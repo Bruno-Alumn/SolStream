@@ -162,6 +162,15 @@ bool IsValidFileName(const std::wstring& fileName) {
     if (IsReservedName(fileName))
         return false;
 
+    // Also reject if the base name (before extension) is reserved.
+    // Windows treats CON.txt, NUL.log, etc. as reserved.
+    auto dotPos = fileName.find(L'.');
+    if (dotPos != std::wstring::npos) {
+        std::wstring baseName = fileName.substr(0, dotPos);
+        if (IsReservedName(baseName))
+            return false;
+    }
+
     for (auto ch : fileName) {
         if (ch == L'/' || ch == L'\\' || ch == L':' || ch == L'*' ||
             ch == L'?' || ch == L'\"' || ch == L'<' || ch == L'>' ||
@@ -174,6 +183,23 @@ bool IsValidFileName(const std::wstring& fileName) {
     if (fileName == L"." || fileName == L"..")
         return false;
 
+    return true;
+}
+
+bool IsValidExtension(const std::wstring& extension) {
+    if (extension.empty() || extension.size() > 64)
+        return false;
+    if (extension[0] != L'.')
+        return false;
+    for (size_t i = 1; i < extension.size(); ++i) {
+        auto ch = extension[i];
+        if (ch == L'/' || ch == L'\\' || ch == L':' || ch == L'*' ||
+            ch == L'?' || ch == L'\"' || ch == L'<' || ch == L'>' ||
+            ch == L'|')
+            return false;
+        if (static_cast<unsigned>(ch) < 32)
+            return false;
+    }
     return true;
 }
 
@@ -247,14 +273,19 @@ bool ValidateFilePath(const std::wstring& absolutePath) {
     if (root.back() != L'\\')
         root += L'\\';
 
-    // Compare case-insensitively using CompareStringOrdinal.
-    int cmp = CompareStringOrdinal(
-        realPath.c_str(), static_cast<int>(realPath.size()),
-        root.c_str(),    static_cast<int>(root.size()),
-        TRUE);  // case-insensitive
+    // Compare case-insensitively: realPath must start with root.
+    if (realPath.size() < root.size())
+        return false;
 
-    // realPath must start with root (CSTR_GREATER_THAN or CSTR_EQUAL).
-    return cmp == CSTR_EQUAL || cmp == CSTR_GREATER_THAN;
+    if (_wcsnicmp(realPath.c_str(), root.c_str(), root.size()) != 0)
+        return false;
+
+    // After the root prefix, the next character (if any) must be a
+    // separator or end-of-string (prevents "transfers_evil" match).
+    if (realPath.size() > root.size() && realPath[root.size()] != L'\\')
+        return false;
+
+    return true;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -266,6 +297,8 @@ std::wstring CreateStagingPath(
     const std::wstring& extension)
 {
     if (!IsValidSessionId(sessionId))
+        return {};
+    if (!IsValidExtension(extension))
         return {};
 
     std::wstring stageDir = TransferRoot() + sessionId + L"\\stage\\";
@@ -301,8 +334,23 @@ std::wstring CreateStagingPath(
     auto canonical = GetFinalPath(hDir);
     bool dirOk = false;
     if (!canonical.empty()) {
+        // Strip \\?\ prefix if present.
+        auto stripPrefix = [](std::wstring& p) {
+            if (p.size() >= 4 && p[0] == L'\\' && p[1] == L'\\' &&
+                p[2] == L'?' && p[3] == L'\\')
+                p.erase(0, 4);
+            if (p.size() >= 8 && p[0] == L'U' && p[1] == L'N' &&
+                p[2] == L'C' && p[3] == L'\\')
+                p.erase(0, 4);
+        };
+        stripPrefix(canonical);
+
         // Check that canonical path starts with TransferRoot().
         std::wstring root = TransferRoot();
+        stripPrefix(root);
+        if (root.back() != L'\\')
+            root += L'\\';
+
         if (canonical.size() >= root.size() &&
             _wcsnicmp(canonical.c_str(), root.c_str(), root.size()) == 0)
             dirOk = true;

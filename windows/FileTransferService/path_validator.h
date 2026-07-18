@@ -43,9 +43,15 @@ constexpr uint64_t kSessionQuota = 10ULL * 1024 * 1024 * 1024;
 
 /// Validate a file name.  Rejects empty names, names containing path
 /// separators (/ \), parent-directory tokens (..), ADS syntax (:),
-/// or Windows reserved device names.
+/// Windows reserved device names (including with extensions like
+/// CON.txt, NUL.log), and trailing dots/spaces.
 /// @return True if the name is safe for use as a single file component.
 [[nodiscard]] bool IsValidFileName(const std::wstring& fileName);
+
+/// Validate a file extension (including the leading dot).
+/// Rejects empty extensions, extensions containing path separators,
+/// parent tokens, or ADS syntax.
+[[nodiscard]] bool IsValidExtension(const std::wstring& extension);
 
 // ── Path validation ─────────────────────────────────────────────────────────
 
