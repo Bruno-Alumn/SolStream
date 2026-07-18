@@ -183,6 +183,11 @@ bool IsValidFileName(const std::wstring& fileName) {
     if (fileName == L"." || fileName == L"..")
         return false;
 
+    // Reject trailing dots and spaces (Windows normalises these away,
+    // allowing file and file. to alias).
+    if (!fileName.empty() && (fileName.back() == L'.' || fileName.back() == L' '))
+        return false;
+
     return true;
 }
 
@@ -190,6 +195,9 @@ bool IsValidExtension(const std::wstring& extension) {
     if (extension.empty() || extension.size() > 64)
         return false;
     if (extension[0] != L'.')
+        return false;
+    // Reject parent-directory token.
+    if (extension == L".." || extension == L".")
         return false;
     for (size_t i = 1; i < extension.size(); ++i) {
         auto ch = extension[i];
@@ -269,9 +277,9 @@ bool ValidateFilePath(const std::wstring& absolutePath) {
     stripPrefix(realPath);
     stripPrefix(root);
 
-    // Ensure root ends with a separator for prefix comparison.
-    if (root.back() != L'\\')
-        root += L'\\';
+    // Strip trailing separator for prefix comparison.
+    if (root.back() == L'\\')
+        root.pop_back();
 
     // Compare case-insensitively: realPath must start with root.
     if (realPath.size() < root.size())
@@ -280,8 +288,8 @@ bool ValidateFilePath(const std::wstring& absolutePath) {
     if (_wcsnicmp(realPath.c_str(), root.c_str(), root.size()) != 0)
         return false;
 
-    // After the root prefix, the next character (if any) must be a
-    // separator or end-of-string (prevents "transfers_evil" match).
+    // After the prefix, the next character (if any) must be a separator.
+    // This prevents matches like "transfers_evil" when root is "transfers".
     if (realPath.size() > root.size() && realPath[root.size()] != L'\\')
         return false;
 
