@@ -163,6 +163,7 @@ add_subdirectory(windows/CaptureHelper)
 add_subdirectory(windows/sunshine)
 add_subdirectory(windows/ClipboardMonitor)
 add_subdirectory(windows/InputInjector)
+add_subdirectory(windows/FileTransferService)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
