@@ -203,6 +203,9 @@ bool IsValidExtension(const std::wstring& extension) {
     // Reject parent-directory token.
     if (extension == L".." || extension == L".")
         return false;
+    // Reject trailing dots and spaces (Windows normalisation aliasing).
+    if (extension.back() == L'.' || extension.back() == L' ')
+        return false;
     for (size_t i = 1; i < extension.size(); ++i) {
         auto ch = extension[i];
         if (ch == L'/' || ch == L'\\' || ch == L':' || ch == L'*' ||
@@ -375,9 +378,11 @@ std::wstring CreateStagingPath(
     // Generate a unique staging path and CREATE_NEW the file (atomic
     // reservation — fails if the path already exists).
     for (int attempt = 0; attempt < 3; ++attempt) {
-        std::wstring path = stageDir + GenerateUUID() + extension;
-        if (path.empty())
+        auto uuid = GenerateUUID();
+        if (uuid.empty())
             continue;
+
+        std::wstring path = stageDir + uuid + extension;
 
         HANDLE hFile = CreateFileW(
             path.c_str(),
@@ -424,6 +429,14 @@ std::wstring AtomicFinalize(
 
     if (hStage == INVALID_HANDLE_VALUE)
         return {};
+
+    // Verify it's a regular file (not a directory).
+    FILE_BASIC_INFO basicInfo{};
+    if (!GetFileInformationByHandleEx(hStage, FileBasicInfo,
+                                       &basicInfo, sizeof(basicInfo)))
+    { CloseHandle(hStage); return {}; }
+    if (basicInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+    { CloseHandle(hStage); return {}; }
 
     auto stageCanonical = GetFinalPath(hStage);
     CloseHandle(hStage);
