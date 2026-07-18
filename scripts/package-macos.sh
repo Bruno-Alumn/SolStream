@@ -1,0 +1,165 @@
+#!/bin/bash
+# package-macos.sh — Build, sign, notarize, and package SolStream macOS client
+#
+# Prerequisites:
+#   - Xcode 15+ installed
+#   - Developer ID Application certificate in keychain
+#   - App Store Connect API key (for notarytool)
+#
+# Usage:
+#   ./package-macos.sh [--dev] [--notarize]
+#
+#   --dev        Development build (ad-hoc signing, no notarization)
+#   --notarize   Production build with full notarization
+
+set -euo pipefail
+cd "$(dirname "$0")/../macos/SolStreamClient"
+
+PRODUCT_NAME="SolStream"
+BUNDLE_ID="com.solstream.macclient"
+BUILD_DIR=".build/release"
+DMG_NAME="${PRODUCT_NAME}.dmg"
+DMG_DIR=".build/dmg"
+
+# Parse flags
+DEV_BUILD=false
+DO_NOTARIZE=false
+for arg in "$@"; do
+    case "$arg" in
+        --dev) DEV_BUILD=true ;;
+        --notarize) DO_NOTARIZE=true ;;
+    esac
+done
+
+echo "=== SolStream macOS Package ==="
+echo "Dev build: $DEV_BUILD"
+echo "Notarize: $DO_NOTARIZE"
+
+# Step 1: Build
+echo ""
+echo "--- Step 1: Building ---"
+swift build --configuration release
+
+# Locate the built binary
+APP_PATH="$BUILD_DIR/$PRODUCT_NAME.app"
+if [ ! -d "$APP_PATH" ]; then
+    # SPM puts executables in .build/release/ directly
+    mkdir -p "$APP_PATH/Contents/MacOS"
+    mkdir -p "$APP_PATH/Contents/Resources"
+    cp "$BUILD_DIR/$PRODUCT_NAME" "$APP_PATH/Contents/MacOS/"
+fi
+
+# Step 2: Create Info.plist if missing
+echo ""
+echo "--- Step 2: Info.plist ---"
+if [ ! -f "$APP_PATH/Contents/Info.plist" ]; then
+    cat > "$APP_PATH/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>$PRODUCT_NAME</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID</string>
+    <key>CFBundleName</key>
+    <string>$PRODUCT_NAME</string>
+    <key>CFBundleVersion</key>
+    <string>0.2.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SolStream needs microphone access for audio streaming.</string>
+</dict>
+</plist>
+EOF
+fi
+
+# Step 3: Sign
+echo ""
+echo "--- Step 3: Signing ---"
+if [ "$DEV_BUILD" = true ]; then
+    codesign --deep --force --verify --verbose \
+        --sign "-" "$APP_PATH"
+else
+    IDENTITY=$(security find-identity -v -p codesigning \
+        | grep "Developer ID Application" | head -1 \
+        | awk '{print $2}')
+    if [ -z "$IDENTITY" ]; then
+        echo "ERROR: No Developer ID Application certificate found."
+        echo "Run: security find-identity -v -p codesigning"
+        exit 1
+    fi
+    echo "Signing with identity: $IDENTITY"
+    codesign --deep --force --verify --verbose \
+        --options runtime \
+        --sign "$IDENTITY" "$APP_PATH"
+fi
+
+# Verify signing
+codesign --verify --verbose "$APP_PATH"
+
+# Step 4: Create DMG
+echo ""
+echo "--- Step 4: Creating DMG ---"
+rm -rf "$DMG_DIR" "$DMG_NAME"
+mkdir -p "$DMG_DIR"
+cp -R "$APP_PATH" "$DMG_DIR/"
+ln -s /Applications "$DMG_DIR/Applications"
+
+hdiutil create -volname "$PRODUCT_NAME" \
+    -srcfolder "$DMG_DIR" \
+    -ov -format UDZO \
+    "$DMG_NAME"
+
+rm -rf "$DMG_DIR"
+
+echo ""
+echo "DMG created: $DMG_NAME"
+
+# Step 5: Notarize (optional)
+if [ "$DO_NOTARIZE" = true ]; then
+    echo ""
+    echo "--- Step 5: Notarizing ---"
+
+    # Requires App Store Connect API key or Apple ID
+    # Option A: API key
+    if [ -f "$HOME/.appstoreconnect/private_key.p8" ]; then
+        xcrun notarytool submit "$DMG_NAME" \
+            --key "$HOME/.appstoreconnect/private_key.p8" \
+            --key-id "$(cat $HOME/.appstoreconnect/key-id.txt)" \
+            --issuer "$(cat $HOME/.appstoreconnect/issuer-id.txt)" \
+            --wait
+    else
+        # Option B: Apple ID (interactive)
+        echo "No API key found. Using Apple ID..."
+        read -rp "Apple ID: " APPLE_ID
+        read -rsp "App-specific password: " APP_PASSWORD
+        echo ""
+        xcrun notarytool submit "$DMG_NAME" \
+            --apple-id "$APPLE_ID" \
+            --password "$APP_PASSWORD" \
+            --team-id "$(security find-identity -v -p codesigning \
+                | grep "Developer ID Application" | head -1 \
+                | awk '{print $2}')" \
+            --wait
+    fi
+
+    # Staple the ticket
+    xcrun stapler staple "$DMG_NAME"
+
+    echo ""
+    echo "Notarization complete."
+fi
+
+echo ""
+echo "=== Done ==="
+echo "Package: $DMG_NAME"
+ls -lh "$DMG_NAME"
