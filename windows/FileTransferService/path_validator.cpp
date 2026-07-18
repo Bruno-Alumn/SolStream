@@ -152,6 +152,10 @@ bool IsValidSessionId(const std::wstring& sessionId) {
     if (sessionId == L"." || sessionId == L"..")
         return false;
 
+    // Reject trailing dots and spaces (Windows normalisation aliasing).
+    if (!sessionId.empty() && (sessionId.back() == L'.' || sessionId.back() == L' '))
+        return false;
+
     return true;
 }
 
@@ -407,10 +411,42 @@ std::wstring AtomicFinalize(
         !IsValidSessionId(sessionId))
         return {};
 
-    // Verify the staging path is inside the expected stage directory.
+    // Verify the staging path is inside the expected stage directory
+    // by opening and canonicalising it.
+    HANDLE hStage = CreateFileW(
+        stagingPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr);
+
+    if (hStage == INVALID_HANDLE_VALUE)
+        return {};
+
+    auto stageCanonical = GetFinalPath(hStage);
+    CloseHandle(hStage);
+
+    if (stageCanonical.empty())
+        return {};
+
+    // Strip \\?\ prefix.
+    auto stripPrefix = [](std::wstring& p) {
+        if (p.size() >= 4 && p[0] == L'\\' && p[1] == L'\\' &&
+            p[2] == L'?' && p[3] == L'\\')
+            p.erase(0, 4);
+        if (p.size() >= 8 && p[0] == L'U' && p[1] == L'N' &&
+            p[2] == L'C' && p[3] == L'\\')
+            p.erase(0, 4);
+    };
+    stripPrefix(stageCanonical);
+
     std::wstring expectedPrefix = TransferRoot() + sessionId + L"\\stage\\";
-    if (stagingPath.size() < expectedPrefix.size() ||
-        _wcsnicmp(stagingPath.c_str(), expectedPrefix.c_str(),
+    stripPrefix(expectedPrefix);
+
+    if (stageCanonical.size() < expectedPrefix.size() ||
+        _wcsnicmp(stageCanonical.c_str(), expectedPrefix.c_str(),
                    expectedPrefix.size()) != 0)
         return {};
 
