@@ -18,7 +18,7 @@ final class StreamWindow: NSObject {
     private let frameRate: Int
     private let streamManager: StreamManager
 
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
     private var metalView: MetalView?
     private var videoDecoder: VideoDecoder?
     private var audioRenderer: AudioRenderer?

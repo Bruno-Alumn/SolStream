@@ -95,5 +95,14 @@ let package = Package(
                 .linkedFramework("Security"),
             ]
         ),
+
+        // ── UI Tests ────────────────────────────────────────────────────
+        .testTarget(
+            name: "SolStreamClientTests",
+            dependencies: ["SolStreamClient", "SolStreamLogging"],
+            linkerSettings: [
+                .linkedFramework("XCTest"),
+            ]
+        ),
     ]
 )
