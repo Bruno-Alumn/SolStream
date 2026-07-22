@@ -147,6 +147,7 @@ function(solstream_setup_target target)
             NOMINMAX
             _WIN32_WINNT=0x0A00
             WINVER=0x0A00
+            SECURITY_WIN32
         )
     endif()
 endfunction()
