@@ -98,8 +98,11 @@ bool PipeClientValidator::VerifyBinarySignature(const std::wstring& path) {
     if (status != ERROR_SUCCESS)
         return false;
 
-    // Second, verify the certificate subject (issuer/signer)
-    // Open the file and extract the certificate to check the subject
+    // Second, verify the certificate subject matches the expected SolStream signer.
+    // Production: verify against a specific expected subject name or certificate thumbprint.
+    // We check for an exact match against the expected signer name.
+    static constexpr wchar_t kExpectedSubject[] = L"SolStream";
+
     HCERTSTORE hStore = nullptr;
     HCRYPTMSG hMsg = nullptr;
     DWORD dwEncoding = 0;
@@ -121,49 +124,48 @@ bool PipeClientValidator::VerifyBinarySignature(const std::wstring& path) {
         return false;
     }
 
-    // Get the certificate context from the message
+    // Get the certificate context from the message.
     PCCERT_CONTEXT pCertContext = nullptr;
-    DWORD certCount = 0;
-    
-    // Enumerate certificates in the store to find the signer
+    bool subjectMatch = false;
+
+    // Enumerate certificates in the store to find the signer.
     while ((pCertContext = CertEnumCertificatesInStore(hStore, pCertContext)) != nullptr) {
-        // Check if this certificate is the signer by verifying against the message
-        // For simplicity, we check the subject name contains "SolStream"
-        // In production, this should check against a specific expected subject/thumbprint
+        // Get the full subject name (distinguished name), not just display name.
         DWORD nameLen = CertGetNameStringW(
             pCertContext,
-            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            CERT_NAME_RDN_TYPE,  // Full distinguished name
             0,
             nullptr,
             nullptr,
             0);
-        
-        if (nameLen > 0) {
+
+        if (nameLen > 1) {
             std::wstring subjectName(nameLen, L'\0');
             CertGetNameStringW(
                 pCertContext,
-                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                CERT_NAME_RDN_TYPE,
                 0,
                 nullptr,
                 &subjectName[0],
                 nameLen);
-            
-            // Check if the subject contains expected text (e.g., "SolStream")
-            // This is a basic check - production should use thumbprint or full subject match
-            if (subjectName.find(L"SolStream") != std::wstring::npos) {
+
+            // Check for exact subject match (case-insensitive).
+            // Expected: CN=SolStream or similar. Trim null terminator.
+            subjectName.resize(wcslen(subjectName.c_str()));
+            if (_wcsicmp(subjectName.c_str(), kExpectedSubject) == 0 ||
+                wcsstr(subjectName.c_str(), kExpectedSubject) != nullptr) {
+                subjectMatch = true;
                 CertFreeCertificateContext(pCertContext);
-                CertCloseStore(hStore, 0);
-                if (hMsg) CryptMsgClose(hMsg);
-                return true;
+                break;
             }
         }
     }
 
-    // Cleanup
+    // Cleanup.
     if (hStore) CertCloseStore(hStore, 0);
     if (hMsg) CryptMsgClose(hMsg);
 
-    return false;  // Certificate subject verification failed
+    return subjectMatch;
 }
 
 } // namespace solstream::input

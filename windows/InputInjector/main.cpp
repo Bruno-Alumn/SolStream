@@ -88,23 +88,40 @@ static bool CreateSessionWindow() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 static bool RunPipeServer(HANDLE stopEvent) {
-    // Create the named pipe with explicit security - restrict to local access only
-    // Use a NULL DACL for development (allows everyone locally)
-    // In production, this should be a proper DACL restricting to specific users
+    // Create the named pipe with explicit security - restrict to local access only.
+    // Build a DACL that allows only the current user (not Everyone).
     SECURITY_ATTRIBUTES sa{};
     SECURITY_DESCRIPTOR sd{};
+    PACL pAcl = nullptr;
 
-    if (InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
-        SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE)) {
-        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-        sa.lpSecurityDescriptor = &sd;
-        sa.bInheritHandle = FALSE;
-    } else {
-        // If security descriptor creation fails, use default (less secure)
-        Log("Warning: Failed to create security descriptor, using default.");
-        sa.nLength = 0;
-        sa.lpSecurityDescriptor = nullptr;
-        sa.bInheritHandle = FALSE;
+    // Get current user SID.
+    HANDLE hToken = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD tokenLen = 0;
+        GetTokenInformation(hToken, TokenUser, nullptr, 0, &tokenLen);
+        std::vector<uint8_t> tokenBuf(tokenLen);
+        if (GetTokenInformation(hToken, TokenUser, tokenBuf.data(), tokenLen, &tokenLen)) {
+            auto* tu = reinterpret_cast<TOKEN_USER*>(tokenBuf.data());
+            // Build ACL with one ACE for current user (GENERIC_ALL access).
+            DWORD aclSize = sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) +
+                           GetLengthSid(tu->User.Sid) - sizeof(DWORD);
+            pAcl = static_cast<PACL>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, aclSize));
+            if (pAcl && InitializeAcl(pAcl, aclSize, ACL_REVISION) &&
+                AddAccessAllowedAce(pAcl, ACL_REVISION, GENERIC_ALL, tu->User.Sid)) {
+                if (InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
+                    SetSecurityDescriptorDacl(&sd, TRUE, pAcl, FALSE)) {
+                    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+                    sa.lpSecurityDescriptor = &sd;
+                    sa.bInheritHandle = FALSE;
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+
+    if (sa.lpSecurityDescriptor == nullptr) {
+        // Fallback: use default security (less secure, log warning).
+        Log("Warning: Failed to create user-restricted DACL, using default security.");
     }
 
     // Create the named pipe with PIPE_REJECT_REMOTE_CLIENTS and explicit security.
