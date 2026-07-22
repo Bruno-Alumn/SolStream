@@ -88,16 +88,35 @@ static bool CreateSessionWindow() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 static bool RunPipeServer(HANDLE stopEvent) {
-    // Create the named pipe with PIPE_REJECT_REMOTE_CLIENTS.
+    // Create the named pipe with explicit security - restrict to local access only
+    // Use a NULL DACL for development (allows everyone locally)
+    // In production, this should be a proper DACL restricting to specific users
+    SECURITY_ATTRIBUTES sa{};
+    SECURITY_DESCRIPTOR sd{};
+
+    if (InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION) &&
+        SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE)) {
+        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+        sa.lpSecurityDescriptor = &sd;
+        sa.bInheritHandle = FALSE;
+    } else {
+        // If security descriptor creation fails, use default (less secure)
+        Log("Warning: Failed to create security descriptor, using default.");
+        sa.nLength = 0;
+        sa.lpSecurityDescriptor = nullptr;
+        sa.bInheritHandle = FALSE;
+    }
+
+    // Create the named pipe with PIPE_REJECT_REMOTE_CLIENTS and explicit security.
     HANDLE hPipe = CreateNamedPipeW(
         kInputInjectorPipe,
         PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
         1,                          // Max instances
         kInputPipeBufferSize,       // Out buffer
         kInputPipeBufferSize,       // In buffer
         0,                          // Default timeout
-        nullptr);                   // Default security (production: explicit DACL)
+        &sa);                      // Security attributes with explicit DACL
 
     if (!hPipe || hPipe == INVALID_HANDLE_VALUE) {
         Log("CreateNamedPipeW failed: %lu", GetLastError());

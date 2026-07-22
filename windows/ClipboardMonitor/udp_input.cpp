@@ -25,11 +25,14 @@ bool ReplayWindow::CheckAndRecord(uint64_t sequence) {
             // Sequence advanced beyond window — reset bitmap.
             m_bitmap = 0;
         } else {
-            // Shift bitmap right by diff and add new bit at top.
-            m_bitmap = (m_bitmap << 1) | 1;
-            if (diff > 1)
-                m_bitmap <<= (diff - 1);
+            // Shift bitmap left by diff positions to make room for new sequence.
+            // Bitmap bit 0 = m_lastSequence, bit N = m_lastSequence - N
+            // When advancing by diff, shift left by diff to expire old entries.
+            m_bitmap <<= diff;
         }
+
+        // Set the bit for the new sequence (position 0 after shift).
+        m_bitmap |= 1;
 
         m_lastSequence = sequence;
         return true;
@@ -184,6 +187,8 @@ bool InputReceiver::ProcessPacket(const uint8_t* data, size_t len) {
     const uint8_t* tag        = data + len - kAESGCMTagSize;
 
     // Decrypt using BCrypt (AES-GCM).
+    // Note: For production use, the algorithm provider and key should be cached
+    // and only regenerated when the session key changes, not per-packet.
     BCRYPT_ALG_HANDLE hAlgo = nullptr;
     BCryptOpenAlgorithmProvider(&hAlgo, BCRYPT_AES_ALGORITHM,
                                 nullptr, 0);
@@ -254,6 +259,11 @@ bool InputReceiver::ProcessPacket(const uint8_t* data, size_t len) {
 
     InputPacket packet{};
     std::memcpy(&packet, plaintext.data() + 8, sizeof(packet));
+
+    // Validate InputPacket before forwarding
+    if (static_cast<uint8_t>(packet.type) == 0xFF) {
+        return false;  // Invalid MessageType 0xFF
+    }
 
     ForwardPacket(packet, sequence);
     return true;
