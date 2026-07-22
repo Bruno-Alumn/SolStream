@@ -18,7 +18,7 @@ public enum KeychainStorage {
     {
         // Build the credential blob: 4-byte token length + token + fingerprint
         var blob = Data()
-        withUnsafeBytes(of: UInt32(token.count).bigEndian) { blob.append($0) }
+        withUnsafeBytes(of: UInt32(token.count).bigEndian) { blob.append(contentsOf: $0) }
         blob.append(token)
         blob.append(serverFingerprint)
 

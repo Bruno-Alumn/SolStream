@@ -2,6 +2,8 @@ import Foundation
 import VideoToolbox
 import CoreVideo
 import CoreMedia
+import QuartzCore
+import SolStreamLogging
 
 /// Decodes H.264/H.265 video frames using VideoToolbox hardware decoder.
 ///
@@ -11,7 +13,7 @@ import CoreMedia
 ///
 /// Thread safety: the decode callback can fire on any thread. The frame
 /// callback dispatches to the main thread for rendering.
-final class VideoDecoder {
+public final class VideoDecoder {
     private var decompressionSession: MTDecompressionSession?
     private let frameCallback: (CVPixelBuffer) -> Void
     private var formatDescription: CMVideoFormatDescription?
@@ -19,9 +21,13 @@ final class VideoDecoder {
     private let callbackQueue = DispatchQueue(label: "com.solstream.decoder",
                                               qos: .userInitiated)
 
-    typealias FrameCallback = (CVPixelBuffer) -> Void
+    /// SPS/PPS from RTSP handshake (set by StreamConnection).
+    public var streamSPS: Data?
+    public var streamPPS: Data?
 
-    init(frameCallback: @escaping FrameCallback) {
+    public typealias FrameCallback = (CVPixelBuffer) -> Void
+
+    public init(frameCallback: @escaping FrameCallback) {
         self.frameCallback = frameCallback
     }
 
@@ -34,7 +40,7 @@ final class VideoDecoder {
     }
 
     /// Decode a compressed video frame (H.264/H.265 Annex B format).
-    func decode(_ data: Data) {
+    public func decode(_ data: Data) {
         guard !data.isEmpty else { return }
 
         // Try to detect the format from the data (SPS/PPS for H.264).
@@ -122,7 +128,7 @@ final class VideoDecoder {
     }
 
     /// Flush pending frames.
-    func flush() {
+    public func flush() {
         if let session = decompressionSession {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
         }
@@ -139,9 +145,9 @@ final class VideoDecoder {
             let nalHeader = data[4]
             let nalType = nalHeader & 0x1F
 
-            // H.264 SPS (7) or PPS (8)
+            // H.264 SPS (7) or PPS (8) — format from RTSP handshake is used below.
             if nalType == 7 || nalType == 8 {
-                createH264FormatDescription(data: data)
+                // Format will be created from RTSP SPS/PPS below.
                 return
             }
         }
@@ -165,22 +171,25 @@ final class VideoDecoder {
     }
 
     private func createH264FormatDescription(sps: Data, pps: Data) {
-        var formatDesc: CMVideoFormatDescription?
         let spsPtr = [UInt8](sps)
         let ppsPtr = [UInt8](pps)
-        var parameterSets: [UnsafePointer<UInt8>] = [spsPtr, ppsPtr]
         var parameterSetSizes = [sps.count, pps.count]
 
-        parameterSets.withUnsafeMutableBufferPointer { psBuffer in
-            parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
-                CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    allocator: kCFAllocatorDefault,
-                    parameterSetCount: 2,
-                    parameterSetPointers: psBuffer.baseAddress!,
-                    parameterSetSizes: sizesBuffer.baseAddress!,
-                    nalUnitHeaderLength: 4,
-                    formatDescriptionOut: &formatDescription
-                )
+        spsPtr.withUnsafeBufferPointer { spsBuf in
+            ppsPtr.withUnsafeBufferPointer { ppsBuf in
+                var parameterSets: [UnsafePointer<UInt8>] = [spsBuf.baseAddress!, ppsBuf.baseAddress!]
+                parameterSets.withUnsafeMutableBufferPointer { psBuffer in
+                    parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
+                        CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: 2,
+                            parameterSetPointers: psBuffer.baseAddress!,
+                            parameterSetSizes: sizesBuffer.baseAddress!,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &formatDescription
+                        )
+                    }
+                }
             }
         }
     }
@@ -189,11 +198,9 @@ final class VideoDecoder {
         // HEVC format description creation
         // For now, create a basic HEVC format description
         // In production, extract VPS/SPS/PPS from the data
-        var formatDesc: CMVideoFormatDescription?
         let codec = kCMVideoCodecType_HEVC
 
         // Create format description with codec type
-        // This is a simplified version - full implementation would parse VPS/SPS/PPS
         var videoFormatDesc: CMVideoFormatDescription?
         let status = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
@@ -207,8 +214,6 @@ final class VideoDecoder {
         if status == noErr {
             formatDescription = videoFormatDesc
         }
-    }
-        // for Phase 2 full implementation.
     }
 
     private func createSession(formatDesc: CMFormatDescription) {

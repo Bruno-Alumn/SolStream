@@ -2,13 +2,15 @@ import Foundation
 import AudioUnit
 import CoreAudio
 import AVFoundation
+import SolStreamLogging
+import SolStreamLogging
 
 /// Renders Opus/S16LE audio frames using AudioUnit for low-latency playback.
 ///
 /// Uses the RemoteIO AudioUnit (output unit) for macOS audio output.
 /// Audio frames arrive from the stream connection, are decoded, and
 /// queued in a ring buffer for the AudioUnit playback callback.
-final class AudioRenderer {
+public final class AudioRenderer {
     private var audioUnit: AudioUnit?
     private var audioQueue: AudioQueueRef?
     private var isRunning = false
@@ -18,10 +20,10 @@ final class AudioRenderer {
     private let channelCount: UInt32 = 2
     private let bitsPerChannel: UInt32 = 16
 
-    // Simple ring buffer for audio data
-    private var ringBuffer = RingBuffer<Int16>(capacity: 48000 * 2 * 2) // ~1 second
+    // Simple ring buffer for audio data (internal for callback access)
+    var ringBuffer = RingBuffer<Int16>(capacity: 48000 * 2 * 2) // ~1 second
 
-    init() {
+    public init() {
         setupAudio()
     }
 
@@ -34,7 +36,7 @@ final class AudioRenderer {
 
     /// Play a decoded audio frame. Called from the stream connection callback.
     /// Formats supported: 16-bit PCM, 48kHz stereo.
-    func playAudio(_ data: Data) {
+    public func playAudio(_ data: Data) {
         guard !data.isEmpty, isRunning else { return }
 
         // Process each 16-bit sample.
@@ -53,7 +55,7 @@ final class AudioRenderer {
     }
 
     /// Stop audio playback.
-    func stop() {
+    public func stop() {
         isRunning = false
         if let audioUnit {
             AudioOutputUnitStop(audioUnit)
@@ -164,8 +166,8 @@ private let renderCallback: AURenderCallback = {(
 }
 
 // MARK: - Simple Ring Buffer
-
-private final class RingBuffer<T> {
+/// Simple ring buffer for audio data (internal access for callback).
+final class RingBuffer<T> {
     private var buffer: [T]
     private var readIndex = 0
     private var writeIndex = 0

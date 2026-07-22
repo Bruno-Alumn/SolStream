@@ -1,5 +1,10 @@
 import Foundation
 import AppKit
+import SolStreamLogging
+import VideoDecoder
+import AudioRenderer
+import InputCapture
+import StreamConnection
 
 /// A per-application window that renders the streamed desktop content.
 ///

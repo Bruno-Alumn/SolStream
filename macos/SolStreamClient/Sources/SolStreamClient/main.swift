@@ -1,5 +1,6 @@
 import Cocoa
 import AppKit
+import SolStreamLogging
 
 /// SolStream macOS Client entry point.
 ///
@@ -11,7 +12,6 @@ import AppKit
 ///   - AudioUnit renderer for audio playback
 ///   - moonlight-common-c for SRTP/RTSP stream protocol
 ///
-@main
 struct SolStreamApp {
     static func main() {
         let app = NSApplication.shared
@@ -20,6 +20,9 @@ struct SolStreamApp {
         app.run()
     }
 }
+
+// Entry point
+SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamWindows: [StreamWindow] = []

@@ -8,7 +8,7 @@ import CoreVideo
 /// The view uses a Metal texture cache (CVMetalTextureCache) to efficiently
 /// map CVPixelBuffers (from VideoToolbox) into Metal textures without
 /// copying the pixel data.
-final class MetalView: NSView {
+public final class MetalView: NSView {
     private var metalDevice: MTLDevice?
     private var metalLayer: CAMetalLayer?
     private var textureCache: CVMetalTextureCache?
@@ -19,7 +19,7 @@ final class MetalView: NSView {
     private var frameTexture: MTLTexture?
     private let commandQueue: MTLCommandQueue?
 
-    override init(frame frameRect: NSRect) {
+    public override init(frame frameRect: NSRect) {
         // Create the Metal device.
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
@@ -61,7 +61,7 @@ final class MetalView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func makeBackingLayer() -> CALayer {
+    public override func makeBackingLayer() -> CALayer {
         return CAMetalLayer()
     }
 
@@ -69,7 +69,7 @@ final class MetalView: NSView {
 
     /// Display a decoded video frame. Called from the decoder callback.
     /// Must be called on the main thread.
-    func displayFrame(_ pixelBuffer: CVPixelBuffer) {
+    public func displayFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let textureCache,
               let metalLayer,
               let drawable = metalLayer.nextDrawable()
@@ -121,7 +121,7 @@ final class MetalView: NSView {
 
     // MARK: - Resizing
 
-    override func viewDidEndLiveResize() {
+    public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()
         guard let metalLayer, let window else { return }
         let scale = window.backingScaleFactor

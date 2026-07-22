@@ -13,7 +13,7 @@ import Carbon
 /// The input capture is enabled/disabled by the StreamWindow:
 ///   enabled = window is key (focused)
 ///   disabled = window is not key
-final class InputCapture {
+public final class InputCapture {
     private weak var targetView: NSView?
     private var keyboardMonitor: Any?
     private var mouseMonitor: Any?
@@ -97,26 +97,26 @@ final class InputCapture {
         0x6F: 0x7B,  // F12
     ]
 
-    init() {}
+    public init() {}
 
     deinit {
         disableCapture()
     }
 
     /// Attach input capture to a view. The view must be part of a window.
-    func attach(to view: NSView) {
+    public func attach(to view: NSView) {
         self.targetView = view
     }
 
     /// Enable input capture. Called when the window becomes key.
-    func enableCapture() {
+    public func enableCapture() {
         guard !isCapturing, targetView?.window != nil else { return }
         isCapturing = true
         installMonitors()
     }
 
     /// Disable input capture. Called when the window resigns key.
-    func disableCapture() {
+    public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
         removeMonitors()
