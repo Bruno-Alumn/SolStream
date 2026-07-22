@@ -97,6 +97,10 @@ private:
     std::array<uint8_t, kAESGCMKeySize> m_key{};
     bool m_keySet{false};
 
+    // Cached BCrypt handles (initialized once, reused per packet)
+    BCRYPT_ALG_HANDLE m_hAlgo{nullptr};
+    BCRYPT_KEY_HANDLE m_hKey{nullptr};
+
     // Replay protection
     ReplayWindow m_replayWindow;
     std::mutex m_replayMutex;

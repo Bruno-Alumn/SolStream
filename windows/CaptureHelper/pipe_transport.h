@@ -27,7 +27,7 @@ namespace SolStream::IPC {
 constexpr std::size_t kMaxPayloadSize = 4096;
 constexpr auto kDefaultTimeout = std::chrono::milliseconds(5000);
 
-static constexpr std::wstring_view kPipeName = L"\\\\.\\pipe\\SolStream_CaptureHelper";
+static constexpr std::wstring_view kPipeName = L"\\.\\pipe\\SolStream_CaptureHelper";
 
 // ── Message protocol ────────────────────────────────────────────────────────
 

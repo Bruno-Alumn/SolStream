@@ -25,10 +25,10 @@ bool ReplayWindow::CheckAndRecord(uint64_t sequence) {
             // Sequence advanced beyond window — reset bitmap.
             m_bitmap = 0;
         } else {
-            // Shift bitmap left by diff positions to make room for new sequence.
-            // Bitmap bit 0 = m_lastSequence, bit N = m_lastSequence - N
-            // When advancing by diff, shift left by diff to expire old entries.
-            m_bitmap <<= diff;
+            // Shift bitmap right by diff positions to make room for new sequence.
+            // Bitmap bit 0 = m_lastSequence, bit N = m_lastSequence - N.
+            // When advancing by diff, shift right so old bit 0 becomes new bit diff.
+            m_bitmap >>= diff;
         }
 
         // Set the bit for the new sequence (position 0 after shift).
@@ -125,6 +125,16 @@ void InputReceiver::Stop() {
         m_recvThread.join();
     WSACleanup();
     m_packetCb = nullptr;
+
+    // Cleanup cached BCrypt handles.
+    if (m_hKey) {
+        BCryptDestroyKey(m_hKey);
+        m_hKey = nullptr;
+    }
+    if (m_hAlgo) {
+        BCryptCloseAlgorithmProvider(m_hAlgo, 0);
+        m_hAlgo = nullptr;
+    }
 }
 
 void InputReceiver::SetDecryptionKey(const uint8_t* key, size_t len) {
@@ -132,6 +142,22 @@ void InputReceiver::SetDecryptionKey(const uint8_t* key, size_t len) {
         len = m_key.size();
     std::memcpy(m_key.data(), key, len);
     m_keySet = true;
+
+    // Initialize BCrypt handles for AES-GCM (cached for performance).
+    if (m_hAlgo)
+        BCryptCloseAlgorithmProvider(m_hAlgo, 0);
+    if (m_hKey)
+        BCryptDestroyKey(m_hKey);
+
+    BCryptOpenAlgorithmProvider(&m_hAlgo, BCRYPT_AES_ALGORITHM, nullptr, 0);
+    if (m_hAlgo) {
+        BCryptSetProperty(m_hAlgo, BCRYPT_CHAINING_MODE,
+                         (PBYTE)BCRYPT_CHAIN_MODE_GCM,
+                         sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
+        BCryptGenerateSymmetricKey(m_hAlgo, &m_hKey, nullptr, 0,
+                                    m_key.data(),
+                                    static_cast<ULONG>(m_key.size()), 0);
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -186,29 +212,9 @@ bool InputReceiver::ProcessPacket(const uint8_t* data, size_t len) {
     size_t ciphertextLen     = len - kAESGCMNonceSize - kAESGCMTagSize;
     const uint8_t* tag        = data + len - kAESGCMTagSize;
 
-    // Decrypt using BCrypt (AES-GCM).
-    // Note: For production use, the algorithm provider and key should be cached
-    // and only regenerated when the session key changes, not per-packet.
-    BCRYPT_ALG_HANDLE hAlgo = nullptr;
-    BCryptOpenAlgorithmProvider(&hAlgo, BCRYPT_AES_ALGORITHM,
-                                nullptr, 0);
-    if (!hAlgo)
+    // Use cached BCrypt handles (initialized in SetDecryptionKey).
+    if (!m_hAlgo || !m_hKey)
         return false;
-
-    BCryptSetProperty(hAlgo, BCRYPT_CHAINING_MODE,
-                      (PBYTE)BCRYPT_CHAIN_MODE_GCM,
-                      sizeof(BCRYPT_CHAIN_MODE_GCM), 0);
-
-    // Derive session key from shared key + nonce.
-    BCRYPT_KEY_HANDLE hKey = nullptr;
-    BCryptGenerateSymmetricKey(hAlgo, &hKey, nullptr, 0,
-                                m_key.data(),
-                                static_cast<ULONG>(m_key.size()), 0);
-
-    if (!hKey) {
-        BCryptCloseAlgorithmProvider(hAlgo, 0);
-        return false;
-    }
 
     // Prepare GCM authentication info.
     BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
@@ -220,12 +226,12 @@ bool InputReceiver::ProcessPacket(const uint8_t* data, size_t len) {
     authInfo.pbAuthData  = nullptr;
     authInfo.cbAuthData  = 0;
 
-    // Decrypt in place.
+    // Decrypt using cached key handle.
     std::vector<uint8_t> plaintext(ciphertextLen);
     ULONG plaintextLen = 0;
 
     NTSTATUS status = BCryptDecrypt(
-        hKey,
+        m_hKey,
         const_cast<PUCHAR>(ciphertext),
         static_cast<ULONG>(ciphertextLen),
         &authInfo,
@@ -234,9 +240,6 @@ bool InputReceiver::ProcessPacket(const uint8_t* data, size_t len) {
         static_cast<ULONG>(plaintext.size()),
         &plaintextLen,
         0);
-
-    BCryptDestroyKey(hKey);
-    BCryptCloseAlgorithmProvider(hAlgo, 0);
 
     if (status != 0)
         return false;  // Authentication failure
