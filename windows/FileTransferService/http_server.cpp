@@ -36,6 +36,13 @@ bool FileTransferServer::Start(uint16_t port) {
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
         return false;
 
+    // Initialize OLE for clipboard operations (must be done once per thread).
+    HRESULT oleHr = OleInitialize(nullptr);
+    if (FAILED(oleHr) && oleHr != S_OK) {
+        WSACleanup();
+        return false;
+    }
+
     m_listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_listenSock == INVALID_SOCKET) { WSACleanup(); return false; }
 
@@ -80,8 +87,11 @@ void FileTransferServer::Stop() {
     }
     if (m_acceptThread.joinable())
         m_acceptThread.join();
+
+    // Uninitialize OLE (paired with OleInitialize in Start).
+    OleUninitialize();
     WSACleanup();
-    m_connCount.store(0, std::memory_order_release);
+}
 }
 
 int FileTransferServer::ConnectionCount() const noexcept {
@@ -349,7 +359,7 @@ void FileTransferServer::HandleUpload(SOCKET sock, const HttpRequest& req) {
     m_cleanup.CommitFile(wsSession, part.data.size());
 
     // Set IDataObject on clipboard for paste.
-    OleInitialize(nullptr);
+    // OLE already initialized in Start() - just set clipboard.
     auto* dataObj = new FileDataObject(finalPath);
     OleSetClipboard(dataObj);
     dataObj->Release();
