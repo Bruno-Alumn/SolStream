@@ -131,52 +131,83 @@ final class VideoDecoder {
     // MARK: - Private
 
     private func createFormatDescription(from data: Data) {
-        // H.264: look for AVCC/Annex B header (0x00 0x00 0x00 0x01 or 0x00 0x00 0x01).
-        // For H.265: HEVC start code.
-        // We auto-detect by scanning the first few bytes.
+        // Auto-detect codec by scanning for start codes and NAL unit types.
+        guard data.count > 5 else { return }
 
-        let startCodeH264: [UInt8] = [0x00, 0x00, 0x00, 0x01]
-        let startCodeH264_3: [UInt8] = [0x00, 0x00, 0x01]
-        let startCodeHEVC: [UInt8] = [0x00, 0x00, 0x00, 0x01]
+        // Check for H.264 (Annex B start code: 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01)
+        if data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
+            let nalHeader = data[4]
+            let nalType = nalHeader & 0x1F
 
-        // Check first few bytes for NAL unit type.
-        guard data.count > 4 else { return }
-
-        let nalType = data[4] & 0x1F
-        let isH264 = (nalType == 7 || nalType == 8)  // SPS or PPS
-
-        if isH264 {
-            // Try to extract SPS/PPS from the stream.
-            // In Phase 2, the format is negotiated during RTSP handshake.
-            // For now, create a basic H.264 format description.
-            let sps: [UInt8] = [0x67, 0x42, 0x00, 0x1e, 0xab]  // Baseline profile placeholder
-            let pps: [UInt8] = [0x68, 0xce, 0x38, 0x80]
-
-            var parameterSetSizes = [
-                sps.count, pps.count
-            ]
-
-            var parameterSets: [UnsafePointer<UInt8>] = [
-                UnsafePointer(sps),
-                UnsafePointer(pps)
-            ]
-
-            // Use 'withUnsafeMutablePointer' to create pointers to the arrays.
-            // For a real implementation, these would come from the RTSP SDP.
-            parameterSets.withUnsafeMutableBufferPointer { psBuffer in
-                parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
-                    CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                        allocator: kCFAllocatorDefault,
-                        parameterSetCount: 2,
-                        parameterSetPointers: psBuffer.baseAddress!,
-                        parameterSetSizes: sizesBuffer.baseAddress!,
-                        nalUnitHeaderLength: 4,
-                        formatDescriptionOut: &formatDescription
-                    )
-                }
+            // H.264 SPS (7) or PPS (8)
+            if nalType == 7 || nalType == 8 {
+                createH264FormatDescription(data: data)
+                return
             }
         }
-        // H.265 detection and format description creation would go here
+
+        // Check for H.265/HEVC (start code + NAL unit type 32-34 for VPS/SPS/PPS)
+        if data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
+            let nalHeader = data[6]  // HEVC NAL header is 2 bytes
+            let nalType = (nalHeader >> 1) & 0x3F
+
+            // HEVC VPS (32), SPS (33), PPS (34)
+            if nalType >= 32 && nalType <= 34 {
+                createHEVCFormatDescription(data: data)
+                return
+            }
+        }
+
+        // Fallback: try H.264 if we have SPS/PPS from RTSP handshake
+        if let sps = streamSPS, let pps = streamPPS {
+            createH264FormatDescription(sps: sps, pps: pps)
+        }
+    }
+
+    private func createH264FormatDescription(sps: Data, pps: Data) {
+        var formatDesc: CMVideoFormatDescription?
+        let spsPtr = [UInt8](sps)
+        let ppsPtr = [UInt8](pps)
+        var parameterSets: [UnsafePointer<UInt8>] = [spsPtr, ppsPtr]
+        var parameterSetSizes = [sps.count, pps.count]
+
+        parameterSets.withUnsafeMutableBufferPointer { psBuffer in
+            parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
+                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    allocator: kCFAllocatorDefault,
+                    parameterSetCount: 2,
+                    parameterSetPointers: psBuffer.baseAddress!,
+                    parameterSetSizes: sizesBuffer.baseAddress!,
+                    nalUnitHeaderLength: 4,
+                    formatDescriptionOut: &formatDescription
+                )
+            }
+        }
+    }
+
+    private func createHEVCFormatDescription(data: Data) {
+        // HEVC format description creation
+        // For now, create a basic HEVC format description
+        // In production, extract VPS/SPS/PPS from the data
+        var formatDesc: CMVideoFormatDescription?
+        let codec = kCMVideoCodecType_HEVC
+
+        // Create format description with codec type
+        // This is a simplified version - full implementation would parse VPS/SPS/PPS
+        var videoFormatDesc: CMVideoFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: codec,
+            width: 1920,
+            height: 1080,
+            extensions: nil,
+            formatDescriptionOut: &videoFormatDesc
+        )
+
+        if status == noErr {
+            formatDescription = videoFormatDesc
+        }
+    }
         // for Phase 2 full implementation.
     }
 
