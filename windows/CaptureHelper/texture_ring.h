@@ -180,9 +180,10 @@ private:
     // Atomic status for producer-consumer handoff
     // Free→(relaxed)→Pending(release)→InUse(relaxed)→Free(release)
     std::atomic<std::uint8_t> m_status[kRingSlotCount]{};
-    // Track outstanding Begin operations (by slot index, -1 = none)
-    std::size_t m_claimedProducerSlot{kRingSlotCount};  // sentinel = "not claimed"
-    std::size_t m_claimedConsumerSlot{kRingSlotCount};
+    // Track outstanding Begin operations (by slot index, kRingSlotCount = none)
+    // Atomic because HandleDeviceRemoved() may reset from any thread.
+    std::atomic<std::size_t> m_claimedProducerSlot{kRingSlotCount};
+    std::atomic<std::size_t> m_claimedConsumerSlot{kRingSlotCount};
 
     std::size_t m_nextProducerIndex{};
     std::size_t m_nextConsumerIndex{};

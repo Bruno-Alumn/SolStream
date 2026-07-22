@@ -134,9 +134,9 @@ void TextureRing::Reset() noexcept {
 TextureRing::ProduceResult TextureRing::BeginProduce() noexcept {
     if (!m_initialized.load(std::memory_order_acquire))
         return {nullptr, RingResult::InvalidState};
-    if (m_deviceRemoved.load(std::memory_order_relaxed))
+    if (m_deviceRemoved.load(std::memory_order_acquire))
         return {nullptr, RingResult::DeviceRemoved};
-    if (m_claimedProducerSlot < kRingSlotCount)
+    if (m_claimedProducerSlot.load(std::memory_order_acquire) < kRingSlotCount)
         return {nullptr, RingResult::NoSlotAvailable};
 
     const std::size_t start = m_nextProducerIndex;
@@ -168,8 +168,9 @@ TextureRing::ProduceResult TextureRing::BeginProduce() noexcept {
                 std::memory_order_acq_rel,
                 std::memory_order_relaxed)) {
             // AcquireSync succeeded but CAS failed (slot was taken between
-            // our relaxed load and CAS). Release the mutex properly.
-            HRESULT releaseHr = slot.mutex->ReleaseSync(kMutexKeyConsume);
+            // our relaxed load and CAS). Release the mutex back to producer
+            // state (key 0) since we didn't produce anything.
+            HRESULT releaseHr = slot.mutex->ReleaseSync(kMutexKeyProduce);
             if (releaseHr != S_OK) {
                 HandleDeviceRemoved();
                 m_claimedProducerSlot = kRingSlotCount;
@@ -192,8 +193,8 @@ RingResult TextureRing::EndProduce() noexcept {
     if (m_claimedProducerSlot >= kRingSlotCount)
         return RingResult::InvalidState;
 
-    const std::size_t idx = m_claimedProducerSlot;
-    m_claimedProducerSlot = kRingSlotCount;
+    const std::size_t idx = m_claimedProducerSlot.load(std::memory_order_relaxed);
+    m_claimedProducerSlot.store(kRingSlotCount, std::memory_order_relaxed);
 
     HRESULT hr = m_slots[idx].mutex->ReleaseSync(kMutexKeyConsume);
     if (hr != S_OK) {
@@ -210,9 +211,9 @@ RingResult TextureRing::EndProduce() noexcept {
 TextureRing::ConsumeResult TextureRing::BeginConsume() noexcept {
     if (!m_initialized.load(std::memory_order_acquire))
         return {nullptr, RingResult::InvalidState};
-    if (m_deviceRemoved.load(std::memory_order_relaxed))
+    if (m_deviceRemoved.load(std::memory_order_acquire))
         return {nullptr, RingResult::DeviceRemoved};
-    if (m_claimedConsumerSlot < kRingSlotCount)
+    if (m_claimedConsumerSlot.load(std::memory_order_acquire) < kRingSlotCount)
         return {nullptr, RingResult::NoSlotAvailable};
 
     const std::size_t start = m_nextConsumerIndex;
@@ -256,8 +257,8 @@ RingResult TextureRing::EndConsume() noexcept {
     if (m_claimedConsumerSlot >= kRingSlotCount)
         return RingResult::InvalidState;
 
-    const std::size_t idx = m_claimedConsumerSlot;
-    m_claimedConsumerSlot = kRingSlotCount;
+    const std::size_t idx = m_claimedConsumerSlot.load(std::memory_order_relaxed);
+    m_claimedConsumerSlot.store(kRingSlotCount, std::memory_order_relaxed);
 
     HRESULT hr = m_slots[idx].mutex->ReleaseSync(kMutexKeyProduce);
     if (hr != S_OK) {
@@ -275,7 +276,13 @@ RingResult TextureRing::EndConsume() noexcept {
 // ══════════════════════════════════════════════════════════════════════════════
 
 void TextureRing::HandleDeviceRemoved() noexcept {
-    m_deviceRemoved.store(true, std::memory_order_relaxed);
+    // Use release semantics so that once m_deviceRemoved is true, all
+    // preceding writes (slot state changes, etc.) are visible to other threads.
+    m_deviceRemoved.store(true, std::memory_order_release);
+    
+    // Reset claimed slots to prevent dangling state.
+    m_claimedProducerSlot = kRingSlotCount;
+    m_claimedConsumerSlot = kRingSlotCount;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -330,8 +337,8 @@ void TextureRing::ResetSlotStates() noexcept {
                 std::memory_order_release);
     m_nextProducerIndex = 0;
     m_nextConsumerIndex = 0;
-    m_claimedProducerSlot = kRingSlotCount;
-    m_claimedConsumerSlot = kRingSlotCount;
+    m_claimedProducerSlot.store(kRingSlotCount, std::memory_order_relaxed);
+    m_claimedConsumerSlot.store(kRingSlotCount, std::memory_order_relaxed);
 }
 
 } // namespace SolStream::Capture
