@@ -31,14 +31,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
-        // Create the main configuration window (or show pairing UI).
-        // For Phase 2, the user enters the Windows host address and
-        // pairing PIN here.
-
         Logger.info("SolStream macOS Client v0.2 started")
 
-        // In a real Phase 2 build, this would show a connection dialog.
-        // For now, create a demo stream window.
+        // For dev/testing: show a demo window.
+        // In production this would show a pairing/connection dialog.
+        startStreaming(
+            host: "192.168.1.100",
+            appName: "Demo",
+            width: 1280,
+            height: 720
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
