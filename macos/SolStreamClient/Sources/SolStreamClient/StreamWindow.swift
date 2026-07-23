@@ -54,6 +54,8 @@ final class StreamWindow: NSObject {
     func startStreaming() {
         guard !isStreaming else { return }
 
+        metalView?.setStatus("Connecting to \(host)...")
+
         // Create frame callback: called by decoder when a new frame is ready.
         let onFrame: (CVPixelBuffer) -> Void = { [weak self] pixelBuffer in
             DispatchQueue.main.async {

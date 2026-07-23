@@ -61,14 +61,6 @@ public:
     /// Reset all state (on session disconnect / re-pair).
     void Reset();
 
-    // ── Format validation ────────────────────────────────────────────────
-
-    /// Check whether a format ID is in the allowlist.
-    [[nodiscard]] static bool IsFormatAllowed(uint32_t formatId);
-
-    /// Check data size against per-format limit.
-    [[nodiscard]] static bool IsSizeAllowed(const ClipboardFormatData& fmt);
-
     // ── Rate limiting ────────────────────────────────────────────────────
 
     /// Returns true if the operation should be rate-limited.

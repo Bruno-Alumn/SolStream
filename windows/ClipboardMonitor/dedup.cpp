@@ -164,12 +164,4 @@ bool DedupEngine::IsRateLimited() {
     return m_opCount > kMaxOpsPerSecond;
 }
 
-bool DedupEngine::IsFormatAllowed(uint32_t formatId) {
-    return IsAllowlistedFormat(formatId);
-}
-
-bool DedupEngine::IsSizeAllowed(const ClipboardFormatData& fmt) {
-    return fmt.data.size() <= kMaxBytesPerFormat;
-}
-
 } // namespace solstream::clipboard

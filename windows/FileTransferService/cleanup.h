@@ -68,9 +68,6 @@ public:
     /// older than kSessionMaxAge even if active.
     void SweepOrphans();
 
-    /// Get the list of active session IDs.
-    [[nodiscard]] std::vector<std::wstring> GetActiveSessions() const;
-
     // ── Constants ────────────────────────────────────────────────────────
     static constexpr uint64_t kOrphanTTLSec    = 5 * 60;     // 5 minutes
     static constexpr uint64_t kSessionMaxAgeSec = 3600;       // 1 hour

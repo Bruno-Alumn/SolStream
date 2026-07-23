@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_set>
-#include <vector>
 
 namespace solstream::input {
 

@@ -11,8 +11,6 @@
 #include <Windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <schannel.h>
-#include <security.h>
 
 #include <atomic>
 #include <cstdint>
@@ -79,9 +77,6 @@ private:
     // Remove a client socket from the active list.
     void RemoveClient(SOCKET sock);
 
-    // TLS setup via Schannel on the listening socket.
-    bool SetupServerTLS();
-
     // Send a framed message to a single client.
     bool SendFrame(SOCKET sock, ClipboardFrameType type,
                    const uint8_t* data, size_t len);
@@ -112,11 +107,8 @@ private:
     std::string m_authToken;
 
     OnClipboardReceived m_recvCb;
-    uint64_t m_nextOriginId{1};
 
-    // TLS certificate context
-    CredHandle m_schCred{};
-    bool m_tlsInitialized{false};
+    uint64_t m_nextOriginId{1};
 };
 
 } // namespace solstream::clipboard

@@ -185,15 +185,6 @@ void CleanupEngine::SweepOrphans() {
     }
 }
 
-std::vector<std::wstring> CleanupEngine::GetActiveSessions() const {
-    std::lock_guard lk(m_mutex);
-    std::vector<std::wstring> ids;
-    ids.reserve(m_sessions.size());
-    for (const auto& [id, _] : m_sessions)
-        ids.push_back(id);
-    return ids;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Recursive delete
 // ══════════════════════════════════════════════════════════════════════════════

@@ -14,7 +14,6 @@
 #include <wrl/client.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -69,8 +68,6 @@ public:
 
     EncoderInput(const EncoderInput&) = delete;
     EncoderInput& operator=(const EncoderInput&) = delete;
-    EncoderInput(EncoderInput&&) noexcept;
-    EncoderInput& operator=(EncoderInput&&) noexcept;
 
     /// Set the D3D11 device used to open shared resources.
     /// Must be called before importing any handles.
@@ -80,9 +77,6 @@ public:
     /// Returns the slot index, or -1 if all slots are occupied.
     /// The handle must have been created with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.
     [[nodiscard]] int ImportHandle(HANDLE sharedHandle);
-
-    /// Remove a previously imported handle by slot index.
-    void RemoveHandle(int slotIndex);
 
     /// Attempt to acquire the next frame from the ring.
     /// On success, returns the texture and its slot index.
@@ -101,32 +95,13 @@ public:
     /// Reset all imported handles and slot state.
     void Reset();
 
-    /// Returns the number of imported slots.
-    [[nodiscard]] int SlotCount() const noexcept { return m_slotCount; }
-
 private:
     Microsoft::WRL::ComPtr<ID3D11Device> m_device;
-    Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_context;
 
     SharedSlot m_slots[kRingSlotCount]{};
     int m_slotCount{};
 
     int m_nextConsumerIndex{};
-};
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Stream session state
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// Tracks the active stream session and provides frame timing.
-struct StreamSession {
-    std::uint64_t frameIndex{};
-    std::chrono::steady_clock::time_point startTime;
-
-    void Reset() {
-        frameIndex = 0;
-        startTime = {};
-    }
 };
 
 } // namespace solstream

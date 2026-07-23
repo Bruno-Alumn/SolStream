@@ -1,6 +1,7 @@
 #include "key_state_tracker.h"
 
 #include <cstring>
+#include <vector>
 
 namespace solstream::input {
 

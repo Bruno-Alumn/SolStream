@@ -47,9 +47,6 @@ namespace solstream {
 /// How often to send a heartbeat query to CaptureHelper (milliseconds).
 constexpr auto kHeartbeatInterval = std::chrono::milliseconds(5000);
 
-/// How long to wait for CaptureHelper to connect before reporting failure.
-constexpr auto kConnectTimeout = std::chrono::milliseconds(30000);
-
 /// Maximum time without a Heartbeat or FrameReady before declaring
 /// CaptureHelper as dead.
 constexpr auto kWatchdogTimeout = std::chrono::milliseconds(15000);
@@ -71,7 +68,6 @@ enum class PipeState : std::uint8_t {
     Connected,
     Handshaking,   // Waiting for AdapterInfo after connection
     Streaming,     // Fully operational — capture running
-    Reconnecting,  // Pipe disconnected, attempting reconnect
     Error,         // Fatal error — manual intervention needed
 };
 
@@ -194,7 +190,6 @@ private:
     mutable std::mutex m_sizeMutex;
     UINT m_textureWidth{1920};
     UINT m_textureHeight{1080};
-    bool m_sizeValid{false};
 };
 
 } // namespace solstream

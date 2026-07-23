@@ -4,23 +4,15 @@ import MetalKit
 import CoreVideo
 
 /// An NSView backed by CAMetalLayer that renders decoded video frames.
-///
-/// The view uses a Metal texture cache (CVMetalTextureCache) to efficiently
-/// map CVPixelBuffers (from VideoToolbox) into Metal textures without
-/// copying the pixel data.
 public final class MetalView: NSView {
     private var metalDevice: MTLDevice?
     private var metalLayer: CAMetalLayer?
     private var textureCache: CVMetalTextureCache?
-    private var currentDrawable: CAMetalDrawable?
-    private var displayLink: CVDisplayLink?
-
-    // Current frame texture
-    private var frameTexture: MTLTexture?
-    private let commandQueue: MTLCommandQueue?
+    private var commandQueue: MTLCommandQueue?
+    private var statusText: String = "Connecting..."
+    private var statusField: NSTextField?
 
     public override init(frame frameRect: NSRect) {
-        // Create the Metal device.
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not supported on this system")
         }
@@ -30,7 +22,6 @@ public final class MetalView: NSView {
         super.init(frame: frameRect)
         self.wantsLayer = true
 
-        // Setup CAMetalLayer.
         if let layer = self.layer as? CAMetalLayer {
             self.metalLayer = layer
             layer.device = device
@@ -38,7 +29,6 @@ public final class MetalView: NSView {
             layer.framebufferOnly = true
             layer.drawsAsynchronously = true
 
-            // Fixed size — the stream window sets this.
             let scale = self.window?.backingScaleFactor ?? 2.0
             layer.contentsScale = scale
             layer.drawableSize = CGSize(
@@ -47,7 +37,6 @@ public final class MetalView: NSView {
             )
         }
 
-        // Create the Metal texture cache for CVPixelBuffer → MTLTexture.
         CVMetalTextureCacheCreate(
             kCFAllocatorDefault,
             nil,
@@ -55,6 +44,16 @@ public final class MetalView: NSView {
             nil,
             &textureCache
         )
+
+        // Status text label — shown until first frame arrives.
+        let field = NSTextField(labelWithString: statusText)
+        field.alignment = .center
+        field.textColor = .secondaryLabelColor
+        field.font = NSFont.systemFont(ofSize: 18, weight: .medium)
+        field.frame = CGRect(x: 0, y: frameRect.midY - 16, width: frameRect.width, height: 32)
+        field.autoresizingMask = [.width, .maxXMargin]
+        addSubview(field)
+        statusField = field
     }
 
     required init?(coder: NSCoder) {
@@ -65,11 +64,23 @@ public final class MetalView: NSView {
         return CAMetalLayer()
     }
 
-    // MARK: - Frame display
+    /// Update the status text shown before frames arrive.
+    public func setStatus(_ text: String) {
+        statusText = text
+        DispatchQueue.main.async { [weak self] in
+            self?.statusField?.stringValue = text
+        }
+    }
 
     /// Display a decoded video frame. Called from the decoder callback.
     /// Must be called on the main thread.
     public func displayFrame(_ pixelBuffer: CVPixelBuffer) {
+        // Remove status overlay once we have a frame.
+        if statusField != nil {
+            statusField?.removeFromSuperview()
+            statusField = nil
+        }
+
         guard let textureCache,
               let metalLayer,
               let drawable = metalLayer.nextDrawable()
@@ -78,7 +89,6 @@ public final class MetalView: NSView {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        // Create a Metal texture from the pixel buffer.
         var metalTexture: CVMetalTexture?
         CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,
@@ -95,15 +105,10 @@ public final class MetalView: NSView {
               let texture = CVMetalTextureGetTexture(metalTexture)
         else { return }
 
-        // Blit the frame texture onto the drawable.
         guard let commandBuffer = commandQueue?.makeCommandBuffer(),
               let blitEncoder = commandBuffer.makeBlitCommandEncoder()
         else { return }
 
-        let region = MTLRegionMake2D(0, 0, width, height)
-
-        // Use a simple render pass to copy the source to the drawable.
-        // For production, use a proper shader with color space conversion.
         blitEncoder.copy(from: texture,
                          sourceSlice: 0,
                          sourceLevel: 0,
@@ -118,8 +123,6 @@ public final class MetalView: NSView {
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
-
-    // MARK: - Resizing
 
     public override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()

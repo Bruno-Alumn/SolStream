@@ -88,13 +88,11 @@ static_assert(sizeof(InputPacket) == 12, "InputPacket must be 12 bytes");
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// Bitmask of allowlisted clipboard formats.
-enum ClipboardFormat : uint64_t {
-    CFMT_TEXT           = 1ULL << 0,   ///< CF_TEXT / CF_UNICODETEXT
-    CFMT_HDROP          = 1ULL << 1,   ///< CF_HDROP (file list)
-    CFMT_DIB            = 1ULL << 2,   ///< CF_DIB (bitmap)
-    CFMT_FILECONTENTS   = 1ULL << 3,   ///< CFSTR_FILECONTENTS
-    CFMT_ALL_ALLOWED    = CFMT_TEXT | CFMT_HDROP | CFMT_DIB | CFMT_FILECONTENTS,
-};
+constexpr uint64_t CFMT_TEXT           = 1ULL << 0;   ///< CF_TEXT / CF_UNICODETEXT
+constexpr uint64_t CFMT_HDROP          = 1ULL << 1;   ///< CF_HDROP (file list)
+constexpr uint64_t CFMT_DIB            = 1ULL << 2;   ///< CF_DIB (bitmap)
+constexpr uint64_t CFMT_FILECONTENTS   = 1ULL << 3;   ///< CFSTR_FILECONTENTS
+constexpr uint64_t CFMT_ALL_ALLOWED    = CFMT_TEXT | CFMT_HDROP | CFMT_DIB | CFMT_FILECONTENTS;
 
 /// Maximum clipboard sync parameters.
 constexpr uint32_t kMaxFormatsPerSync   = 10;
@@ -110,7 +108,6 @@ constexpr uint32_t kDebounceMs          = 100;                   // coalesce
 enum class ClipboardFrameType : uint8_t {
     ClipboardUpdate   = 1,  ///< New clipboard data
     ClipboardRequest  = 2,  ///< Request current clipboard snapshot
-    ClipboardAck      = 3,  ///< Acknowledgement (seq echo)
     Heartbeat         = 4,  ///< Keep-alive ping
     AuthToken         = 5,  ///< Session auth token
 };

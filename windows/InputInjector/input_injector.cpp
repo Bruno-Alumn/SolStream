@@ -14,17 +14,6 @@ InputInjector::InputInjector() = default;
 InputInjector::~InputInjector() { ReleaseAllKeys(); }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Allowlist management
-// ══════════════════════════════════════════════════════════════════════════════
-
-void InputInjector::AddAllowedWindow(HWND hwnd) {
-    if (hwnd && IsWindow(hwnd)) {
-        std::lock_guard lk(m_allowlistMutex);
-        m_allowedWindows.insert(hwnd);
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Focus checking
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -33,12 +22,7 @@ bool InputInjector::IsTargetFocused() const {
     if (!fg)
         return false;
 
-    // Check exact match, then allowlist.
-    if (fg == m_targetHwnd)
-        return true;
-
-    std::lock_guard lk(m_allowlistMutex);
-    return m_allowedWindows.count(fg) > 0;
+    return fg == m_targetHwnd;
 }
 
 bool InputInjector::WaitForFocus() {

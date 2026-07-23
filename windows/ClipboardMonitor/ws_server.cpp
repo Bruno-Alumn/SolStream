@@ -5,10 +5,8 @@
 #include <span>
 #include <sstream>
 
-// Link with schannel, secur32, ws2_32
+// Link with ws2_32
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "secur32.lib")
-#pragma comment(lib, "crypt32.lib")
 
 namespace solstream::clipboard {
 

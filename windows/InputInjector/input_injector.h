@@ -10,8 +10,6 @@
 #include <Windows.h>
 #include <cstdint>
 #include <chrono>
-#include <mutex>
-#include <unordered_set>
 
 #include "../ClipboardMonitor/clipboard_input_protocol.h"
 #include "key_state_tracker.h"
@@ -71,8 +69,6 @@ private:
     KeyStateTracker m_keyTracker;
 
     HWND m_targetHwnd{};
-    mutable std::mutex m_allowlistMutex;
-    std::unordered_set<HWND> m_allowedWindows;
 
     // Focus polling
     static constexpr int kFocusLeaseMs  = 100;

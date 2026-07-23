@@ -22,9 +22,6 @@ let package = Package(
                 "InputCapture",
                 "StreamConnection",
                 "SolStreamLogging"
-            ],
-            resources: [
-                .process("Resources")
             ]
         ),
 

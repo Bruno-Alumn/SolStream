@@ -14,33 +14,6 @@ namespace solstream {
 EncoderInput::EncoderInput() = default;
 EncoderInput::~EncoderInput() { Reset(); }
 
-EncoderInput::EncoderInput(EncoderInput&& other) noexcept
-    : m_device(std::move(other.m_device)),
-      m_context(std::move(other.m_context)),
-      m_slotCount(std::exchange(other.m_slotCount, 0)),
-      m_nextConsumerIndex(std::exchange(other.m_nextConsumerIndex, 0))
-{
-    for (int i = 0; i < kRingSlotCount; ++i) {
-        m_slots[i] = other.m_slots[i];
-        other.m_slots[i] = {};
-    }
-}
-
-EncoderInput& EncoderInput::operator=(EncoderInput&& other) noexcept {
-    if (this != &other) {
-        Reset();
-        m_device  = std::move(other.m_device);
-        m_context = std::move(other.m_context);
-        m_slotCount = std::exchange(other.m_slotCount, 0);
-        m_nextConsumerIndex = std::exchange(other.m_nextConsumerIndex, 0);
-        for (int i = 0; i < kRingSlotCount; ++i) {
-            m_slots[i] = other.m_slots[i];
-            other.m_slots[i] = {};
-        }
-    }
-    return *this;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Device
 // ══════════════════════════════════════════════════════════════════════════════
@@ -49,7 +22,6 @@ void EncoderInput::SetDevice(ID3D11Device* device) {
     if (!device)
         throw std::invalid_argument("EncoderInput::SetDevice: device is null.");
     m_device = device;
-    device->GetImmediateContext(&m_context);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -76,19 +48,6 @@ int EncoderInput::ImportHandle(HANDLE sharedHandle) {
     m_slots[idx].sharedHandle = sharedHandle;
     m_slots[idx].mutex        = mutex.Detach();
     return idx;
-}
-
-void EncoderInput::RemoveHandle(int slotIndex) {
-    if (slotIndex < 0 || slotIndex >= m_slotCount)
-        return;
-    auto& slot = m_slots[slotIndex];
-    if (slot.mutex)  { slot.mutex->Release();  slot.mutex = nullptr; }
-    if (slot.sharedHandle) { CloseHandle(slot.sharedHandle); slot.sharedHandle = nullptr; }
-    if (slotIndex < m_slotCount - 1) {
-        m_slots[slotIndex] = m_slots[m_slotCount - 1];
-        m_slots[m_slotCount - 1] = {};
-    }
-    --m_slotCount;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -161,7 +120,6 @@ void EncoderInput::Reset() {
     }
     m_slotCount = 0;
     m_nextConsumerIndex = 0;
-    m_context.Reset();
     m_device.Reset();
 }
 
