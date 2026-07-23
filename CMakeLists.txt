@@ -161,7 +161,6 @@ add_subdirectory(windows/sunshine)
 add_subdirectory(windows/ClipboardMonitor)
 add_subdirectory(windows/InputInjector)
 add_subdirectory(windows/FileTransferService)
-add_subdirectory(windows/SolStreamSecurity)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

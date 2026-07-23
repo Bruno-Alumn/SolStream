@@ -33,7 +33,6 @@ SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamWindows: [StreamWindow] = []
-    private let streamManager = StreamManager()
 
     /// When true, the app exits after taking a test screenshot.
     var testMode = false
@@ -105,7 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        streamManager.disconnectAll()
+        for window in streamWindows {
+            window.stopStreaming()
+        }
     }
 
     /// Start streaming an application window from the host.
@@ -121,8 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appName: appName,
             width: width,
             height: height,
-            frameRate: frameRate,
-            streamManager: streamManager
+            frameRate: frameRate
         )
         streamWindows.append(streamWindow)
         streamWindow.show()

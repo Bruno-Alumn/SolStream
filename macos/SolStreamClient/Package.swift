@@ -11,17 +11,12 @@ let package = Package(
     products: [
         .executable(name: "SolStreamClient", targets: ["SolStreamClient"])
     ],
-    dependencies: [
-        // moonlight-common-c provides SRTP decoding/encoding and
-        // the Moonlight streaming protocol implementation.
-        // We bundle a vendored copy under Sources/CMoonlight for now.
-    ],
+    dependencies: [],
     targets: [
-        // ── Main application target ──────────────────────────────────────
+        // -- Main application target --
         .executableTarget(
             name: "SolStreamClient",
             dependencies: [
-                "CMoonlight",
                 "VideoDecoder",
                 "AudioRenderer",
                 "InputCapture",
@@ -33,30 +28,17 @@ let package = Package(
             ]
         ),
 
-        // ── Shared logging module (used by all targets) ──────────────────
+        // -- Shared logging module (used by all targets) --
         .target(
             name: "SolStreamLogging",
             dependencies: [],
             path: "Sources/SolStreamLogging"
         ),
 
-        // ── Moonlight-common-c (vendored) ────────────────────────────────
-        .target(
-            name: "CMoonlight",
-            dependencies: [],
-            path: "Sources/CMoonlight",
-            publicHeadersPath: "include",
-            linkerSettings: [
-                .linkedLibrary("pthread"),
-                .linkedLibrary("z"),
-                .linkedFramework("CoreFoundation"),
-            ]
-        ),
-
-        // ── Video decoder (VideoToolbox + CAMetalLayer) ──────────────────
+        // -- Video decoder (VideoToolbox + CAMetalLayer) --
         .target(
             name: "VideoDecoder",
-            dependencies: ["CMoonlight", "SolStreamLogging"],
+            dependencies: ["SolStreamLogging"],
             linkerSettings: [
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreVideo"),
@@ -65,10 +47,10 @@ let package = Package(
             ]
         ),
 
-        // ── Audio renderer (AudioUnit) ───────────────────────────────────
+        // -- Audio renderer (AudioUnit) --
         .target(
             name: "AudioRenderer",
-            dependencies: ["CMoonlight", "SolStreamLogging"],
+            dependencies: ["SolStreamLogging"],
             linkerSettings: [
                 .linkedFramework("AudioUnit"),
                 .linkedFramework("CoreAudio"),
@@ -76,7 +58,7 @@ let package = Package(
             ]
         ),
 
-        // ── Input capture (NSView local monitoring, no CGEventTap) ───────
+        // -- Input capture (NSView local monitoring, no CGEventTap) --
         .target(
             name: "InputCapture",
             dependencies: ["SolStreamLogging"],
@@ -86,17 +68,17 @@ let package = Package(
             ]
         ),
 
-        // ── Stream connection (SRTP, WS control, pairing) ────────────────
+        // -- Stream connection (SRTP, WS control, pairing) --
         .target(
             name: "StreamConnection",
-            dependencies: ["CMoonlight", "SolStreamLogging"],
+            dependencies: ["SolStreamLogging"],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
             ]
         ),
 
-        // ── UI Tests ────────────────────────────────────────────────────
+        // -- UI Tests --
         .testTarget(
             name: "SolStreamClientTests",
             dependencies: ["SolStreamClient", "SolStreamLogging"],

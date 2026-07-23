@@ -16,7 +16,6 @@ final class StreamWindow: NSObject {
     private let host: String
     private let appName: String
     private let frameRate: Int
-    private let streamManager: StreamManager
 
     private(set) var window: NSWindow?
     private var metalView: MetalView?
@@ -32,13 +31,11 @@ final class StreamWindow: NSObject {
         appName: String,
         width: Int,
         height: Int,
-        frameRate: Int = 60,
-        streamManager: StreamManager
+        frameRate: Int = 60
     ) {
         self.host = host
         self.appName = appName
         self.frameRate = frameRate
-        self.streamManager = streamManager
         super.init()
         setupWindow(width: width, height: height)
     }
@@ -69,9 +66,6 @@ final class StreamWindow: NSObject {
 
         // Create the audio renderer.
         audioRenderer = AudioRenderer()
-
-        // Create input capture.
-        inputCapture = InputCapture()
 
         // Create the stream connection (SRTP, control channel).
         streamConnection = StreamConnection(
@@ -170,14 +164,4 @@ extension StreamWindow: NSWindowDelegate {
     }
 }
 
-/// Manages all active streams.
-final class StreamManager {
-    private var streams: [StreamWindow] = []
 
-    func disconnectAll() {
-        for stream in streams {
-            stream.stopStreaming()
-        }
-        streams.removeAll()
-    }
-}

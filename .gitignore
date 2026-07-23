@@ -1,1 +1,15 @@
+# Build artifacts
+build/
+macos/SolStreamClient/.build/
+
+# macOS
+.DS_Store
+
+# Understand-Anything analysis data
+.ua/
+
+# Local analysis notes
+.hermes/
+
+# Binary
 solstream

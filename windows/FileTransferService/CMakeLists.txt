@@ -7,7 +7,6 @@ add_executable(FileTransferService
     cleanup.cpp
     clipboard_object.cpp
     http_server.cpp
-    paste_injector.cpp
 )
 
 target_link_libraries(FileTransferService PRIVATE
