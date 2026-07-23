@@ -18,5 +18,5 @@ target_compile_features(InputInjector PRIVATE cxx_std_20)
 
 # GUI subsystem (no console window)
 set_target_properties(InputInjector PROPERTIES
-    WIN32_EXECUTABLE TRUE
+    WIN32_EXECUTABLE FALSE
 )

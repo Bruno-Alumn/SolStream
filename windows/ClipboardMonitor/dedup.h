@@ -14,9 +14,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include "clipboard_input_protocol.h"
 
 namespace solstream::clipboard {
+
+#include "clipboard_input_protocol.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ClipboardData

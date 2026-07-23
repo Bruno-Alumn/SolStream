@@ -13,10 +13,11 @@
 #include <string>
 #include <vector>
 
-#include "clipboard_input_protocol.h"
 #include "dedup.h"
 
 namespace solstream::clipboard {
+
+#include "clipboard_input_protocol.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ClipboardListener
