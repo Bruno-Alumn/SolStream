@@ -144,6 +144,9 @@ private:
     Direct3DCaptureFrame m_pendingFrame{nullptr};
     bool m_frameAvailable{false};
 
+    // Track current pool size (CurrentSize not exposed in SDK 10.0.26100)
+    SizeInt32 m_poolSize{};
+
     // State
     std::atomic<CaptureState> m_state{CaptureState::Idle};
     std::atomic<std::uint64_t> m_frameCount{0};

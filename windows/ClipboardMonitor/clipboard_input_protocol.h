@@ -10,8 +10,6 @@
 #include <Windows.h>
 #include <cstdint>
 
-namespace solstream::clipboard {
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Port assignments
 // ══════════════════════════════════════════════════════════════════════════════
@@ -81,7 +79,7 @@ struct InputPacket {
         uint8_t raw[8];
     };
 };
-static_assert(sizeof(InputPacket) == 12, "InputPacket must be 12 bytes");
+static_assert(sizeof(InputPacket) == 14, "InputPacket must be 14 bytes");
 
 #pragma pack(pop)
 
@@ -122,5 +120,3 @@ constexpr uint32_t kAESGCMKeySize    = 32;    ///< AES-256 key
 constexpr uint32_t kAESGCMNonceSize  = 12;    ///< 96-bit nonce
 constexpr uint32_t kAESGCMTagSize    = 16;    ///< Authentication tag
 constexpr uint32_t kReplayWindowSize = 1024;  ///< Sliding window slots
-
-}  // namespace solstream::clipboard

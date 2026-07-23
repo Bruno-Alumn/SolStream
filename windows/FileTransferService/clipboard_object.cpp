@@ -63,7 +63,7 @@ HRESULT FileDataObject::QueryInterface(REFIID riid, void** ppv) {
 
 // ── IDataObject ────────────────────────────────────────────────────────────
 
-HRESULT FileDataObject::GetData(FORMATETC* pFE, STGMEDIUM* pMed) {
+HRESULT STDMETHODCALLTYPE FileDataObject::GetData(FORMATETC* pFE, STGMEDIUM* pMed) {
     if (!pFE || !pMed) return E_INVALIDARG;
     pMed->hGlobal = nullptr;
     pMed->pUnkForRelease = nullptr;
@@ -124,11 +124,11 @@ HRESULT FileDataObject::GetData(FORMATETC* pFE, STGMEDIUM* pMed) {
     return DV_E_FORMATETC;
 }
 
-HRESULT FileDataObject::GetDataHere(FORMATETC*, STGMEDIUM*) {
+HRESULT STDMETHODCALLTYPE FileDataObject::GetDataHere(FORMATETC*, STGMEDIUM*) {
     return E_NOTIMPL;
 }
 
-HRESULT FileDataObject::QueryGetData(FORMATETC* pFE) {
+HRESULT STDMETHODCALLTYPE FileDataObject::QueryGetData(FORMATETC* pFE) {
     if (!pFE) return E_INVALIDARG;
 
     for (auto& fmt : m_formats) {
@@ -140,16 +140,16 @@ HRESULT FileDataObject::QueryGetData(FORMATETC* pFE) {
     return DV_E_FORMATETC;
 }
 
-HRESULT FileDataObject::GetCanonicalFormatEtc(FORMATETC*, FORMATETC* pOut) {
+HRESULT STDMETHODCALLTYPE FileDataObject::GetCanonicalFormatEtc(FORMATETC*, FORMATETC* pOut) {
     if (pOut) pOut->ptd = nullptr;
     return DATA_S_SAMEFORMATETC;
 }
 
-HRESULT FileDataObject::SetData(FORMATETC*, STGMEDIUM*, BOOL) {
+HRESULT STDMETHODCALLTYPE FileDataObject::SetData(FORMATETC*, STGMEDIUM*, BOOL) {
     return E_NOTIMPL;
 }
 
-HRESULT FileDataObject::EnumFormatEtc(DWORD dwDirection,
+HRESULT STDMETHODCALLTYPE FileDataObject::EnumFormatEtc(DWORD dwDirection,
                                        IEnumFORMATETC** ppEnum)
 {
     if (!ppEnum) return E_INVALIDARG;
@@ -205,13 +205,13 @@ HRESULT FileDataObject::EnumFormatEtc(DWORD dwDirection,
     return S_OK;
 }
 
-HRESULT FileDataObject::DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) {
+HRESULT STDMETHODCALLTYPE FileDataObject::DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) {
     return OLE_E_ADVISENOTSUPPORTED;
 }
-HRESULT FileDataObject::DUnadvise(DWORD) {
+HRESULT STDMETHODCALLTYPE FileDataObject::DUnadvise(DWORD) {
     return OLE_E_ADVISENOTSUPPORTED;
 }
-HRESULT FileDataObject::EnumDAdvise(IEnumSTATDATA**) {
+HRESULT STDMETHODCALLTYPE FileDataObject::EnumDAdvise(IEnumSTATDATA**) {
     return OLE_E_ADVISENOTSUPPORTED;
 }
 
@@ -252,7 +252,7 @@ ULONG FileDataObject::FileStream::Release() {
     return r;
 }
 
-HRESULT FileDataObject::FileStream::QueryInterface(REFIID riid, void** ppv) {
+HRESULT STDMETHODCALLTYPE FileDataObject::FileStream::QueryInterface(REFIID riid, void** ppv) {
     if (!ppv) return E_INVALIDARG; *ppv = nullptr;
     if (riid == IID_IUnknown || riid == IID_IStream) {
         *ppv = static_cast<IStream*>(this); AddRef(); return S_OK;

@@ -84,7 +84,7 @@ void WindowCapture::StartCapture(HWND hwnd, ID3D11Device* device) {
         // Create capture item from HWND.
         auto interopFactory = winrt::get_activation_factory<
             winrt::GraphicsCaptureItem,
-            winrt::IGraphicsCaptureItemInterop>();
+            ::IGraphicsCaptureItemInterop>();
         winrt::GraphicsCaptureItem item = {nullptr};
         winrt::check_hresult(interopFactory->CreateForWindow(
             hwnd,
@@ -107,6 +107,7 @@ void WindowCapture::StartCapture(HWND hwnd, ID3D11Device* device) {
             winrt::DirectXPixelFormat::B8G8R8A8UIntNormalized,
             kFramePoolBufferCount,
             {width, height});
+        m_poolSize = {width, height};
 
         // Register the frame-arrived event with an auto-revoker.
         m_frameArrivedRevoker = m_framePool.FrameArrived(
@@ -162,7 +163,7 @@ CapturedFrame WindowCapture::TryGetNextFrame() {
 
         // Extract the native D3D texture from the WinRT surface.
         auto surface = frame.Surface();
-        auto dxgiAccess = surface.as<winrt::IDirect3DDxgiInterfaceAccess>();
+        auto dxgiAccess = surface.as<::IDirect3DDxgiInterfaceAccess>();
         Microsoft::WRL::ComPtr<ID3D11Texture2D> capturedTexture;
         winrt::check_hresult(
             dxgiAccess->GetInterface(IID_PPV_ARGS(&capturedTexture)));
@@ -217,7 +218,7 @@ try {
         auto contentSize = frame.ContentSize();
         if (contentSize.Width <= 0 || contentSize.Height <= 0)
             continue;
-        auto poolSize = sender.CurrentSize();
+        auto poolSize = m_poolSize;
         if (contentSize.Width != poolSize.Width ||
             contentSize.Height != poolSize.Height) {
             // Window resized — recreate the frame pool.
@@ -225,7 +226,8 @@ try {
             m_frameAvailable = false;
             gotFrame = false;
             auto pixelFormat = winrt::DirectXPixelFormat::B8G8R8A8UIntNormalized;
-            sender.Recreate(m_winrtDevice, pixelFormat, {contentSize.Width, contentSize.Height});
+            sender.Recreate(m_winrtDevice, pixelFormat, kFramePoolBufferCount, {contentSize.Width, contentSize.Height});
+            m_poolSize = {contentSize.Width, contentSize.Height};
             // Drop this frame (was from the old-size pool).
             continue;
         }
@@ -276,6 +278,7 @@ void WindowCapture::StopCaptureLocked() noexcept {
     // Release WinRT and D3D11 objects.
     m_captureItem  = nullptr;
     m_winrtDevice  = nullptr;
+    m_poolSize     = {};
     m_context.Reset();
     m_device.Reset();
     m_hwnd = {};

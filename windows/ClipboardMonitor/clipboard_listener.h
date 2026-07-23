@@ -58,6 +58,14 @@ public:
                                     WPARAM wParam, LPARAM lParam);
 
 private:
+    /// Handle a WM_CLIPBOARDUPDATE notification.
+    void OnClipboardUpdate();
+
+    /// Read clipboard data for a specific format.
+    [[nodiscard]] ClipboardFormatData ReadFormat(uint32_t formatId);
+
+    /// Enumerate all available formats on the clipboard.
+    [[nodiscard]] std::vector<uint32_t> EnumerateFormats();
 
     HWND m_hwnd{};
     OnChangeCallback m_callback;

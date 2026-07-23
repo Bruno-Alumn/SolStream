@@ -39,15 +39,15 @@ public:
     HRESULT QueryInterface(REFIID riid, void** ppv) override;
 
     // IDataObject
-    HRESULT GetData(FORMATETC* pFormatEtc, STGMEDIUM* pMedium) override;
-    HRESULT GetDataHere(FORMATETC*, STGMEDIUM*) override;
-    HRESULT QueryGetData(FORMATETC* pFormatEtc) override;
-    HRESULT GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override;
-    HRESULT SetData(FORMATETC*, STGMEDIUM*, BOOL) override;
-    HRESULT EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override;
-    HRESULT DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override;
-    HRESULT DUnadvise(DWORD) override;
-    HRESULT EnumDAdvise(IEnumSTATDATA**) override;
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC* pFormatEtc, STGMEDIUM* pMedium) override;
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC*, STGMEDIUM*) override;
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC* pFormatEtc) override;
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override;
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC*, STGMEDIUM*, BOOL) override;
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override;
+    HRESULT STDMETHODCALLTYPE DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override;
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD) override;
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA**) override;
 
 private:
     LONG m_refCount{1};
