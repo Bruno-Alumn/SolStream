@@ -1,8 +1,8 @@
 #pragma once
 
 /// @file input_injector.h
-/// SendInput wrapper with focus-aware injection, target HWND allowlist,
-/// and 100ms lease with 10ms polling.
+/// SendInput wrapper with focus-aware injection and
+/// 100ms lease with 10ms polling.
 ///
 /// Thread safety: all methods must be called from a single thread
 /// (the pipe receive thread) or serialised externally.
@@ -42,9 +42,6 @@ public:
 
     /// Set the target HWND for injection.
     void SetTargetWindow(HWND hwnd) { m_targetHwnd = hwnd; }
-
-    /// Add a HWND to the allowlist.
-    void AddAllowedWindow(HWND hwnd);
 
     /// Process an input packet.
     /// Returns true if the packet was injected (or queued within lease).

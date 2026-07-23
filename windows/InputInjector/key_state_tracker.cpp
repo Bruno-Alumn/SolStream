@@ -5,16 +5,6 @@
 namespace solstream::input {
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Helpers
-// ══════════════════════════════════════════════════════════════════════════════
-
-bool KeyStateTracker::IsModifier(uint8_t vkCode) {
-    for (auto m : kModifiers)
-        if (m == vkCode) return true;
-    return false;
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Key tracking
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -26,21 +16,6 @@ void KeyStateTracker::KeyDown(uint8_t vkCode) {
 void KeyStateTracker::KeyUp(uint8_t vkCode) {
     std::lock_guard lk(m_mutex);
     m_pressedKeys.erase(vkCode);
-}
-
-bool KeyStateTracker::HasPressedKeys() const {
-    std::lock_guard lk(m_mutex);
-    return !m_pressedKeys.empty();
-}
-
-std::vector<uint8_t> KeyStateTracker::GetPressedKeys() const {
-    std::lock_guard lk(m_mutex);
-    return {m_pressedKeys.begin(), m_pressedKeys.end()};
-}
-
-void KeyStateTracker::Reset() {
-    std::lock_guard lk(m_mutex);
-    m_pressedKeys.clear();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -85,24 +60,6 @@ int KeyStateTracker::ReleaseAll() {
 
     m_pressedKeys.clear();
     return count;
-}
-
-int KeyStateTracker::ReleaseModifiers() {
-    std::lock_guard lk(m_mutex);
-    std::vector<INPUT> inputs;
-
-    for (auto vk : kModifiers) {
-        if (m_pressedKeys.erase(vk) > 0) {
-            inputs.push_back(MakeKeyInput(vk, false, true));
-        }
-    }
-
-    if (!inputs.empty()) {
-        SendInput(static_cast<UINT>(inputs.size()),
-                  inputs.data(), sizeof(INPUT));
-    }
-
-    return static_cast<int>(inputs.size());
 }
 
 } // namespace solstream::input

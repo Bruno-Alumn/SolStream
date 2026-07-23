@@ -46,8 +46,6 @@ enum class MessageType : std::uint32_t {
     // Sunshine → CaptureHelper (0x81-0x8F)
     StartStream       = 0x81,
     StopStream        = 0x82,
-    ResizeFrame       = 0x83,
-    QueryStatus       = 0x84,
     ResizeNotify      = 0x85,  // Encoder drained, ready for pool recreate
     SunshinePID       = 0x86,  // Sunshine's PID (for DuplicateHandle target)
 };
@@ -171,8 +169,6 @@ public:
 [[nodiscard]] std::vector<std::byte> BuildMessage(
     MessageType type, std::uint32_t sequence, std::span<const std::byte> payload);
 
-[[nodiscard]] MessageHeader ParseHeader(std::span<const std::byte> buffer);
-
 // ── Shared handle transfer ───────────────────────────────────────────────────
 //
 // Shared-texture HANDLEs cannot be marshalled directly over a named pipe
@@ -209,17 +205,5 @@ static_assert(sizeof(SharedHandlePayload) == 32,
 /// Returns the handle value valid in the target process, or nullptr on failure.
 [[nodiscard]] HANDLE DuplicateHandleForProcess(
     HANDLE localHandle, HANDLE targetProcessHandle);
-
-/// Duplicate handle for process by PID.
-/// Opens the target process with PROCESS_DUP_HANDLE, duplicates the handle,
-/// then closes the process handle.
-/// Returns the handle value valid in the target process, or nullptr on failure.
-[[nodiscard]] HANDLE DuplicateHandleForPID(
-    HANDLE localHandle, DWORD targetPID);
-
-/// Open a shared texture handle received via pipe on the given D3D11 device.
-/// Returns the texture or nullptr on failure.
-[[nodiscard]] Microsoft::WRL::ComPtr<ID3D11Texture2D> OpenSharedHandle(
-    ID3D11Device* device, HANDLE sharedHandle);
 
 } // namespace SolStream::IPC

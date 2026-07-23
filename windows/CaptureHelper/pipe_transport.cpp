@@ -22,10 +22,6 @@ PipeException::PipeException(std::string_view msg, DWORD errorCode)
 
 namespace {
 
-std::wstring ToNullTerminated(std::wstring_view sv) {
-    return std::wstring(sv);
-}
-
 constexpr DWORD kPipeOpenMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
 constexpr DWORD kPipeMode = PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT;
 constexpr DWORD kPipeMaxInstances = 1;
@@ -154,7 +150,7 @@ void PipeServer::Start(std::wstring_view pipeName, OnMessageFn onMessage) {
     m_onMessage = std::move(onMessage);
     CreateStopEvent();
 
-    auto name = ToNullTerminated(pipeName);
+    auto name = std::wstring(pipeName);
 
     WinHandle pipe(CreateNamedPipeW(
         name.c_str(), kPipeOpenMode, kPipeMode,
@@ -222,7 +218,7 @@ void PipeClient::Connect(std::wstring_view pipeName, OnMessageFn onMessage,
     m_onMessage = std::move(onMessage);
     CreateStopEvent();
 
-    auto name = ToNullTerminated(pipeName);
+    auto name = std::wstring(pipeName);
 
     // Retry loop for transient server availability.
     auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -296,19 +292,6 @@ std::vector<std::byte> BuildMessage(
     return buf;
 }
 
-MessageHeader ParseHeader(std::span<const std::byte> buffer) {
-    if (buffer.size() < sizeof(MessageHeader))
-        throw PipeException("ParseHeader: buffer too small.", ERROR_INVALID_PARAMETER);
-
-    MessageHeader hdr{};
-    std::memcpy(&hdr, buffer.data(), sizeof(hdr));
-
-    if (hdr.magic != kMagic)
-        throw PipeException("ParseHeader: invalid magic.", ERROR_INVALID_DATA);
-
-    return hdr;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Shared handle transfer helpers
 // ══════════════════════════════════════════════════════════════════════════════
@@ -333,33 +316,6 @@ HANDLE DuplicateHandleForProcess(HANDLE localHandle, HANDLE targetProcessHandle)
         return nullptr;
 
     return remoteHandle;
-}
-
-HANDLE DuplicateHandleForPID(HANDLE localHandle, DWORD targetPID) {
-    if (!localHandle || localHandle == INVALID_HANDLE_VALUE)
-        return nullptr;
-
-    HANDLE targetProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, targetPID);
-    if (!targetProcess)
-        return nullptr;
-
-    HANDLE remoteHandle = DuplicateHandleForProcess(localHandle, targetProcess);
-    CloseHandle(targetProcess);
-    return remoteHandle;
-}
-
-Microsoft::WRL::ComPtr<ID3D11Texture2D> OpenSharedHandle(
-    ID3D11Device* device, HANDLE sharedHandle)
-{
-    if (!device || !sharedHandle || sharedHandle == INVALID_HANDLE_VALUE)
-        return nullptr;
-
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-    HRESULT hr = device->OpenSharedResource(sharedHandle, IID_PPV_ARGS(&texture));
-    if (FAILED(hr))
-        return nullptr;
-
-    return texture;
 }
 
 } // namespace SolStream::IPC

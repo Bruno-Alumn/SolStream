@@ -20,22 +20,6 @@
 
 namespace SolStream::Capture {
 
-// ── HRESULT exception macro ─────────────────────────────────────────────────
-#define SOLSTREAM_THROW_IF_FAILED(expr)                                     \
-    do {                                                                    \
-        HRESULT _hr_ = (expr);                                              \
-        if (FAILED(_hr_))                                                   \
-            throw DeviceException(_hr_, "SolStream: " #expr " failed.");    \
-    } while(0)
-/// Describes a DXGI adapter for device selection.
-struct AdapterInfo {
-    LUID luid{};
-    std::wstring name;              // UTF-16 from DXGI
-    std::uint64_t dedicatedVRAM{};  // bytes (use uint64_t to avoid 32-bit truncation)
-    bool isHardware{};              // true if not SOFTWARE and not Microsoft BASIC
-    bool isWARP{};                  // Windows Advanced Rasterization Platform
-};
-
 /// Exception wrapping an HRESULT failure from D3D11/DXGI operations.
 class DeviceException final : public std::runtime_error {
 public:
@@ -73,17 +57,9 @@ public:
     DeviceManager(const DeviceManager&) = delete;
     DeviceManager& operator=(const DeviceManager&) = delete;
 
-    DeviceManager(DeviceManager&& other) noexcept;
-    DeviceManager& operator=(DeviceManager&& other) noexcept;
-
     /// Create a D3D11 device using the specified driver type.
     /// For D3D_DRIVER_TYPE_HARDWARE the first suitable adapter is selected.
     [[nodiscard]] DevicePtr CreateDevice(D3D_DRIVER_TYPE driverType = D3D_DRIVER_TYPE_HARDWARE);
-
-    /// Create a D3D11 device on the adapter identified by the given LUID.
-    /// Internally uses D3D_DRIVER_TYPE_UNKNOWN (required when passing an adapter).
-    /// Returns nullptr (does not throw) if the LUID does not match any adapter.
-    [[nodiscard]] DevicePtr CreateDeviceOnAdapter(LUID adapterLuid);
 
     /// LUID of the adapter backing the current device.
     /// Returns {0,0} if no device has been created yet. Check HasDevice() first.
@@ -95,9 +71,6 @@ public:
 
     /// Returns true if a D3D11 device has been successfully created.
     [[nodiscard]] bool HasDevice() const noexcept { return m_device != nullptr; }
-
-    /// Enumerate all DXGI adapters on the system.
-    [[nodiscard]] static std::vector<AdapterInfo> EnumerateAdapters();
 
     /// Poll the device removal status.
     /// Returns S_OK if the device is healthy, or a failure HRESULT

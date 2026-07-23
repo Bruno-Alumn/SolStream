@@ -37,10 +37,7 @@ private:
 
 enum class CaptureState : std::uint8_t {
     Idle,
-    Starting,
     Capturing,
-    Paused,
-    Stopping,
     Error,
     DeviceLost,
 };

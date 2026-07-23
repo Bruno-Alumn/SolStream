@@ -13,55 +13,6 @@ namespace SolStream::Capture {
 TextureRing::TextureRing() = default;
 TextureRing::~TextureRing() { Reset(); }
 
-TextureRing::TextureRing(TextureRing&& other) noexcept
-    : m_device(std::move(other.m_device)),
-      m_createFn(std::move(other.m_createFn))
-{
-    for (std::size_t i = 0; i < kRingSlotCount; ++i) {
-        m_slots[i] = std::move(other.m_slots[i]);
-        m_status[i].store(
-            other.m_status[i].exchange(
-                static_cast<std::uint8_t>(SlotStatus::Free),
-                std::memory_order_relaxed),
-            std::memory_order_relaxed);
-    }
-    m_initialized.store(other.m_initialized.exchange(false, std::memory_order_release),
-                        std::memory_order_relaxed);
-    m_deviceRemoved.store(other.m_deviceRemoved.exchange(false, std::memory_order_relaxed),
-                          std::memory_order_relaxed);
-    m_claimedProducerSlot = std::exchange(other.m_claimedProducerSlot, kRingSlotCount);
-    m_claimedConsumerSlot = std::exchange(other.m_claimedConsumerSlot, kRingSlotCount);
-    m_nextProducerIndex = std::exchange(other.m_nextProducerIndex, 0);
-    m_nextConsumerIndex = std::exchange(other.m_nextConsumerIndex, 0);
-    m_stats = std::exchange(other.m_stats, RingStats{});
-}
-
-TextureRing& TextureRing::operator=(TextureRing&& other) noexcept {
-    if (this != &other) {
-        Reset();
-        for (std::size_t i = 0; i < kRingSlotCount; ++i) {
-            m_slots[i] = std::move(other.m_slots[i]);
-            m_status[i].store(
-                other.m_status[i].exchange(
-                    static_cast<std::uint8_t>(SlotStatus::Free),
-                    std::memory_order_relaxed),
-                std::memory_order_relaxed);
-        }
-        m_initialized.store(other.m_initialized.exchange(false, std::memory_order_release),
-                            std::memory_order_relaxed);
-        m_deviceRemoved.store(other.m_deviceRemoved.exchange(false, std::memory_order_relaxed),
-                              std::memory_order_relaxed);
-        m_claimedProducerSlot   = std::exchange(other.m_claimedProducerSlot, kRingSlotCount);
-        m_claimedConsumerSlot   = std::exchange(other.m_claimedConsumerSlot, kRingSlotCount);
-        m_nextProducerIndex = std::exchange(other.m_nextProducerIndex, 0);
-        m_nextConsumerIndex = std::exchange(other.m_nextConsumerIndex, 0);
-        m_device  = std::move(other.m_device);
-        m_createFn = std::move(other.m_createFn);
-        m_stats = std::exchange(other.m_stats, RingStats{});
-    }
-    return *this;
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // Initialize / Reset
 // ══════════════════════════════════════════════════════════════════════════════
@@ -102,7 +53,6 @@ void TextureRing::Initialize(ID3D11Device* device, CreateTextureFn createFn) {
     m_nextConsumerIndex  = 0;
     m_claimedProducerSlot = kRingSlotCount;
     m_claimedConsumerSlot = kRingSlotCount;
-    m_stats = RingStats{};
     m_deviceRemoved.store(false, std::memory_order_relaxed);
 
     m_initialized.store(true, std::memory_order_release);
@@ -124,7 +74,6 @@ void TextureRing::Reset() noexcept {
     }
     m_device.Reset();
     m_createFn = nullptr;
-    m_stats = RingStats{};
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -150,7 +99,6 @@ TextureRing::ProduceResult TextureRing::BeginProduce() noexcept {
 
         HRESULT hr = slot.mutex->AcquireSync(kMutexKeyProduce, kMutexAcquireTimeoutMs);
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-            ++m_stats.producerTimeouts;
             return {nullptr, RingResult::AcquireTimeout};
         }
         if (hr != S_OK) {
@@ -181,11 +129,9 @@ TextureRing::ProduceResult TextureRing::BeginProduce() noexcept {
 
         m_claimedProducerSlot = idx;
         m_nextProducerIndex = (idx + 1) % kRingSlotCount;
-        ++m_stats.totalFramesCaptured;
         return {slot.texture.Get(), RingResult::Success};
     }
 
-    ++m_stats.missedFrames;
     return {nullptr, RingResult::NoSlotAvailable};
 }
 
@@ -233,7 +179,6 @@ TextureRing::ConsumeResult TextureRing::BeginConsume() noexcept {
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             m_status[idx].store(static_cast<std::uint8_t>(SlotStatus::Pending),
                                 std::memory_order_release);
-            ++m_stats.consumerTimeouts;
             return {nullptr, RingResult::AcquireTimeout};
         }
         if (hr != S_OK) {
@@ -246,7 +191,6 @@ TextureRing::ConsumeResult TextureRing::BeginConsume() noexcept {
 
         m_claimedConsumerSlot = idx;
         m_nextConsumerIndex = (idx + 1) % kRingSlotCount;
-        ++m_stats.totalFramesDelivered;
         return {slot.texture.Get(), RingResult::Success};
     }
 

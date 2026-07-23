@@ -48,15 +48,6 @@ enum class RingResult {
     InternalError,
 };
 
-// ── Statistics ──────────────────────────────────────────────────────────────
-struct RingStats {
-    std::uint64_t totalFramesCaptured{};
-    std::uint64_t totalFramesDelivered{};
-    std::uint64_t missedFrames{};
-    std::uint64_t producerTimeouts{};
-    std::uint64_t consumerTimeouts{};
-};
-
 // ── Exception ───────────────────────────────────────────────────────────────
 class TextureRingException final : public std::runtime_error {
 public:
@@ -71,7 +62,6 @@ private:
 
 // ── Forward declarations ────────────────────────────────────────────────────
 class TextureRing;
-class RingSlotGuard;
 
 // ── Texture Ring ────────────────────────────────────────────────────────────
 //
@@ -118,8 +108,6 @@ public:
 
     TextureRing(const TextureRing&) = delete;
     TextureRing& operator=(const TextureRing&) = delete;
-    TextureRing(TextureRing&& other) noexcept;
-    TextureRing& operator=(TextureRing&& other) noexcept;
 
     void Initialize(ID3D11Device* device, CreateTextureFn createFn);
     void Reset() noexcept;
@@ -134,14 +122,6 @@ public:
     // Consumer
     [[nodiscard]] ConsumeResult BeginConsume() noexcept;
     RingResult EndConsume() noexcept;
-
-    // RAII convenience
-    [[nodiscard]] RingSlotGuard ScopedProduce(ID3D11Texture2D*& outTexture, RingResult& outResult);
-    [[nodiscard]] RingSlotGuard ScopedConsume(ID3D11Texture2D*& outTexture, RingResult& outResult);
-
-    // Stats (call only when producer and consumer are stopped)
-    [[nodiscard]] RingStats GetStats() const noexcept { return m_stats; }
-    void ResetStats() noexcept { m_stats = {}; }
 
     // ── Cross-process handle export ──────────────────────────────────────
     //
@@ -165,15 +145,10 @@ public:
     void ResetSlotStates() noexcept;
 
 private:
-    friend class RingSlotGuard;
-
     struct Slot {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         Microsoft::WRL::ComPtr<IDXGIKeyedMutex> mutex;
     };
-
-    std::size_t NextFreeIndex() const noexcept;
-    std::size_t NextPendingIndex() const noexcept;
 
     void HandleDeviceRemoved() noexcept;
 
@@ -188,7 +163,6 @@ private:
     std::size_t m_nextProducerIndex{};
     std::size_t m_nextConsumerIndex{};
     Slot m_slots[kRingSlotCount]{};
-    RingStats m_stats{};
 
     std::atomic<bool> m_initialized{false};
     std::atomic<bool> m_deviceRemoved{false};
@@ -196,76 +170,5 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device> m_device;
     CreateTextureFn m_createFn;
 };
-
-// ── RAII Guard ──────────────────────────────────────────────────────────────
-// Defined after TextureRing so it can call its methods.
-class RingSlotGuard {
-public:
-    RingSlotGuard() noexcept = default;
-
-    ~RingSlotGuard() noexcept { Release(); }
-
-    RingSlotGuard(const RingSlotGuard&) = delete;
-    RingSlotGuard& operator=(const RingSlotGuard&) = delete;
-
-    RingSlotGuard(RingSlotGuard&& other) noexcept
-        : m_ring(std::exchange(other.m_ring, nullptr)),
-          m_isProducer(other.m_isProducer),
-          m_lastResult(other.m_lastResult) {}
-
-    RingSlotGuard& operator=(RingSlotGuard&& other) noexcept {
-        if (this != &other) {
-            Release();
-            m_ring = std::exchange(other.m_ring, nullptr);
-            m_isProducer = other.m_isProducer;
-            m_lastResult = other.m_lastResult;
-        }
-        return *this;
-    }
-
-    explicit operator bool() const noexcept { return m_ring != nullptr; }
-
-    [[nodiscard]] RingResult LastResult() const noexcept { return m_lastResult; }
-
-    void Release() noexcept {
-        if (m_ring) {
-            m_lastResult = m_isProducer
-                ? m_ring->EndProduce()
-                : m_ring->EndConsume();
-            m_ring = nullptr;
-        }
-    }
-
-private:
-    friend class TextureRing;
-
-    RingSlotGuard(TextureRing* ring, bool isProducer) noexcept
-        : m_ring(ring), m_isProducer(isProducer) {}
-
-    TextureRing* m_ring{};
-    bool m_isProducer{};
-    RingResult m_lastResult{RingResult::InvalidState};
-};
-
-// ── Inline convenience helpers ──────────────────────────────────────────────
-inline RingSlotGuard TextureRing::ScopedProduce(ID3D11Texture2D*& outTexture,
-                                                  RingResult& outResult) {
-    auto [tex, res] = BeginProduce();
-    outTexture = tex;
-    outResult = res;
-    return (res == RingResult::Success)
-        ? RingSlotGuard(this, true)
-        : RingSlotGuard{};
-}
-
-inline RingSlotGuard TextureRing::ScopedConsume(ID3D11Texture2D*& outTexture,
-                                                  RingResult& outResult) {
-    auto [tex, res] = BeginConsume();
-    outTexture = tex;
-    outResult = res;
-    return (res == RingResult::Success)
-        ? RingSlotGuard(this, false)
-        : RingSlotGuard{};
-}
 
 } // namespace SolStream::Capture
