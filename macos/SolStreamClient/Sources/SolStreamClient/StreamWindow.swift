@@ -82,6 +82,14 @@ final class StreamWindow: NSObject {
                 self?.audioRenderer?.playAudio(data)
             }
         )
+        streamConnection?.onStatus = { [weak self] msg in
+            self?.metalView?.setStatus(msg)
+        }
+        streamConnection?.onHandshakeComplete = { [weak self] success in
+            if success {
+                self?.metalView?.setStatus("Stream connected")
+            }
+        }
 
         isStreaming = true
         streamConnection?.connect()
