@@ -130,7 +130,7 @@ private:
     CaptureItem m_captureItem{nullptr};
 
     // Event auto-revoker (unsubscribes automatically on destruction/revoke)
-    winrt::event_revoker<FramePool> m_frameArrivedRevoker;
+    winrt::event_revoker<winrt::Windows::Graphics::Capture::IDirect3D11CaptureFramePool> m_frameArrivedRevoker;
 
     // Native device and context for resource management
     Microsoft::WRL::ComPtr<ID3D11Device> m_device;

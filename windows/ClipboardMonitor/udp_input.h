@@ -21,9 +21,9 @@
 #include <thread>
 #include <vector>
 
-#include "clipboard_input_protocol.h"
-
 namespace solstream::clipboard {
+
+#include "clipboard_input_protocol.h"
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ReplayWindow

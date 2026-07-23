@@ -81,10 +81,9 @@ void WindowCapture::StartCapture(HWND hwnd, ID3D11Device* device) {
             &CreateDirect3D11DeviceFromDXGIDevice, dxgiDevice.Get());
         m_winrtDevice = inspectable.as<winrt::IDirect3DDevice>();
 
-        // Create capture item from HWND.
-        auto interopFactory = winrt::get_activation_factory<
-            winrt::GraphicsCaptureItem,
-            ::IGraphicsCaptureItemInterop>();
+        // Capture item from HWND via interop.
+        auto factory = winrt::get_activation_factory<winrt::GraphicsCaptureItem>();
+        auto interopFactory = factory.as<::IGraphicsCaptureItemInterop>();
         winrt::GraphicsCaptureItem item = {nullptr};
         winrt::check_hresult(interopFactory->CreateForWindow(
             hwnd,
@@ -163,10 +162,9 @@ CapturedFrame WindowCapture::TryGetNextFrame() {
 
         // Extract the native D3D texture from the WinRT surface.
         auto surface = frame.Surface();
-        auto dxgiAccess = surface.as<::IDirect3DDxgiInterfaceAccess>();
         Microsoft::WRL::ComPtr<ID3D11Texture2D> capturedTexture;
-        winrt::check_hresult(
-            dxgiAccess->GetInterface(IID_PPV_ARGS(&capturedTexture)));
+        capturedTexture.copy_from(
+            GetDXGIInterfaceFromWinRTSurface<ID3D11Texture2D>(surface));
 
         // Describe the source and create a compatible destination.
         D3D11_TEXTURE2D_DESC srcDesc{};
