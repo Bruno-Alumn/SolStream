@@ -7,6 +7,7 @@ add_executable(ClipboardMonitor
     dedup.cpp
     ws_server.cpp
     udp_input.cpp
+    ../CaptureHelper/pipe_transport.cpp
 )
 
 target_link_libraries(ClipboardMonitor PRIVATE
@@ -22,4 +23,9 @@ target_compile_features(ClipboardMonitor PRIVATE cxx_std_20)
 # Console subsystem for debugging (change to WIN32_EXECUTABLE for release)
 set_target_properties(ClipboardMonitor PROPERTIES
     WIN32_EXECUTABLE FALSE
+)
+
+# Include path for shared IPC headers
+target_include_directories(ClipboardMonitor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../CaptureHelper
 )
