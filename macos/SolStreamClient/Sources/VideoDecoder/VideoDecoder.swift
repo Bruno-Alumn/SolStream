@@ -178,8 +178,8 @@ public final class VideoDecoder {
         spsPtr.withUnsafeBufferPointer { spsBuf in
             ppsPtr.withUnsafeBufferPointer { ppsBuf in
                 var parameterSets: [UnsafePointer<UInt8>] = [spsBuf.baseAddress!, ppsBuf.baseAddress!]
-                psBuffer in
-                    let _ = parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
+                parameterSets.withUnsafeMutableBufferPointer { psBuffer in
+                    _ = parameterSetSizes.withUnsafeMutableBufferPointer { sizesBuffer in
                         CMVideoFormatDescriptionCreateFromH264ParameterSets(
                             allocator: kCFAllocatorDefault,
                             parameterSetCount: 2,
