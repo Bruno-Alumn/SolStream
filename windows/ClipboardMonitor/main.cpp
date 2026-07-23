@@ -58,7 +58,7 @@ static bool ConnectToInputInjector() {
     Log("Connecting to InputInjector pipe...");
 
     try {
-        g_inputPipe.Connect(kInputInjectorPipe,
+        g_inputPipe.Connect(clip::kInputInjectorPipe,
                             nullptr,  // no message callback needed (we send only)
                             std::chrono::milliseconds(10000));
         Log("Connected to InputInjector pipe.");
@@ -114,7 +114,7 @@ int main() try {
 
     // ── WS Server ───────────────────────────────────────────────────────
     Log("Starting clipboard WS server on port %u...",
-        static_cast<unsigned>(kClipboardWSPort));
+        static_cast<unsigned>(clip::kClipboardWSPort));
     if (!g_clipServer.Start()) {
         Log("Failed to start clipboard WS server.");
         return 1;
@@ -164,7 +164,7 @@ int main() try {
 
     // ── UDP Input Receiver ──────────────────────────────────────────────
     Log("Starting UDP input receiver on port %u...",
-        static_cast<unsigned>(kInputUDPPort));
+        static_cast<unsigned>(clip::kInputUDPPort));
     g_inputReceiver.SetPacketCallback(
         [](const clip::InputPacket& packet) {
             ForwardInputPacket(packet);
@@ -175,8 +175,8 @@ int main() try {
     }
 
     Log("ClipboardMonitor ready. Clipboard WS on %u, UDP input on %u.",
-        static_cast<unsigned>(kClipboardWSPort),
-        static_cast<unsigned>(kInputUDPPort));
+        static_cast<unsigned>(clip::kClipboardWSPort),
+        static_cast<unsigned>(clip::kInputUDPPort));
 
     // ── Main wait ───────────────────────────────────────────────────────
     // The message pump thread handles clipboard. Main thread just waits.

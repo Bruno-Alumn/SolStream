@@ -162,12 +162,10 @@ CapturedFrame WindowCapture::TryGetNextFrame() {
 
         // Extract the native D3D texture from the WinRT surface.
         auto surface = frame.Surface();
+        auto dxgiSurface = surface.as<IDXGISurface>();
         Microsoft::WRL::ComPtr<ID3D11Texture2D> capturedTexture;
-        auto inspectable = surface.as<winrt::Windows::Foundation::IInspectable>();
         winrt::check_hresult(
-            ::GetDXGIInterfaceFromObject(
-                inspectable.get(),
-                IID_PPV_ARGS(capturedTexture.GetAddressOf())));
+            dxgiSurface->QueryInterface(IID_PPV_ARGS(&capturedTexture)));
 
         // Describe the source and create a compatible destination.
         D3D11_TEXTURE2D_DESC srcDesc{};
