@@ -197,8 +197,8 @@ struct SharedHandlePayload {
     std::uint32_t adapterLuidLow;    // DXGI adapter LUID low part (for verification)
     std::int32_t  adapterLuidHigh;   // DXGI adapter LUID high part
 };
-static_assert(sizeof(SharedHandlePayload) == 32,
-    "SharedHandlePayload must be 32 bytes");
+static_assert(sizeof(SharedHandlePayload) == 28,
+    "SharedHandlePayload must be 28 bytes");
 #pragma pack(pop)
 
 /// Duplicate a shared-texture handle from the current process into the

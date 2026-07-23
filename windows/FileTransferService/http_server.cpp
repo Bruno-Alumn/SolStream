@@ -145,7 +145,7 @@ void FileTransferServer::HandleClient(SOCKET sock) {
 
     if (raw.empty()) return;
 
-    auto req = ParseRequest(raw);
+    auto req = ParseRequest(std::vector<char>(raw.begin(), raw.end()));
 
     if (!ValidateAuth(req)) {
         SendResponse(sock, 401, "Unauthorized", "text/plain", "Unauthorized");

@@ -53,19 +53,11 @@ public:
     /// The origin ID for this session.
     void SetOriginId(uint32_t id) { m_originId = id; }
 
-private:
-    /// Handle a WM_CLIPBOARDUPDATE notification.
-    void OnClipboardUpdate();
-
-    /// Read clipboard data for a specific format.
-    [[nodiscard]] ClipboardFormatData ReadFormat(uint32_t formatId);
-
-    /// Enumerate all available formats on the clipboard.
-    [[nodiscard]] std::vector<uint32_t> EnumerateFormats();
-
-    // Window procedure (static).
+    // Window procedure (static, public — used by RegisterClassEx).
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
                                     WPARAM wParam, LPARAM lParam);
+
+private:
 
     HWND m_hwnd{};
     OnChangeCallback m_callback;

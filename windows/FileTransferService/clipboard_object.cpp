@@ -205,7 +205,7 @@ HRESULT FileDataObject::EnumFormatEtc(DWORD dwDirection,
     return S_OK;
 }
 
-HRESULT FileDataObject::DAdvise(FORMATETC*, ADVF, IAdviseSink*, DWORD*) {
+HRESULT FileDataObject::DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) {
     return OLE_E_ADVISENOTSUPPORTED;
 }
 HRESULT FileDataObject::DUnadvise(DWORD) {
@@ -219,7 +219,9 @@ HRESULT FileDataObject::EnumDAdvise(IEnumSTATDATA**) {
 // FileStream (IStream implementation for CFSTR_FILECONTENTS)
 // ══════════════════════════════════════════════════════════════════════════════
 
-FileDataObject::FileStream::FileStream(const std::wstring& path) {
+FileDataObject::FileStream::FileStream(const std::wstring& path)
+    : m_storedPath(path)
+{
     m_hFile = CreateFileW(
         path.c_str(),
         GENERIC_READ,
@@ -330,7 +332,7 @@ HRESULT FileDataObject::FileStream::Stat(STATSTG* stat, DWORD grfStatFlag) {
 HRESULT FileDataObject::FileStream::Clone(IStream** ppStream) {
     if (!ppStream) return E_INVALIDARG;
     auto* clone = new FileStream(m_hFile != INVALID_HANDLE_VALUE
-        ? m_filePath : L"");
+        ? m_storedPath : L"");
     // Share the same file handle by duplicating.
     if (m_hFile != INVALID_HANDLE_VALUE) {
         HANDLE hDup = INVALID_HANDLE_VALUE;

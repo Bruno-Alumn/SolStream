@@ -205,8 +205,8 @@ static bool RunPipeServer(HANDLE stopEvent) {
             }
 
             // Check if this is an InputPacket (payload size matches).
-            if (bytesRead == sizeof(input::InputPacket)) {
-                InputPacket packet{};
+            if (bytesRead == sizeof(solstream::clipboard::InputPacket)) {
+                solstream::clipboard::InputPacket packet{};
                 std::memcpy(&packet, buf.data(), sizeof(packet));
                 g_injector.ProcessPacket(packet);
             }

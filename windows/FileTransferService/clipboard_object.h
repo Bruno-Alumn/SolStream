@@ -45,7 +45,7 @@ public:
     HRESULT GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override;
     HRESULT SetData(FORMATETC*, STGMEDIUM*, BOOL) override;
     HRESULT EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override;
-    HRESULT DAdvise(FORMATETC*, ADVF, IAdviseSink*, DWORD*);
+    HRESULT DAdvise(FORMATETC*, DWORD, IAdviseSink*, DWORD*) override;
     HRESULT DUnadvise(DWORD) override;
     HRESULT EnumDAdvise(IEnumSTATDATA**) override;
 
@@ -89,6 +89,7 @@ private:
         HANDLE m_hFile{INVALID_HANDLE_VALUE};
         LARGE_INTEGER m_position{};
         uint64_t m_fileSize{};
+        std::wstring m_storedPath;
     };
 };
 
