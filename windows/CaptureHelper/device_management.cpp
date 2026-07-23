@@ -153,7 +153,8 @@ DeviceManager::DevicePtr DeviceManager::CreateDevice(D3D_DRIVER_TYPE driverType)
         return dev;
     }
 
-    auto const [device, _context] = CreateD3D11Device(adapter.Get(), driverType, luid);
+    auto const [device, _context] = CreateD3D11Device(adapter.Get(),
+        adapter ? D3D_DRIVER_TYPE_UNKNOWN : driverType, luid);
     return device;
 }
 
