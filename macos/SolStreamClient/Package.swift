@@ -65,10 +65,10 @@ let package = Package(
             ]
         ),
 
-        // -- Stream connection (SRTP, WS control, pairing) --
+        // -- Stream connection (SRTP, WS control, pairing) --  
         .target(
             name: "StreamConnection",
-            dependencies: ["SolStreamLogging", "CCommonCrypto"],
+            dependencies: ["SolStreamLogging", "CCommonCrypto", "CEnet"],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
@@ -80,6 +80,17 @@ let package = Package(
             name: "CCommonCrypto",
             dependencies: [],
             path: "Sources/CCommonCrypto"
+        ),
+
+        // -- ENET networking library --
+        .target(
+            name: "CEnet",
+            dependencies: [],
+            path: "Sources/CEnet",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("include"),
+            ]
         ),
 
         // -- UI Tests --
