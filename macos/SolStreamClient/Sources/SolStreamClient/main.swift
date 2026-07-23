@@ -58,8 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit")
 
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        field.placeholderString = "192.168.1.100"
-        field.stringValue = "192.168.1.100"
+        field.placeholderString = "100.101.102.103"
+        field.stringValue = "100.101.102.103"
         alert.accessoryView = field
 
         let response = alert.runModal()
