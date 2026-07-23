@@ -16,3 +16,6 @@ macos/SolStreamClient/.build/
 
 # Binary
 solstream
+# External source references
+references/*
+!references/.gitkeep
