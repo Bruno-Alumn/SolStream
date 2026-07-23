@@ -142,5 +142,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         streamWindows.append(streamWindow)
         streamWindow.show()
+        streamWindow.startStreaming()
     }
 }
