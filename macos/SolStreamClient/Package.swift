@@ -68,11 +68,18 @@ let package = Package(
         // -- Stream connection (SRTP, WS control, pairing) --
         .target(
             name: "StreamConnection",
-            dependencies: ["SolStreamLogging"],
+            dependencies: ["SolStreamLogging", "CCommonCrypto"],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
             ]
+        ),
+
+        // -- CommonCrypto bridging module --
+        .target(
+            name: "CCommonCrypto",
+            dependencies: [],
+            path: "Sources/CCommonCrypto"
         ),
 
         // -- UI Tests --
