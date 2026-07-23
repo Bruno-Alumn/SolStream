@@ -167,21 +167,16 @@ private let renderCallback: AURenderCallback = {(
 
 // MARK: - Simple Ring Buffer
 /// Simple ring buffer for audio data (internal access for callback).
-final class RingBuffer<T> {
+final class RingBuffer<T: ExpressibleByIntegerLiteral> {
     private var buffer: [T]
-    private var readIndex = 0
     private var writeIndex = 0
+    private var readIndex = 0
     private var count = 0
     private let capacity: Int
 
     init(capacity: Int) {
         self.capacity = capacity
-        self.buffer = []
-        self.buffer.reserveCapacity(capacity)
-        // Push placeholder elements.
-        for _ in 0..<capacity {
-            buffer.append(0 as! T)
-        }
+        self.buffer = [T](repeating: 0, count: capacity)
     }
 
     var available: Int { count }
