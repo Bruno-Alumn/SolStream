@@ -92,7 +92,6 @@ void FileTransferServer::Stop() {
     OleUninitialize();
     WSACleanup();
 }
-}
 
 int FileTransferServer::ConnectionCount() const noexcept {
     return m_connCount.load(std::memory_order_acquire);

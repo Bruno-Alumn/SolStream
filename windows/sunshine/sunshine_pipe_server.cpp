@@ -305,7 +305,6 @@ void SunshinePipeServer::HandleSharedHandleInfo(std::span<const std::byte> paylo
         std::lock_guard lk(m_sizeMutex);
         m_textureWidth  = static_cast<UINT>(shp.textureWidth);
         m_textureHeight = static_cast<UINT>(shp.textureHeight);
-        m_sizeValid = true;
     }
 
     // Send acknowledgement with the local slot index.

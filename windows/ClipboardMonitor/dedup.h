@@ -8,6 +8,7 @@
 /// a single thread or serialised externally.
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>

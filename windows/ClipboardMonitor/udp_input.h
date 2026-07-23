@@ -9,6 +9,7 @@
 /// forwarding callback is invoked on that thread.
 
 #include <Windows.h>
+#include <bcrypt.h>
 #include <winsock2.h>
 
 #include <atomic>

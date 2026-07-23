@@ -11,5 +11,8 @@ macos/SolStreamClient/.build/
 # Local analysis notes
 .hermes/
 
+# Sync metadata
+.stfolder/
+
 # Binary
 solstream

@@ -25,13 +25,13 @@ void FileDataObject::InitFormats() {
     // 2. CFSTR_FILECONTENTS — IStream.
     m_formats[1] = {
         static_cast<CLIPFORMAT>(
-            RegisterClipboardFormatW(CFSTR_FILECONTENTS)),
+            RegisterClipboardFormatW(L"FileContents")),
         nullptr, DVASPECT_CONTENT, 0, TYMED_ISTREAM
     };
     // 3. CFSTR_PREFERREDDROPEFFECT — DROPEFFECT_COPY.
     m_formats[2] = {
         static_cast<CLIPFORMAT>(
-            RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)),
+            RegisterClipboardFormatW(L"Preferred DropEffect")),
         nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL
     };
 }
@@ -96,7 +96,7 @@ HRESULT FileDataObject::GetData(FORMATETC* pFE, STGMEDIUM* pMed) {
 
     // CFSTR_PREFERREDDROPEFFECT
     CLIPFORMAT cfDropEffect = static_cast<CLIPFORMAT>(
-        RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT));
+        RegisterClipboardFormatW(L"Preferred DropEffect"));
     if (pFE->cfFormat == cfDropEffect && (pFE->tymed & TYMED_HGLOBAL)) {
         HGLOBAL hGlob = GlobalAlloc(GHND | GMEM_SHARE, sizeof(DWORD));
         if (!hGlob) return STG_E_MEDIUMFULL;
@@ -112,7 +112,7 @@ HRESULT FileDataObject::GetData(FORMATETC* pFE, STGMEDIUM* pMed) {
 
     // CFSTR_FILECONTENTS
     CLIPFORMAT cfFileContents = static_cast<CLIPFORMAT>(
-        RegisterClipboardFormatW(CFSTR_FILECONTENTS));
+        RegisterClipboardFormatW(L"FileContents"));
     if (pFE->cfFormat == cfFileContents && (pFE->tymed & TYMED_ISTREAM)) {
         auto* stream = new FileStream(m_filePath);
         pMed->tymed = TYMED_ISTREAM;

@@ -78,7 +78,7 @@ void WindowCapture::StartCapture(HWND hwnd, ID3D11Device* device) {
         winrt::check_hresult(
             device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)));
         auto inspectable = winrt::capture<winrt::Windows::Foundation::IInspectable>(
-            &CreateDirect3D11DeviceFromDXGIDevice, dxgiDevice.get());
+            &CreateDirect3D11DeviceFromDXGIDevice, dxgiDevice.Get());
         m_winrtDevice = inspectable.as<winrt::IDirect3DDevice>();
 
         // Create capture item from HWND.

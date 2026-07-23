@@ -44,6 +44,7 @@ enum class MessageType : std::uint32_t {
     FrameSizeChanged  = 0x09,  // Window resize detected, new dimensions
 
     // Sunshine → CaptureHelper (0x81-0x8F)
+    Quit              = 0x80,
     StartStream       = 0x81,
     StopStream        = 0x82,
     ResizeNotify      = 0x85,  // Encoder drained, ready for pool recreate

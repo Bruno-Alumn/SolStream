@@ -31,7 +31,7 @@ namespace solstream::filetransfer {
 class FileDataObject final : public IDataObject {
 public:
     FileDataObject(const std::wstring& filePath);
-    ~FileDataObject() override = default;
+    ~FileDataObject() = default;
 
     // IUnknown
     ULONG AddRef() override;
@@ -45,7 +45,7 @@ public:
     HRESULT GetCanonicalFormatEtc(FORMATETC*, FORMATETC*) override;
     HRESULT SetData(FORMATETC*, STGMEDIUM*, BOOL) override;
     HRESULT EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override;
-    HRESULT DAdvise(FORMATETC*, ADVF, IAdviseSink*, DWORD*) override;
+    HRESULT DAdvise(FORMATETC*, ADVF, IAdviseSink*, DWORD*);
     HRESULT DUnadvise(DWORD) override;
     HRESULT EnumDAdvise(IEnumSTATDATA**) override;
 
@@ -64,7 +64,7 @@ private:
     class FileStream final : public IStream {
     public:
         FileStream(const std::wstring& path);
-        ~FileStream() override;
+        ~FileStream();
 
         ULONG AddRef() override;
         ULONG Release() override;

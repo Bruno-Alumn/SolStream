@@ -225,7 +225,6 @@ std::string SolStreamAPI::HandleStatus() {
     case PipeState::Connected:    stateStr = "connected";    break;
     case PipeState::Handshaking:  stateStr = "handshaking";  break;
     case PipeState::Streaming:    stateStr = "streaming";    break;
-    case PipeState::Reconnecting: stateStr = "reconnecting"; break;
     case PipeState::Error:        stateStr = "error";        break;
     default:                      stateStr = "unknown";      break;
     }
