@@ -27,6 +27,7 @@ public final class InputCapture {
     /// Modifier flags as of the last `.flagsChanged`, so transitions can be
     /// turned into individual key down/up events.
     private var lastModifierFlags: NSEvent.ModifierFlags = []
+    private var lastDeviceFlags: UInt = 0
 
     /// macOS virtual key code → Windows virtual key code.
     private let keyCodeMap: [UInt16: UInt16] = [
@@ -77,20 +78,33 @@ public final class InputCapture {
     private struct ModifierKey {
         let macKeyCode: UInt16
         let windowsKeyCode: UInt16
-        let flag: NSEvent.ModifierFlags
-        let modifier: InputProtocol.Modifiers
+        /// The DEVICE-DEPENDENT mask for this specific physical key. The public
+        /// flags (.shift, .control…) are shared by the left and right keys, so
+        /// releasing one while the other is held reads as "still down" and
+        /// would emit a key DOWN — leaving that key stuck on the host forever.
+        let deviceMask: UInt
     }
 
     private let modifierKeys: [ModifierKey] = [
-        ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, flag: .shift, modifier: .shift),    // L shift
-        ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, flag: .shift, modifier: .shift),    // R shift
-        ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, flag: .control, modifier: .control),// L ctrl
-        ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, flag: .control, modifier: .control),// R ctrl
-        ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, flag: .option, modifier: .alt),     // L alt
-        ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, flag: .option, modifier: .alt),     // R alt
-        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0x5B, flag: .command, modifier: .meta),   // L cmd → L win
-        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0x5C, flag: .command, modifier: .meta),   // R cmd → R win
+        ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, deviceMask: 0x0000_0002),  // L shift
+        ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, deviceMask: 0x0000_0004),  // R shift
+        ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, deviceMask: 0x0000_0001),  // L ctrl
+        ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, deviceMask: 0x0000_2000),  // R ctrl
+        ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, deviceMask: 0x0000_0020),  // L alt
+        ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, deviceMask: 0x0000_0040),  // R alt
+        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0x5B, deviceMask: 0x0000_0008),  // L cmd → L win
+        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0x5C, deviceMask: 0x0000_0010),  // R cmd → R win
     ]
+
+    /// Counters that separate "AppKit never delivered the event" from
+    /// "delivered but rejected", which are otherwise indistinguishable.
+    public private(set) var mouseMovedSeen = 0
+    public private(set) var positionsSent = 0
+
+    /// Non-modifier keys currently held, so they can be released on focus loss.
+    /// Sunshine hands key-down straight to SendInput, and Windows auto-repeats
+    /// a key it never sees released — so a missed key-up repeats forever.
+    private var heldKeys: Set<UInt16> = []
 
     public init() {}
 
@@ -114,7 +128,7 @@ public final class InputCapture {
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
-        releaseHeldModifiers()
+        releaseHeldKeys()
         removeMonitors()
     }
 
@@ -158,34 +172,51 @@ public final class InputCapture {
         switch event.type {
         case .keyDown, .keyUp:
             guard let windowsKey = keyCodeMap[event.keyCode] else { return }
+            let pressed = event.type == .keyDown
+            if pressed {
+                heldKeys.insert(windowsKey)
+            } else {
+                heldKeys.remove(windowsKey)
+            }
             onInput?(InputProtocol.key(code: windowsKey,
-                                       pressed: event.type == .keyDown,
+                                       pressed: pressed,
                                        modifiers: modifiers(from: event.modifierFlags)))
 
         case .flagsChanged:
             // A modifier press and release both arrive as .flagsChanged; which
-            // it was is only knowable by diffing against the previous state.
+            // it was is only knowable by diffing against the previous state —
+            // and it must be diffed against the device-dependent bit for this
+            // exact key, not the shared .shift/.control/... flag.
             let flags = event.modifierFlags
+            let deviceFlags = flags.rawValue
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }) {
-                let isDown = flags.contains(key.flag)
+                let isDown = (deviceFlags & key.deviceMask) != 0
                 onInput?(InputProtocol.key(code: key.windowsKeyCode,
                                            pressed: isDown,
                                            modifiers: modifiers(from: flags)))
             }
             lastModifierFlags = flags
+            lastDeviceFlags = deviceFlags
 
         default:
             break
         }
     }
 
-    /// Release anything still held when focus leaves, so a modifier cannot get
-    /// stuck down on the host after we stop sending events.
-    private func releaseHeldModifiers() {
-        for key in modifierKeys where lastModifierFlags.contains(key.flag) {
+    /// Release everything still held when focus leaves. Without this the host
+    /// keeps the key down — and Windows auto-repeats a key it never sees
+    /// released, so a single missed key-up types forever.
+    private func releaseHeldKeys() {
+        for code in heldKeys {
+            onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
+        }
+        heldKeys.removeAll()
+
+        for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             onInput?(InputProtocol.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
         }
         lastModifierFlags = []
+        lastDeviceFlags = 0
     }
 
     private func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
@@ -204,6 +235,7 @@ public final class InputCapture {
 
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            if event.type == .mouseMoved { mouseMovedSeen += 1 }
             sendPosition(for: event, in: view)
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -257,6 +289,7 @@ public final class InputCapture {
         let x = Int((source.minX + unitX * source.width).rounded())
         let y = Int((source.minY + unitY * source.height).rounded())
 
+        positionsSent += 1
         onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
                                                  referenceWidth: Int(canvas.width),
                                                  referenceHeight: Int(canvas.height)))

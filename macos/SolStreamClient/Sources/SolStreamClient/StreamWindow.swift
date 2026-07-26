@@ -95,6 +95,10 @@ final class StreamWindow: NSObject {
         connection.onPhase = { [weak self] phase in
             self?.apply(phase: phase)
         }
+        connection.onPointerStats = { [weak self] in
+            guard let self, let capture = self.inputCapture else { return (0, 0) }
+            return (capture.mouseMovedSeen, capture.positionsSent)
+        }
         connection.onStatus = { [weak self] message in
             guard let self else { return }
             // Same late-arrival race as the phase updates: once video is on
@@ -216,6 +220,10 @@ final class StreamWindow: NSObject {
         window.minSize = NSSize(width: 640, height: 360)
         window.backgroundColor = .black
         window.collectionBehavior = [.fullScreenPrimary]
+        // NSWindow does not receive mouse-moved events unless it asks. Without
+        // this the window server never sends them to us at all, so hovering
+        // moves nothing on the host and the pointer only tracks while dragging.
+        window.acceptsMouseMovedEvents = true
         window.contentAspectRatio = NSSize(width: config.width, height: config.height)
 
         let metalView = MetalView(frame: contentRect)
@@ -240,6 +248,8 @@ extension StreamWindow: NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         inputCapture?.enableCapture()
+        Log.info("[input] capture enabled (window is key, acceptsMouseMoved="
+                 + "\(window?.acceptsMouseMovedEvents == true))")
     }
 
     func windowDidResignKey(_ notification: Notification) {

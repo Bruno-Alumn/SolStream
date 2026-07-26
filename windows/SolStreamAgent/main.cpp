@@ -37,6 +37,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <cwchar>
 #include <string>
@@ -45,6 +46,12 @@
 namespace {
 
 constexpr unsigned short kDefaultPort = 47997;
+
+// Anyone who can reach this socket can enumerate every window title and move or
+// focus any window on the machine. There is no authentication, so by default it
+// is bound to loopback only and reached through an SSH tunnel. --listen-all is
+// opt-in and prints a warning.
+constexpr const char* kLoopback = "127.0.0.1";
 constexpr int kProtocolVersion = 1;
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -369,7 +376,17 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
     if (end == at) {
         return false;
     }
-    out = std::stoll(json.substr(at, end - at));
+    // std::stoll throws on a sign with no digits and on values that do not fit,
+    // and an uncaught exception here would terminate the agent on one malformed
+    // line. strtoll reports both cases through errno instead.
+    const std::string digits = json.substr(at, end - at);
+    errno = 0;
+    char* stop = nullptr;
+    const long long value = std::strtoll(digits.c_str(), &stop, 10);
+    if (errno == ERANGE || stop == digits.c_str()) {
+        return false;
+    }
+    out = value;
     return true;
 }
 
@@ -459,6 +476,15 @@ bool SendLine(SOCKET client, const std::string& text) {
 }
 
 void ServeClient(SOCKET client) {
+    // Without a receive timeout a peer that vanishes without a FIN (sleep, VPN
+    // drop, cable pull) leaves this blocked in recv forever, and because the
+    // accept loop is single-client the agent never serves anyone again.
+    DWORD timeout_ms = 30000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*) &timeout_ms, sizeof(timeout_ms));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*) &timeout_ms, sizeof(timeout_ms));
+    BOOL keepalive = TRUE;
+    setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, (const char*) &keepalive, sizeof(keepalive));
+
     // Greet with the protocol version and the display list, so the Mac can pick
     // its capture display without a round trip.
     char hostname[256] = {};
@@ -476,6 +502,10 @@ void ServeClient(SOCKET client) {
     char chunk[4096];
     for (;;) {
         const int n = recv(client, chunk, sizeof(chunk), 0);
+        if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
+            Log("[agent] client idle for 30s, dropping");
+            return;
+        }
         if (n <= 0) {
             return;
         }
@@ -508,9 +538,13 @@ void ServeClient(SOCKET client) {
 
 int wmain(int argc, wchar_t** argv) {
     unsigned short port = kDefaultPort;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::wstring(argv[i]) == L"--port") {
+    bool listen_all = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::wstring arg = argv[i];
+        if (arg == L"--port" && i + 1 < argc) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
+        } else if (arg == L"--listen-all") {
+            listen_all = true;
         }
     }
 
@@ -536,8 +570,15 @@ int wmain(int argc, wchar_t** argv) {
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(port);
+    if (listen_all) {
+        address.sin_addr.s_addr = INADDR_ANY;
+        Log("[agent] WARNING: listening on ALL interfaces. This socket is");
+        Log("[agent] WARNING: unauthenticated and can move any window on this");
+        Log("[agent] WARNING: machine. Prefer the default loopback bind.");
+    } else {
+        inet_pton(AF_INET, kLoopback, &address.sin_addr);
+    }
 
     if (bind(listener, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
         Log("[agent] bind(%u) failed: %d", port, WSAGetLastError());
@@ -548,7 +589,8 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
-    Log("[agent] SolStream agent v%d listening on port %u", kProtocolVersion, port);
+    Log("[agent] SolStream agent v%d listening on %s:%u",
+        kProtocolVersion, listen_all ? "0.0.0.0" : kLoopback, port);
     for (const Display& display : EnumerateDisplays()) {
         Log("[agent]   display %s %ldx%ld at (%ld,%ld)%s",
             display.device_name.c_str(),
