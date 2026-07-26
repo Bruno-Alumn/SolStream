@@ -12,6 +12,13 @@ public final class InputCapture {
     /// Receives ready-to-send packets built by `InputProtocol`.
     public var onInput: ((Data) -> Void)?
 
+    /// The region of the streamed canvas this view displays, in canvas pixels,
+    /// and the canvas's full size. Pointer positions must be sent in canvas
+    /// coordinates: Sunshine rescales from the reference rectangle we declare
+    /// onto the captured display, and it knows nothing about our crop.
+    public var sourceRect: CGRect?
+    public var canvasSize: CGSize?
+
     private weak var targetView: NSView?
     private var keyboardMonitor: Any?
     private var mouseMonitor: Any?
@@ -235,16 +242,24 @@ public final class InputCapture {
         let bounds = view.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
 
-        let x = Int(point.x.rounded())
-        let y = Int((view.isFlipped ? point.y : bounds.height - point.y).rounded())
+        // View point -> normalised within the view -> canvas pixel.
+        let unitX = point.x / bounds.width
+        let unitY = (view.isFlipped ? point.y : bounds.height - point.y) / bounds.height
 
         // Ignore events outside the video surface rather than clamping them to
         // the edge, which would drag the host pointer along the border.
-        guard x >= 0, y >= 0, x <= Int(bounds.width), y <= Int(bounds.height) else { return }
+        guard (0...1).contains(unitX), (0...1).contains(unitY) else { return }
+
+        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? bounds.size)
+        let canvas = canvasSize ?? source.size
+        guard canvas.width > 0, canvas.height > 0 else { return }
+
+        let x = Int((source.minX + unitX * source.width).rounded())
+        let y = Int((source.minY + unitY * source.height).rounded())
 
         onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
-                                                 referenceWidth: Int(bounds.width),
-                                                 referenceHeight: Int(bounds.height)))
+                                                 referenceWidth: Int(canvas.width),
+                                                 referenceHeight: Int(canvas.height)))
     }
 
     private func button(for event: NSEvent) -> InputProtocol.MouseButton? {

@@ -418,8 +418,25 @@ std::string HandleCommand(const std::string& line) {
         if (!window) {
             return "{\"type\":\"error\",\"message\":\"no such window\"}";
         }
-        SetForegroundWindow(window);
-        return "{\"type\":\"focused\",\"ok\":true}";
+
+        // SetForegroundWindow alone is unreliable: Windows refuses foreground
+        // changes requested by a process that does not own the foreground, so
+        // it silently fails whenever a modal dialog or another app holds it.
+        // Raising in the Z-order is not subject to that restriction and is what
+        // actually matters for capture, so do that first and unconditionally.
+        if (IsIconic(window)) {
+            ShowWindow(window, SW_RESTORE);
+        }
+        SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        BringWindowToTop(window);
+        const BOOL foreground = SetForegroundWindow(window);
+
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"type\":\"focused\",\"ok\":true,\"foreground\":%s}",
+                      foreground ? "true" : "false");
+        return buffer;
     }
 
     return "{\"type\":\"error\",\"message\":\"unknown cmd\"}";

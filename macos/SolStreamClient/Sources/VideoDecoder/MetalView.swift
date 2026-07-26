@@ -16,6 +16,17 @@ public final class MetalView: NSView {
     private var textureCache: CVMetalTextureCache?
     private var drawableSize: CGSize = .zero
 
+    /// The region of the decoded frame to present, in frame pixels. Nil shows
+    /// the whole frame. This is what turns one decoded stream into N
+    /// independent windows: each view blits a different sub-rect of the same
+    /// CVPixelBuffer, so there is still only one decode.
+    public var sourceRect: CGRect? {
+        didSet {
+            guard oldValue != sourceRect else { return }
+            drawableSize = .zero   // force the drawable to be resized
+        }
+    }
+
     private let overlay = StatusOverlay()
 
     // Presentation runs on the main thread but frames arrive on the media
@@ -123,11 +134,17 @@ public final class MetalView: NSView {
 
         guard let metalLayer = layer as? CAMetalLayer, let textureCache else { return }
 
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        guard width > 0, height > 0 else { return }
+        let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let frameHeight = CVPixelBufferGetHeight(pixelBuffer)
+        guard frameWidth > 0, frameHeight > 0 else { return }
 
-        let size = CGSize(width: width, height: height)
+        // Clamp the crop to the frame; the host's window can extend past the
+        // captured display, and blitting outside the texture is a hard error.
+        let full = CGRect(x: 0, y: 0, width: frameWidth, height: frameHeight)
+        let crop = (sourceRect ?? full).intersection(full).integral
+        guard crop.width >= 1, crop.height >= 1 else { return }
+
+        let size = CGSize(width: crop.width, height: crop.height)
         if size != drawableSize {
             drawableSize = size
             metalLayer.drawableSize = size
@@ -136,7 +153,7 @@ public final class MetalView: NSView {
         var cvTexture: CVMetalTexture?
         let status = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-            .bgra8Unorm, width, height, 0, &cvTexture
+            .bgra8Unorm, frameWidth, frameHeight, 0, &cvTexture
         )
         guard status == kCVReturnSuccess,
               let cvTexture,
@@ -148,8 +165,8 @@ public final class MetalView: NSView {
 
         blit.copy(from: texture,
                   sourceSlice: 0, sourceLevel: 0,
-                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                  sourceSize: MTLSizeMake(width, height, 1),
+                  sourceOrigin: MTLOrigin(x: Int(crop.minX), y: Int(crop.minY), z: 0),
+                  sourceSize: MTLSizeMake(Int(crop.width), Int(crop.height), 1),
                   to: drawable.texture,
                   destinationSlice: 0, destinationLevel: 0,
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))

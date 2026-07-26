@@ -18,6 +18,7 @@ SolStreamApp.main()
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamWindows: [StreamWindow] = []
     private var connectWindow: ConnectWindow?
+    private var agent: AgentConnection?
 
     /// `--host <ip>` connects immediately; `--test-screenshot` grabs the window
     /// and exits (used by the UI tests).
@@ -51,8 +52,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("packet size overridden to \(size)")
         }
 
-        if let index = arguments.firstIndex(of: "--host"), index + 1 < arguments.count {
-            startStreaming(host: arguments[index + 1], config: config)
+        let host = arguments.firstIndex(of: "--host").flatMap { index in
+            index + 1 < arguments.count ? arguments[index + 1] : nil
+        }
+        let appWindowQuery = arguments.firstIndex(of: "--app-window").flatMap { index in
+            index + 1 < arguments.count ? arguments[index + 1] : nil
+        }
+        // The agent may be reached somewhere other than the stream host — over
+        // an SSH port forward during development, for instance, which avoids
+        // opening an inbound firewall port on the Windows box.
+        let agentHost = arguments.firstIndex(of: "--agent-host").flatMap { index in
+            index + 1 < arguments.count ? arguments[index + 1] : nil
+        }
+
+        if let host, let appWindowQuery {
+            startSingleApp(host: host, agentHost: agentHost ?? host,
+                           matching: appWindowQuery, config: config)
+        } else if let host {
+            startStreaming(host: host, config: config)
         } else {
             showConnectWindow()
         }
@@ -105,6 +122,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         streamWindows.append(streamWindow)
         streamWindow.show()
         streamWindow.startStreaming()
+    }
+
+    /// Stream a single Windows application window.
+    ///
+    /// The agent is consulted BEFORE the stream is launched, because the encode
+    /// canvas has to match the capture display exactly. Sunshine scales the
+    /// captured display into the requested viewport; asking for the display's
+    /// own size makes that scale 1:1, so the crop is pixel-exact instead of
+    /// resampled.
+    private func startSingleApp(host: String, agentHost: String, matching query: String,
+                                config: StreamConnection.Config) {
+        let agent = AgentConnection(host: agentHost)
+        self.agent = agent
+
+        agent.onState = { state in
+            if case .failed(let message) = state {
+                Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+            }
+        }
+
+        agent.onDisplays = { [weak self] displays in
+            guard let self, let capture = displays.first(where: { $0.isPrimary }) ?? displays.first else {
+                Log.error("[app] host reported no displays")
+                return
+            }
+            Log.info("[app] capture display \(capture.name) \(capture.width)x\(capture.height)")
+
+            agent.windows { [weak self] windows in
+                guard let self else { return }
+                let matches = windows.filter {
+                    $0.title.localizedCaseInsensitiveContains(query)
+                }
+                guard let target = matches.first else {
+                    Log.error("[app] no window matching \"\(query)\". Candidates:")
+                    for window in windows { Log.error("[app]   \(window.title)") }
+                    return
+                }
+                Log.info("[app] target \"\(target.title)\" id=\(target.id) at \(target.frame)")
+
+                DispatchQueue.main.async {
+                    self.launchSingleApp(host: host, agent: agent,
+                                         window: target, display: capture, config: config)
+                }
+            }
+        }
+
+        agent.connect()
+    }
+
+    private func launchSingleApp(host: String, agent: AgentConnection,
+                                 window: RemoteWindow, display: RemoteDisplay,
+                                 config baseConfig: StreamConnection.Config) {
+        // Encode at the display's native size so Sunshine does not rescale.
+        var config = baseConfig
+        config.width = display.width
+        config.height = display.height
+
+        let streamWindow = StreamWindow(host: host, config: config)
+        streamWindow.onClose = { [weak self, weak streamWindow] in
+            guard let self else { return }
+            self.streamWindows.removeAll { $0 === streamWindow }
+        }
+        streamWindows.append(streamWindow)
+        streamWindow.window?.title = window.title
+        streamWindow.show()
+        streamWindow.startStreaming()
+
+        let canvas = CGSize(width: display.width, height: display.height)
+
+        // Put the window at a known place on the capture display rather than
+        // trusting where the user left it, then crop to the rectangle the host
+        // actually achieved — an app with a minimum size may not accept ours.
+        let requested = Self.layoutRect(for: window, on: display)
+        agent.place(windowID: window.id, at: requested) { [weak streamWindow] achieved in
+            let placed = achieved ?? requested
+            // Raise it, so on a shared display it is at least on top. On a
+            // dedicated capture display nothing else is there to occlude it.
+            agent.focus(windowID: window.id)
+
+            let crop = CGRect(x: placed.minX - CGFloat(display.x),
+                              y: placed.minY - CGFloat(display.y),
+                              width: placed.width, height: placed.height)
+            DispatchQueue.main.async {
+                streamWindow?.setSourceRect(crop, canvasSize: canvas)
+                Log.info("[app] placed at \(placed); cropping \(display.width)x\(display.height) to \(crop)")
+            }
+        }
+    }
+
+    /// Where to put a window on the capture display.
+    ///
+    /// For now: centred at its current size, clamped to the display. Once there
+    /// is a dedicated capture display this becomes the tiling layout manager
+    /// that guarantees windows never overlap.
+    private static func layoutRect(for window: RemoteWindow,
+                                   on display: RemoteDisplay) -> CGRect {
+        let width = min(CGFloat(window.width), CGFloat(display.width))
+        let height = min(CGFloat(window.height), CGFloat(display.height))
+        let x = CGFloat(display.x) + (CGFloat(display.width) - width) / 2
+        let y = CGFloat(display.y) + (CGFloat(display.height) - height) / 2
+        return CGRect(x: x.rounded(), y: y.rounded(), width: width, height: height)
     }
 
     // MARK: - Menu

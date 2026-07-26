@@ -27,6 +27,21 @@ final class StreamWindow: NSObject {
     /// Called when the window closes so the app can decide whether to quit.
     var onClose: (() -> Void)?
 
+    /// Show only this region of the streamed canvas, in canvas pixels. This is
+    /// what makes one Sunshine stream into a single-application window: the
+    /// agent puts the app's client area at a known rectangle, and we present
+    /// only that rectangle.
+    func setSourceRect(_ rect: CGRect?, canvasSize: CGSize) {
+        metalView?.sourceRect = rect
+        inputCapture?.sourceRect = rect
+        inputCapture?.canvasSize = canvasSize
+
+        if let rect, rect.width > 0, rect.height > 0 {
+            window?.contentAspectRatio = NSSize(width: rect.width, height: rect.height)
+            window?.setContentSize(NSSize(width: rect.width / 2, height: rect.height / 2))
+        }
+    }
+
     init(host: String, config: StreamConnection.Config = .init()) {
         self.host = host
         self.config = config
