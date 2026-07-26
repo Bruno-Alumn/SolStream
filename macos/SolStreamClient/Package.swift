@@ -96,7 +96,8 @@ let package = Package(
         // -- UI Tests --
         .testTarget(
             name: "SolStreamClientTests",
-            dependencies: ["SolStreamClient", "SolStreamLogging"],
+            dependencies: ["SolStreamClient", "SolStreamLogging",
+                           "StreamConnection", "VideoDecoder"],
             linkerSettings: [
                 .linkedFramework("XCTest"),
             ]
