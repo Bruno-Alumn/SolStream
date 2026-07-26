@@ -313,3 +313,63 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(apps[1].name, "Steam Big Picture")
     }
 }
+
+/// Byte-exact checks of the input packets against Sunshine's `Input.h` structs.
+/// The header size field excludes itself, the magic is little-endian, and the
+/// payload fields are big-endian except the keyboard key code — get any of
+/// those backwards and the host silently ignores or misreads the event.
+final class InputProtocolTests: XCTestCase {
+
+    func testAbsoluteMouseMoveLayout() {
+        let packet = InputProtocol.mouseMoveAbsolute(x: 100, y: 200,
+                                                     referenceWidth: 1920,
+                                                     referenceHeight: 1080)
+        // 8-byte header + 10-byte body == sizeof(NV_ABS_MOUSE_MOVE_PACKET)
+        XCTAssertEqual(packet.count, 18)
+        XCTAssertEqual(packet.hexString,
+                       "0000000e"    // size = 14 (BE), excludes itself
+                       + "05000000"  // MOUSE_MOVE_ABS_MAGIC (LE)
+                       + "0064"      // x = 100 (BE)
+                       + "00c8"      // y = 200 (BE)
+                       + "0000"      // unused
+                       + "077f"      // width - 1 = 1919 (BE)
+                       + "0437")     // height - 1 = 1079 (BE)
+    }
+
+    func testKeyboardLayout() {
+        let packet = InputProtocol.key(code: 0x41, pressed: true, modifiers: .shift)
+        XCTAssertEqual(packet.count, 14)  // sizeof(NV_KEYBOARD_PACKET)
+        XCTAssertEqual(packet.hexString,
+                       "0000000a"    // size = 10
+                       + "03000000"  // KEY_DOWN_EVENT_MAGIC
+                       + "00"        // flags
+                       + "4100"      // keyCode = 0x41, LITTLE-endian here
+                       + "01"        // MODIFIER_SHIFT
+                       + "0000")     // zero2
+    }
+
+    func testKeyUpUsesItsOwnMagic() {
+        let packet = InputProtocol.key(code: 0x41, pressed: false, modifiers: [])
+        XCTAssertEqual(packet.hexString.dropFirst(8).prefix(8), "04000000")
+    }
+
+    func testMouseButtonLayout() {
+        XCTAssertEqual(InputProtocol.mouseButton(.left, pressed: true).hexString,
+                       "00000005" + "08000000" + "01")
+        XCTAssertEqual(InputProtocol.mouseButton(.right, pressed: false).hexString,
+                       "00000005" + "09000000" + "03")
+    }
+
+    func testScrollMirrorsBothAmounts() {
+        let packet = InputProtocol.scroll(amount: 120)
+        XCTAssertEqual(packet.hexString,
+                       "0000000a" + "0a000000" + "0078" + "0078" + "0000")
+    }
+
+    func testReferenceRectNeverUnderflows() {
+        // A zero-sized view must not produce -1 on the wire.
+        let packet = InputProtocol.mouseMoveAbsolute(x: 0, y: 0,
+                                                     referenceWidth: 0, referenceHeight: 0)
+        XCTAssertEqual(packet.hexString.suffix(8), "00000000")
+    }
+}

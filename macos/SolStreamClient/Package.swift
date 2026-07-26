@@ -58,7 +58,7 @@ let package = Package(
         // -- Input capture (NSView local monitoring, no CGEventTap) --
         .target(
             name: "InputCapture",
-            dependencies: ["SolStreamLogging"],
+            dependencies: ["SolStreamLogging", "StreamConnection"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),  // For HID keycode mapping

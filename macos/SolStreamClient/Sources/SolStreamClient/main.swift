@@ -57,6 +57,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showConnectWindow()
         }
 
+        // --test-input drives the host pointer to a known spot shortly before
+        // the screenshot, so the cursor's position in the captured frame proves
+        // input reached the host.
+        if arguments.contains("--test-input") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(1, captureDelay - 2)) { [weak self] in
+                self?.streamWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
+            }
+        }
+
         if testMode {
             DispatchQueue.main.asyncAfter(deadline: .now() + captureDelay) { [weak self] in
                 self?.captureTestScreenshot()

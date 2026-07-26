@@ -92,6 +92,11 @@ final class StreamWindow: NSObject {
             Log.info("[window] handshake \(success ? "complete" : "failed")")
         }
 
+        // Route captured local input to the host.
+        inputCapture?.onInput = { [weak connection] packet in
+            connection?.sendInput(packet)
+        }
+
         streamConnection = connection
         metalView?.onRetry = { [weak self] in
             self?.restart()
@@ -116,6 +121,20 @@ final class StreamWindow: NSObject {
         videoDecoder = nil
 
         Log.info("[window] stopped streaming from \(host)")
+    }
+
+    /// Test hook: place the host pointer at a normalised position within the
+    /// video surface, so input can be verified without a human at the keyboard.
+    func sendTestPointer(normalizedX: Double, normalizedY: Double) {
+        guard let view = metalView else { return }
+        let bounds = view.bounds
+        let packet = InputProtocol.mouseMoveAbsolute(
+            x: Int(Double(bounds.width) * normalizedX),
+            y: Int(Double(bounds.height) * normalizedY),
+            referenceWidth: Int(bounds.width),
+            referenceHeight: Int(bounds.height))
+        streamConnection?.sendInput(packet)
+        Log.info("[input] test pointer -> \(normalizedX), \(normalizedY)")
     }
 
     private func restart() {

@@ -1,100 +1,88 @@
 import AppKit
 import Carbon
+import StreamConnection
 
-/// Captures local keyboard and mouse input via NSView event monitoring.
+/// Turns local macOS keyboard and mouse events into GameStream input packets.
 ///
-/// KEY DESIGN DECISION: This uses ONLY local NSView monitoring
-/// (addLocalMonitorForEventsMatchingMask), NOT CGEventTap. This means:
-/// - NO Accessibility permission required
-/// - Input is only captured when the SolStream window is key/focused
-/// - No risk of kCGEventTapDisabledByTimeout
-/// - No risk of leaking local interactions to the remote host when unfocused
-///
-/// The input capture is enabled/disabled by the StreamWindow:
-///   enabled = window is key (focused)
-///   disabled = window is not key
+/// Uses ONLY local NSView monitoring (`addLocalMonitorForEvents`), never a
+/// CGEventTap, which means no Accessibility permission is required and events
+/// are captured only while our window is key — local interaction can never leak
+/// to the remote host while you are using another app.
 public final class InputCapture {
+    /// Receives ready-to-send packets built by `InputProtocol`.
+    public var onInput: ((Data) -> Void)?
+
     private weak var targetView: NSView?
     private var keyboardMonitor: Any?
     private var mouseMonitor: Any?
     private var isCapturing = false
 
-    /// Key code translation table (macOS HID → Windows virtual key codes).
-    /// This maps the most common keys. A full table is in the protocol spec.
-    private let keyCodeMap: [UInt16: UInt8] = [
-        // Letters (lowercase, same as uppercase in HID)
-        0x00: 0x41,  // a
-        0x0B: 0x42,  // b
-        0x08: 0x43,  // c
-        0x02: 0x44,  // d
-        0x0E: 0x45,  // e
-        0x03: 0x46,  // f
-        0x05: 0x47,  // g
-        0x04: 0x48,  // h
-        0x22: 0x49,  // i
-        0x26: 0x4A,  // j
-        0x28: 0x4B,  // k
-        0x25: 0x4C,  // l
-        0x2E: 0x4D,  // m
-        0x2D: 0x4E,  // n
-        0x1F: 0x4F,  // o
-        0x23: 0x50,  // p
-        0x0C: 0x51,  // q
-        0x0F: 0x52,  // r
-        0x01: 0x53,  // s
-        0x11: 0x54,  // t
-        0x20: 0x55,  // u
-        0x09: 0x56,  // v
-        0x0D: 0x57,  // w
-        0x07: 0x58,  // x
-        0x10: 0x59,  // y
-        0x06: 0x5A,  // z
+    /// Modifier flags as of the last `.flagsChanged`, so transitions can be
+    /// turned into individual key down/up events.
+    private var lastModifierFlags: NSEvent.ModifierFlags = []
 
-        // Numbers
-        0x1D: 0x30,  // 0
-        0x12: 0x31,  // 1
-        0x13: 0x32,  // 2
-        0x14: 0x33,  // 3
-        0x15: 0x34,  // 4
-        0x17: 0x35,  // 5
-        0x16: 0x36,  // 6
-        0x1A: 0x37,  // 7
-        0x1C: 0x38,  // 8
-        0x19: 0x39,  // 9
+    /// macOS virtual key code → Windows virtual key code.
+    private let keyCodeMap: [UInt16: UInt16] = [
+        // Letters
+        0x00: 0x41, 0x0B: 0x42, 0x08: 0x43, 0x02: 0x44, 0x0E: 0x45, 0x03: 0x46,
+        0x05: 0x47, 0x04: 0x48, 0x22: 0x49, 0x26: 0x4A, 0x28: 0x4B, 0x25: 0x4C,
+        0x2E: 0x4D, 0x2D: 0x4E, 0x1F: 0x4F, 0x23: 0x50, 0x0C: 0x51, 0x0F: 0x52,
+        0x01: 0x53, 0x11: 0x54, 0x20: 0x55, 0x09: 0x56, 0x0D: 0x57, 0x07: 0x58,
+        0x10: 0x59, 0x06: 0x5A,
 
-        // Special keys
+        // Digits
+        0x1D: 0x30, 0x12: 0x31, 0x13: 0x32, 0x14: 0x33, 0x15: 0x34,
+        0x17: 0x35, 0x16: 0x36, 0x1A: 0x37, 0x1C: 0x38, 0x19: 0x39,
+
+        // Editing and navigation
         0x24: 0x0D,  // Return
         0x30: 0x09,  // Tab
         0x31: 0x20,  // Space
-        0x33: 0x08,  // Delete (Backspace)
+        0x33: 0x08,  // Backspace
         0x35: 0x1B,  // Escape
-        0x37: 0x5B,  // Command → Left Windows key
-        0x38: 0x10,  // Left Shift
-        0x3A: 0x12,  // Left Alt (Option)
-        0x3B: 0x11,  // Left Control
-        0x3C: 0x10,  // Right Shift
-        0x3D: 0x12,  // Right Alt (Option)
-        0x3E: 0x11,  // Right Control
+        0x75: 0x2E,  // Forward delete
+        0x73: 0x24,  // Home
+        0x77: 0x23,  // End
+        0x74: 0x21,  // Page up
+        0x79: 0x22,  // Page down
+        0x7B: 0x25, 0x7C: 0x27, 0x7D: 0x28, 0x7E: 0x26,  // ← → ↓ ↑
 
-        // Arrow keys
-        0x7B: 0x25,  // Left Arrow
-        0x7C: 0x26,  // Right Arrow
-        0x7D: 0x28,  // Down Arrow
-        0x7E: 0x27,  // Up Arrow
+        // Punctuation (US layout)
+        0x1B: 0xBD,  // -
+        0x18: 0xBB,  // =
+        0x21: 0xDB,  // [
+        0x1E: 0xDD,  // ]
+        0x2A: 0xDC,  // \
+        0x29: 0xBA,  // ;
+        0x27: 0xDE,  // '
+        0x2B: 0xBC,  // ,
+        0x2F: 0xBE,  // .
+        0x2C: 0xBF,  // /
+        0x32: 0xC0,  // `
 
         // Function keys
-        0x7A: 0x70,  // F1
-        0x78: 0x71,  // F2
-        0x63: 0x72,  // F3
-        0x76: 0x73,  // F4
-        0x60: 0x74,  // F5
-        0x61: 0x75,  // F6
-        0x62: 0x76,  // F7
-        0x64: 0x77,  // F8
-        0x65: 0x78,  // F9
-        0x6D: 0x79,  // F10
-        0x67: 0x7A,  // F11
-        0x6F: 0x7B,  // F12
+        0x7A: 0x70, 0x78: 0x71, 0x63: 0x72, 0x76: 0x73, 0x60: 0x74, 0x61: 0x75,
+        0x62: 0x76, 0x64: 0x77, 0x65: 0x78, 0x6D: 0x79, 0x67: 0x7A, 0x6F: 0x7B,
+    ]
+
+    /// Modifier keys need their own left/right virtual key codes, and each one
+    /// maps to the flag whose transition announces it.
+    private struct ModifierKey {
+        let macKeyCode: UInt16
+        let windowsKeyCode: UInt16
+        let flag: NSEvent.ModifierFlags
+        let modifier: InputProtocol.Modifiers
+    }
+
+    private let modifierKeys: [ModifierKey] = [
+        ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, flag: .shift, modifier: .shift),    // L shift
+        ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, flag: .shift, modifier: .shift),    // R shift
+        ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, flag: .control, modifier: .control),// L ctrl
+        ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, flag: .control, modifier: .control),// R ctrl
+        ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, flag: .option, modifier: .alt),     // L alt
+        ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, flag: .option, modifier: .alt),     // R alt
+        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0x5B, flag: .command, modifier: .meta),   // L cmd → L win
+        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0x5C, flag: .command, modifier: .meta),   // R cmd → R win
     ]
 
     public init() {}
@@ -103,43 +91,41 @@ public final class InputCapture {
         disableCapture()
     }
 
-    /// Attach input capture to a view. The view must be part of a window.
+    /// Attach to the view whose bounds define the input coordinate space.
     public func attach(to view: NSView) {
         self.targetView = view
     }
 
-    /// Enable input capture. Called when the window becomes key.
+    /// Enable capture. Called when the window becomes key.
     public func enableCapture() {
         guard !isCapturing, targetView?.window != nil else { return }
         isCapturing = true
         installMonitors()
     }
 
-    /// Disable input capture. Called when the window resigns key.
+    /// Disable capture. Called when the window resigns key.
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
+        releaseHeldModifiers()
         removeMonitors()
     }
 
-    // MARK: - Private
+    // MARK: - Monitors
 
     private func installMonitors() {
-        guard let window = targetView?.window else { return }
-
-        // Keyboard: local monitor captures all key events when window is focused.
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .keyUp, .flagsChanged]
         ) { [weak self] event in
             self?.handleKeyEvent(event)
-            return event  // Don't swallow — the window still needs the event
+            return event
         }
 
-        // Mouse: local monitor for mouse events.
         mouseMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                       .otherMouseDown, .otherMouseUp,
                        .mouseMoved, .leftMouseDragged, .rightMouseDragged,
-                       .scrollWheel]
+                       .otherMouseDragged, .scrollWheel]
         ) { [weak self] event in
             self?.handleMouseEvent(event)
             return event
@@ -157,110 +143,116 @@ public final class InputCapture {
         }
     }
 
-    // MARK: - Event Handlers
+    // MARK: - Keyboard
 
     private func handleKeyEvent(_ event: NSEvent) {
         guard isCapturing else { return }
 
         switch event.type {
-        case .keyDown:
-            // Send key down
-            if let vkCode = keyCodeMap[event.keyCode] {
-                sendInput(.keyDown(vkCode))
-            }
-            // Handle command-key equivalents (for system shortcuts we let through)
-            // We send the raw scancode for Windows to interpret.
-
-        case .keyUp:
-            if let vkCode = keyCodeMap[event.keyCode] {
-                sendInput(.keyUp(vkCode))
-            }
+        case .keyDown, .keyUp:
+            guard let windowsKey = keyCodeMap[event.keyCode] else { return }
+            onInput?(InputProtocol.key(code: windowsKey,
+                                       pressed: event.type == .keyDown,
+                                       modifiers: modifiers(from: event.modifierFlags)))
 
         case .flagsChanged:
-            // Modifier keys (Shift, Control, Option, Command)
-            let mods = event.modifierFlags
-            let wasPressed: Bool = {
-                // For flagsChanged, event.isARepeat indicates the new state
-                // Actually, we track explicitly.
-                return false  // Simplified for Phase 2
-            }()
-            // In a full implementation, track modifier state transitions.
-            // For Phase 2, we send all flags on every flagsChanged event.
-            let modifierFlags = encodeModifiers(mods)
-            sendInput(.modifiers(modifierFlags))
+            // A modifier press and release both arrive as .flagsChanged; which
+            // it was is only knowable by diffing against the previous state.
+            let flags = event.modifierFlags
+            if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }) {
+                let isDown = flags.contains(key.flag)
+                onInput?(InputProtocol.key(code: key.windowsKeyCode,
+                                           pressed: isDown,
+                                           modifiers: modifiers(from: flags)))
+            }
+            lastModifierFlags = flags
 
         default:
             break
         }
     }
+
+    /// Release anything still held when focus leaves, so a modifier cannot get
+    /// stuck down on the host after we stop sending events.
+    private func releaseHeldModifiers() {
+        for key in modifierKeys where lastModifierFlags.contains(key.flag) {
+            onInput?(InputProtocol.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
+        }
+        lastModifierFlags = []
+    }
+
+    private func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
+        var result: InputProtocol.Modifiers = []
+        if flags.contains(.shift) { result.insert(.shift) }
+        if flags.contains(.control) { result.insert(.control) }
+        if flags.contains(.option) { result.insert(.alt) }
+        if flags.contains(.command) { result.insert(.meta) }
+        return result
+    }
+
+    // MARK: - Mouse
 
     private func handleMouseEvent(_ event: NSEvent) {
         guard isCapturing, let view = targetView else { return }
 
-        let location = view.convert(event.locationInWindow, from: nil)
-        let localPoint = view.bounds
-
-        // Convert to relative coordinates (0..1) for Windows DPI scaling.
-        let relX = Float(location.x / localPoint.width)
-        let relY = Float(location.y / localPoint.height)
-
         switch event.type {
-        case .leftMouseDown:
-            sendInput(.mouseButton(relX, relY, .left, true))
-        case .leftMouseUp:
-            sendInput(.mouseButton(relX, relY, .left, false))
-        case .rightMouseDown:
-            sendInput(.mouseButton(relX, relY, .right, true))
-        case .rightMouseUp:
-            sendInput(.mouseButton(relX, relY, .right, false))
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged:
-            sendInput(.mouseMove(relX, relY))
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            sendPosition(for: event, in: view)
+
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            // Position first: Windows clicks wherever the pointer currently is.
+            sendPosition(for: event, in: view)
+            if let button = button(for: event) {
+                onInput?(InputProtocol.mouseButton(button, pressed: true))
+            }
+
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            sendPosition(for: event, in: view)
+            if let button = button(for: event) {
+                onInput?(InputProtocol.mouseButton(button, pressed: false))
+            }
+
         case .scrollWheel:
-            let deltaX = Float(event.scrollingDeltaX)
-            let deltaY = Float(event.scrollingDeltaY)
-            sendInput(.scrollWheel(deltaX, deltaY))
+            // Windows counts a wheel click as 120 units.
+            let vertical = Int((event.scrollingDeltaY * 12).rounded())
+            let horizontal = Int((event.scrollingDeltaX * 12).rounded())
+            if vertical != 0 { onInput?(InputProtocol.scroll(amount: vertical)) }
+            if horizontal != 0 { onInput?(InputProtocol.horizontalScroll(amount: horizontal)) }
+
         default:
             break
         }
     }
 
-    // MARK: - Input Encoding
+    /// Send the pointer position in the view's own coordinate space.
+    ///
+    /// The packet carries the reference rectangle alongside the coordinates and
+    /// Sunshine rescales onto the captured surface, so view points work
+    /// directly — no DPI or stream-resolution maths needed here. macOS
+    /// coordinates are bottom-left origin, Windows is top-left, hence the flip.
+    private func sendPosition(for event: NSEvent, in view: NSView) {
+        let point = view.convert(event.locationInWindow, from: nil)
+        let bounds = view.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
 
-    enum InputAction {
-        case keyDown(UInt8)
-        case keyUp(UInt8)
-        case modifiers(UInt32)
-        case mouseMove(Float, Float)           // relative X, Y (0..1)
-        case mouseButton(Float, Float, MouseButton, Bool)
-        case scrollWheel(Float, Float)          // delta X, delta Y
+        let x = Int(point.x.rounded())
+        let y = Int((view.isFlipped ? point.y : bounds.height - point.y).rounded())
+
+        // Ignore events outside the video surface rather than clamping them to
+        // the edge, which would drag the host pointer along the border.
+        guard x >= 0, y >= 0, x <= Int(bounds.width), y <= Int(bounds.height) else { return }
+
+        onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
+                                                 referenceWidth: Int(bounds.width),
+                                                 referenceHeight: Int(bounds.height)))
     }
 
-    enum MouseButton {
-        case left, right, middle
-    }
-
-    private func encodeModifiers(_ flags: NSEvent.ModifierFlags) -> UInt32 {
-        var result: UInt32 = 0
-        if flags.contains(.shift)     { result |= 0x01 }
-        if flags.contains(.control)   { result |= 0x02 }
-        if flags.contains(.option)    { result |= 0x04 }
-        if flags.contains(.command)   { result |= 0x08 }
-        return result
-    }
-
-    private func sendInput(_ action: InputAction) {
-        // In Phase 2, this serializes the action into the binary input
-        // protocol packet and sends it via UDP to the Windows host
-        // (port 47990, AES-GCM encrypted).
-        //
-        // For now, this is a placeholder that encodes the action but
-        // does not send it (no UDP socket yet — that's the StreamConnection's
-        // responsibility in a full implementation).
-        //
-        // The input packet format is defined in the architecture spec:
-        //   - Keyboard:  { type: 0x01, vkCode, flags }
-        //   - Mouse:     { type: 0x02, relX, relY, buttons }
-        //   - Scroll:    { type: 0x03, deltaX, deltaY }
-        _ = action  // Placeholder — wire up to StreamConnection in full build.
+    private func button(for event: NSEvent) -> InputProtocol.MouseButton? {
+        switch event.type {
+        case .leftMouseDown, .leftMouseUp: return .left
+        case .rightMouseDown, .rightMouseUp: return .right
+        case .otherMouseDown, .otherMouseUp: return event.buttonNumber == 2 ? .middle : nil
+        default: return nil
+        }
     }
 }
