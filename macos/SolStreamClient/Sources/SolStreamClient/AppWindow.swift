@@ -25,6 +25,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Coalesces live-resize into one placement request per settle.
     private var resizeWork: DispatchWorkItem?
 
+    /// Watches for the application being closed on the host.
+    private var lifeTimer: Timer?
+    private var isClosing = false
+
     var onClose: (() -> Void)?
 
     init(session: StreamSession, agent: AgentConnection,
@@ -36,6 +40,42 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.tile = tile
         super.init()
         build(title: remote.title)
+
+        if remote.hidesCaptionWhenCropped {
+            Log.info("[window] \"\(remote.title)\" has a standard title bar "
+                     + "(\(remote.captionInset)px), which the crop already excludes")
+        } else {
+            // Not a failure: Explorer, Chrome, Discord and friends draw their
+            // caption inside the client area, sharing that strip with tabs and
+            // the address bar. Cropping the buttons away would take those too, so
+            // the buttons stay — and closing from inside the stream has to work.
+            Log.info("[window] \"\(remote.title)\" draws its own title bar, so its "
+                     + "window buttons stay visible; watching for it to be closed")
+        }
+        startWatchingForExit()
+    }
+
+    /// Poll the host for this window still existing.
+    ///
+    /// Necessary whenever the application's own close button reaches the stream:
+    /// the user can quit it from inside the video, and without this the macOS
+    /// window would sit there showing whatever now occupies those pixels.
+    private func startWatchingForExit() {
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isClosing else { return }
+            self.agent.windowStatus(id: self.remoteWindowID) { [weak self] status in
+                // A dropped agent connection reports nil, not death. Closing the
+                // window on a transient failure would be worse than doing nothing.
+                guard let status, !status.isAlive else { return }
+                DispatchQueue.main.async {
+                    guard let self, !self.isClosing else { return }
+                    Log.info("[window] the host application closed; ending the stream")
+                    self.close()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        lifeTimer = timer
     }
 
     func show() {
@@ -70,6 +110,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = title
+        // NSWindow created directly defaults to releasing itself on close, which
+        // is a hangover from manual retain/release: ARC then releases it again
+        // from the property below and the process dies in objc_release at the next
+        // autorelease-pool drain. Only invisible while windows were closed solely
+        // at app termination, when the process exits before that drain happens.
+        window.isReleasedWhenClosed = false
         window.backgroundColor = .black
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 320, height: 200)
@@ -143,12 +189,25 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        isClosing = true
+        lifeTimer?.invalidate()
+        lifeTimer = nil
+        resizeWork?.cancel()
         agent.setTopmost(windowID: remoteWindowID, false)
         if let metalView {
             session.detach(metalView)
         }
         inputCapture?.disableCapture()
-        onClose?()
+
+        // Deferred, and capturing the closure rather than self: onClose drops
+        // this object's last strong reference, because the owner removes it from
+        // its array. Calling it inline would deallocate self part-way through its
+        // own delegate method, and NSWindow.delegate is a weak reference so
+        // AppKit is not keeping us alive either.
+        window?.delegate = nil
+        let notify = onClose
+        onClose = nil
+        DispatchQueue.main.async { notify?() }
     }
 
     // MARK: - Status

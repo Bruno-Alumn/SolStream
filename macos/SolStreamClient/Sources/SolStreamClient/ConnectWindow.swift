@@ -27,6 +27,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             defer: false
         )
         window.title = "SolStream"
+        // See AppWindow.build(): a directly-created NSWindow releases itself on
+        // close, which double-releases against the strong property below.
+        window.isReleasedWhenClosed = false
         window.isMovableByWindowBackground = true
 
         super.init()

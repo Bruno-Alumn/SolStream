@@ -21,6 +21,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var agent: AgentConnection?
     private var session: StreamSession?
     private var appWindows: [AppWindow] = []
+    private var picker: AppPicker?
+
+    /// Set once from the command line, then reused when the picker sends us
+    /// round the loop again.
+    private var agentHostOverride: String?
+    private var displayQuery: String?
+    private var baseConfig = StreamConnection.Config()
 
     /// `--host <ip>` connects immediately; `--test-screenshot` grabs the window
     /// and exits (used by the UI tests).
@@ -67,6 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             index + 1 < arguments.count ? arguments[index + 1] : nil
         }
 
+        // --launch starts an installed application by name, skipping the picker.
+        let launchQuery = arguments.firstIndex(of: "--launch").flatMap { index in
+            index + 1 < arguments.count ? arguments[index + 1] : nil
+        }
+
         // --display picks which host display to park applications on, by device
         // name or adapter substring. Without it a virtual display wins, because
         // that is the one nothing else can be dragged across.
@@ -74,12 +86,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             index + 1 < arguments.count ? arguments[index + 1] : nil
         }
 
-        if let host, let appWindowQuery {
+        self.agentHostOverride = agentHost
+        self.displayQuery = displayQuery
+        self.baseConfig = config
+
+        // --desktop is the old whole-screen mirror, kept for diagnosing the
+        // stream itself. It shows the task bar and everything else on the
+        // display, which is exactly what single-application mode exists to avoid,
+        // so it is not the default any more.
+        if let host, arguments.contains("--desktop") {
+            // Ask for a canvas shaped like this Mac. Sunshine letterboxes to
+            // preserve the source aspect, so a 16:9 request against a 3:2 display
+            // is where the black bars down each side came from.
+            var desktop = config
+            if let screen = NSScreen.main {
+                let scale = screen.backingScaleFactor
+                desktop.width = Int((screen.frame.width * scale).rounded())
+                desktop.height = Int((screen.frame.height * scale).rounded())
+                Log.info("[desktop] requesting \(desktop.width)x\(desktop.height) to match this Mac")
+            }
+            startStreaming(host: host, config: desktop)
+        } else if let host, let launchQuery {
+            startLaunching(host: host, agentHost: agentHost ?? host, matching: launchQuery)
+        } else if let host, let appWindowQuery {
             startSingleApp(host: host, agentHost: agentHost ?? host,
                            matching: appWindowQuery, displayQuery: displayQuery,
                            config: config)
         } else if let host {
-            startStreaming(host: host, config: config)
+            showPicker(host: host)
         } else {
             showConnectWindow()
         }
@@ -115,10 +149,135 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showConnectWindow() {
         let window = ConnectWindow { [weak self] host in
-            self?.startStreaming(host: host)
+            self?.showPicker(host: host)
         }
         connectWindow = window
         window.show()
+    }
+
+    /// Connect to the agent and ask what the host can show.
+    ///
+    /// This is the ordinary way in: pick one application, get one window. The
+    /// agent is consulted before any stream starts, because the encode canvas has
+    /// to match the capture display exactly for crops to be pixel-exact.
+    private func showPicker(host: String) {
+        let agentHost = agentHostOverride ?? host
+        let agent = AgentConnection(host: agentHost)
+        self.agent = agent
+
+        let picker = AppPicker(host: host, onChoose: { [weak self] choice in
+            self?.open(choice: choice, host: host, agent: agent)
+        }, onCancel: { [weak self] in
+            guard let self else { return }
+            self.picker = nil
+            self.agent = nil
+            agent.disconnect()
+            if self.appWindows.isEmpty && !self.testMode {
+                self.showConnectWindow()
+            }
+        })
+        self.picker = picker
+        picker.show()
+
+        agent.onState = { [weak picker] state in
+            guard case .failed(let message) = state else { return }
+            DispatchQueue.main.async {
+                picker?.showFailure("Can't reach the SolStream agent on \(agentHost): \(message)")
+            }
+        }
+
+        // Both lists, then show them together — a half-populated picker that
+        // grows under the cursor is worse than a moment's wait.
+        agent.onDisplays = { [weak self] _ in
+            agent.windows { windows in
+                agent.apps { apps in
+                    DispatchQueue.main.async {
+                        guard self != nil else { return }
+                        picker.present(windows: windows, apps: apps)
+                    }
+                }
+            }
+        }
+        agent.connect()
+    }
+
+    /// The picker's launch path without the picker, for `--launch` and tests.
+    private func startLaunching(host: String, agentHost: String, matching query: String) {
+        let agent = AgentConnection(host: agentHost)
+        self.agent = agent
+
+        agent.onState = { state in
+            if case .failed(let message) = state {
+                Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+            }
+        }
+        agent.onDisplays = { [weak self] _ in
+            agent.apps { apps in
+                guard let match = apps.first(where: {
+                    $0.name.localizedCaseInsensitiveContains(query)
+                }) else {
+                    Log.error("[app] no installed application matched \"\(query)\"")
+                    return
+                }
+                Log.info("[app] launching \"\(match.name)\"")
+                DispatchQueue.main.async { [weak self] in
+                    self?.open(choice: .launch(match), host: host, agent: agent)
+                }
+            }
+        }
+        agent.connect()
+    }
+
+    private func open(choice: AppPicker.Choice, host: String, agent: AgentConnection) {
+        switch choice {
+        case .running(let window):
+            picker?.close()
+            picker = nil
+            start(host: host, agent: agent, targets: [window])
+
+        case .launch(let app):
+            picker?.showBusy("Starting \(app.name) on \(host)…")
+            agent.launch(path: app.path) { [weak self] id in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard let id else {
+                        self.picker?.clearBusy()
+                        self.picker?.showFailure("\(app.name) didn't open a window.")
+                        return
+                    }
+                    // Re-enumerate rather than trusting the launch reply: the
+                    // window list carries the title and caption geometry the
+                    // stream window needs, and the app may have retitled itself
+                    // in the moment since it appeared.
+                    agent.windows { windows in
+                        DispatchQueue.main.async {
+                            guard let target = windows.first(where: { $0.id == id }) else {
+                                self.picker?.clearBusy()
+                                self.picker?.showFailure("\(app.name) opened a window that vanished.")
+                                return
+                            }
+                            self.picker?.close()
+                            self.picker = nil
+                            self.start(host: host, agent: agent, targets: [target])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve the capture display, then hand off to the shared open path.
+    private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
+        guard let capture = Self.selectDisplay(from: agent.displays, preferring: displayQuery) else {
+            Log.error("[app] host reported no displays")
+            return
+        }
+        Log.info("[app] capture display \(capture.name) "
+                 + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
+                 + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
+        Log.info("[app] Sunshine's output_name must resolve to \(capture.name)")
+        openApps(host: host, agent: agent, targets: targets,
+                 display: capture, config: baseConfig)
     }
 
     private func startStreaming(host: String, config: StreamConnection.Config = .init()) {
@@ -220,9 +379,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindow.onClose = { [weak self, weak appWindow] in
                 guard let self else { return }
                 self.appWindows.removeAll { $0 === appWindow }
-                if self.appWindows.isEmpty {
-                    self.session?.stop()
-                    self.session = nil
+                guard self.appWindows.isEmpty else { return }
+                self.session?.stop()
+                self.session = nil
+                // Back to the picker rather than quitting: closing one
+                // application is not a reason to disconnect from the host.
+                if !self.testMode {
+                    self.agent = nil
+                    agent.disconnect()
+                    self.showPicker(host: host)
                 }
             }
             appWindow.setStatus("Connecting to \(host)", detail: target.title)

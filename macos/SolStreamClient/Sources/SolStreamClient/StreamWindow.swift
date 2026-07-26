@@ -216,6 +216,9 @@ final class StreamWindow: NSObject {
         )
 
         window.title = "SolStream — \(host)"
+        // See AppWindow.build(): a directly-created NSWindow releases itself on
+        // close, which double-releases against the strong property below.
+        window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = false
         window.minSize = NSSize(width: 640, height: 360)
         window.backgroundColor = .black

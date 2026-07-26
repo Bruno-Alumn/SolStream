@@ -68,22 +68,49 @@ Remove the dev task with `schtasks /delete /tn SolStreamAgentDev /f`.
 Newline-delimited JSON over TCP, one request per line, one reply per line.
 On connect the agent sends a `hello` then a `displays` message unprompted.
 
+Only one client is served at a time, which is all the Mac needs — but it does
+mean a second connection blocks in the accept backlog rather than being refused.
+
 | request | reply |
 |---|---|
-| `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","x","y","w","h","primary"}]}` |
-| `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h"}]}` |
+| `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary"}]}` |
+| `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","captionInset","occluded"}]}` |
+| `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
+| `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}` |
+| `{"cmd":"window","id":N}` | `{"type":"window","id":N,"alive":bool,"minimized":bool,"x","y","w","h","captionInset"}` |
 | `{"cmd":"place","id":N,"x":..,"y":..,"w":..,"h":..}` | `{"type":"placed","ok":true,"x","y","w","h"}` |
 | `{"cmd":"focus","id":N}` | `{"type":"focused","ok":true}` |
+| `{"cmd":"topmost","id":N,"topmost":bool}` | `{"type":"topmost","ok":true}` |
 
 `displays[].name` is the `DXGI_OUTPUT_DESC.DeviceName` form (`\\.\DISPLAY1`) —
 the same string Sunshine's `output_name` setting takes, so the capture display
-can be selected without the user copying anything by hand.
+can be selected without the user copying anything by hand. `adapter` is the GDI
+adapter description, which is how the Mac tells a virtual display from a real one.
 
 Window `x/y/w/h` describe the **client area** in virtual-desktop coordinates,
 not the window frame. That is what gets cropped out of the stream, and it is
 what `place` positions: the agent measures the current frame-to-client offset
 and compensates, rather than computing it from `AdjustWindowRect`, which does
 not account for DPI scaling, custom frames, or DWM's invisible resize borders.
+
+`captionInset` is how many pixels of non-client title bar sit above the client
+area. Because the crop *is* the client area, a window reporting 31 there has its
+minimise/maximise/close buttons excluded for free. A window reporting 0 draws its
+own caption inside the client area — Explorer, Chrome and Discord all do — and
+there the buttons share a strip with tabs and the address bar, so cropping them
+off would take real UI with them. The Mac leaves those alone and polls `window`
+instead, so that closing the application from inside the stream ends the session.
+
+`launch` **blocks** until the application shows a window, which can be many
+seconds for a cold start. It watches for a window that was not open before,
+preferring one belonging to the process it started; if none appears it falls back
+to a newly-focused window, because an application that was already running
+usually reuses its existing window instead of opening another.
+
+Store/UWP applications are **not** listed by `apps`: it walks the Start Menu for
+`.lnk` shortcuts, and packaged apps (Notepad and Calculator on Windows 11) are
+surfaced from the app database rather than as shortcuts. Every classic desktop
+application is there.
 
 ## Toolchain differences that bite
 

@@ -32,6 +32,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -40,6 +41,8 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cwchar>
+#include <cwctype>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -79,6 +82,20 @@ std::string ToUtf8(const std::wstring& text) {
     std::string out(static_cast<size_t>(needed), '\0');
     WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(),
                         out.data(), needed, nullptr, nullptr);
+    return out;
+}
+
+std::wstring ToWide(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(),
+                                           nullptr, 0);
+    if (needed <= 0) {
+        return {};
+    }
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(), out.data(), needed);
     return out;
 }
 
@@ -174,6 +191,15 @@ struct WindowInfo {
     /// covering the tile is streamed as though it were part of the app.
     bool occluded = false;
     std::string occluded_by;
+    /// Pixels of non-client caption above the client area.
+    ///
+    /// The Mac crops the CLIENT area, so a standard caption is already outside
+    /// the crop and its minimise/maximise/close buttons never reach the stream.
+    /// A window that draws its own caption inside the client area (Explorer,
+    /// Chrome, Discord) reports 0 here — and for those the buttons share a strip
+    /// with tabs and the address bar, so cropping them off would take real UI
+    /// with them.
+    int caption_inset = 0;
 };
 
 /// Could this window actually draw over what is beneath it?
@@ -312,6 +338,7 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     info.handle = window;
     info.frame = VisibleFrame(window);
     info.client = ClientAreaInScreen(window);
+    info.caption_inset = (int) std::max(0L, info.client.top - info.frame.top);
     GetWindowThreadProcessId(window, &info.pid);
 
     std::wstring title(static_cast<size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
@@ -356,6 +383,148 @@ std::vector<WindowInfo> EnumerateWindows() {
 HWND WindowFromId(uint64_t id) {
     auto handle = reinterpret_cast<HWND>(static_cast<uintptr_t>(id));
     return IsWindow(handle) ? handle : nullptr;
+}
+
+uint64_t IdFromWindow(HWND window) {
+    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window));
+}
+
+// ── Launchable applications ──────────────────────────────────────────────────
+
+struct AppEntry {
+    std::string name;
+    std::wstring path;  // the .lnk itself; ShellExecute resolves it
+};
+
+/// Walk a Start Menu tree collecting shortcuts.
+///
+/// The shortcuts are launched as-is rather than resolved to their targets: that
+/// keeps the arguments, working directory and "run as" flags the installer chose,
+/// and avoids needing COM for IShellLink.
+void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int depth) {
+    if (depth > 4) {
+        return;
+    }
+    WIN32_FIND_DATAW found{};
+    HANDLE handle = FindFirstFileW((dir + L"\\*").c_str(), &found);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    do {
+        const std::wstring name = found.cFileName;
+        if (name == L"." || name == L"..") {
+            continue;
+        }
+        const std::wstring full = dir + L"\\" + name;
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            ScanShortcuts(full, out, depth + 1);
+            continue;
+        }
+        if (name.size() <= 4 || _wcsicmp(name.c_str() + name.size() - 4, L".lnk") != 0) {
+            continue;
+        }
+        const std::wstring stem = name.substr(0, name.size() - 4);
+        std::wstring lowered = stem;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::towlower);
+        // Nobody wants to stream an uninstaller, and clicking one by accident
+        // from a list of application names would be genuinely bad.
+        if (lowered.find(L"uninstall") != std::wstring::npos) {
+            continue;
+        }
+        out.push_back(AppEntry{ToUtf8(stem), full});
+    } while (FindNextFileW(handle, &found));
+    FindClose(handle);
+}
+
+std::vector<AppEntry> EnumerateApps() {
+    std::vector<AppEntry> apps;
+    wchar_t buffer[MAX_PATH] = {};
+    const wchar_t* roots[] = {L"ProgramData", L"APPDATA"};
+    for (const wchar_t* root : roots) {
+        if (GetEnvironmentVariableW(root, buffer, MAX_PATH)) {
+            ScanShortcuts(std::wstring(buffer) + L"\\Microsoft\\Windows\\Start Menu\\Programs",
+                          apps, 0);
+        }
+    }
+    std::sort(apps.begin(), apps.end(), [](const AppEntry& a, const AppEntry& b) {
+        return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
+    });
+    // The per-user and all-users trees overlap heavily.
+    apps.erase(std::unique(apps.begin(), apps.end(), [](const AppEntry& a, const AppEntry& b) {
+        return _stricmp(a.name.c_str(), b.name.c_str()) == 0;
+    }), apps.end());
+    return apps;
+}
+
+/// Start an application and return the window it opens.
+///
+/// Matching on the launched process id alone is not enough: plenty of shortcuts
+/// run a stub that spawns the real process, so the window that appears belongs to
+/// a different pid. So take a snapshot first and watch for a window that was not
+/// there before, preferring a pid match while there is still time to wait for one.
+uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
+    std::set<HWND> before;
+    for (const WindowInfo& window : EnumerateWindows()) {
+        before.insert(window.handle);
+    }
+    const HWND foreground_before = GetForegroundWindow();
+
+    SHELLEXECUTEINFOW request{};
+    request.cbSize = sizeof(request);
+    request.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    request.lpVerb = L"open";
+    request.lpFile = path.c_str();
+    request.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&request)) {
+        Log("[agent] ShellExecuteEx failed: %lu", GetLastError());
+        return 0;
+    }
+    DWORD launched_pid = 0;
+    if (request.hProcess) {
+        launched_pid = GetProcessId(request.hProcess);
+        CloseHandle(request.hProcess);
+    }
+
+    const ULONGLONG start = GetTickCount64();
+    const ULONGLONG deadline = start + timeout_ms;
+    HWND fallback = nullptr;
+    ULONGLONG fallback_seen = 0;
+    while (GetTickCount64() < deadline) {
+        Sleep(250);
+        for (const WindowInfo& window : EnumerateWindows()) {
+            if (before.count(window.handle)) {
+                continue;
+            }
+            if (launched_pid && window.pid == launched_pid) {
+                return IdFromWindow(window.handle);
+            }
+            if (!fallback) {
+                fallback = window.handle;
+                fallback_seen = GetTickCount64();
+            }
+        }
+        // Give the exact match a moment to show up, then take what we have
+        // rather than sitting out the whole timeout for a stub launcher.
+        if (fallback && GetTickCount64() - fallback_seen > 3000) {
+            return IdFromWindow(fallback);
+        }
+
+        // No new window may be the correct outcome rather than a failure: an
+        // application that is already running usually reuses its window —
+        // Explorer opens a tab in the existing one, and single-instance
+        // applications just raise theirs. Starting an application does always
+        // bring its window forward, so a foreground window that changed is very
+        // probably the one the user asked for. Waited on for a few seconds so a
+        // genuinely new window still wins if one is on its way.
+        if (!fallback && GetTickCount64() - start > 4000) {
+            const HWND foreground = GetForegroundWindow();
+            if (foreground && foreground != foreground_before && IsUserWindow(foreground)) {
+                Log("[agent] no new window; taking the newly focused one instead");
+                return IdFromWindow(foreground);
+            }
+        }
+    }
+    return fallback ? IdFromWindow(fallback) : 0;
 }
 
 // ── Placement ────────────────────────────────────────────────────────────────
@@ -441,6 +610,7 @@ std::string WindowsJson(const std::vector<WindowInfo>& windows) {
         entry += ",\"h\":" + std::to_string(window.client.bottom - window.client.top);
         entry += ",\"exStyle\":" + std::to_string(
             (unsigned long) GetWindowLongPtrW(window.handle, GWL_EXSTYLE));
+        entry += ",\"captionInset\":" + std::to_string(window.caption_inset);
         entry += ",\"occluded\":" + std::string(window.occluded ? "true" : "false");
         if (window.occluded) {
             entry += ",\"occludedBy\":\"" + JsonEscape(window.occluded_by) + "\"";
@@ -449,6 +619,43 @@ std::string WindowsJson(const std::vector<WindowInfo>& windows) {
         out += entry;
     }
     out += "]}";
+    return out;
+}
+
+std::string AppsJson(const std::vector<AppEntry>& apps) {
+    std::string out = "{\"type\":\"apps\",\"apps\":[";
+    for (size_t i = 0; i < apps.size(); ++i) {
+        out += i ? "," : "";
+        out += "{\"name\":\"" + JsonEscape(apps[i].name) + "\"";
+        out += ",\"path\":\"" + JsonEscape(ToUtf8(apps[i].path)) + "\"}";
+    }
+    out += "]}";
+    return out;
+}
+
+/// One window's live state, for the Mac to poll.
+///
+/// `alive` is the whole point: a window whose caption buttons reach the stream
+/// can be closed from inside it, and the Mac has to notice and tear the session
+/// down. It is deliberately based on the handle still existing rather than on
+/// the window being enumerable — minimising an application must not look like
+/// quitting it.
+std::string WindowStatusJson(uint64_t id) {
+    HWND handle = WindowFromId(id);
+    if (!handle) {
+        return "{\"type\":\"window\",\"id\":" + std::to_string(id) + ",\"alive\":false}";
+    }
+    const RECT client = ClientAreaInScreen(handle);
+    const RECT frame = VisibleFrame(handle);
+    std::string out = "{\"type\":\"window\",\"id\":" + std::to_string(id);
+    out += ",\"alive\":true";
+    out += ",\"minimized\":" + std::string(IsIconic(handle) ? "true" : "false");
+    out += ",\"x\":" + std::to_string(client.left);
+    out += ",\"y\":" + std::to_string(client.top);
+    out += ",\"w\":" + std::to_string(client.right - client.left);
+    out += ",\"h\":" + std::to_string(client.bottom - client.top);
+    out += ",\"captionInset\":" + std::to_string((int) std::max(0L, client.top - frame.top));
+    out += "}";
     return out;
 }
 
@@ -529,6 +736,38 @@ std::string HandleCommand(const std::string& line) {
 
     if (command == "windows") {
         return WindowsJson(EnumerateWindows());
+    }
+
+    if (command == "apps") {
+        return AppsJson(EnumerateApps());
+    }
+
+    if (command == "window") {
+        long long id = 0;
+        if (!FieldNumber(line, "id", id)) {
+            return "{\"type\":\"error\",\"message\":\"window needs id\"}";
+        }
+        return WindowStatusJson(static_cast<uint64_t>(id));
+    }
+
+    if (command == "launch") {
+        std::string path;
+        if (!FieldString(line, "path", path)) {
+            return "{\"type\":\"error\",\"message\":\"launch needs path\"}";
+        }
+        long long timeout = 20000;
+        FieldNumber(line, "timeoutMs", timeout);
+        timeout = std::min<long long>(std::max<long long>(timeout, 1000), 60000);
+        // This blocks until the application shows a window. The agent serves one
+        // client at a time, so nothing else is waiting on it, and the alternative
+        // — returning immediately and making the Mac poll for an unidentified
+        // new window — just moves the same matching problem across the wire.
+        const uint64_t id = LaunchAndWaitForWindow(ToWide(path), (DWORD) timeout);
+        if (id == 0) {
+            return "{\"type\":\"error\",\"message\":\"launched, but no window appeared\"}";
+        }
+        Log("[agent] launched %s -> window %llu", path.c_str(), (unsigned long long) id);
+        return WindowStatusJson(id);
     }
 
     if (command == "place") {

@@ -22,8 +22,17 @@ final class StreamSession {
     /// every stored property has a value (nil) by the time it is built.
     private(set) var connectionRef: StreamConnection!
     private var decoder: VideoDecoder?
-    /// Weak, so a closed window drops out on its own.
-    private var sinks = NSHashTable<MetalView>.weakObjects()
+    /// Strong on purpose.
+    ///
+    /// This was an `NSHashTable.weakObjects()` so closed windows would drop out
+    /// by themselves, and that crashed: `allObjects` on a weak NSHashTable can
+    /// hand back an object that is already being deallocated, because zeroing the
+    /// weak entry is not atomic with reading the table. The decode callback runs
+    /// on a VideoToolbox thread while a window deallocates on the main thread, so
+    /// the returned array retained a freed view and the process died in
+    /// objc_release the next time the pool drained. Windows always detach in
+    /// windowWillClose, so explicit removal is both sufficient and predictable.
+    private var sinks: [MetalView] = []
     private let sinkLock = NSLock()
 
     private var isRunning = false
@@ -42,7 +51,7 @@ final class StreamSession {
         let decoder = VideoDecoder { [weak self] pixelBuffer in
             guard let self else { return }
             self.sinkLock.lock()
-            let views = self.sinks.allObjects
+            let views = self.sinks
             self.sinkLock.unlock()
             for view in views {
                 view.displayFrame(pixelBuffer)
@@ -81,8 +90,13 @@ final class StreamSession {
         guard isRunning else { return }
         isRunning = false
         connection.disconnect(waitUntilDone: waitUntilDone)
+        // Drain the decoder before dropping the sinks: its callback runs on a
+        // VideoToolbox thread and is what hands frames to the views.
         decoder?.shutdown()
         decoder = nil
+        sinkLock.lock()
+        sinks.removeAll()
+        sinkLock.unlock()
         Log.info("[session] stopped")
     }
 
@@ -90,7 +104,9 @@ final class StreamSession {
 
     func attach(_ view: MetalView) {
         sinkLock.lock()
-        sinks.add(view)
+        if !sinks.contains(where: { $0 === view }) {
+            sinks.append(view)
+        }
         let count = sinks.count
         sinkLock.unlock()
         Log.info("[session] \(count) window(s) attached")
@@ -98,7 +114,7 @@ final class StreamSession {
 
     func detach(_ view: MetalView) {
         sinkLock.lock()
-        sinks.remove(view)
+        sinks.removeAll { $0 === view }
         let remaining = sinks.count
         sinkLock.unlock()
         Log.info("[session] \(remaining) window(s) attached")
