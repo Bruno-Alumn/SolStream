@@ -373,3 +373,32 @@ final class InputProtocolTests: XCTestCase {
         XCTAssertEqual(packet.hexString.suffix(8), "00000000")
     }
 }
+
+/// The client picks which host display to park applications on. Getting this
+/// wrong is not a visible error: it streams the real monitor instead, and every
+/// crop then shows whatever the user happens to have open there.
+final class DisplaySelectionTests: XCTestCase {
+
+    private func display(_ name: String, adapter: String,
+                         primary: Bool = false,
+                         width: Int = 1920, height: Int = 1080) -> RemoteDisplay {
+        RemoteDisplay(name: name, adapter: adapter, x: 0, y: 0,
+                      width: width, height: height, isPrimary: primary)
+    }
+
+    func testVirtualDisplayIsRecognisedByAdapter() {
+        XCTAssertTrue(display("\\\\.\\DISPLAY6", adapter: "Virtual Display Driver").isVirtual)
+        XCTAssertTrue(display("\\\\.\\DISPLAY2", adapter: "IddSampleDriver Device").isVirtual)
+    }
+
+    func testPhysicalAdapterIsNotVirtual() {
+        XCTAssertFalse(display("\\\\.\\DISPLAY1", adapter: "NVIDIA GeForce RTX 4070 SUPER").isVirtual)
+        XCTAssertFalse(display("\\\\.\\DISPLAY1", adapter: "Radeon RX 580 Series").isVirtual)
+    }
+
+    /// An agent that predates the `adapter` field must not have every display
+    /// silently classed as virtual.
+    func testMissingAdapterIsNotVirtual() {
+        XCTAssertFalse(display("\\\\.\\DISPLAY1", adapter: "").isVirtual)
+    }
+}

@@ -111,9 +111,28 @@ std::string JsonEscape(const std::string& text) {
 
 struct Display {
     std::string device_name;  // matches Sunshine's output_name / DXGI DeviceName
+    std::string adapter;      // e.g. "NVIDIA GeForce RTX 4070 SUPER", "Virtual Display Driver"
     RECT bounds{};
     bool primary = false;
 };
+
+/// The GDI adapter driving a display.
+///
+/// The Mac uses this to tell a virtual display from a physical one. Parking the
+/// streamed application on a display of its own is what stops anything the user
+/// has open on the real monitor from ever landing inside the crop.
+std::string AdapterDescription(const wchar_t* device_name) {
+    for (DWORD i = 0;; ++i) {
+        DISPLAY_DEVICEW adapter{};
+        adapter.cb = sizeof(adapter);
+        if (!EnumDisplayDevicesW(nullptr, i, &adapter, 0)) {
+            return {};
+        }
+        if (wcscmp(adapter.DeviceName, device_name) == 0) {
+            return ToUtf8(adapter.DeviceString);
+        }
+    }
+}
 
 BOOL CALLBACK MonitorProc(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
     auto* displays = reinterpret_cast<std::vector<Display>*>(param);
@@ -126,6 +145,7 @@ BOOL CALLBACK MonitorProc(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
 
     Display display;
     display.device_name = ToUtf8(info.szDevice);
+    display.adapter = AdapterDescription(info.szDevice);
     display.bounds = info.rcMonitor;
     display.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
     displays->push_back(std::move(display));
@@ -388,11 +408,13 @@ std::string DisplaysJson(const std::vector<Display>& displays) {
     std::string out = "{\"type\":\"displays\",\"displays\":[";
     for (size_t i = 0; i < displays.size(); ++i) {
         const Display& display = displays[i];
-        char buffer[512];
+        char buffer[1024];
         std::snprintf(buffer, sizeof(buffer),
-                      "%s{\"name\":\"%s\",\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld,\"primary\":%s}",
+                      "%s{\"name\":\"%s\",\"adapter\":\"%s\",\"x\":%ld,\"y\":%ld,"
+                      "\"w\":%ld,\"h\":%ld,\"primary\":%s}",
                       i ? "," : "",
                       JsonEscape(display.device_name).c_str(),
+                      JsonEscape(display.adapter).c_str(),
                       display.bounds.left, display.bounds.top,
                       display.bounds.right - display.bounds.left,
                       display.bounds.bottom - display.bounds.top,

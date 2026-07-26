@@ -67,9 +67,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             index + 1 < arguments.count ? arguments[index + 1] : nil
         }
 
+        // --display picks which host display to park applications on, by device
+        // name or adapter substring. Without it a virtual display wins, because
+        // that is the one nothing else can be dragged across.
+        let displayQuery = arguments.firstIndex(of: "--display").flatMap { index in
+            index + 1 < arguments.count ? arguments[index + 1] : nil
+        }
+
         if let host, let appWindowQuery {
             startSingleApp(host: host, agentHost: agentHost ?? host,
-                           matching: appWindowQuery, config: config)
+                           matching: appWindowQuery, displayQuery: displayQuery,
+                           config: config)
         } else if let host {
             startStreaming(host: host, config: config)
         } else {
@@ -133,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// canvas has to match the capture display exactly: when it does, Sunshine's
     /// scale factor is 1.0 and every crop is pixel-exact rather than resampled.
     private func startSingleApp(host: String, agentHost: String, matching query: String,
-                                config: StreamConnection.Config) {
+                                displayQuery: String?, config: StreamConnection.Config) {
         let queries = query.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespaces)
         }.filter { !$0.isEmpty }
@@ -149,11 +157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         agent.onDisplays = { [weak self] displays in
             guard let self,
-                  let capture = displays.first(where: { $0.isPrimary }) ?? displays.first else {
+                  let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
                 Log.error("[app] host reported no displays")
                 return
             }
-            Log.info("[app] capture display \(capture.name) \(capture.width)x\(capture.height)")
+            Log.info("[app] capture display \(capture.name) "
+                     + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
+                     + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
+            // Sunshine encodes exactly one display, chosen by its own config. If
+            // that is not the display we are placing windows on, every crop is
+            // taken from the wrong pixels — so say plainly what it must be set to.
+            Log.info("[app] Sunshine's output_name must resolve to \(capture.name)")
 
             agent.windows { [weak self] windows in
                 guard let self else { return }
@@ -240,14 +254,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Say what the host display would ideally be, for when a virtual display
-    /// driver makes that adjustable.
+    /// Choose which host display to stream.
     ///
-    /// One-to-one crispness needs the host window's client area to have as many
-    /// pixels as the macOS window can show — that is points times the backing
-    /// scale factor. So the capture display wants to be at least the Mac
-    /// display's physical resolution, and the tiles are carved out of it. A
-    /// fixed-EDID dummy plug cannot offer arbitrary modes, which is the real
+    /// A virtual display wins by default. It is the only one that can be sized
+    /// to this Mac exactly, and because no user ever drags a window onto it by
+    /// accident, nothing can appear inside a crop that is not the streamed app.
+    /// The primary display is the fallback, not the preference.
+    private static func selectDisplay(from displays: [RemoteDisplay],
+                                      preferring query: String?) -> RemoteDisplay? {
+        if let query, !query.isEmpty {
+            let match = displays.first {
+                $0.name.localizedCaseInsensitiveContains(query)
+                    || $0.adapter.localizedCaseInsensitiveContains(query)
+            }
+            if let match { return match }
+            Log.error("[app] no display matched \"\(query)\"; falling back. Candidates: "
+                      + displays.map { "\($0.name) [\($0.adapter)]" }.joined(separator: ", "))
+        }
+        return displays.first(where: { $0.isVirtual })
+            ?? displays.first(where: { $0.isPrimary })
+            ?? displays.first
+    }
+
+    /// Compare the capture display against what this Mac can actually show.
+    ///
+    /// One-to-one crispness needs the host display to have as many pixels as the
+    /// macOS window can display — that is points times the backing scale factor.
+    /// A fixed-EDID dummy plug cannot offer arbitrary modes, which is the real
     /// argument for a virtual display over a dongle.
     private static func reportIdealCanvas(display: RemoteDisplay) {
         guard let screen = NSScreen.main else { return }
@@ -264,6 +297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 [canvas] a full-screen window would be upscaled. For 1:1, set the \
                 capture display to \(Int(physical.width))x\(Int(physical.height)).
                 """)
+        } else {
+            Log.info("[canvas] capture display covers this Mac; full-screen is 1:1")
         }
     }
 
@@ -343,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Prefer a stream window; fall back to whatever window is on screen so
         // the connect window can be captured too.
         guard let window = streamWindows.first?.window
+                ?? appWindows.first?.window
                 ?? NSApp.windows.first(where: { $0.isVisible }) else {
             Log.error("No window to capture")
             NSApp.terminate(nil)
