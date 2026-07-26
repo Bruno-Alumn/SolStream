@@ -40,6 +40,29 @@ avoid this; listening turned out simpler and needs no knowledge of the Mac's
 address.) No admin rights, no driver, no service. Kill it in Task Manager and
 the machine is exactly as it was.
 
+## It must run in the interactive session
+
+Verified on real hardware, and it is not optional. A process launched over SSH
+runs in **session 0**, where `EnumDisplayMonitors` reports a phantom
+`WinDisc` 1024x768 display and `EnumWindows` returns **nothing** — session 0
+has no access to the logged-on user's desktop. The same agent launched into the
+console session (7 on this machine) correctly reports `\\.\DISPLAY1`
+2560x1440 and the real window list.
+
+So in production the agent is a **logon-triggered scheduled task**, not a
+service. For development, `dev-remote.sh` builds over SSH but launches through
+an interactive scheduled task:
+
+```
+schtasks /create /tn SolStreamAgentDev /tr "...\run_agent.bat" /sc ONCE /st 00:00 /it /f
+schtasks /run /tn SolStreamAgentDev
+```
+
+Sockets are not session-isolated, so once it is running in the user's session it
+can still be driven over loopback from an SSH session.
+
+Remove the dev task with `schtasks /delete /tn SolStreamAgentDev /f`.
+
 ## Protocol
 
 Newline-delimited JSON over TCP, one request per line, one reply per line.
