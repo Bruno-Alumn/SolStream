@@ -156,6 +156,7 @@ endfunction()
 include(CTest)
 
 # ---- Subdirectories ----
+add_subdirectory(windows/SolStreamAgent)
 add_subdirectory(windows/CaptureHelper)
 add_subdirectory(windows/sunshine)
 add_subdirectory(windows/ClipboardMonitor)
