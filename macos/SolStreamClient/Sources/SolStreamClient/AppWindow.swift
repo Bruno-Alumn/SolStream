@@ -90,6 +90,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.window = window
         session.attach(view)
         setTile(tile)
+
+        // Nothing may cover the tile: the crop would stream it as though it
+        // were part of the app.
+        agent.setTopmost(windowID: remoteWindowID, true)
     }
 
     // MARK: - NSWindowDelegate
@@ -137,6 +141,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        agent.setTopmost(windowID: remoteWindowID, false)
         if let metalView {
             session.detach(metalView)
         }

@@ -147,7 +147,59 @@ struct WindowInfo {
     DWORD pid = 0;
     RECT frame{};   // the visible frame, excluding invisible resize borders
     RECT client{};  // client area in screen coordinates
+    /// Something is drawn over this window's client area.
+    ///
+    /// This matters because the Mac crops a RECTANGLE out of the captured
+    /// display: the crop has no idea where window borders are, so anything
+    /// covering the tile is streamed as though it were part of the app.
+    bool occluded = false;
+    std::string occluded_by;
 };
+
+/// Could this window actually draw over what is beneath it?
+///
+/// WS_EX_TRANSPARENT marks a click-through overlay, and a layered window with
+/// zero alpha draws nothing. Both sit above ordinary windows without hiding
+/// anything, so treating them as occluders would report a permanent false
+/// positive on any machine with a game overlay installed.
+bool CanPaintOver(HWND window) {
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+
+    // Click-through overlay.
+    if (style & WS_EX_TRANSPARENT) {
+        return false;
+    }
+
+    if (style & WS_EX_LAYERED) {
+        BYTE alpha = 255;
+        DWORD flags = 0;
+        COLORREF key = 0;
+        if (GetLayeredWindowAttributes(window, &key, &alpha, &flags)) {
+            if ((flags & LWA_ALPHA) && alpha < 16) {
+                return false;
+            }
+        } else {
+            // The call only succeeds for windows that used
+            // SetLayeredWindowAttributes. A failure means per-pixel alpha via
+            // UpdateLayeredWindow, which is how game and chat overlays are
+            // built — screen-sized, and almost entirely transparent. Treating
+            // those as occluders reports a permanent false positive.
+            return false;
+        }
+    }
+
+    // A window that never takes focus and hides from the task bar is
+    // decoration, not something a user would say is "covering" their app.
+    if ((style & WS_EX_NOACTIVATE) && (style & WS_EX_TOOLWINDOW)) {
+        return false;
+    }
+    return true;
+}
+
+bool Intersects(const RECT& a, const RECT& b) {
+    return a.left < b.right && b.left < a.right &&
+           a.top < b.bottom && b.top < a.bottom;
+}
 
 /// Windows 10+ window rectangles include an invisible resize border, so
 /// GetWindowRect overstates the visible bounds by several pixels on each side.
@@ -203,11 +255,38 @@ bool IsUserWindow(HWND window) {
     return (frame.right - frame.left) > 0 && (frame.bottom - frame.top) > 0;
 }
 
+/// Accumulates the enumeration, plus every visible window above the current
+/// one, so occlusion can be decided in a single top-to-bottom pass.
+struct EnumState {
+    std::vector<WindowInfo> windows;
+    std::vector<std::pair<RECT, std::string>> above;
+};
+
 BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
+    auto* state = reinterpret_cast<EnumState*>(param);
+
+    // Anything visible can occlude, including the tool windows and owned
+    // dialogs that IsUserWindow filters out of the reported list — but only if
+    // it actually paints. Screen-wide click-through overlays (the NVIDIA
+    // GeForce overlay is the usual one) sit above everything and would
+    // otherwise report constant false occlusion.
+    const bool visible = IsWindowVisible(window) && !IsIconic(window) && CanPaintOver(window);
+    int cloaked = 0;
+    if (visible
+        && !(SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+             && cloaked != 0)) {
+        const RECT frame = VisibleFrame(window);
+        if ((frame.right - frame.left) > 0 && (frame.bottom - frame.top) > 0) {
+            wchar_t occluder_title[128] = {};
+            GetWindowTextW(window, occluder_title, 128);
+            state->above.emplace_back(frame, ToUtf8(occluder_title));
+        }
+    }
+
     if (!IsUserWindow(window)) {
         return TRUE;
     }
-    auto* windows = reinterpret_cast<std::vector<WindowInfo>*>(param);
+    auto* windows = &state->windows;
 
     WindowInfo info;
     info.handle = window;
@@ -224,14 +303,34 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     GetClassNameW(window, class_name, 256);
     info.class_name = ToUtf8(class_name);
 
+    // Everything already in `above` was enumerated earlier, i.e. is higher in
+    // the Z-order. The last entry is this window itself. Report whichever
+    // covers the most of the tile — the first one found is not necessarily the
+    // one a user would blame.
+    long long worst = 0;
+    for (size_t i = 0; i + 1 < state->above.size(); ++i) {
+        const RECT& other = state->above[i].first;
+        if (!Intersects(other, info.client)) {
+            continue;
+        }
+        const long long overlap =
+            (long long) (std::min(other.right, info.client.right) - std::max(other.left, info.client.left)) *
+            (long long) (std::min(other.bottom, info.client.bottom) - std::max(other.top, info.client.top));
+        if (overlap > worst) {
+            worst = overlap;
+            info.occluded = true;
+            info.occluded_by = state->above[i].second;
+        }
+    }
+
     windows->push_back(std::move(info));
     return TRUE;
 }
 
 std::vector<WindowInfo> EnumerateWindows() {
-    std::vector<WindowInfo> windows;
-    EnumWindows(WindowProc, reinterpret_cast<LPARAM>(&windows));
-    return windows;
+    EnumState state;
+    EnumWindows(WindowProc, reinterpret_cast<LPARAM>(&state));
+    return std::move(state.windows);
 }
 
 HWND WindowFromId(uint64_t id) {
@@ -318,6 +417,12 @@ std::string WindowsJson(const std::vector<WindowInfo>& windows) {
         entry += ",\"y\":" + std::to_string(window.client.top);
         entry += ",\"w\":" + std::to_string(window.client.right - window.client.left);
         entry += ",\"h\":" + std::to_string(window.client.bottom - window.client.top);
+        entry += ",\"exStyle\":" + std::to_string(
+            (unsigned long) GetWindowLongPtrW(window.handle, GWL_EXSTYLE));
+        entry += ",\"occluded\":" + std::string(window.occluded ? "true" : "false");
+        if (window.occluded) {
+            entry += ",\"occludedBy\":\"" + JsonEscape(window.occluded_by) + "\"";
+        }
         entry += "}";
         out += entry;
     }
@@ -423,6 +528,29 @@ std::string HandleCommand(const std::string& line) {
                       ok ? "true" : "false",
                       client.left, client.top,
                       client.right - client.left, client.bottom - client.top);
+        return buffer;
+    }
+
+    if (command == "topmost") {
+        long long id = 0, on = 1;
+        if (!FieldNumber(line, "id", id)) {
+            return "{\"type\":\"error\",\"message\":\"topmost needs id\"}";
+        }
+        FieldNumber(line, "on", on);
+        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        if (!window) {
+            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+        }
+        // Pinning a managed window above ordinary ones stops other apps
+        // covering the tile. Safe for our own tiles because they never
+        // overlap each other.
+        const BOOL ok = SetWindowPos(window, on ? HWND_TOPMOST : HWND_NOTOPMOST,
+                                     0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        char buffer[96];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"type\":\"topmost\",\"ok\":%s,\"on\":%s}",
+                      ok ? "true" : "false", on ? "true" : "false");
         return buffer;
     }
 
