@@ -56,8 +56,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         metalView?.sourceRect = crop
         inputCapture?.sourceRect = crop
         inputCapture?.canvasSize = session.canvasSize
-        window?.contentAspectRatio = NSSize(width: max(rect.width, 1),
-                                            height: max(rect.height, 1))
+        // Deliberately NO contentAspectRatio. The remote window resizes to match
+        // whatever shape we are dragged into, so locking the aspect would stop
+        // the very thing that makes this feel native — stretch either axis and
+        // the Windows app reflows, exactly as a local window would.
     }
 
     // MARK: - Window

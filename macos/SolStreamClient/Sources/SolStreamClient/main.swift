@@ -181,8 +181,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           targets: [RemoteWindow], display: RemoteDisplay,
                           config baseConfig: StreamConnection.Config) {
         var config = baseConfig
+        // The encode canvas matches the capture display, which makes Sunshine's
+        // scale factor 1.0 and every crop pixel-exact. It is fixed for the whole
+        // session: `mode=` is negotiated at /launch and ANNOUNCE, so changing it
+        // later would mean tearing the session down and reconnecting. Resizing a
+        // window therefore resizes the WINDOW within a fixed canvas — no display
+        // mode change, no reconnect, no black frame.
         config.width = display.width
         config.height = display.height
+
+        Self.reportIdealCanvas(display: display)
 
         let session = StreamSession(host: host, config: config)
         self.session = session
@@ -229,6 +237,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             default:
                 break
             }
+        }
+    }
+
+    /// Say what the host display would ideally be, for when a virtual display
+    /// driver makes that adjustable.
+    ///
+    /// One-to-one crispness needs the host window's client area to have as many
+    /// pixels as the macOS window can show — that is points times the backing
+    /// scale factor. So the capture display wants to be at least the Mac
+    /// display's physical resolution, and the tiles are carved out of it. A
+    /// fixed-EDID dummy plug cannot offer arbitrary modes, which is the real
+    /// argument for a virtual display over a dongle.
+    private static func reportIdealCanvas(display: RemoteDisplay) {
+        guard let screen = NSScreen.main else { return }
+        let scale = screen.backingScaleFactor
+        let physical = CGSize(width: (screen.frame.width * scale).rounded(),
+                              height: (screen.frame.height * scale).rounded())
+        Log.info("""
+            [canvas] host display \(display.width)x\(display.height); this Mac is \
+            \(Int(screen.frame.width))x\(Int(screen.frame.height)) points @\(scale)x \
+            = \(Int(physical.width))x\(Int(physical.height)) physical
+            """)
+        if display.width < Int(physical.width) || display.height < Int(physical.height) {
+            Log.info("""
+                [canvas] a full-screen window would be upscaled. For 1:1, set the \
+                capture display to \(Int(physical.width))x\(Int(physical.height)).
+                """)
         }
     }
 
