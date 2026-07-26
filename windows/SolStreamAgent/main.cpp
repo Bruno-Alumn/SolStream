@@ -13,15 +13,32 @@
 // Build (macOS cross):  ./build-cross.sh
 // Build (Windows):      cmake --build . --target SolStreamAgent
 
+// windows.h defines min/max as macros, which turns any std::max( into std::(
+// and produces a baffling "illegal token on right side of ::" from MSVC.
+// mingw-w64 does not define them, so this only shows up in the MSVC build.
+// Target Windows 10 1703+, where SetProcessDpiAwarenessContext and the
+// PER_MONITOR_AWARE_V2 context are declared. The MSVC SDK guards them behind
+// this; mingw-w64 declares them unconditionally.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+
+#define NOMINMAX
+// Keeps windows.h from dragging in the original winsock.h, which would clash
+// with winsock2.h below.
+#define WIN32_LEAN_AND_MEAN
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <dwmapi.h>
-#include <shellscalingapi.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -476,7 +493,7 @@ int wmain(int argc, wchar_t** argv) {
     unsigned short port = kDefaultPort;
     for (int i = 1; i + 1 < argc; ++i) {
         if (std::wstring(argv[i]) == L"--port") {
-            port = static_cast<unsigned short>(_wtoi(argv[i + 1]));
+            port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         }
     }
 

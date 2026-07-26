@@ -62,6 +62,21 @@ what `place` positions: the agent measures the current frame-to-client offset
 and compensates, rather than computing it from `AdjustWindowRect`, which does
 not account for DPI scaling, custom frames, or DWM's invisible resize borders.
 
+## Toolchain differences that bite
+
+The cross build uses mingw-w64, your build uses MSVC, and they do not agree.
+mingw is the more permissive of the two, so **the Windows build is the source
+of truth** — a clean `./build-cross.sh` does not prove MSVC will be happy.
+Known divergences, all handled in the source:
+
+- `windows.h` defines `min`/`max` as macros unless `NOMINMAX` is set, which
+  turns `std::max(` into `std::(` and makes MSVC emit "illegal token on right
+  side of `::`". mingw does not define them at all.
+- mingw pulls in `<cstdarg>`/`<cstdlib>` transitively; MSVC does not.
+- `SetProcessDpiAwarenessContext` is guarded behind an API level in the MSVC
+  SDK, hence the explicit `_WIN32_WINNT 0x0A00`.
+- `_wtoi` is a Microsoft extension. Standard `std::wcstol` is used instead.
+
 ## Notes for future work
 
 - The process is per-monitor DPI aware (v2). Without that every coordinate
