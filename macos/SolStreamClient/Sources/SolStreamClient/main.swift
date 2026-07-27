@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var session: StreamSession?
     private var appWindows: [AppWindow] = []
     private var picker: AppPicker?
+    private var clipboard: ClipboardBridge?
 
     /// Set once from the command line, then reused when the picker sends us
     /// round the loop again.
@@ -485,6 +486,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Self.reportIdealCanvas(display: display)
 
+        // Only while something is actually streamed: syncing a clipboard with a
+        // machine the user is not looking at would be surprising.
+        let bridge = ClipboardBridge(agent: agent)
+        clipboard = bridge
+        bridge.start()
+
         let session = StreamSession(host: host, config: config)
         self.session = session
         session.start()
@@ -502,6 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard self.appWindows.isEmpty else { return }
                 self.session?.stop()
                 self.session = nil
+                self.clipboard?.stop()
+                self.clipboard = nil
                 // Back to the picker rather than quitting: closing one
                 // application is not a reason to disconnect from the host.
                 if !self.testMode {

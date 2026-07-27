@@ -321,13 +321,26 @@ if ($ConfigureSunshine) {
     } else {
         Copy-Item $SunshineConfig "$SunshineConfig.solstream-backup" -Force -ErrorAction SilentlyContinue
         $conf = [System.IO.File]::ReadAllText($SunshineConfig)
-        if ($conf -match '(?m)^output_name\s*=.*$') {
-            $conf = [regex]::Replace($conf, '(?m)^output_name\s*=.*$', "output_name = $id")
-        } else {
-            $conf = $conf.TrimEnd() + "`r`noutput_name = $id`r`n"
+
+        # output_name takes the DEVICE ID, never the \\.\DISPLAYn name: a device
+        # restart renumbers those, and this setup restarts the device.
+        #
+        # upnp asks the router to forward Sunshine's ports on its own. It is off
+        # by default and costs nothing to turn on — Sunshine already carries the
+        # miniupnpc IGD client — and on a home router that behaves it removes the
+        # need for the user to arrange any connectivity at all. It is a request,
+        # not a guarantee: a router with UPnP disabled simply ignores it.
+        $settings = @{ 'output_name' = $id; 'upnp' = 'on' }
+        foreach ($key in $settings.Keys) {
+            $line = "$key = $($settings[$key])"
+            if ($conf -match "(?m)^$key\s*=.*$") {
+                $conf = [regex]::Replace($conf, "(?m)^$key\s*=.*$", $line)
+            } else {
+                $conf = $conf.TrimEnd() + "`r`n$line`r`n"
+            }
         }
         [System.IO.File]::WriteAllText($SunshineConfig, $conf, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host "Sunshine output_name = $id  ($($vdd.Name))"
+        Write-Host "Sunshine output_name = $id  ($($vdd.Name)), upnp = on"
         Restart-Service -Name 'SunshineService' -Force -ErrorAction SilentlyContinue
         Write-Host "Sunshine restarted."
     }

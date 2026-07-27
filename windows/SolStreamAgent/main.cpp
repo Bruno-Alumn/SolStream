@@ -606,6 +606,111 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     return fallback ? IdFromWindow(fallback) : 0;
 }
 
+// ── Clipboard ────────────────────────────────────────────────────────────────
+//
+// Text only, and deliberately so. Images and files raise questions this does not
+// need to answer yet — how large is too large, what happens to a 2 GB file
+// dropped on a link — whereas text is what people actually copy between a Mac and
+// a remote application all day.
+//
+// Implemented here rather than in the separate ClipboardMonitor daemon: that one
+// stands up its own WebSocket server with no authentication, and the agent is
+// already the one authenticated channel to this machine. A second open port for
+// this would be a second thing to secure.
+
+/// The clipboard is a shared, contended resource: another process can hold it
+/// open, and OpenClipboard fails rather than waiting.
+class ClipboardLock {
+public:
+    ClipboardLock() {
+        for (int attempt = 0; attempt < 10 && !held_; ++attempt) {
+            held_ = OpenClipboard(nullptr) != FALSE;
+            if (!held_) {
+                Sleep(20);
+            }
+        }
+    }
+    ~ClipboardLock() {
+        if (held_) {
+            CloseClipboard();
+        }
+    }
+    bool held() const { return held_; }
+
+    ClipboardLock(const ClipboardLock&) = delete;
+    ClipboardLock& operator=(const ClipboardLock&) = delete;
+
+private:
+    bool held_ = false;
+};
+
+/// Bumped by Windows whenever anything changes the clipboard, so the Mac can poll
+/// for "has it changed" without transferring the contents every time.
+DWORD ClipboardSequence() {
+    return GetClipboardSequenceNumber();
+}
+
+std::string ClipboardGetJson() {
+    ClipboardLock lock;
+    if (!lock.held()) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
+    }
+    HANDLE handle = GetClipboardData(CF_UNICODETEXT);
+    if (!handle) {
+        // Not an error: the clipboard may hold an image, or nothing.
+        return "{\"type\":\"clipboard\",\"ok\":true,\"text\":\"\",\"seq\":"
+             + std::to_string(ClipboardSequence()) + "}";
+    }
+    auto* wide = static_cast<const wchar_t*>(GlobalLock(handle));
+    if (!wide) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
+    }
+    std::string text = ToUtf8(wide);
+    GlobalUnlock(handle);
+
+    // A clipboard can hold a whole document; this channel is for text people
+    // copy, not for bulk transfer.
+    constexpr size_t kMaxBytes = 1 << 20;
+    bool truncated = false;
+    if (text.size() > kMaxBytes) {
+        text.resize(kMaxBytes);
+        truncated = true;
+    }
+    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":" + std::to_string(ClipboardSequence())
+         + ",\"truncated\":" + (truncated ? "true" : "false")
+         + ",\"text\":\"" + JsonEscape(text) + "\"}";
+}
+
+std::string ClipboardSetJson(const std::string& text) {
+    const std::wstring wide = ToWide(text);
+    const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"out of memory\"}";
+    }
+    if (void* target = GlobalLock(memory)) {
+        std::memcpy(target, wide.c_str(), bytes);
+        GlobalUnlock(memory);
+    } else {
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
+    }
+
+    ClipboardLock lock;
+    if (!lock.held()) {
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        // Ownership only transfers on success; on failure it is still ours.
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard rejected it\"}";
+    }
+    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":"
+         + std::to_string(ClipboardSequence()) + "}";
+}
+
 // ── Icons ────────────────────────────────────────────────────────────────────
 //
 // Sent as raw BGRA plus dimensions rather than PNG. Neither side then needs an
@@ -1516,6 +1621,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
 
     if (command == "apps") {
         return AppsJson(EnumerateApps());
+    }
+
+    if (command == "clipboard") {
+        std::string text;
+        if (FieldString(line, "text", text)) {
+            return ClipboardSetJson(text);
+        }
+        // No text field means "what have you got"; a seq that matches what the
+        // Mac already has means it need not ask for the contents.
+        long long since = -1;
+        if (FieldNumber(line, "seq", since) && since >= 0
+            && static_cast<DWORD>(since) == ClipboardSequence()) {
+            return "{\"type\":\"clipboard\",\"ok\":true,\"unchanged\":true,\"seq\":"
+                 + std::to_string(ClipboardSequence()) + "}";
+        }
+        return ClipboardGetJson();
     }
 
     if (command == "icon") {
