@@ -710,7 +710,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func disconnectHost() {
-        appWindows.forEach { $0.close() }
+        // Detach the close callbacks first. A window's onClose is delivered on the
+        // NEXT main-loop turn — deliberately, so it cannot deallocate the window
+        // inside its own delegate method — and it routes back to the picker. Left
+        // attached, disconnecting would show the connect window and then have a
+        // picker appear over it, reconnecting to the host just left.
+        let windows = appWindows
+        appWindows.removeAll()
+        windows.forEach {
+            $0.onClose = nil
+            $0.close()
+        }
+
+        clipboard?.stop()
+        clipboard = nil
         session?.stop()
         session = nil
         agent?.disconnect()
