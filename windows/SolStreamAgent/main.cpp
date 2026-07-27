@@ -204,7 +204,7 @@ std::vector<Display> EnumerateDisplays() {
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
-                    int& out_w, int& out_h) {
+                    int& out_w, int& out_h, int& out_hz) {
     DEVMODEW best{};
     DEVMODEW largest{};
     bool have_best = false;
@@ -220,14 +220,29 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
             continue;
         }
         const long long area = (long long) mode.dmPelsWidth * mode.dmPelsHeight;
-        if (!have_largest || area > (long long) largest.dmPelsWidth * largest.dmPelsHeight) {
+        const long long largest_area =
+            (long long) largest.dmPelsWidth * largest.dmPelsHeight;
+        if (!have_largest || area > largest_area
+            || (area == largest_area
+                && mode.dmDisplayFrequency > largest.dmDisplayFrequency)) {
             largest = mode;
             have_largest = true;
         }
         if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
             continue;
         }
-        if (!have_best || area < (long long) best.dmPelsWidth * best.dmPelsHeight) {
+        // Smallest area that still covers the request — and, among equals, the
+        // highest refresh rate. Ranking on area alone left the winner as
+        // whichever mode the driver happened to enumerate first, and the virtual
+        // display offers every resolution at every rate, so that was a coin toss
+        // between 30 Hz and 120 Hz. The choice is then written with
+        // CDS_UPDATEREGISTRY, so a bad flip persists; and since the early-out
+        // below used to compare only width and height, nothing ever corrected
+        // it. A display pinned at 30 Hz is indistinguishable, from the Mac, from
+        // a network problem.
+        const long long best_area = (long long) best.dmPelsWidth * best.dmPelsHeight;
+        if (!have_best || area < best_area
+            || (area == best_area && mode.dmDisplayFrequency > best.dmDisplayFrequency)) {
             best = mode;
             have_best = true;
         }
@@ -243,9 +258,14 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     current.dmSize = sizeof(current);
     if (EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &current)
         && current.dmPelsWidth == best.dmPelsWidth
-        && current.dmPelsHeight == best.dmPelsHeight) {
+        && current.dmPelsHeight == best.dmPelsHeight
+        // Refresh rate counts as "already there" too, or a display left pinned
+        // at the wrong rate by an earlier run would never be corrected: the
+        // resolution matches, so nothing would ever be applied again.
+        && current.dmDisplayFrequency >= best.dmDisplayFrequency) {
         out_w = (int) current.dmPelsWidth;
         out_h = (int) current.dmPelsHeight;
+        out_hz = (int) current.dmDisplayFrequency;
         return true;  // already there; do not make the screen flash for nothing
     }
 
@@ -259,7 +279,8 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     }
     out_w = (int) best.dmPelsWidth;
     out_h = (int) best.dmPelsHeight;
-    Log("[agent] display mode -> %dx%d", out_w, out_h);
+    out_hz = (int) best.dmDisplayFrequency;
+    Log("[agent] display mode -> %dx%d @ %dHz", out_w, out_h, out_hz);
     return true;
 }
 
@@ -1765,12 +1786,17 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
             return "{\"type\":\"error\",\"message\":\"canvas size out of range\"}";
         }
         int got_w = 0, got_h = 0;
-        if (!SetDisplayMode(ToWide(device), (int) want_w, (int) want_h, got_w, got_h)) {
+        int got_hz = 0;
+        if (!SetDisplayMode(ToWide(device), (int) want_w, (int) want_h,
+                            got_w, got_h, got_hz)) {
             return "{\"type\":\"canvas\",\"ok\":false,\"message\":\"could not set a display mode\"}";
         }
         char buffer[192];
+        // The rate goes back so the Mac can log it. A capture display stuck at
+        // 30 Hz otherwise looks exactly like a slow network.
         std::snprintf(buffer, sizeof(buffer),
-                      "{\"type\":\"canvas\",\"ok\":true,\"w\":%d,\"h\":%d}", got_w, got_h);
+                      "{\"type\":\"canvas\",\"ok\":true,\"w\":%d,\"h\":%d,\"hz\":%d}",
+                      got_w, got_h, got_hz);
         return buffer;
     }
 
