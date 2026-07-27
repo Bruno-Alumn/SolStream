@@ -637,6 +637,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.appWindows.forEach { $0.setRemoteCursor(cursor) }
         }
 
+        // Closing the application on the Windows side ends the stream, without
+        // waiting for the once-a-second poll to catch up. Closing the last
+        // window stops the session and returns to the picker, which is the same
+        // path as closing it from this end — quitting one application is not a
+        // reason to disconnect from the host.
+        agent.onWindowClosed = { [weak self] id in
+            self?.appWindows.first { $0.remoteWindowID == id }?
+                .hostWindowClosed(noticedBy: "pushed by the host")
+        }
+
         session.connection.onControlConnected = { [weak session, weak agent] in
             guard let session else { return }
             HostCursor.apply(to: session.connection, host: host,
@@ -766,6 +776,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu
 
+    /// Move a menu item onto ⌃⌘, SolStream's own prefix.
+    ///
+    /// Bare ⌘ belongs to the streamed application: ⌘ is sent to Windows as
+    /// Control, so ⌘W closes a browser tab over there and ⌘F opens Find. Leaving
+    /// this application's own shortcuts on bare ⌘ would mean a Mac user reaching
+    /// for "close this tab" got their whole session torn down instead.
+    ///
+    /// ⌘Q is the one exception and stays where macOS puts it: quitting has to
+    /// work from anywhere, and a Windows application that wanted Ctrl+Q can be
+    /// quit from its own menus.
+    @discardableResult
+    private static func reserve(_ item: NSMenuItem) -> NSMenuItem {
+        item.keyEquivalentModifierMask = [.control, .command]
+        return item
+    }
+
     private func buildMenu() {
         let mainMenu = NSMenu()
 
@@ -789,10 +815,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // window, so "which PC am I on" never has to be inferred from a title bar.
         let hostMenuItem = NSMenuItem()
         let hostMenu = NSMenu(title: "Host")
-        hostMenu.addItem(withTitle: "Switch App…",
-                         action: #selector(switchApp), keyEquivalent: "o")
-        hostMenu.addItem(withTitle: "Disconnect",
-                         action: #selector(disconnectHost), keyEquivalent: "d")
+        Self.reserve(hostMenu.addItem(withTitle: "Switch App…",
+                                      action: #selector(switchApp), keyEquivalent: "o"))
+        Self.reserve(hostMenu.addItem(withTitle: "Disconnect",
+                                      action: #selector(disconnectHost), keyEquivalent: "d"))
         hostMenu.addItem(.separator())
         let cursorItem = NSMenuItem(title: "Hide the PC's Cursor",
                                     action: #selector(toggleHostCursor), keyEquivalent: "")
@@ -808,10 +834,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // already the list of what is open — AppKit maintains it for us.
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(withTitle: "Enter Full Screen",
-                           action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
-        windowMenu.addItem(withTitle: "Close",
-                           action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        // ⌃⌘F is the system's own full-screen shortcut, so this is where it
+        // should have been all along.
+        Self.reserve(windowMenu.addItem(withTitle: "Enter Full Screen",
+                                        action: #selector(NSWindow.toggleFullScreen(_:)),
+                                        keyEquivalent: "f"))
+        Self.reserve(windowMenu.addItem(withTitle: "Close",
+                                        action: #selector(NSWindow.performClose(_:)),
+                                        keyEquivalent: "w"))
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
         NSApp.windowsMenu = windowMenu

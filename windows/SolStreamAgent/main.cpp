@@ -1026,10 +1026,36 @@ bool TokenMatches(const std::string& supplied) {
 
 constexpr int kMaxLocks = 8;
 
+// ── The push channel ─────────────────────────────────────────────────────────
+//
+// Two things the host has to volunteer rather than wait to be asked about: the
+// cursor changing shape, and a streamed window being closed. Both go to the one
+// authenticated client on the same socket the commands arrive on, and both must
+// stay silent until that client has proved who it is — the display list is
+// withheld for the same reason, and a notice that leaked the host's UI state to
+// anyone who can open a socket would quietly undo it.
+
+SOCKET g_push_client = INVALID_SOCKET;
+volatile LONG g_push_authorised = 0;
+/// Serialises writes to the client socket. Three threads send on it — the one
+/// serving commands, the cursor watcher and the window watcher — and a line
+/// interleaved with another is a line neither end can parse.
+CRITICAL_SECTION g_send_cs;
+bool SendLine(SOCKET client, const std::string& text);
+
 struct WindowLock {
     HWND window = nullptr;
     RECT desired{};           // client area, in virtual-desktop coordinates
     LONG_PTR saved_style = 0;
+    /// Who owned this window when the agent first touched it.
+    ///
+    /// Windows recycles window handles, so `IsWindow` on a handle whose window
+    /// has been destroyed can come back true — pointing at something else
+    /// entirely. Without this the watcher would go on enforcing a geometry,
+    /// a topmost band and a stripped frame on an unrelated application, and the
+    /// Mac would go on showing whatever now occupies those pixels rather than
+    /// noticing that the thing it was streaming is gone.
+    DWORD pid = 0;
     // How the window looked before the agent touched it. Everything the agent
     // changes has to be recorded, because the client that changed it may never
     // come back to change it again: a Mac that loses its network leaves the
@@ -1099,6 +1125,52 @@ POINT MinimumClientSize(HWND window) {
     return minimum;
 }
 
+/// Has this slot's window gone?
+///
+/// A destroyed handle can be handed back out to a new window, so the process
+/// that owns it has to agree as well. Call with `g_lock_cs` held.
+bool SlotWindowGone(const WindowLock& lock) {
+    if (!IsWindow(lock.window)) {
+        return true;
+    }
+    if (lock.pid == 0) {
+        return false;
+    }
+    DWORD owner = 0;
+    GetWindowThreadProcessId(lock.window, &owner);
+    return owner != lock.pid;
+}
+
+/// Tell the Mac a window it was streaming has been closed.
+///
+/// Pushed the moment the watcher notices, rather than left for the Mac's
+/// once-a-second poll to discover. The poll is still there as a backstop, but a
+/// window whose application has quit goes on showing the last frame it ever
+/// sent until something says otherwise, and up to a second of a dead
+/// application's corpse is a second too many.
+void NotifyWindowClosed(uint64_t id) {
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+        return;
+    }
+    // Read the socket and write to it under the send lock, which the client's
+    // departure also takes before clearing it. Unlike the cursor thread, this
+    // watcher is never joined before the socket closes ΓÇö so without this the
+    // handle could be closed and reissued to the *next* client between the read
+    // and the send, and this line would land on somebody else's connection.
+    // A CRITICAL_SECTION is recursive, so SendLine taking it again is fine.
+    EnterCriticalSection(&g_send_cs);
+    struct Unlock {
+        ~Unlock() { LeaveCriticalSection(&g_send_cs); }
+    } unlock;
+    const SOCKET client = g_push_client;
+    if (client == INVALID_SOCKET) {
+        return;
+    }
+    // A failure means the client has gone, which the serving thread finds out
+    // on its own recv. Nothing to do about it here.
+    SendLine(client, "{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
+}
+
 /// Put a locked window back if anything moved or resized it.
 DWORD WINAPI WatcherProc(LPVOID) {
     while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
@@ -1106,12 +1178,25 @@ DWORD WINAPI WatcherProc(LPVOID) {
         for (int i = 0; i < kMaxLocks; ++i) {
             HWND window = nullptr;
             RECT desired{};
+            uint64_t closed = 0;
             EnterCriticalSection(&g_lock_cs);
-            if (g_locks[i].geometry_locked && IsWindow(g_locks[i].window)) {
+            if (g_locks[i].active && SlotWindowGone(g_locks[i])) {
+                // Release the slot here rather than through UnlockWindow: there
+                // is no window left to give a frame, a placement or a z-order
+                // back to, and holding the slot would keep this dead handle in
+                // the way of the next application to be streamed.
+                closed = IdFromWindow(g_locks[i].window);
+                g_locks[i] = WindowLock{};
+            } else if (g_locks[i].geometry_locked) {
                 window = g_locks[i].window;
                 desired = g_locks[i].desired;
             }
             LeaveCriticalSection(&g_lock_cs);
+            if (closed != 0) {
+                Log("[agent] tracked window %llu was closed", (unsigned long long) closed);
+                NotifyWindowClosed(closed);
+                continue;
+            }
             if (!window) {
                 continue;
             }
@@ -1163,6 +1248,7 @@ int ClaimSlot(HWND window) {
         g_locks[i].window = window;
         g_locks[i].active = true;
         g_locks[i].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
+        GetWindowThreadProcessId(window, &g_locks[i].pid);
         g_locks[i].saved_topmost =
             (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
         // WINDOWPLACEMENT rather than GetWindowRect: it carries the restored
@@ -1623,6 +1709,21 @@ std::string AppsJson(const std::vector<AppEntry>& apps) {
 /// quitting it.
 std::string WindowStatusJson(uint64_t id) {
     HWND handle = WindowFromId(id);
+    // A tracked window is checked against the process that owned it, so a
+    // recycled handle reads as what it is — the original window is gone. Without
+    // this the poll and the watcher could disagree: the watcher would report the
+    // window closed and drop it, and the next poll would say it was alive again.
+    if (handle) {
+        EnterCriticalSection(&g_lock_cs);
+        for (int i = 0; i < kMaxLocks; ++i) {
+            if (g_locks[i].active && g_locks[i].window == handle
+                && SlotWindowGone(g_locks[i])) {
+                handle = nullptr;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_lock_cs);
+    }
     if (!handle) {
         return "{\"type\":\"window\",\"id\":" + std::to_string(id) + ",\"alive\":false}";
     }
@@ -2036,6 +2137,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         EnterCriticalSection(&g_lock_cs);
         ClaimSlot(window);
         LeaveCriticalSection(&g_lock_cs);
+        // And start watching from here rather than from `lock`. This is the
+        // first thing the Mac says about a window it intends to stream, and the
+        // watcher is what notices the window being closed ΓÇö an application that
+        // exits between being pinned and being locked would otherwise go
+        // unreported until the Mac next polled.
+        if (on) {
+            StartWatcher();
+        }
         const BOOL ok = SetWindowPos(window, on ? HWND_TOPMOST : HWND_NOTOPMOST,
                                      0, 0, 0, 0,
                                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -2081,14 +2190,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
 
 // ΓöÇΓöÇ Server ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-// Serialises writes to the client socket.
-//
-// Command replies come from the serving thread and cursor notices from the
-// watcher below, and a line torn in half by the other thread's send() is a
-// protocol desync the Mac cannot recover from -- it has no request ids to
-// resynchronise against, so it drops the connection.
-CRITICAL_SECTION g_send_cs;
-
+// A line torn in half by another thread's send() is a protocol desync the Mac
+// cannot recover from -- it has no request ids to resynchronise against, so it
+// drops the connection. `g_send_cs` is declared with the push channel, above.
 bool SendLine(SOCKET client, const std::string& text) {
     std::string payload = text;
     payload += '\n';
@@ -2195,13 +2299,8 @@ NamedCursor g_cursors[] = {
     {IDC_HELP, "help", nullptr},
 };
 
-SOCKET g_cursor_client = INVALID_SOCKET;
 HANDLE g_cursor_thread = nullptr;
 volatile LONG g_cursor_stop = 0;
-/// Nothing is pushed before the client has proved who it is. The display list is
-/// withheld until then for the same reason, and a notice that leaks the host's
-/// UI state to anyone who can open the socket would quietly undo that.
-volatile LONG g_cursor_authorised = 0;
 
 const char* CursorName(HCURSOR cursor) {
     for (NamedCursor& known : g_cursors) {
@@ -2223,7 +2322,7 @@ DWORD WINAPI CursorWatcherProc(LPVOID) {
         info.cbSize = sizeof(info);
         const BOOL got = GetCursorInfo(&info);
         HCURSOR current = got ? info.hCursor : nullptr;
-        if (InterlockedCompareExchange(&g_cursor_authorised, 0, 0) == 0) {
+        if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
             // Not authenticated yet. Forget the last shape too, so the first
             // push after authentication carries the current one rather than
             // being skipped as unchanged.
@@ -2237,7 +2336,7 @@ DWORD WINAPI CursorWatcherProc(LPVOID) {
         }
         if (current != last) {
             last = current;
-            const SOCKET client = g_cursor_client;
+            const SOCKET client = g_push_client;
             if (client != INVALID_SOCKET) {
                 std::string line = "{\"type\":\"cursor\",\"shape\":\"";
                 line += CursorName(current);
@@ -2255,10 +2354,15 @@ DWORD WINAPI CursorWatcherProc(LPVOID) {
     return 0;
 }
 
+/// Open the push channel for this client and start watching the cursor.
+///
+/// The socket registered here is the one the window watcher reports closures on
+/// too, so this has to run for every client, not only the ones interested in the
+/// cursor.
 void StartCursorWatcher(SOCKET client, bool authorised) {
-    g_cursor_client = client;
+    g_push_client = client;
     InterlockedExchange(&g_cursor_stop, 0);
-    InterlockedExchange(&g_cursor_authorised, authorised ? 1 : 0);
+    InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
     g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc, nullptr, 0, nullptr);
 }
 
@@ -2271,8 +2375,12 @@ void StopCursorWatcher() {
         CloseHandle(g_cursor_thread);
         g_cursor_thread = nullptr;
     }
-    g_cursor_client = INVALID_SOCKET;
-    InterlockedExchange(&g_cursor_authorised, 0);
+    // Under the send lock, so the window watcher — which is not joined here —
+    // cannot be holding this socket while it is retired.
+    EnterCriticalSection(&g_send_cs);
+    g_push_client = INVALID_SOCKET;
+    LeaveCriticalSection(&g_send_cs);
+    InterlockedExchange(&g_push_authorised, 0);
 }
 
 void ServeClient(SOCKET client) {
@@ -2355,7 +2463,7 @@ void ServeClient(SOCKET client) {
             // the hello sequence, withheld until now, and the Mac waits for it
             // before doing anything else.
             if (!was_authenticated && authenticated) {
-                InterlockedExchange(&g_cursor_authorised, 1);
+                InterlockedExchange(&g_push_authorised, 1);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
                 }

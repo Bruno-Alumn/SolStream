@@ -16,7 +16,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     private let session: StreamSession
     private let agent: AgentConnection
-    private let remoteWindowID: UInt64
+    /// The host window this one is showing. Not private: the agent pushes
+    /// closures by id, and the owner has to know which window it means.
+    let remoteWindowID: UInt64
     private let display: RemoteDisplay
 
     /// Where this window's client area sits on the capture display.
@@ -113,11 +115,24 @@ final class AppWindow: NSObject, NSWindowDelegate {
         qualityTimer = timer
     }
 
+    /// End the session because the application has gone on the host.
+    ///
+    /// Called from the host's push and from the poll below, whichever notices
+    /// first; `isClosing` makes the second one a no-op. `noticedBy` says which
+    /// did, because "the push never arrived and the backstop caught it a second
+    /// later" and "the push worked" look identical from the outside.
+    func hostWindowClosed(noticedBy route: String) {
+        guard !isClosing else { return }
+        Log.info("[window] the host application closed (\(route)); ending the stream")
+        close()
+    }
+
     /// Poll the host for this window still existing.
     ///
-    /// Necessary whenever the application's own close button reaches the stream:
-    /// the user can quit it from inside the video, and without this the macOS
-    /// window would sit there showing whatever now occupies those pixels.
+    /// A backstop behind the host's own push, not the primary route: the agent
+    /// reports a closure the moment its watcher sees it, and this catches the
+    /// case where that notice never arrives — a push sent while the socket was
+    /// being replaced, or an agent old enough not to send one at all.
     private func startWatchingForExit() {
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self, !self.isClosing else { return }
@@ -125,11 +140,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // A dropped agent connection reports nil, not death. Closing the
                 // window on a transient failure would be worse than doing nothing.
                 guard let status, !status.isAlive else { return }
-                DispatchQueue.main.async {
-                    guard let self, !self.isClosing else { return }
-                    Log.info("[window] the host application closed; ending the stream")
-                    self.close()
-                }
+                DispatchQueue.main.async { self?.hostWindowClosed(noticedBy: "poll") }
             }
         }
         RunLoop.main.add(timer, forMode: .common)

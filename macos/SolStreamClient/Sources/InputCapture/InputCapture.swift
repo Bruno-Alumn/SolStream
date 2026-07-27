@@ -86,7 +86,7 @@ public final class InputCapture {
 
     /// Modifier keys need their own left/right virtual key codes, and each one
     /// maps to the flag whose transition announces it.
-    private struct ModifierKey {
+    struct ModifierKey {
         let macKeyCode: UInt16
         let windowsKeyCode: UInt16
         /// The DEVICE-DEPENDENT mask for this specific physical key. The public
@@ -96,16 +96,69 @@ public final class InputCapture {
         let deviceMask: UInt
     }
 
-    private let modifierKeys: [ModifierKey] = [
+    /// Command carries Windows Control, and nothing carries the Windows key.
+    ///
+    /// ⌘C and Ctrl+C are the same gesture on the two systems, so mapping ⌘ to the
+    /// Windows key — which is what a literal position-for-position mapping gives
+    /// — means every shortcut a Mac user knows does nothing, and the ones that do
+    /// fire are the Start menu and the window-snapping overlay. Mapping it to
+    /// Control instead makes copy, paste, undo, save, find and select-all
+    /// universal, which is the whole point of the window looking native.
+    ///
+    /// The Windows key is then unreachable on purpose: there is no key left to
+    /// put it on, and it is the one key whose whole job is to raise Windows' own
+    /// shell over the top of the application being streamed.
+    ///
+    /// Mac Control keeps mapping to Windows Control too, so muscle memory from
+    /// either side works. That makes two physical keys share one Windows key,
+    /// which `otherKeyHolds` exists to handle.
+    let modifierKeys: [ModifierKey] = [
         ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, deviceMask: 0x0000_0002),  // L shift
         ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, deviceMask: 0x0000_0004),  // R shift
         ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, deviceMask: 0x0000_0001),  // L ctrl
         ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, deviceMask: 0x0000_2000),  // R ctrl
         ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, deviceMask: 0x0000_0020),  // L alt
         ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, deviceMask: 0x0000_0040),  // R alt
-        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0x5B, deviceMask: 0x0000_0008),  // L cmd → L win
-        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0x5C, deviceMask: 0x0000_0010),  // R cmd → R win
+        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0xA2, deviceMask: 0x0000_0008),  // L cmd → L ctrl
+        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0xA3, deviceMask: 0x0000_0010),  // R cmd → R ctrl
     ]
+
+    /// Is some *other* physical Mac key that maps to the same Windows key still
+    /// down?
+    ///
+    /// Control and Command both become Windows Control, so releasing one while
+    /// the other is held would send a key-up for a key the user is still
+    /// pressing: the host drops out of Control mid-chord, and the next letter
+    /// gets typed into the document instead of running the shortcut. The
+    /// symmetric case matters less but is skipped for the same reason — a second
+    /// key-down for a key already down is noise.
+    static func otherKeyHolds(_ key: ModifierKey, flags: UInt,
+                              among keys: [ModifierKey]) -> Bool {
+        keys.contains {
+            $0.windowsKeyCode == key.windowsKeyCode
+                && $0.macKeyCode != key.macKeyCode
+                && (flags & $0.deviceMask) != 0
+        }
+    }
+
+    /// Combinations that belong to SolStream rather than to the streamed
+    /// application, and so are neither sent to the host nor swallowed here.
+    ///
+    /// Everything else carrying ⌘ goes to Windows and is *not* also acted on
+    /// locally — otherwise ⌘F would toggle full screen on this Mac at the same
+    /// moment it opened Find on the host. The reserved set is small and stated
+    /// as a rule rather than a list of key codes: ⌘Q, because macOS reserves it
+    /// and a user who wants out of the application should always get out, and
+    /// anything with ⌃⌘, which is SolStream's own prefix. Control and Command
+    /// both being Windows Control means ⌃⌘ costs the host nothing: it collapses
+    /// to a Control the application never sees a letter for.
+    static func isReserved(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
+        guard flags.contains(.command) else { return false }
+        if flags.contains(.control) { return true }
+        // ⌘Q, and only on its own — ⇧⌘Q and ⌥⌘Q mean nothing here and belong to
+        // whatever is being streamed.
+        return keyCode == 0x0C && !flags.contains(.shift) && !flags.contains(.option)
+    }
 
     /// Counters that separate "AppKit never delivered the event" from
     /// "delivered but rejected", which are otherwise indistinguishable.
@@ -116,6 +169,9 @@ public final class InputCapture {
     /// Sunshine hands key-down straight to SendInput, and Windows auto-repeats
     /// a key it never sees released — so a missed key-up repeats forever.
     private var heldKeys: Set<UInt16> = []
+
+    /// The subset of `heldKeys` pressed while ⌘ was down — see `releaseChordKeys`.
+    private var chordKeys: Set<UInt16> = []
 
     /// Buttons currently down, for exactly the reason above. Capture stops the
     /// moment the window resigns key, so the matching mouse-up is never seen and
@@ -155,8 +211,11 @@ public final class InputCapture {
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.keyDown, .keyUp, .flagsChanged]
         ) { [weak self] event in
-            self?.handleKeyEvent(event)
-            return event
+            // Returning nil consumes the event, which is the only way to stop a
+            // keystroke doing something on this Mac *as well as* on the host.
+            // Local monitors run ahead of menu key-equivalent matching, so a
+            // combination swallowed here never reaches the main menu.
+            (self?.handleKeyEvent(event) ?? false) ? nil : event
         }
 
         mouseMonitor = NSEvent.addLocalMonitorForEvents(
@@ -183,21 +242,44 @@ public final class InputCapture {
 
     // MARK: - Keyboard
 
-    private func handleKeyEvent(_ event: NSEvent) {
-        guard isCapturing else { return }
+    /// - Returns: true when the event went to the host and must not also act on
+    ///   this Mac.
+    ///
+    /// Not private so the translation can be tested against real `NSEvent`s
+    /// rather than against a restatement of the mapping table: what matters is
+    /// the bytes a ⌘C actually puts on the wire.
+    @discardableResult
+    func handleKeyEvent(_ event: NSEvent) -> Bool {
+        guard isCapturing else { return false }
 
         switch event.type {
         case .keyDown, .keyUp:
-            guard let windowsKey = keyCodeMap[event.keyCode] else { return }
+            // SolStream's own shortcuts are neither forwarded nor swallowed:
+            // AppKit gets them exactly as it would if nothing were streaming.
+            guard !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
+                return false
+            }
+            guard let windowsKey = keyCodeMap[event.keyCode] else { return false }
             let pressed = event.type == .keyDown
             if pressed {
                 heldKeys.insert(windowsKey)
+                // macOS does not reliably deliver the key-up for a key released
+                // while ⌘ is still held, and a key-down the host never sees
+                // released auto-repeats forever. Which keys were part of a ⌘
+                // chord is recorded here so they can be let go when ⌘ is.
+                if event.modifierFlags.contains(.command) { chordKeys.insert(windowsKey) }
             } else {
                 heldKeys.remove(windowsKey)
+                chordKeys.remove(windowsKey)
             }
             onInput?(InputProtocol.key(code: windowsKey,
                                        pressed: pressed,
                                        modifiers: modifiers(from: event.modifierFlags)))
+            // Everything that reached the host is consumed. The window is a
+            // Windows application as far as the keyboard is concerned, so ⇥ must
+            // not move focus around our own view tree and Space must not press
+            // whichever control AppKit happens to think is focused.
+            return true
 
         case .flagsChanged:
             // A modifier press and release both arrive as .flagsChanged; which
@@ -206,18 +288,39 @@ public final class InputCapture {
             // exact key, not the shared .shift/.control/... flag.
             let flags = event.modifierFlags
             let deviceFlags = flags.rawValue
-            if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }) {
+            if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
+               !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
                 let isDown = (deviceFlags & key.deviceMask) != 0
                 onInput?(InputProtocol.key(code: key.windowsKeyCode,
                                            pressed: isDown,
                                            modifiers: modifiers(from: flags)))
             }
+            if lastModifierFlags.contains(.command) && !flags.contains(.command) {
+                releaseChordKeys()
+            }
             lastModifierFlags = flags
             lastDeviceFlags = deviceFlags
+            // Never swallowed: AppKit tracks modifier state from these, and a
+            // window that stops seeing them is one that thinks ⌘ is still down
+            // long after it was let go.
+            return false
 
         default:
-            break
+            return false
         }
+    }
+
+    /// Let go of anything pressed during a ⌘ chord, now that ⌘ itself is up.
+    ///
+    /// Belt and braces against the one macOS behaviour that would leave a key
+    /// stuck down on the host: key-up delivery while Command is held. If the
+    /// key-ups did arrive there is nothing here to release.
+    private func releaseChordKeys() {
+        for code in chordKeys {
+            heldKeys.remove(code)
+            onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
+        }
+        chordKeys.removeAll()
     }
 
     /// Release everything still held when focus leaves. Without this the host
@@ -228,26 +331,40 @@ public final class InputCapture {
             onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
         }
         heldKeys.removeAll()
+        chordKeys.removeAll()
 
         for button in heldButtons {
             onInput?(InputProtocol.mouseButton(button, pressed: false))
         }
         heldButtons.removeAll()
 
+        // Deduplicated: Control and Command share a Windows key code, so a hand
+        // holding both would otherwise send two ups for it.
+        var released: Set<UInt16> = []
         for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
+            guard released.insert(key.windowsKeyCode).inserted else { continue }
             onInput?(InputProtocol.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
         }
         lastModifierFlags = []
         lastDeviceFlags = 0
     }
 
-    private func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
+    /// The modifier bitmask that rides along with a key event.
+    ///
+    /// Command reports as Control, matching the key codes: a packet that said
+    /// "Control is not down" while sending Control's key code would describe a
+    /// keyboard nobody is holding. `.meta` is never set — that bit means the
+    /// Windows key, which no key on this Mac can reach.
+    static func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
         var result: InputProtocol.Modifiers = []
         if flags.contains(.shift) { result.insert(.shift) }
-        if flags.contains(.control) { result.insert(.control) }
+        if flags.contains(.control) || flags.contains(.command) { result.insert(.control) }
         if flags.contains(.option) { result.insert(.alt) }
-        if flags.contains(.command) { result.insert(.meta) }
         return result
+    }
+
+    private func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
+        Self.modifiers(from: flags)
     }
 
     // MARK: - Mouse
