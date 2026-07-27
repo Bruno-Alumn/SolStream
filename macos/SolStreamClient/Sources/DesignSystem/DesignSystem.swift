@@ -185,6 +185,24 @@ public enum DS {
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError() }
 
+        /// Swap in the real icon once the host has produced one. The tile keeps
+        /// its slot and size, so nothing reflows when it arrives.
+        public func setIcon(_ image: CGImage?) {
+            guard let image else { return }
+            iconLayer.contents = image
+            iconLayer.frame = bounds.insetBy(dx: 2, dy: 2)
+            iconLayer.contentsGravity = .resizeAspect
+            label.isHidden = true
+            tint = .clear
+            needsDisplay = true
+        }
+
+        private lazy var iconLayer: CALayer = {
+            let sublayer = CALayer()
+            layer?.addSublayer(sublayer)
+            return sublayer
+        }()
+
         public override func updateLayer() {
             layer?.backgroundColor = tint.cgColor
         }

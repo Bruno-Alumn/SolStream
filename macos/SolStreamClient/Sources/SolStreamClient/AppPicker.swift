@@ -42,6 +42,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private var allRows: [Row] = []
     private var rows: [Row] = []
     private var busyRow: Int?
+    private var iconCache: [String: CGImage] = [:]
+    private var requestedIcons: Set<String> = []
+    /// Set by the owner so rows can ask the host for their icon.
+    weak var agent: AgentConnection?
 
     private let onChoose: (Choice) -> Void
     private let onCancel: () -> Void
@@ -292,6 +296,33 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         dot.isHidden = !entry.isRunning
 
         let monogram = DS.Monogram(name: entry.title, key: entry.key)
+        // Cached across reloads: the list redraws on every keystroke, and asking
+        // the host again each time would make typing hit the network.
+        if let cached = iconCache[entry.key] {
+            monogram.setIcon(cached)
+        } else if !requestedIcons.contains(entry.key) {
+            requestedIcons.insert(entry.key)
+            let key = entry.key
+            let connection = agent
+            let fetch: (@escaping (CGImage?) -> Void) -> Void
+            switch entry.choice {
+            case .running(let window):
+                fetch = { connection?.icon(windowID: window.id, completion: $0) }
+            case .launch(let app):
+                fetch = { connection?.icon(path: app.path, completion: $0) }
+            }
+            fetch { [weak self] image in
+                guard let image else { return }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.iconCache[key] = image
+                    // Only the rows currently showing this key need redrawing.
+                    for (index, row) in self.rows.enumerated() where row.key == key {
+                        self.tableView.reloadData(forRowIndexes: [index], columnIndexes: [0])
+                    }
+                }
+            }
+        }
 
         let title = NSTextField(labelWithString: entry.title)
         title.font = DS.body

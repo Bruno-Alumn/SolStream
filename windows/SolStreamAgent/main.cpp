@@ -44,6 +44,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cwchar>
+#include <cstring>
 #include <cwctype>
 #include <set>
 #include <string>
@@ -603,6 +604,121 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
         }
     }
     return fallback ? IdFromWindow(fallback) : 0;
+}
+
+// ── Icons ────────────────────────────────────────────────────────────────────
+//
+// Sent as raw BGRA plus dimensions rather than PNG. Neither side then needs an
+// image codec: the agent stays plain Win32 with no GDI+ lifetime to get wrong,
+// and the Mac builds an NSImage straight from the bytes. An icon is a few KB, so
+// the size difference does not matter over a LAN.
+
+/// Render an HICON into a straight-alpha BGRA buffer.
+///
+/// Icons come back from Windows as two bitmaps — colour and mask — and the colour
+/// one is only sometimes 32-bit with real alpha. Drawing onto a black DIB and
+/// taking the mask into account handles both cases, which matters because the
+/// 16-colour icons some old executables still carry would otherwise come out as
+/// solid rectangles.
+bool IconToBgra(HICON icon, int size, std::vector<unsigned char>& out) {
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;  // top-down
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = GetDC(nullptr);
+    if (!screen) {
+        return false;
+    }
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HDC memory = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!bitmap || !memory || !bits) {
+        if (bitmap) DeleteObject(bitmap);
+        if (memory) DeleteDC(memory);
+        return false;
+    }
+    HGDIOBJ previous = SelectObject(memory, bitmap);
+    std::memset(bits, 0, static_cast<size_t>(size) * size * 4);
+    const BOOL drawn = DrawIconEx(memory, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL);
+    SelectObject(memory, previous);
+
+    if (drawn) {
+        out.assign(static_cast<unsigned char*>(bits),
+                   static_cast<unsigned char*>(bits) + static_cast<size_t>(size) * size * 4);
+        // DrawIconEx leaves alpha at zero for icons without an alpha channel, which
+        // would make them invisible. If nothing is opaque, treat any coloured pixel
+        // as solid.
+        bool anyAlpha = false;
+        for (size_t i = 3; i < out.size(); i += 4) {
+            if (out[i] != 0) { anyAlpha = true; break; }
+        }
+        if (!anyAlpha) {
+            for (size_t i = 0; i < out.size(); i += 4) {
+                const bool coloured = out[i] || out[i + 1] || out[i + 2];
+                out[i + 3] = coloured ? 0xFF : 0x00;
+            }
+        }
+    }
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    return drawn != FALSE;
+}
+
+std::string Base64Encode(const std::vector<unsigned char>& bytes) {
+    if (bytes.empty()) {
+        return {};
+    }
+    DWORD needed = 0;
+    if (!CryptBinaryToStringA(bytes.data(), (DWORD) bytes.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &needed)) {
+        return {};
+    }
+    std::string out(needed, '\0');
+    if (!CryptBinaryToStringA(bytes.data(), (DWORD) bytes.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out.data(), &needed)) {
+        return {};
+    }
+    out.resize(strlen(out.c_str()));
+    return out;
+}
+
+/// A window's own icon, asked for politely then taken from the class.
+HICON WindowIcon(HWND window) {
+    // WM_GETICON with a timeout: a hung application must not hang the agent.
+    DWORD_PTR result = 0;
+    for (WPARAM which : {static_cast<WPARAM>(ICON_BIG), static_cast<WPARAM>(ICON_SMALL2),
+                         static_cast<WPARAM>(ICON_SMALL)}) {
+        if (SendMessageTimeoutW(window, WM_GETICON, which, 0,
+                                SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result)
+            && result) {
+            return reinterpret_cast<HICON>(result);
+        }
+    }
+    if (HICON fromClass = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON))) {
+        return fromClass;
+    }
+    return reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+}
+
+constexpr int kIconSize = 64;
+
+std::string IconJson(const std::string& id, HICON icon, bool destroy) {
+    std::vector<unsigned char> bgra;
+    const bool ok = icon && IconToBgra(icon, kIconSize, bgra);
+    if (destroy && icon) {
+        DestroyIcon(icon);
+    }
+    if (!ok) {
+        return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(id) + "\"}";
+    }
+    return "{\"type\":\"icon\",\"ok\":true,\"id\":\"" + JsonEscape(id) + "\",\"w\":"
+         + std::to_string(kIconSize) + ",\"h\":" + std::to_string(kIconSize)
+         + ",\"bgra\":\"" + Base64Encode(bgra) + "\"}";
 }
 
 // ── Authentication ───────────────────────────────────────────────────────────
@@ -1400,6 +1516,30 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
 
     if (command == "apps") {
         return AppsJson(EnumerateApps());
+    }
+
+    if (command == "icon") {
+        // Either a window (by id) or a shortcut (by path). Fetched one at a time
+        // and on demand, so a picker showing 245 applications does not extract
+        // 245 icons before it can draw anything.
+        long long id = 0;
+        if (FieldNumber(line, "id", id)) {
+            HWND window = WindowFromId(static_cast<uint64_t>(id));
+            if (!window) {
+                return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + std::to_string(id) + "\"}";
+            }
+            return IconJson(std::to_string(id), WindowIcon(window), false);
+        }
+        std::string path;
+        if (!FieldString(line, "path", path)) {
+            return "{\"type\":\"error\",\"message\":\"icon needs id or path\"}";
+        }
+        HICON large = nullptr;
+        // ExtractIconEx resolves a .lnk to its target on its own.
+        if (ExtractIconExW(ToWide(path).c_str(), 0, &large, nullptr, 1) == 0 || !large) {
+            return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
+        }
+        return IconJson(path, large, true);
     }
 
     if (command == "canvas") {

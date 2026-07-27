@@ -192,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showConnectWindow()
             }
         })
+        picker.agent = agent
         self.picker = picker
         picker.show()
 

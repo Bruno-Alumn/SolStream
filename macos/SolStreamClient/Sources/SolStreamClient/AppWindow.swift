@@ -92,6 +92,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             var stats = QualityPill.Stats()
             stats.fps = Int((Double(frames) / elapsed).rounded())
             stats.bitrateMbps = Double(bytes) * 8 / elapsed / 1_000_000
+            stats.latencyMs = snapshot.latencyMs
             stats.droppedFrames = snapshot.dropped
             stats.totalFrames = snapshot.frames
             stats.audioActive = snapshot.audioFrames > 0
