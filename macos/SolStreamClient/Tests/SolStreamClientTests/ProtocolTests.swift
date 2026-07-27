@@ -268,14 +268,18 @@ final class ProtocolTests: XCTestCase {
 
     // MARK: - Pairing identity
 
-    func testCertificateSignatureIsExtractedFromDER() {
+    func testCertificateSignatureIsExtractedFromDER() throws {
         let identity = ClientIdentity.shared
-        let signature = ClientIdentity.extractCertificateSignature(identity.certDER)
-        XCTAssertNotNil(signature)
+        let signature = try XCTUnwrap(ClientIdentity.extractCertificateSignature(identity.certDER))
         // A 2048-bit RSA signature.
-        XCTAssertEqual(signature?.count, 256)
-        XCTAssertEqual(signature?.prefix(4).hexString, "077196cd",
-                       "must match the signature field of the shipped certificate")
+        XCTAssertEqual(signature.count, 256)
+        // This used to assert the first four bytes of the one certificate every
+        // build shipped. Identities are minted per installation now, so there is
+        // no fixed answer — but the signature is still the last element of the
+        // certificate, so it has to be the DER's own tail. That catches the walk
+        // stopping early and returning some other element, which is the failure
+        // the hardcoded prefix was really guarding against.
+        XCTAssertEqual(signature, identity.certDER.suffix(256))
     }
 
     func testClientIdentityLoadsAKeyThatCanSign() throws {

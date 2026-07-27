@@ -552,6 +552,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             appWindow.setStatus("Connecting to \(host)", detail: target.title)
+            // A StreamSession cannot be restarted in place — stop() releases the
+            // decoder and start() does not build another — so recovering means a
+            // new session. Closing the windows runs the path that already exists
+            // for that, back to the picker with the host connection still up,
+            // where the same application is one click away.
+            appWindow.onRetry = { [weak self] in
+                guard let self else { return }
+                Log.info("[app] retry after a lost stream; returning to the picker")
+                self.appWindows.forEach { $0.close() }
+            }
             appWindows.append(appWindow)
             appWindow.show()
 
@@ -562,6 +572,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindow.placeAndLock()
             agent.focus(windowID: target.id)
             Log.info("[app] \"\(target.title)\" -> tile \(tile)")
+        }
+
+        // The watchdog speaks only once frames have been arriving and then stop,
+        // so it never argues with onPhase about a stream that has not started.
+        session.onLiveness = { [weak self] liveness in
+            guard let self else { return }
+            switch liveness {
+            case .live:
+                self.appWindows.forEach { $0.hideStatus() }
+            case .stalled(let seconds):
+                self.appWindows.forEach {
+                    $0.setStatus("Reconnecting…",
+                                 detail: "No picture for \(seconds)s — asking \(host) for a new frame")
+                }
+            case .lost:
+                self.appWindows.forEach {
+                    $0.setError("Lost the stream",
+                                detail: "\(host) stopped sending video and did not answer "
+                                        + "requests for a new frame.")
+                }
+            }
         }
 
         session.onPhase = { [weak self] phase in

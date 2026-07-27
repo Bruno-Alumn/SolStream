@@ -49,6 +49,37 @@ final class StreamSession {
 
     var onPhase: ((StreamConnection.Phase) -> Void)?
 
+    /// What the watchdog has to say about the picture.
+    enum Liveness: Equatable {
+        /// Frames stopped; the host has been asked for a fresh keyframe.
+        case stalled(seconds: Int)
+        /// Asked repeatedly and nothing came back. Only a reconnect will help.
+        case lost
+        /// Frames again.
+        case live
+    }
+
+    var onLiveness: ((Liveness) -> Void)?
+
+    // MARK: - Watchdog
+
+    private var framesDelivered: UInt64 = 0
+    private let frameCountLock = NSLock()
+    private var watchdog: DispatchSourceTimer?
+    private var lastSeenFrameCount: UInt64 = 0
+    private var stalledSince: Date?
+    private var keyframeRequests = 0
+    private var reportedLost = false
+
+    /// At 60fps a frame is due every 16ms, so a second of silence is not a
+    /// hiccup. Long enough not to fire on a garbage-collection pause, short
+    /// enough that the user has not yet started clicking things twice.
+    private static let stallThreshold: TimeInterval = 1.0
+    /// Most stalls are one undecodable frame, and a keyframe fixes them without
+    /// anybody noticing. Past five seconds of asking, the problem is the
+    /// connection and no amount of further asking will produce a picture.
+    private static let maxKeyframeRequests = 5
+
     var connection: StreamConnection { connectionRef }
 
     init(host: String, config: StreamConnection.Config) {
@@ -60,6 +91,9 @@ final class StreamSession {
         // different regions of it.
         let decoder = VideoDecoder { [weak self] pixelBuffer in
             guard let self else { return }
+            self.frameCountLock.lock()
+            self.framesDelivered &+= 1
+            self.frameCountLock.unlock()
             self.sinkLock.lock()
             let views = self.sinks
             self.sinkLock.unlock()
@@ -113,12 +147,81 @@ final class StreamSession {
             return self.pointerStats?() ?? (0, 0)
         }
         connection.connect()
+        startWatchdog()
         Log.info("[session] started for \(host), canvas \(Int(canvasSize.width))x\(Int(canvasSize.height))")
+    }
+
+    /// Notice when the picture stops, and try the cheap fix before saying so.
+    ///
+    /// A stalled stream used to look exactly like a still one: the last frame
+    /// stayed on screen indefinitely, with no spinner, no error and no way to
+    /// tell a frozen stream from an application that simply was not redrawing.
+    /// The overwhelmingly common cause is a single frame that could not be
+    /// decoded — a dropped packet in a reference frame — after which every
+    /// later frame refers to something the decoder does not have. Asking for a
+    /// keyframe fixes that outright, so ask before reporting anything.
+    private func startWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 1, repeating: .milliseconds(500), leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in self?.checkLiveness() }
+        watchdog = timer
+        timer.resume()
+    }
+
+    private func checkLiveness() {
+        frameCountLock.lock()
+        let delivered = framesDelivered
+        frameCountLock.unlock()
+
+        if delivered != lastSeenFrameCount {
+            lastSeenFrameCount = delivered
+            if stalledSince != nil {
+                Log.info("[watchdog] frames resumed")
+                stalledSince = nil
+                keyframeRequests = 0
+                reportedLost = false
+                report(.live)
+            }
+            return
+        }
+
+        // Nothing has arrived yet at all. That is the connection phase's story
+        // to tell — it already shows "Waiting for video" — and a watchdog
+        // shouting over it would only be a second opinion on the same fact.
+        guard delivered > 0 else { return }
+
+        guard let since = stalledSince else {
+            stalledSince = Date()
+            return
+        }
+        let stalled = Date().timeIntervalSince(since)
+        guard stalled >= Self.stallThreshold else { return }
+
+        if keyframeRequests < Self.maxKeyframeRequests {
+            keyframeRequests += 1
+            Log.info("[watchdog] no frames for \(String(format: "%.1f", stalled))s; "
+                     + "asking for a keyframe (\(keyframeRequests)/\(Self.maxKeyframeRequests))")
+            connectionRef.requestKeyframe()
+            report(.stalled(seconds: Int(stalled)))
+        } else if !reportedLost {
+            reportedLost = true
+            Log.error("[watchdog] no frames for \(String(format: "%.1f", stalled))s "
+                      + "after \(keyframeRequests) keyframe requests; giving up on recovery")
+            report(.lost)
+        }
+    }
+
+    private func report(_ liveness: Liveness) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onLiveness?(liveness)
+        }
     }
 
     func stop(waitUntilDone: Bool = false) {
         guard isRunning else { return }
         isRunning = false
+        watchdog?.cancel()
+        watchdog = nil
         connection.disconnect(waitUntilDone: waitUntilDone)
         // Drain the decoder before dropping the sinks: its callback runs on a
         // VideoToolbox thread and is what hands frames to the views.

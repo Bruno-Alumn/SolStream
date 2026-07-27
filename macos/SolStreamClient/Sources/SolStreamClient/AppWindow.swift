@@ -377,7 +377,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     // MARK: - Status
 
     func setStatus(_ title: String, detail: String? = nil) {
-        metalView?.setStatus(title, detail: detail)
+        metalView?.setStatus(title, detail: detail, busy: true)
     }
 
     func setError(_ title: String, detail: String? = nil) {
@@ -396,5 +396,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func hideStatus() {
         metalView?.hideStatus()
+    }
+
+    /// Handler for the overlay's "Try Again" button. Only shown alongside an
+    /// error, so setting this does not put a button in front of a working
+    /// stream.
+    var onRetry: (() -> Void)? {
+        get { metalView?.onRetry }
+        set { metalView?.onRetry = newValue }
     }
 }
