@@ -3,6 +3,7 @@ import AppKit
 import SolStreamLogging
 import VideoDecoder
 import StreamConnection
+import AudioRenderer
 
 /// One Sunshine session, feeding any number of windows.
 ///
@@ -37,6 +38,13 @@ final class StreamSession {
 
     private var isRunning = false
 
+    private var audioDecoder: OpusDecoder?
+    private var audioRenderer: AudioRenderer?
+    private var lastAudioSequence: UInt16?
+    private(set) var audioFramesDecoded: UInt64 = 0
+    private(set) var audioParityDropped: UInt64 = 0
+    private(set) var audioGaps: UInt64 = 0
+
     var onPhase: ((StreamConnection.Phase) -> Void)?
 
     var connection: StreamConnection { connectionRef }
@@ -65,8 +73,8 @@ final class StreamSession {
             onVideoFrame: { [weak decoder] frame in
                 decoder?.decode(frame.annexB, isIDR: frame.isIDR)
             },
-            onAudioData: { _ in
-                // Sunshine sends Opus; no decoder wired up yet.
+            onAudioData: { [weak self] datagram in
+                self?.handleAudio(datagram)
             }
         )
         decoder.onKeyframeNeeded = { [weak self] in
@@ -79,8 +87,18 @@ final class StreamSession {
         guard !isRunning else { return }
         isRunning = true
 
+        // Started here rather than in init: the renderer holds the output device
+        // open, and a session that is built but never run should not take it.
+        audioDecoder = OpusDecoder()
+        if audioDecoder != nil {
+            audioRenderer = AudioRenderer()
+        }
+
         connection.onPhase = { [weak self] phase in
             self?.onPhase?(phase)
+        }
+        connection.onAudioStats = { [weak self] in
+            (self?.audioFramesDecoded ?? 0, self?.audioParityDropped ?? 0)
         }
         connection.connect()
         Log.info("[session] started for \(host), canvas \(Int(canvasSize.width))x\(Int(canvasSize.height))")
@@ -97,8 +115,51 @@ final class StreamSession {
         sinkLock.lock()
         sinks.removeAll()
         sinkLock.unlock()
-        Log.info("[session] stopped")
+        audioRenderer?.stop()
+        audioRenderer = nil
+        audioDecoder = nil
+        Log.info("[session] stopped — audio: \(audioFramesDecoded) frames decoded, "
+                 + "\(audioParityDropped) parity shards dropped, \(audioGaps) gap(s)")
     }
+
+    // MARK: - Audio
+
+    /// Turn one audio datagram into sound.
+    ///
+    /// Sunshine sends Opus behind a 12-byte RTP header, and interleaves
+    /// Reed-Solomon parity shards into the same stream as separate packets with
+    /// their own type. Feeding a parity shard to the decoder produces noise, so
+    /// they are dropped: recovering a lost audio frame from parity is not worth
+    /// the machinery when the frames are 5ms long and a gap is inaudible.
+    ///
+    /// Audio is not encrypted here — the SDP asks only for SS_ENC_CONTROL_V2, so
+    /// Sunshine leaves audio in the clear.
+    private func handleAudio(_ datagram: Data) {
+        guard datagram.count > Self.rtpHeaderSize else { return }
+        let packetType = datagram[datagram.startIndex + 1] & 0x7F
+        guard packetType == Self.audioPacketType else {
+            if packetType == Self.audioFecPacketType { audioParityDropped &+= 1 }
+            return
+        }
+
+        let sequence = UInt16(datagram[datagram.startIndex + 2]) << 8
+                     | UInt16(datagram[datagram.startIndex + 3])
+        if let last = lastAudioSequence, sequence != last &+ 1 {
+            // A gap means the next frame does not continue the last one.
+            audioDecoder?.reset()
+            audioGaps &+= 1
+        }
+        lastAudioSequence = sequence
+
+        let opus = datagram.subdata(in: datagram.startIndex + Self.rtpHeaderSize ..< datagram.endIndex)
+        guard let pcm = audioDecoder?.decode(opus) else { return }
+        audioFramesDecoded &+= 1
+        audioRenderer?.playAudio(pcm)
+    }
+
+    private static let rtpHeaderSize = 12
+    private static let audioPacketType: UInt8 = 97
+    private static let audioFecPacketType: UInt8 = 127
 
     // MARK: - Sinks
 
