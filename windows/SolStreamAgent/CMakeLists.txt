@@ -30,7 +30,10 @@ target_link_libraries(SolStreamAgent PRIVATE
 target_compile_definitions(SolStreamAgent PRIVATE UNICODE _UNICODE)
 
 if(MSVC)
-    target_compile_options(SolStreamAgent PRIVATE /W4 /permissive-)
+    # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
+    # Without it MSVC reads them in the system code page and "token — the" is
+    # rendered as "token a€" in the window.
+    target_compile_options(SolStreamAgent PRIVATE /W4 /permissive- /utf-8)
 else()
     target_compile_options(SolStreamAgent PRIVATE -Wall -Wextra -municode)
     target_link_options(SolStreamAgent PRIVATE -municode -static)

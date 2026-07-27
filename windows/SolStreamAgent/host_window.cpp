@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 
 #include <mutex>
@@ -9,13 +10,27 @@
 
 #include "vdd.h"
 
+// Not in every SDK this is built against, and it is only an integer.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+
 namespace solstream {
 namespace {
 
 constexpr wchar_t kClassName[] = L"SolStreamHostWindow";
-constexpr int kWidth = 520;
-constexpr int kHeight = 470;
+/// Wide enough for the longest status line. The first render truncated
+/// "Sunshine running on base port 47600 (installed copy)" mid-word, which is the
+/// one row where the detail is the whole point.
+constexpr int kWidth = 620;
+/// Two heights, because the pairing card is only there when a Mac is waiting.
+/// One height sized for the card leaves a third of the window empty the rest of
+/// the time; one sized without it clips the card when it matters most.
+constexpr int kHeightCompact = 344;
+constexpr int kHeightWithPin = 510;
 constexpr UINT kTimerId = 1;
+
+int g_height = kHeightCompact;
 
 enum ControlId {
     kIdCopyToken = 100,
@@ -44,6 +59,7 @@ constexpr COLORREF kCard = RGB(0x1C, 0x1E, 0x28);
 constexpr COLORREF kText = RGB(0xEC, 0xEE, 0xF6);
 constexpr COLORREF kTextFaint = RGB(0x8A, 0x8E, 0xA3);
 constexpr COLORREF kAccent = RGB(0x7C, 0x6C, 0xF5);
+constexpr COLORREF kAccentPressed = RGB(0x2A, 0x27, 0x4A);
 constexpr COLORREF kGood = RGB(0x4C, 0xC8, 0x8A);
 constexpr COLORREF kBad = RGB(0xE0, 0x6C, 0x6C);
 
@@ -188,16 +204,25 @@ void Paint(HWND window) {
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
         case WM_CREATE: {
+            // Owner-drawn: a stock button is light grey with a light border,
+            // and on a near-black card that is the one element that looks like
+            // it belongs to a different program.
             CreateWindowExW(0, L"BUTTON", L"Copy token",
-                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            kWidth - 130, kHeight - 96, 100, 26,
+                            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                            kWidth - 130, g_height - 96, 100, 26,
                             window, (HMENU) (INT_PTR) kIdCopyToken,
                             nullptr, nullptr);
             CreateWindowExW(0, L"BUTTON", L"Install display driver",
-                            WS_CHILD | BS_PUSHBUTTON,
-                            28, kHeight - 58, 180, 28,
+                            WS_CHILD | BS_OWNERDRAW,
+                            28, g_height - 56, 180, 28,
                             window, (HMENU) (INT_PTR) kIdInstallDriver,
                             nullptr, nullptr);
+            // A dark title bar to match the window under it. Without this the
+            // chrome is light and the content is near-black, which reads as an
+            // application that has been half-restyled.
+            const BOOL dark = TRUE;
+            DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                                  &dark, sizeof(dark));
             SetTimer(window, kTimerId, 1000, nullptr);
             return 0;
         }
@@ -227,6 +252,53 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     break;
             }
             break;
+        }
+
+        case WM_DRAWITEM: {
+            auto* item = (DRAWITEMSTRUCT*) lparam;
+            if (item->CtlType != ODT_BUTTON) {
+                break;
+            }
+            const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+            // The accent for the action, a flat fill for the surface, and a
+            // one-pixel edge — the same shape the Mac's outlined buttons have.
+            HBRUSH fill = CreateSolidBrush(pressed ? kAccentPressed : kCard);
+            FillRect(item->hDC, &item->rcItem, fill);
+            DeleteObject(fill);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, kAccent);
+            HGDIOBJ old_pen = SelectObject(item->hDC, pen);
+            HGDIOBJ old_brush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+            Rectangle(item->hDC, item->rcItem.left, item->rcItem.top,
+                      item->rcItem.right, item->rcItem.bottom);
+            SelectObject(item->hDC, old_pen);
+            SelectObject(item->hDC, old_brush);
+            DeleteObject(pen);
+
+            wchar_t caption[128] = {};
+            GetWindowTextW(item->hwndItem, caption, 128);
+            SetBkMode(item->hDC, TRANSPARENT);
+            SetTextColor(item->hDC, kText);
+            SelectObject(item->hDC, g_body_font);
+            DrawTextW(item->hDC, caption, -1, &item->rcItem,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (item->itemState & ODS_FOCUS) {
+                RECT focus = item->rcItem;
+                InflateRect(&focus, -3, -3);
+                DrawFocusRect(item->hDC, &focus);
+            }
+            return TRUE;
+        }
+
+        case WM_SIZE: {
+            // Keep the buttons on the bottom edge wherever it now is.
+            const int height = HIWORD(lparam);
+            SetWindowPos(GetDlgItem(window, kIdCopyToken), nullptr,
+                         kWidth - 130, height - 96, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER);
+            SetWindowPos(GetDlgItem(window, kIdInstallDriver), nullptr,
+                         28, height - 56, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            return 0;
         }
 
         case WM_TIMER: {
@@ -298,7 +370,7 @@ bool ShowHostWindow() {
         return false;
     }
 
-    RECT wanted{0, 0, kWidth, kHeight};
+    RECT wanted{0, 0, kWidth, g_height};
     AdjustWindowRect(&wanted, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE);
     g_window = CreateWindowExW(
         0, kClassName, L"SolStream",
@@ -334,6 +406,16 @@ void ShowPairingPin(const std::wstring& pin, const std::wstring& client_name) {
         g_pending_client = client_name;
     }
     if (g_window) {
+        // Grow to fit the card, and shrink again when it goes.
+        const int wanted_height = pin.empty() ? kHeightCompact : kHeightWithPin;
+        if (wanted_height != g_height) {
+            g_height = wanted_height;
+            RECT frame{0, 0, kWidth, g_height};
+            AdjustWindowRect(&frame, (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME), FALSE);
+            SetWindowPos(g_window, nullptr, 0, 0,
+                         frame.right - frame.left, frame.bottom - frame.top,
+                         SWP_NOMOVE | SWP_NOZORDER);
+        }
         // Bring it forward: this is the one moment the user has to look.
         if (!pin.empty()) {
             ShowWindow(g_window, SW_SHOW);
