@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `--host <ip>` connects immediately; `--test-screenshot` grabs the window
     /// and exits (used by the UI tests).
     private var testMode = false
+    /// Set by --test-dropdown so the capture targets the list, not the window
+    /// behind it.
+    private var dropdownWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -142,6 +145,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--test-input") {
             DispatchQueue.main.asyncAfter(deadline: .now() + max(1, captureDelay - 2)) { [weak self] in
                 self?.streamWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
+            }
+        }
+
+        // --test-dropdown photographs the host list, which is otherwise only
+        // reachable with the mouse.
+        if arguments.contains("--test-dropdown") {
+            testMode = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.5, captureDelay - 1.5)) {
+                [weak self] in
+                self?.dropdownWindow = self?.connectWindow?.openDropdownForTesting()
             }
         }
 
@@ -890,7 +903,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func captureTestScreenshot() {
         // Prefer a stream window; fall back to whatever window is on screen so
         // the connect window can be captured too.
-        guard let window = streamWindows.first?.window
+        guard let window = dropdownWindow
+                ?? streamWindows.first?.window
                 ?? appWindows.first?.window
                 ?? NSApp.windows.first(where: { $0.isVisible }) else {
             Log.error("No window to capture")

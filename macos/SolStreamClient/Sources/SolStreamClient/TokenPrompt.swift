@@ -1,4 +1,5 @@
 import AppKit
+import DesignSystem
 import SolStreamLogging
 import StreamConnection
 
@@ -35,13 +36,11 @@ enum TokenPrompt {
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
 
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
-        field.placeholderString = "Paste the token"
         // Tokens are pasted, essentially always, and a paste that silently
         // brings a trailing newline along should not read as a wrong token.
-        field.usesSingleLineMode = true
-        field.cell?.wraps = false
-        field.cell?.isScrollable = true
+        let field = DS.Field(placeholder: "Paste the token", mono: true)
+        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        field.translatesAutoresizingMaskIntoConstraints = true
         alert.accessoryView = field
 
         // Without this the text field is not first responder and the first

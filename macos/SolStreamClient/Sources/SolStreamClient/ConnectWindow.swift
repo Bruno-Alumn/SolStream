@@ -26,9 +26,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     private let window: NSWindow
-    private let hostField = NSComboBox()
-    private let dot = DS.Dot()
-    private let detailLabel = NSTextField(labelWithString: "")
+    private let hostDropdown = HostDropdown()
     private let hintLabel = NSTextField(labelWithString: "")
     private let connectButton: DS.OutlinedButton
     private let quitButton: DS.OutlinedButton
@@ -76,37 +74,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
         // ── The host row ────────────────────────────────────────────────────
         //
-        // The editable field IS the name line rather than sitting under one, so
-        // the address is never shown twice. Its own chevron is the affordance for
-        // picking a discovered host; the detail line underneath carries
-        // reachability, pairing and latency.
-        hostField.isEditable = true
-        hostField.usesDataSource = false
-        hostField.completes = true
-        hostField.font = DS.section
-        hostField.textColor = DS.textPrimary
-        hostField.isBordered = false
-        hostField.drawsBackground = false
-        hostField.focusRingType = .none
-        hostField.delegate = self
-        hostField.target = self
-        hostField.action = #selector(hostChanged)
-        hostField.placeholderString = "hostname or IP address"
-        hostField.stringValue = state.address
-
-        detailLabel.font = DS.monoSmall
-        detailLabel.textColor = DS.textMuted
-
-        let row = NSView()
-        row.wantsLayer = true
-        row.layer?.backgroundColor = DS.chrome.cgColor
-        row.layer?.cornerRadius = DS.Metric.rowCorner
-        row.layer?.cornerCurve = .continuous
-        row.translatesAutoresizingMaskIntoConstraints = false
-        for child in [dot, hostField, detailLabel] as [NSView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(child)
-        }
+        // One control, not a field plus a menu. It shows the chosen host on two
+        // lines with its state dot, and opens a list of the same rows over
+        // itself — including, as the last row, the place to type an address that
+        // discovery did not find.
+        hostDropdown.translatesAutoresizingMaskIntoConstraints = false
+        hostDropdown.onPick = { [weak self] address in self?.hostPicked(address) }
 
         hintLabel.font = DS.secondary
         hintLabel.textColor = DS.textMuted
@@ -126,7 +99,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
-        let stack = NSStackView(views: [heading, subheading, row, hintLabel, buttons])
+        let stack = NSStackView(views: [heading, subheading, hostDropdown, hintLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
@@ -143,21 +116,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
-            row.heightAnchor.constraint(equalToConstant: 62),
+            hostDropdown.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
             hintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
-
-            dot.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 16),
-            dot.centerYAnchor.constraint(equalTo: hostField.centerYAnchor),
-
-            hostField.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 10),
-            hostField.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
-            hostField.topAnchor.constraint(equalTo: row.topAnchor, constant: 10),
-
-            detailLabel.leadingAnchor.constraint(equalTo: hostField.leadingAnchor, constant: 4),
-            detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor, constant: -12),
-            detailLabel.topAnchor.constraint(equalTo: hostField.bottomAnchor, constant: 4),
         ])
 
         window.contentView = content
@@ -166,10 +127,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     func show() {
         window.center()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(hostField)
         NSApp.activate(ignoringOtherApps: true)
         startDiscovery()
         scheduleProbe()
+    }
+
+    /// Open the host list, for `--test-dropdown`.
+    func openDropdownForTesting() -> NSWindow? {
+        hostDropdown.openForTesting()
+        return hostDropdown.listWindow
     }
 
     func close() {
@@ -185,6 +151,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func refresh() {
         state.isPaired = ClientIdentity.shared.isPaired(host: state.address)
 
+        var dotState: DS.Dot.State = .idle
         var parts: [String] = []
         // The discovered name, when there is one, is worth more than repeating the
         // address the field is already showing.
@@ -195,15 +162,18 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             if let latency = state.latency {
                 parts.append("\(Int(latency * 1000)) ms")
             }
-            dot.state = .live
+            dotState = .live
         case .some(false):
             parts.append("unreachable")
-            dot.state = .dead
+            dotState = .dead
         case nil:
             parts.append(state.address.isEmpty ? "enter an address" : "checking…")
-            dot.state = .idle
+            dotState = .idle
         }
-        detailLabel.stringValue = parts.joined(separator: " · ")
+        hostDropdown.setSelection(address: state.address, name: state.name,
+                                  detail: parts.joined(separator: " · "), dotState: dotState)
+        hostDropdown.items = hostItems()
+        hostDropdown.isDiscovering = browser.isRunning
 
         switch (state.isReachable, state.needsPairing) {
         case (.some(true), true):
@@ -274,21 +244,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         browser.onChange = { [weak self] hosts in
             guard let self else { return }
             self.discovered = hosts
-            let targets = hosts.map(\.connectTarget)
-            let typed = self.hostField.stringValue
-            self.hostField.removeAllItems()
-            self.hostField.addItems(withObjectValues: targets
-                + Self.recentHosts.filter { !targets.contains($0) })
-            self.hostField.stringValue = typed
 
-            // Offer the one obvious choice rather than making them open the menu,
-            // but never overwrite something already typed.
-            if typed.isEmpty, let first = hosts.first {
-                self.hostField.stringValue = first.connectTarget
+            // Offer the one obvious choice rather than making them open the list,
+            // but never overwrite a host already chosen.
+            if self.state.address.isEmpty, let first = hosts.first {
                 self.state.address = first.connectTarget
                 self.state.name = first.name
                 self.scheduleProbe()
-            } else if let match = hosts.first(where: { $0.connectTarget == typed }) {
+            } else if let match = hosts.first(where: { $0.connectTarget == self.state.address }) {
                 self.state.name = match.name
             }
             self.refresh()
@@ -298,8 +261,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     // MARK: - Actions
 
-    @objc private func hostChanged() {
-        let typed = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// A row was committed, or an address typed into the list's last row.
+    private func hostPicked(_ address: String) {
+        let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard typed != state.address else { return }
         state.address = typed
         state.name = discovered.first { $0.connectTarget == typed }?.name
@@ -310,7 +274,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func connectTapped() {
-        let host = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = state.address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
             hintLabel.stringValue = "Enter a hostname or IP address."
             hintLabel.textColor = DS.accentBright
@@ -333,6 +297,26 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Rows for the list: what is on the network now, then what was used before.
+    /// Two kinds, so exactly one divider falls between them.
+    private func hostItems() -> [HostDropdown.Item] {
+        var items = discovered.map { host in
+            HostDropdown.Item(address: host.connectTarget, name: host.name,
+                              detail: host.connectTarget
+                                  + (ClientIdentity.shared.isPaired(host: host.connectTarget)
+                                     ? " · paired" : " · not paired"),
+                              dotState: .live, kind: .discovered)
+        }
+        let seen = Set(items.map(\.address))
+        items += Self.recentHosts.filter { !seen.contains($0) }.map { address in
+            HostDropdown.Item(address: address, name: nil,
+                              detail: ClientIdentity.shared.isPaired(host: address)
+                                  ? "paired" : "not paired",
+                              dotState: .idle, kind: .recent)
+        }
+        return items
+    }
+
     // MARK: - Recents
 
     private static var lastHost: String? {
@@ -351,16 +335,5 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hosts.insert(host, at: 0)
         UserDefaults.standard.set(Array(hosts.prefix(5)), forKey: recentHostsKey)
         UserDefaults.standard.set(host, forKey: lastHostKey)
-    }
-}
-
-extension ConnectWindow: NSComboBoxDelegate {
-    func comboBoxSelectionDidChange(_ notification: Notification) {
-        // The field's value updates after this returns, so read it on the next turn.
-        DispatchQueue.main.async { [weak self] in self?.hostChanged() }
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        hostChanged()
     }
 }

@@ -30,7 +30,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     private let window: NSWindow
-    private let searchField = NSSearchField()
+    private let searchField = DS.Field(placeholder: "")
+    /// The search row: the field plus its shortcut hint, on the design's plain
+    /// surface rather than NSSearchField's own bezel and magnifier.
+    private let searchRow = NSView()
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -73,12 +76,32 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
     private func build(host: String) {
         searchField.placeholderString = "Search windows and apps on \(host)"
-        searchField.font = DS.body
         searchField.target = self
         searchField.action = #selector(searchChanged)
-        searchField.sendsWholeSearchString = false
-        searchField.sendsSearchStringImmediately = true
-        searchField.focusRingType = .none
+        // Filter as it is typed rather than on Return: the list is the answer,
+        // so making the user commit to see it would be a step for nothing.
+        searchField.delegate = self
+
+        let searchHint = NSTextField(labelWithString: "⌘F")
+        searchHint.font = DS.monoSmall
+        searchHint.textColor = DS.textMuted
+        searchHint.translatesAutoresizingMaskIntoConstraints = false
+
+        searchRow.wantsLayer = true
+        searchRow.layer?.backgroundColor = DS.chrome.cgColor
+        searchRow.layer?.cornerRadius = DS.Metric.rowCorner
+        searchRow.layer?.cornerCurve = .continuous
+        searchRow.translatesAutoresizingMaskIntoConstraints = false
+        searchRow.addSubview(searchField)
+        searchRow.addSubview(searchHint)
+        NSLayoutConstraint.activate([
+            searchRow.heightAnchor.constraint(equalToConstant: 38),
+            searchField.leadingAnchor.constraint(equalTo: searchRow.leadingAnchor, constant: 12),
+            searchField.centerYAnchor.constraint(equalTo: searchRow.centerYAnchor),
+            searchField.trailingAnchor.constraint(equalTo: searchHint.leadingAnchor, constant: -8),
+            searchHint.trailingAnchor.constraint(equalTo: searchRow.trailingAnchor, constant: -12),
+            searchHint.centerYAnchor.constraint(equalTo: searchRow.centerYAnchor),
+        ])
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("app"))
         column.resizingMask = .autoresizingMask
@@ -132,7 +155,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
-        let stack = NSStackView(views: [searchField, scrollView,
+        let stack = NSStackView(views: [searchRow, scrollView,
                                         DS.hairlineView(), footer, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -150,7 +173,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
-        for view in [searchField, scrollView, footer, buttons] as [NSView] {
+        for view in [searchRow, scrollView, footer, buttons] as [NSView] {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -44).isActive = true
         }
         window.contentView = content
@@ -393,5 +416,11 @@ private final class PickerRowView: NSTableRowView {
         DS.accent.withAlphaComponent(0.5).setStroke()
         shape.lineWidth = 1
         shape.stroke()
+    }
+}
+
+extension AppPicker: NSTextFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        searchChanged()
     }
 }

@@ -55,6 +55,18 @@ public enum DS {
     public static let textFaint = dynamic(dark: hex(0x75798C), light: hex(0x424450))
     /// Separators. One pixel, never a border box.
     public static let hairline = dynamic(dark: hex(0x3F424D), light: hex(0xCFD3E5))
+    /// The edge of a surface that floats above the window — a popover or a
+    /// menu. A step stronger than `hairline`, because it has to hold its own
+    /// against whatever it is covering rather than divide two things on the
+    /// same plane.
+    public static var edgeStrong: NSColor {
+        // Increase Contrast raises it again, which is the one accessibility
+        // setting a 1px edge genuinely depends on.
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            ? dynamic(dark: hex(0x9397AB), light: hex(0x595D6C))
+            : dynamic(dark: hex(0x595D6C), light: hex(0xB2B6CA))
+    }
+
     /// Degraded: the accent with its chroma pulled down rather than a new hue.
     public static let degraded = dynamic(dark: hex(0x796CBF, alpha: 0.55),
                                          light: hex(0x796CBF, alpha: 0.55))
@@ -297,6 +309,49 @@ public enum DS {
 
     /// The design's outlined action: a hairline box that fills with accent tint on
     /// hover, rather than a solid button competing with the content.
+    /// A text field the way the design draws every one of them: no border, no
+    /// background, no focus ring, and an accent caret.
+    ///
+    /// The caret is the fiddly part. `insertionPointColor` belongs to
+    /// `NSTextView`, and an `NSTextField` does not own its editor — the window
+    /// lends it one on focus and takes it back afterwards. So the colour has to
+    /// be applied to that borrowed editor each time the field gains focus, not
+    /// once at construction.
+    public final class Field: NSTextField {
+        public init(placeholder: String, mono: Bool = false, readOnly: Bool = false) {
+            super.init(frame: .zero)
+            placeholderString = placeholder
+            font = mono ? DS.monoBody : DS.body
+            textColor = readOnly ? DS.textSecondary : DS.textPrimary
+            isBordered = false
+            drawsBackground = false
+            focusRingType = .none
+            isEditable = !readOnly
+            isSelectable = true
+            lineBreakMode = .byTruncatingTail
+            cell?.usesSingleLineMode = true
+            cell?.wraps = false
+            cell?.isScrollable = true
+            translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        public override func becomeFirstResponder() -> Bool {
+            let became = super.becomeFirstResponder()
+            if let editor = currentEditor() as? NSTextView {
+                editor.insertionPointColor = DS.accent
+                // The design gives selection the same accent tint the rest of the
+                // interface uses, rather than the system blue.
+                editor.selectedTextAttributes = [
+                    .backgroundColor: DS.accentTint,
+                    .foregroundColor: DS.textPrimary,
+                ]
+            }
+            return became
+        }
+    }
+
     public final class OutlinedButton: NSButton {
         private var isPrimary: Bool = false
 
