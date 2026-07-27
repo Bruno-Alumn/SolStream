@@ -1,11 +1,11 @@
-// SolStream Agent — the Windows half of single-application streaming.
+﻿// SolStream Agent ΓÇö the Windows half of single-application streaming.
 //
 // It does one job: make a chosen application's window sit at a known,
 // non-overlapping rectangle on a chosen display, and tell the Mac where it is.
 // The Mac then crops that rectangle out of the single Sunshine stream and
 // presents it as a native window.
 //
-// Deliberately plain Win32 — SetWindowPos, EnumWindows, GetMonitorInfo, a
+// Deliberately plain Win32 ΓÇö SetWindowPos, EnumWindows, GetMonitorInfo, a
 // socket. No D3D, no WinRT, no COM lifetimes, no shared handles. That is the
 // only kind of Windows code that can be written correctly without a debugger,
 // which matters because this is developed on a Mac and cross-compiled.
@@ -63,7 +63,7 @@ constexpr int kProtocolVersion = 1;
 // with the matching pair in AgentConnection.swift, because the clipboard is the
 // one command whose payload is sized by the user rather than by the protocol.
 //
-// JSON escaping can expand text sixfold — a control byte becomes \u00xx — so the
+// JSON escaping can expand text sixfold ΓÇö a control byte becomes \u00xx ΓÇö so the
 // line limit must clear six times the payload cap at both ends. Getting this
 // wrong is not a truncated clipboard: whichever side hits its line cap first
 // tears down the control channel mid-session.
@@ -74,7 +74,7 @@ constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 /// that moved Sunshine off its default needs --sunshine-port to match.
 unsigned short g_sunshine_web_port = 47990;
 
-// ── Logging ──────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Logging ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 void Log(const char* fmt, ...) {
     va_list args;
@@ -85,7 +85,7 @@ void Log(const char* fmt, ...) {
     va_end(args);
 }
 
-// ── Text ─────────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Text ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 std::string ToUtf8(const std::wstring& text) {
     if (text.empty()) {
@@ -117,7 +117,7 @@ std::wstring ToWide(const std::string& text) {
 }
 
 /// Escape a string for embedding in JSON. Window titles are arbitrary user
-/// text — quotes and backslashes in them would otherwise corrupt the stream.
+/// text ΓÇö quotes and backslashes in them would otherwise corrupt the stream.
 std::string JsonEscape(const std::string& text) {
     std::string out;
     out.reserve(text.size() + 8);
@@ -141,7 +141,7 @@ std::string JsonEscape(const std::string& text) {
     return out;
 }
 
-// ── Displays ─────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Displays ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 struct Display {
     std::string device_name;  // matches Sunshine's output_name / DXGI DeviceName
@@ -199,8 +199,8 @@ std::vector<Display> EnumerateDisplays() {
 /// upscaled and looks soft.
 ///
 /// This only ever SWITCHES between modes the driver already offers, which is
-/// immediate. Adding a mode to a virtual display is the expensive operation — it
-/// needs a device restart — so the modes are seeded once at setup instead.
+/// immediate. Adding a mode to a virtual display is the expensive operation ΓÇö it
+/// needs a device restart ΓÇö so the modes are seeded once at setup instead.
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
@@ -231,7 +231,7 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
         if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
             continue;
         }
-        // Smallest area that still covers the request — and, among equals, the
+        // Smallest area that still covers the request ΓÇö and, among equals, the
         // highest refresh rate. Ranking on area alone left the winner as
         // whichever mode the driver happened to enumerate first, and the virtual
         // display offers every resolution at every rate, so that was a coin toss
@@ -284,7 +284,7 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     return true;
 }
 
-// ── Windows ──────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Windows ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 struct WindowInfo {
     HWND handle = nullptr;
@@ -305,7 +305,7 @@ struct WindowInfo {
     /// The Mac crops the CLIENT area, so a standard caption is already outside
     /// the crop and its minimise/maximise/close buttons never reach the stream.
     /// A window that draws its own caption inside the client area (Explorer,
-    /// Chrome, Discord) reports 0 here — and for those the buttons share a strip
+    /// Chrome, Discord) reports 0 here ΓÇö and for those the buttons share a strip
     /// with tabs and the address bar, so cropping them off would take real UI
     /// with them.
     int caption_inset = 0;
@@ -337,7 +337,7 @@ bool CanPaintOver(HWND window) {
             // The call only succeeds for windows that used
             // SetLayeredWindowAttributes. A failure means per-pixel alpha via
             // UpdateLayeredWindow, which is how game and chat overlays are
-            // built — screen-sized, and almost entirely transparent. Treating
+            // built ΓÇö screen-sized, and almost entirely transparent. Treating
             // those as occluders reports a permanent false positive.
             return false;
         }
@@ -421,7 +421,7 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     auto* state = reinterpret_cast<EnumState*>(param);
 
     // Anything visible can occlude, including the tool windows and owned
-    // dialogs that IsUserWindow filters out of the reported list — but only if
+    // dialogs that IsUserWindow filters out of the reported list ΓÇö but only if
     // it actually paints. Screen-wide click-through overlays (the NVIDIA
     // GeForce overlay is the usual one) sit above everything and would
     // otherwise report constant false occlusion.
@@ -461,7 +461,7 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
 
     // Everything already in `above` was enumerated earlier, i.e. is higher in
     // the Z-order. The last entry is this window itself. Report whichever
-    // covers the most of the tile — the first one found is not necessarily the
+    // covers the most of the tile ΓÇö the first one found is not necessarily the
     // one a user would blame.
     long long worst = 0;
     for (size_t i = 0; i + 1 < state->above.size(); ++i) {
@@ -498,7 +498,7 @@ uint64_t IdFromWindow(HWND window) {
     return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window));
 }
 
-// ── Launchable applications ──────────────────────────────────────────────────
+// ΓöÇΓöÇ Launchable applications ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 struct AppEntry {
     std::string name;
@@ -572,7 +572,7 @@ std::vector<AppEntry> EnumerateApps() {
 /// `\\attacker\share\payload.exe` ran it as the logged-in user, and `icon` would
 /// happily reach the same UNC path and hand over a set of NTLM credentials on
 /// the way. Checking against the list the agent just produced costs one
-/// directory walk and removes the primitive rather than narrowing it — there is
+/// directory walk and removes the primitive rather than narrowing it ΓÇö there is
 /// no path a client can name that the user could not have clicked in their own
 /// Start Menu.
 ///
@@ -669,7 +669,7 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
         }
 
         // No new window may be the correct outcome rather than a failure: an
-        // application that is already running usually reuses its window —
+        // application that is already running usually reuses its window ΓÇö
         // Explorer opens a tab in the existing one, and single-instance
         // applications just raise theirs. Starting an application does always
         // bring its window forward, so a foreground window that changed is very
@@ -686,11 +686,11 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     return fallback ? IdFromWindow(fallback) : 0;
 }
 
-// ── Clipboard ────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Clipboard ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // Text only, and deliberately so. Images and files raise questions this does not
-// need to answer yet — how large is too large, what happens to a 2 GB file
-// dropped on a link — whereas text is what people actually copy between a Mac and
+// need to answer yet ΓÇö how large is too large, what happens to a 2 GB file
+// dropped on a link ΓÇö whereas text is what people actually copy between a Mac and
 // a remote application all day.
 //
 // Implemented here rather than in the separate ClipboardMonitor daemon: that one
@@ -754,7 +754,7 @@ std::string ClipboardGetJson() {
     if (text.size() > kMaxClipboardBytes) {
         // Cut between codepoints, not at a byte offset. resize() alone can slice
         // a multi-byte character in half, and the Mac rejects the whole line as
-        // malformed JSON — losing the reply, not just the tail of the text.
+        // malformed JSON ΓÇö losing the reply, not just the tail of the text.
         size_t cut = kMaxClipboardBytes;
         while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
             --cut;
@@ -797,7 +797,7 @@ std::string ClipboardSetJson(const std::string& text) {
          + std::to_string(ClipboardSequence()) + "}";
 }
 
-// ── Icons ────────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Icons ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // Sent as raw BGRA plus dimensions rather than PNG. Neither side then needs an
 // image codec: the agent stays plain Win32 with no GDI+ lifetime to get wrong,
@@ -806,7 +806,7 @@ std::string ClipboardSetJson(const std::string& text) {
 
 /// Render an HICON into a straight-alpha BGRA buffer.
 ///
-/// Icons come back from Windows as two bitmaps — colour and mask — and the colour
+/// Icons come back from Windows as two bitmaps ΓÇö colour and mask ΓÇö and the colour
 /// one is only sometimes 32-bit with real alpha. Drawing onto a black DIB and
 /// taking the mask into account handles both cases, which matters because the
 /// 16-colour icons some old executables still carry would otherwise come out as
@@ -912,7 +912,7 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
          + ",\"bgra\":\"" + Base64Encode(bgra) + "\"}";
 }
 
-// ── Authentication ───────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Authentication ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // This socket can enumerate and move every window on the machine and launch
 // arbitrary applications. Binding a single trusted address limits who can reach
@@ -921,7 +921,7 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
 // any command is accepted.
 //
 // The token is generated on first run and kept in the user's own profile. It is
-// not encrypted, deliberately — the point is for the person at the machine to be
+// not encrypted, deliberately ΓÇö the point is for the person at the machine to be
 // able to read it and give it to their Mac.
 //
 // Plaintext over TCP means this authenticates the client to the host and nothing
@@ -1009,12 +1009,12 @@ bool TokenMatches(const std::string& supplied) {
     return difference == 0;
 }
 
-// ── Geometry lock ────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Geometry lock ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // The Mac crops a FIXED rectangle out of the shared canvas, so a window resized
 // on the host stops lining up with it and the stream shows desktop where the
-// application used to be. Size has to be driven from the macOS window — the thing
-// the user is actually looking at — and only from there.
+// application used to be. Size has to be driven from the macOS window ΓÇö the thing
+// the user is actually looking at ΓÇö and only from there.
 //
 // Two layers, because one is not enough. Removing WS_THICKFRAME and
 // WS_MAXIMIZEBOX takes away the resize border and the maximise affordance, which
@@ -1140,7 +1140,7 @@ bool LockWindow(HWND window) {
     EnterCriticalSection(&g_lock_cs);
     // The lock was released across the un-maximise above, so re-establish that
     // this slot is still this window's. Nothing reclaims slots concurrently
-    // today — commands and the disconnect cleanup all run on the client thread —
+    // today ΓÇö commands and the disconnect cleanup all run on the client thread ΓÇö
     // but reviving a slot that had been cleared would restore a zeroed style
     // onto a real window, and that is not a failure worth finding later.
     if (!g_locks[slot].active || g_locks[slot].window != window) {
@@ -1189,7 +1189,7 @@ void UnlockWindow(HWND window) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     // And put it back where it was. Managed windows are parked on the virtual
     // display, whose origin sits off the side of the real desktop, so a window
-    // left at those coordinates is not merely misplaced — it is invisible, on a
+    // left at those coordinates is not merely misplaced ΓÇö it is invisible, on a
     // monitor that stops existing when the session ends.
     if (saved.saved_placement.length == sizeof(WINDOWPLACEMENT)) {
         SetWindowPlacement(window, &saved.saved_placement);
@@ -1223,17 +1223,17 @@ void SetLockedGeometry(HWND window, const RECT& client) {
     LeaveCriticalSection(&g_lock_cs);
 }
 
-// ── Sunshine pairing ─────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Sunshine pairing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // Sunshine pairs by showing a PIN on the client and having a human type it into
 // Sunshine's web UI on the host. For a non-technical user that means a browser, a
 // self-signed-certificate warning, creating web UI credentials, and finding the
-// PIN page — which is where most people give up.
+// PIN page ΓÇö which is where most people give up.
 //
 // The agent already runs on the host, so it can do that step itself: the Mac
 // sends the PIN it is displaying and the agent POSTs it to Sunshine's own local
 // API. Reading confighttp.cpp, /api/pin needs HTTP Basic auth, and its CSRF check
-// is skipped outright for requests carrying neither Origin nor Referer — those
+// is skipped outright for requests carrying neither Origin nor Referer ΓÇö those
 // cannot be browser-initiated, so a non-browser client needs no token.
 //
 // Sunshine stores only a salted hash of its web UI password, so the plaintext
@@ -1445,7 +1445,7 @@ std::string PairJson(const std::string& pin, const std::string& name, INTERNET_P
                "\"message\":\"Sunshine rejected the stored credentials.\"}";
     }
     // nvhttp::pin returns false when no client is actually waiting to pair, which
-    // still comes back as HTTP 200 — so the body decides, not the status.
+    // still comes back as HTTP 200 ΓÇö so the body decides, not the status.
     const bool ok = reply.status == 200 && reply.body.find("\"status\":true") != std::string::npos;
     Log("[agent] pair pin -> HTTP %lu %s", reply.status, ok ? "accepted" : "rejected");
     if (ok) {
@@ -1455,12 +1455,12 @@ std::string PairJson(const std::string& pin, const std::string& name, INTERNET_P
            + JsonEscape(reply.body.substr(0, 200)) + "\"}";
 }
 
-// ── Placement ────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Placement ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /// Place a window so its CLIENT AREA lands exactly on the requested rectangle.
 ///
 /// The caller cares about the client area, because that is what gets cropped
-/// out of the stream — but SetWindowPos positions the whole window including
+/// out of the stream ΓÇö but SetWindowPos positions the whole window including
 /// its frame. So measure the current difference between the two and offset by
 /// it. Measuring beats computing from AdjustWindowRect, which does not know
 /// about DPI scaling, custom frames, or DWM's invisible borders.
@@ -1499,7 +1499,7 @@ bool PlaceClientArea(HWND window, int x, int y, int width, int height) {
                         SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
 }
 
-// ── JSON output ──────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ JSON output ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 std::string DisplaysJson(const std::vector<Display>& displays) {
     std::string out = "{\"type\":\"displays\",\"displays\":[";
@@ -1566,7 +1566,7 @@ std::string AppsJson(const std::vector<AppEntry>& apps) {
 /// `alive` is the whole point: a window whose caption buttons reach the stream
 /// can be closed from inside it, and the Mac has to notice and tear the session
 /// down. It is deliberately based on the handle still existing rather than on
-/// the window being enumerable — minimising an application must not look like
+/// the window being enumerable ΓÇö minimising an application must not look like
 /// quitting it.
 std::string WindowStatusJson(uint64_t id) {
     HWND handle = WindowFromId(id);
@@ -1587,7 +1587,7 @@ std::string WindowStatusJson(uint64_t id) {
     return out;
 }
 
-// ── Tiny request parsing ─────────────────────────────────────────────────────
+// ΓöÇΓöÇ Tiny request parsing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
 // The command set is small and fixed, so a full JSON parser would be more
 // surface area than the protocol itself. Extract by key instead.
@@ -1595,8 +1595,8 @@ std::string WindowStatusJson(uint64_t id) {
 /// Extract a JSON string value, honouring escapes.
 ///
 /// The escape handling is not decoration. Every string the Mac sends us is full
-/// of backslashes — Windows device names like \\.\DISPLAY7 and shortcut paths
-/// like C:\Users\... — and JSON doubles every one of them on the wire. Taking the
+/// of backslashes ΓÇö Windows device names like \\.\DISPLAY7 and shortcut paths
+/// like C:\Users\... ΓÇö and JSON doubles every one of them on the wire. Taking the
 /// raw substring gives back the doubled form, and it also stops at the first
 /// quote, so any window title containing one truncates.
 ///
@@ -1902,8 +1902,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         timeout = std::min<long long>(std::max<long long>(timeout, 1000), 60000);
         // This blocks until the application shows a window. The agent serves one
         // client at a time, so nothing else is waiting on it, and the alternative
-        // — returning immediately and making the Mac poll for an unidentified
-        // new window — just moves the same matching problem across the wire.
+        // ΓÇö returning immediately and making the Mac poll for an unidentified
+        // new window ΓÇö just moves the same matching problem across the wire.
         const uint64_t id = LaunchAndWaitForWindow(ToWide(path), (DWORD) timeout);
         if (id == 0) {
             return "{\"type\":\"error\",\"message\":\"launched, but no window appeared\"}";
@@ -1925,7 +1925,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         }
         const bool ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h);
         const RECT client = ClientAreaInScreen(window);
-        // The Mac asked for this, so it is the new truth — otherwise the watcher
+        // The Mac asked for this, so it is the new truth ΓÇö otherwise the watcher
         // would immediately drag the window back to the previous size.
         SetLockedGeometry(window, client);
         char buffer[256];
@@ -1975,8 +1975,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         // overlap each other.
         //
         // Claim a slot even when this window is not geometry-locked, so that
-        // whatever happens to the session — a clean disconnect or a Mac that
-        // simply vanishes — the window is known to be owed a trip back down.
+        // whatever happens to the session ΓÇö a clean disconnect or a Mac that
+        // simply vanishes ΓÇö the window is known to be owed a trip back down.
         EnterCriticalSection(&g_lock_cs);
         ClaimSlot(window);
         LeaveCriticalSection(&g_lock_cs);
@@ -2023,7 +2023,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
     return "{\"type\":\"error\",\"message\":\"unknown cmd\"}";
 }
 
-// ── Server ───────────────────────────────────────────────────────────────────
+// ΓöÇΓöÇ Server ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 bool SendLine(SOCKET client, const std::string& text) {
     std::string payload = text;
@@ -2076,8 +2076,8 @@ void ServeClient(SOCKET client) {
     std::string buffer;
     char chunk[4096];
     // Set once a line has outgrown the cap, and cleared at the newline that ends
-    // it. The rest of an oversized line has not arrived yet — it comes in later
-    // recv() chunks — so this cannot be a one-off scan of what is in hand.
+    // it. The rest of an oversized line has not arrived yet ΓÇö it comes in later
+    // recv() chunks ΓÇö so this cannot be a one-off scan of what is in hand.
     bool discarding = false;
     for (;;) {
         const int n = recv(client, chunk, sizeof(chunk), 0);
@@ -2124,7 +2124,7 @@ void ServeClient(SOCKET client) {
             }
         }
 
-        // A client that never sends a newline must not grow this unbounded —
+        // A client that never sends a newline must not grow this unbounded ΓÇö
         // but refuse the line, not the client. Dropping the connection is far
         // more destructive than it sounds: closing the socket runs UnlockAll(),
         // which pulls every streamed window off the virtual display and back
@@ -2198,7 +2198,7 @@ int SetSunshineCredentials() {
     }
 
     // Prove they work now rather than failing later, mid-pairing. An empty PIN is
-    // rejected by Sunshine, but only after it has checked the credentials — so a
+    // rejected by Sunshine, but only after it has checked the credentials ΓÇö so a
     // 401 distinguishes bad credentials from a bad PIN.
     const HttpResult reply = PostToSunshine(L"/api/pin", "{\"pin\":\"\",\"name\":\"SolStream\"}",
                                             user, password, g_sunshine_web_port);
@@ -2229,8 +2229,8 @@ int wmain(int argc, wchar_t** argv) {
         } else if (arg == L"--sunshine-port" && i + 1 < argc) {
             g_sunshine_web_port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         } else if (arg == L"--bind" && i + 1 < argc) {
-            // Prefer a single address — a VPN interface such as Tailscale, whose
-            // peers are already device-authenticated — over every interface.
+            // Prefer a single address ΓÇö a VPN interface such as Tailscale, whose
+            // peers are already device-authenticated ΓÇö over every interface.
             bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
             bind_address = "0.0.0.0";
@@ -2301,7 +2301,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     // EXCLUSIVE, not REUSEADDR. On Windows SO_REUSEADDR lets a second process
-    // bind a port that is already bound — it does not merely permit reusing a
+    // bind a port that is already bound ΓÇö it does not merely permit reusing a
     // port in TIME_WAIT as it does on unix. A second agent, in another user's
     // session, would therefore start successfully, and which of the two a given
     // connection reached would be indeterminate: the Mac could silently end up
@@ -2332,7 +2332,7 @@ int wmain(int argc, wchar_t** argv) {
     //
     // The agent starts at logon, and a VPN interface does not. Binding a Tailscale
     // address the moment the desktop appears fails with WSAEADDRNOTAVAIL, because
-    // the interface is seconds away from existing — so the agent would exit and
+    // the interface is seconds away from existing ΓÇö so the agent would exit and
     // the Mac would find nothing there until somebody started it by hand. The same
     // applies to DHCP on a slow network.
     bool bound = false;

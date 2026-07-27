@@ -107,6 +107,25 @@ final class CertificateTests: XCTestCase {
         XCTAssertFalse(ClientIdentity.isCompromisedSeed(fresh.certPEM))
     }
 
+    /// The SPKI we derive must be byte-identical to what OpenSSL produces for
+    /// the same certificate — it is what curl hashes for `--pinnedpubkey`, so a
+    /// difference of one byte pins a host to something no TLS stack will ever
+    /// match, locking the client out of it permanently.
+    func testSubjectPublicKeyInfoMatchesOpenSSL() throws {
+        let identity = try XCTUnwrap(CertificateFactory.makeIdentity())
+        let der = try XCTUnwrap(Self.der(fromPEM: identity.certPEM))
+        let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, der as CFData))
+        let key = try XCTUnwrap(SecCertificateCopyKey(certificate))
+        let spki = try XCTUnwrap(CertificateFactory.subjectPublicKeyInfo(for: key))
+
+        guard let certPath = ProcessInfo.processInfo.environment["SOLSTREAM_SPKI_CERT"],
+              let spkiPath = ProcessInfo.processInfo.environment["SOLSTREAM_SPKI_OUT"] else {
+            throw XCTSkip("set SOLSTREAM_SPKI_CERT and SOLSTREAM_SPKI_OUT to cross-check with openssl")
+        }
+        try identity.certPEM.write(toFile: certPath, atomically: true, encoding: .utf8)
+        try spki.write(to: URL(fileURLWithPath: spkiPath))
+    }
+
     // MARK: - Helpers
 
     /// The `tbsCertificate` element *including* its own tag and length, which is
