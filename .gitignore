@@ -22,3 +22,6 @@ references/*
 
 # Cross-compiled agent binary
 windows/SolStreamAgent/*.exe
+
+# Packaged client (built by scripts/package-macos.sh)
+macos/SolStreamClient/*.dmg

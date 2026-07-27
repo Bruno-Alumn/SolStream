@@ -304,6 +304,21 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Say everything the host has forgotten.
+    ///
+    /// A dropped agent connection runs `UnlockAll` on the host, which hands
+    /// every managed window its resize border back, drops it out of the topmost
+    /// band and puts it back where it was before the session — on the real
+    /// desktop, not the virtual display this crop is taken from. So a reconnect
+    /// is not just a socket coming back: without this the picture stays live
+    /// while showing whatever now occupies those pixels.
+    func reassertOnHost() {
+        guard !isClosing else { return }
+        Log.info("[window] agent reconnected; re-applying this window's placement")
+        agent.setTopmost(windowID: remoteWindowID, true)
+        placeAndLock()
+    }
+
     /// Place the host window to match this one, then stop it being resized there.
     ///
     /// The initial placement goes through exactly the same path as a drag, so

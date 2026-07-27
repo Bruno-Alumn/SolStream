@@ -1916,6 +1916,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
     }
 
+    // Answered before the authentication check, and doing nothing: it exists so
+    // a client that is simply idle — sitting in the application picker with no
+    // window open — does not look like a client that has vanished. The recv
+    // timeout below cannot tell those apart, and dropping the wrong one leaves
+    // the Mac holding a socket that is gone, on which every later command fails
+    // silently.
+    if (command == "ping") {
+        return "{\"type\":\"pong\"}";
+    }
+
     if (command == "auth") {
         std::string supplied;
         FieldString(line, "token", supplied);

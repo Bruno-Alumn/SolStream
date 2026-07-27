@@ -647,6 +647,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .hostWindowClosed(noticedBy: "pushed by the host")
         }
 
+        // The host forgets every window it was managing when the socket drops,
+        // so a reconnect has to say it all again.
+        agent.onReconnected = { [weak self] in
+            self?.appWindows.forEach { $0.reassertOnHost() }
+        }
+
         session.connection.onControlConnected = { [weak session, weak agent] in
             guard let session else { return }
             HostCursor.apply(to: session.connection, host: host,
