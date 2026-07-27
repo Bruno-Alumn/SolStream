@@ -1047,6 +1047,42 @@ volatile LONG g_watcher_stop = 0;
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height);
 
+/// The smallest client area this window will accept, in pixels.
+///
+/// Asked of the window rather than inferred from what it does. Watching for "we
+/// asked for less and got more" sounds equivalent and is not: that is also what
+/// every failed placement looks like, and mistaking one for a minimum latches a
+/// floor the size of the whole display, which the Mac window then cannot be
+/// dragged below.
+///
+/// WM_GETMINMAXINFO is prefilled the way Windows prefills it, so an application
+/// that ignores the message still yields the system defaults rather than zeroes.
+/// Sent with a timeout because it crosses into another process, and a hung
+/// application must not take the agent with it.
+POINT MinimumClientSize(HWND window) {
+    MINMAXINFO info{};
+    info.ptMinTrackSize.x = GetSystemMetrics(SM_CXMINTRACK);
+    info.ptMinTrackSize.y = GetSystemMetrics(SM_CYMINTRACK);
+    info.ptMaxTrackSize.x = GetSystemMetrics(SM_CXMAXTRACK);
+    info.ptMaxTrackSize.y = GetSystemMetrics(SM_CYMAXTRACK);
+    DWORD_PTR unused = 0;
+    SendMessageTimeoutW(window, WM_GETMINMAXINFO, 0, (LPARAM) &info,
+                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 250, &unused);
+
+    // ptMinTrackSize is a whole-window minimum; the crop is the client area, so
+    // take the non-client furniture back off.
+    RECT furniture{0, 0, 0, 0};
+    AdjustWindowRectEx(&furniture,
+                       (DWORD) GetWindowLongPtrW(window, GWL_STYLE), FALSE,
+                       (DWORD) GetWindowLongPtrW(window, GWL_EXSTYLE));
+    POINT minimum{};
+    minimum.x = info.ptMinTrackSize.x - (furniture.right - furniture.left);
+    minimum.y = info.ptMinTrackSize.y - (furniture.bottom - furniture.top);
+    if (minimum.x < 1) { minimum.x = 1; }
+    if (minimum.y < 1) { minimum.y = 1; }
+    return minimum;
+}
+
 /// Put a locked window back if anything moved or resized it.
 DWORD WINAPI WatcherProc(LPVOID) {
     while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
@@ -1930,11 +1966,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         // would immediately drag the window back to the previous size.
         SetLockedGeometry(window, client);
         char buffer[256];
+        const POINT minimum = MinimumClientSize(window);
         std::snprintf(buffer, sizeof(buffer),
-                      "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}",
+                      "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld"
+                      ",\"minW\":%ld,\"minH\":%ld}",
                       ok ? "true" : "false",
                       client.left, client.top,
-                      client.right - client.left, client.bottom - client.top);
+                      client.right - client.left, client.bottom - client.top,
+                      minimum.x, minimum.y);
         return buffer;
     }
 

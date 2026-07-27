@@ -32,9 +32,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var resizeInFlight = false
     private var resizeAgain = false
     private var wantsSettle = false
-    /// The smallest the host application has been willing to become, in host
-    /// pixels. Learned from what it actually does, since it will not say.
-    private var hostMinimum: CGSize = .zero
 
     /// Watches for the application being closed on the host.
     private var lifeTimer: Timer?
@@ -338,11 +335,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
             return
         }
 
-        agent.place(windowID: remoteWindowID, at: requested) { [weak self] achieved in
+        agent.place(windowID: remoteWindowID, at: requested) { [weak self] placement in
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { completion?() }
-                guard let achieved else { return }
+                guard let placement else { return }
+                let achieved = placement.frame
                 // Follow what the host actually did, then clip to the canvas.
                 //
                 // An application can refuse to be as small as we asked — and it
@@ -353,7 +351,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // so the visible rectangle is what the crop and this window must
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
-                self.learnMinimumSize(requested: requested, achieved: achieved, scale: scale)
+                self.applyMinimumSize(placement.minimumSize, scale: scale)
                 let visible = achieved.intersection(self.displayRect)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
@@ -374,33 +372,30 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// Teach this window the size the host application refuses to go below.
     ///
-    /// Windows applications have minimum sizes and some resize in whole rows, so
-    /// asking for 400px wide and getting 700 back is normal. Without this the
-    /// user could drag well past that floor, see nothing happen, and then watch
-    /// the window spring back to the host's size on release. Giving AppKit the
-    /// same limit makes the drag simply stop there, which is what a local window
-    /// does.
+    /// The value is reported by the host window itself (WM_GETMINMAXINFO), not
+    /// inferred. Inferring it from "we asked for less and got more" is what the
+    /// first version did, and that is indistinguishable from a placement that
+    /// simply failed — in which case the size read back is the host window's
+    /// current one, and a floor the size of the whole display gets latched. The
+    /// macOS window then cannot be dragged smaller at all, which is exactly how
+    /// it went wrong.
     ///
-    /// Only ever grows. A limit that relaxed itself on one noisy measurement
-    /// would let the spring-back return.
-    private func learnMinimumSize(requested: CGRect, achieved: CGRect, scale: CGFloat) {
-        guard let window, scale > 0 else { return }
-        var minimum = hostMinimum
-        // A point of slack, so rounding between points and pixels is not read as
-        // a refusal.
-        if achieved.width > requested.width + 1 {
-            minimum.width = max(minimum.width, achieved.width)
+    /// Clamped to the screen regardless. A minimum larger than the display can
+    /// only be wrong, and it is the one mistake here the user cannot undo by
+    /// dragging.
+    private func applyMinimumSize(_ hostPixels: CGSize, scale: CGFloat) {
+        guard let window, scale > 0,
+              hostPixels.width > 0, hostPixels.height > 0 else { return }
+        var target = NSSize(width: (hostPixels.width / scale).rounded(),
+                            height: (hostPixels.height / scale).rounded())
+        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size {
+            target.width = min(target.width, visible.width)
+            target.height = min(target.height, visible.height)
         }
-        if achieved.height > requested.height + 1 {
-            minimum.height = max(minimum.height, achieved.height)
-        }
-        guard minimum != hostMinimum else { return }
-        hostMinimum = minimum
-        window.contentMinSize = NSSize(width: minimum.width / scale,
-                                       height: minimum.height / scale)
-        Log.info("[window] host will not go below "
-                 + "\(Int(minimum.width))x\(Int(minimum.height)); "
-                 + "this window now stops there too")
+        guard target != window.contentMinSize else { return }
+        window.contentMinSize = target
+        Log.info("[window] host minimum is \(Int(hostPixels.width))x\(Int(hostPixels.height)); "
+                 + "this window stops at \(Int(target.width))x\(Int(target.height)) points")
     }
 
     /// Make this window exactly as tall and wide as the crop it is showing.
