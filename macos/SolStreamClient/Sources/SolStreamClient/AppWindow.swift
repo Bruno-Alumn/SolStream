@@ -352,6 +352,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
                 self.applyMinimumSize(placement.minimumSize, scale: scale)
+                if placement.resizeBorder > 0 {
+                    self.inputCapture?.edgeGuard = placement.resizeBorder
+                }
                 let visible = achieved.intersection(self.displayRect)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)

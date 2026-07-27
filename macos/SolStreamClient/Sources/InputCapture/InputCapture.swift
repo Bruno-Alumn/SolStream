@@ -19,6 +19,17 @@ public final class InputCapture {
     public var sourceRect: CGRect?
     public var canvasSize: CGSize?
 
+    /// How far inside the crop to keep the host pointer, in canvas pixels.
+    ///
+    /// The outer band of a window is its resize grab area, and a drag starting
+    /// there begins a resize on the host — which is not something the user
+    /// should be able to do from inside the picture, since the macOS window
+    /// frame is what owns the size. Positions are pinned to the inside of this
+    /// band rather than dropped, so the pointer still tracks right up to the
+    /// edge of the usable area; it simply never lands on the border itself, and
+    /// so never turns into a resize arrow or starts a drag there.
+    public var edgeGuard: CGFloat = 0
+
     private weak var targetView: NSView?
     private var keyboardMonitor: Any?
     private var mouseMonitor: Any?
@@ -333,8 +344,9 @@ public final class InputCapture {
                              source: source, isFlipped: view.isFlipped)
         guard let unit = mapped else { return false }
 
-        let x = Int((source.minX + unit.x * source.width).rounded())
-        let y = Int((source.minY + unit.y * source.height).rounded())
+        let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
+        let x = Int(target.x.rounded())
+        let y = Int(target.y.rounded())
 
         positionsSent += 1
         onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
@@ -373,6 +385,24 @@ public final class InputCapture {
                            y: (fromTop - inset.y) / shown.height)
         guard (0...1).contains(unit.x), (0...1).contains(unit.y) else { return nil }
         return unit
+    }
+
+    /// Turn a unit position within the crop into a canvas coordinate, kept
+    /// `edgeGuard` pixels clear of the crop's own edges.
+    ///
+    /// The outer band of a window is its resize grab area, so a pointer that can
+    /// reach it can start a host-side resize — which belongs to the macOS window
+    /// frame, not to the picture. Pinned rather than dropped, so the pointer
+    /// still tracks to the edge of the usable area instead of freezing short of
+    /// it.
+    static func canvasPoint(unit: CGPoint, source: CGRect, edgeGuard: CGFloat) -> CGPoint {
+        // A crop narrower than two guards would invert the safe rectangle, so
+        // the guard gives way rather than the geometry.
+        let insetX = min(edgeGuard, max(0, (source.width - 1) / 2))
+        let insetY = min(edgeGuard, max(0, (source.height - 1) / 2))
+        let safe = source.insetBy(dx: insetX, dy: insetY)
+        return CGPoint(x: min(max(source.minX + unit.x * source.width, safe.minX), safe.maxX),
+                       y: min(max(source.minY + unit.y * source.height, safe.minY), safe.maxY))
     }
 
     /// The same mapping, but pinned to the edge instead of refused when the

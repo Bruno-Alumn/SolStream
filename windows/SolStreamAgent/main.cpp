@@ -1047,6 +1047,22 @@ volatile LONG g_watcher_stop = 0;
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height);
 
+/// How wide the window's resize grab area is, in pixels, at its own DPI.
+///
+/// The Mac keeps the pointer this far inside the crop so a drag can never start
+/// a resize on the host. Read per-window rather than assumed: the streamed
+/// display runs at a different scaling from the primary one, and the grab area
+/// is in physical pixels, so a constant would be right on one monitor and wrong
+/// on the other.
+int ResizeBorderThickness(HWND window) {
+    const UINT dpi = GetDpiForWindow(window);
+    if (dpi == 0) {
+        return GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+    }
+    return GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+         + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
 /// The smallest client area this window will accept, in pixels.
 ///
 /// Asked of the window rather than inferred from what it does. Watching for "we
@@ -1969,11 +1985,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         const POINT minimum = MinimumClientSize(window);
         std::snprintf(buffer, sizeof(buffer),
                       "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld"
-                      ",\"minW\":%ld,\"minH\":%ld}",
+                      ",\"minW\":%ld,\"minH\":%ld,\"border\":%d}",
                       ok ? "true" : "false",
                       client.left, client.top,
                       client.right - client.left, client.bottom - client.top,
-                      minimum.x, minimum.y);
+                      minimum.x, minimum.y, ResizeBorderThickness(window));
         return buffer;
     }
 
