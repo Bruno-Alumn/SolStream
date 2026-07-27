@@ -1,5 +1,6 @@
 import AppKit
 import SolStreamLogging
+import StreamConnection
 
 /// The initial "which host?" window.
 ///
@@ -16,6 +17,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private let hintLabel = NSTextField(labelWithString: "")
 
     private let onConnect: (String) -> Void
+
+    /// Hosts Sunshine is advertising on this network. A convenience only — mDNS
+    /// does not cross subnets and plenty of networks block multicast, so the text
+    /// field is never taken away.
+    private let browser = HostBrowser()
+    private var discovered: [DiscoveredHost] = []
 
     init(onConnect: @escaping (String) -> Void) {
         self.onConnect = onConnect
@@ -95,10 +102,52 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(hostField)
         NSApp.activate(ignoringOtherApps: true)
+        startDiscovery()
     }
 
     func close() {
+        browser.stop()
         window.orderOut(nil)
+    }
+
+    // MARK: - Discovery
+
+    private func startDiscovery() {
+        browser.onChange = { [weak self] hosts in
+            guard let self else { return }
+            self.discovered = hosts
+            self.refreshHostList()
+        }
+        browser.start()
+    }
+
+    /// Merge discovered hosts into the combo box, in front of the recents.
+    ///
+    /// Deliberately non-destructive: whatever the user has typed stays put, so a
+    /// host appearing mid-keystroke cannot overwrite it.
+    private func refreshHostList() {
+        let typed = hostField.stringValue
+        let targets = discovered.map(\.connectTarget)
+        let recents = Self.recentHosts.filter { !targets.contains($0) }
+
+        hostField.removeAllItems()
+        hostField.addItems(withObjectValues: targets + recents)
+        hostField.stringValue = typed
+
+        if discovered.isEmpty {
+            hintLabel.stringValue = "First connection shows a PIN to enter in Sunshine's web UI."
+        } else {
+            let names = discovered.map(\.name).joined(separator: ", ")
+            hintLabel.stringValue = discovered.count == 1
+                ? "Found \(names) on this network — pick it from the list, or type an address."
+                : "Found \(discovered.count) hosts: \(names)."
+        }
+        hintLabel.textColor = .tertiaryLabelColor
+
+        // Offer the one obvious choice rather than making them open the menu.
+        if typed.isEmpty, let first = targets.first {
+            hostField.stringValue = first
+        }
     }
 
     // MARK: - Actions

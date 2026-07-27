@@ -149,19 +149,64 @@ function Find-VddAdapter {
 
 # ── 1. Teach the driver the mode ─────────────────────────────────────────────
 
+# Every Retina Mac size we know about, in host pixels (points x 2), plus the
+# requested one. Seeding the whole ladder up front is what keeps this out of the
+# streaming path: a device restart is needed to ADD a mode, never to switch
+# between modes already in the list. So pay it once here, then any Mac that
+# connects later just calls ChangeDisplaySettingsEx.
+#
+# All are within 4096 in both axes, which is NVENC's H.264 limit — a larger canvas
+# starts a session that never delivers a frame.
+$LADDER = @(
+    @{w=2560; h=1440},   # 1280x720  @2x, and a 1440p panel at 100%
+    @{w=2560; h=1600},   # 1280x800  @2x
+    @{w=2880; h=1800},   # 1440x900  @2x — 13" Air default
+    @{w=2940; h=1912},   # 1470x956  @2x — 14" MBP default
+    @{w=3024; h=1964},   # 1512x982  @2x — 14" MBP native
+    @{w=3420; h=2214},   # 1710x1107 @2x — 16" MBP default
+    @{w=3456; h=2234},   # 1728x1117 @2x — 16" MBP native
+    @{w=3600; h=2338},   # 1800x1169 @2x
+    @{w=3840; h=2160}    # 4K panel at 100%
+)
+
+$wanted = @($LADDER)
+if (-not ($wanted | Where-Object { $_.w -eq $Width -and $_.h -eq $Height })) {
+    $wanted += @{w=$Width; h=$Height}
+}
+foreach ($m in $wanted) {
+    if ($m.w -gt 4096 -or $m.h -gt 4096) {
+        throw "${($m.w)}x${($m.h)} exceeds NVENC's 4096 limit; a session at that size never delivers video."
+    }
+}
+
 $raw = [System.IO.File]::ReadAllText($settings)
+$have = @{}
+foreach ($m in [regex]::Matches($raw, '<width>\s*(\d+)\s*</width>\s*<height>\s*(\d+)\s*</height>')) {
+    $have["$($m.Groups[1].Value)x$($m.Groups[2].Value)"] = $true
+}
+$missing = @($wanted | Where-Object { -not $have.ContainsKey("$($_.w)x$($_.h)") })
+
 $modeAdded = $false
-if ($raw -notmatch ("<width>\s*{0}\s*</width>\s*<height>\s*{1}\s*</height>" -f $Width, $Height)) {
+if ($missing.Count -gt 0) {
     Copy-Item $settings "$settings.solstream-backup" -Force -ErrorAction SilentlyContinue
     $idx = $raw.LastIndexOf('</resolutions>')
     if ($idx -lt 0) { throw "vdd_settings.xml has no <resolutions> block." }
-    $block = "        <resolution>`r`n            <width>$Width</width>`r`n            <height>$Height</height>`r`n            <refresh_rate>60</refresh_rate>`r`n        </resolution>`r`n    "
-    [System.IO.File]::WriteAllText($settings, $raw.Substring(0, $idx) + $block + $raw.Substring($idx),
+    # One refresh rate per added resolution, not the file's global list: the driver
+    # replicates every <g_refresh_rate> across every resolution, so the mode count
+    # is (resolutions x global rates) and a long ladder against six global rates is
+    # how the target-mode buffer overflows. That overflow is the nastiest failure
+    # here — the driver logs "Input buffer is too small for target modes" and then
+    # reports success, so it presents as a healthy device with no display at all.
+    $block = ''
+    foreach ($m in $missing) {
+        $block += "        <resolution>`r`n            <width>$($m.w)</width>`r`n            <height>$($m.h)</height>`r`n            <refresh_rate>60</refresh_rate>`r`n        </resolution>`r`n"
+    }
+    [System.IO.File]::WriteAllText($settings, $raw.Substring(0, $idx) + $block + "    " + $raw.Substring($idx),
                                    (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host "Added ${Width}x${Height} to vdd_settings.xml"
+    Write-Host ("Added to vdd_settings.xml: " + (($missing | ForEach-Object { "$($_.w)x$($_.h)" }) -join ', '))
     $modeAdded = $true
 } else {
-    Write-Host "${Width}x${Height} already offered by the driver"
+    Write-Host "All ladder modes already offered by the driver"
 }
 
 # The driver reads that file when the device starts, so a new mode needs a cycle.

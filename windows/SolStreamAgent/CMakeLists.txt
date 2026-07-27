@@ -10,7 +10,7 @@ set_target_properties(SolStreamAgent PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-target_link_libraries(SolStreamAgent PRIVATE user32 ws2_32 dwmapi shell32)
+target_link_libraries(SolStreamAgent PRIVATE user32 ws2_32 dwmapi shell32 winhttp crypt32)
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
 # of the API, on both toolchains.

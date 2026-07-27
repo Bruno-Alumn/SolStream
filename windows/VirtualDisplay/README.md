@@ -23,8 +23,15 @@ No dongle offers 3600×2338. Its EDID has a fixed mode list — you get 2560×14
 never show). A virtual display's mode list is a config file, so it can be made to
 match the client exactly and Sunshine scales by 1.0.
 
-The cost is that it is a kernel-mode driver: an install, admin rights, and
-something that can break across Windows updates.
+The cost is a driver install and admin rights, plus something that can break
+across Windows updates.
+
+It is **not** a kernel-mode driver, despite what an earlier version of this file
+said. `MttVDD.inf` declares `UmdfService=MttVDD`, `UmdfLibraryVersion=2.25.0` and
+`UmdfExtensions = IddCx0102` — it is a user-mode driver on the User-Mode Driver
+Framework, which is what IddCx indirect displays are. It cannot bugcheck the
+machine; a crash takes out the driver host process, not Windows. Worth knowing
+before weighing up whether to ship it to other people.
 
 ## Driver
 

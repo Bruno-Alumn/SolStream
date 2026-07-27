@@ -76,6 +76,7 @@ mean a second connection blocks in the accept backlog rather than being refused.
 | `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary"}]}` |
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","captionInset","occluded"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
+| `{"cmd":"pair","pin":"1234","name":"…"}` | `{"type":"paired","ok":bool,"reason","message"}` |
 | `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}` |
 | `{"cmd":"window","id":N}` | `{"type":"window","id":N,"alive":bool,"minimized":bool,"x","y","w","h","captionInset"}` |
 | `{"cmd":"place","id":N,"x":..,"y":..,"w":..,"h":..}` | `{"type":"placed","ok":true,"x","y","w","h"}` |
@@ -106,6 +107,37 @@ seconds for a cold start. It watches for a window that was not open before,
 preferring one belonging to the process it started; if none appears it falls back
 to a newly-focused window, because an application that was already running
 usually reuses its existing window instead of opening another.
+
+## Pairing without the web UI
+
+Sunshine's own pairing asks the user to open its web UI, get past a self-signed
+certificate warning, create credentials and find the PIN page. `pair` does that
+step for them: the Mac sends the PIN it is displaying and the agent POSTs it to
+Sunshine's local `/api/pin`.
+
+Two things make that possible. `/api/pin` takes HTTP Basic auth, and its CSRF
+check is skipped outright for a request carrying neither `Origin` nor `Referer` —
+those cannot be browser-initiated, so a non-browser client needs no token
+(`confighttp.cpp`, `validate_csrf_token`). The reply is judged on its body rather
+than its status, because `nvhttp::pin()` returns false inside an HTTP 200 when no
+client is actually waiting to pair.
+
+Sunshine stores only a salted hash of its web UI password, so the plaintext cannot
+be read back off disk. Supply it once:
+
+```
+SolStreamAgent.exe --set-sunshine-credentials
+```
+
+It prompts (the password is never taken as an argument, where the process list
+would expose it), stores it with DPAPI under `%LOCALAPPDATA%\SolStream\`, and
+immediately checks it against Sunshine so a wrong password fails now rather than
+mid-pairing. DPAPI ties the blob to the Windows *user account*, not the session —
+verified by writing it from an SSH session (session 0) and decrypting it from the
+agent in the console session.
+
+With no credentials stored, `pair` returns `reason:"no-credentials"` and the Mac
+falls back to displaying the PIN, which is no worse than Sunshine's own flow.
 
 Store/UWP applications are **not** listed by `apps`: it walks the Start Menu for
 `.lnk` shortcuts, and packaged apps (Notepad and Calculator on Windows 11) are

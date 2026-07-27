@@ -360,8 +360,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // later would mean tearing the session down and reconnecting. Resizing a
         // window therefore resizes the WINDOW within a fixed canvas — no display
         // mode change, no reconnect, no black frame.
-        config.width = display.width
-        config.height = display.height
+        // Clamped to NVENC's H.264 maximum. Above it the handshake succeeds and no
+        // frame ever arrives, with the reason only in Sunshine's own log — and a
+        // 16" MacBook Pro at More Space asks for 4112x2658, so this is reachable
+        // with ordinary hardware rather than a pathological setup.
+        let encoderLimit = 4096
+        config.width = min(display.width, encoderLimit)
+        config.height = min(display.height, encoderLimit)
+        if config.width != display.width || config.height != display.height {
+            Log.info("[canvas] capture display is \(display.width)x\(display.height); "
+                     + "clamped to \(config.width)x\(config.height) for the encoder")
+        }
 
         Self.reportIdealCanvas(display: display)
 
@@ -413,8 +422,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appWindows.forEach { $0.setError("Stream failed", detail: message) }
             case .waitingForVideo:
                 self.appWindows.forEach { $0.setStatus("Waiting for video") }
+            case .awaitingPin(let pin):
+                self.brokerPairing(pin: pin, host: host, agent: agent)
             default:
                 break
+            }
+        }
+    }
+
+    /// Get the host to approve its own pairing PIN.
+    ///
+    /// Sunshine's own flow asks the user to open its web UI, get past a
+    /// self-signed certificate warning, create credentials and find the PIN page.
+    /// The agent is already on the host and can hand the PIN to Sunshine directly,
+    /// so all of that disappears. If the host has no stored credentials the PIN is
+    /// shown as before — degraded, but never worse than the original flow.
+    private func brokerPairing(pin: String, host: String, agent: AgentConnection) {
+        let name = Host.current().localizedName ?? "SolStream client"
+        appWindows.forEach { $0.setStatus("Pairing with \(host)", detail: "Asking the host to approve…") }
+        Log.info("[pair] asking the agent to approve PIN for \"\(name)\"")
+
+        agent.pair(pin: pin, clientName: name) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .paired:
+                    Log.info("[pair] the host approved this Mac; no PIN entry needed")
+                    self.appWindows.forEach {
+                        $0.setStatus("Paired", detail: "Starting the stream…")
+                    }
+                case .needsHostSetup(let detail):
+                    Log.info("[pair] host cannot approve automatically: \(detail)")
+                    self.appWindows.forEach {
+                        $0.setPairingPin(pin, host: host, reason:
+                            "Run SolStreamAgent.exe --set-sunshine-credentials on the host "
+                            + "once to skip this step in future.")
+                    }
+                case .failed(let detail):
+                    Log.error("[pair] brokered pairing failed: \(detail)")
+                    self.appWindows.forEach { $0.setPairingPin(pin, host: host, reason: detail) }
+                }
             }
         }
     }

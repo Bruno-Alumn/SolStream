@@ -33,6 +33,8 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <wincrypt.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -56,6 +58,10 @@ constexpr unsigned short kDefaultPort = 47997;
 // opt-in and prints a warning.
 constexpr const char* kLoopback = "127.0.0.1";
 constexpr int kProtocolVersion = 1;
+
+/// Sunshine's web UI / config API port. It is the stream port plus one, so a host
+/// that moved Sunshine off its default needs --sunshine-port to match.
+unsigned short g_sunshine_web_port = 47990;
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -527,6 +533,238 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     return fallback ? IdFromWindow(fallback) : 0;
 }
 
+// ── Sunshine pairing ─────────────────────────────────────────────────────────
+//
+// Sunshine pairs by showing a PIN on the client and having a human type it into
+// Sunshine's web UI on the host. For a non-technical user that means a browser, a
+// self-signed-certificate warning, creating web UI credentials, and finding the
+// PIN page — which is where most people give up.
+//
+// The agent already runs on the host, so it can do that step itself: the Mac
+// sends the PIN it is displaying and the agent POSTs it to Sunshine's own local
+// API. Reading confighttp.cpp, /api/pin needs HTTP Basic auth, and its CSRF check
+// is skipped outright for requests carrying neither Origin nor Referer — those
+// cannot be browser-initiated, so a non-browser client needs no token.
+//
+// Sunshine stores only a salted hash of its web UI password, so the plaintext
+// cannot be recovered from disk. It is supplied once via
+// --set-sunshine-credentials and kept encrypted with DPAPI, which ties it to this
+// Windows user account: another account on the same machine cannot read it.
+
+std::wstring CredentialPath(bool create_directory) {
+    wchar_t buffer[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
+        return {};
+    }
+    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
+    if (create_directory) {
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    return dir + L"\\sunshine.cred";
+}
+
+bool StoreSunshineCredentials(const std::string& user, const std::string& password) {
+    const std::wstring path = CredentialPath(true);
+    if (path.empty()) {
+        return false;
+    }
+    std::string plain = user;
+    plain.push_back('\n');
+    plain += password;
+
+    DATA_BLOB in{static_cast<DWORD>(plain.size()), reinterpret_cast<BYTE*>(plain.data())};
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"SolStream Sunshine credentials", nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        Log("[agent] CryptProtectData failed: %lu", GetLastError());
+        return false;
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = false;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = WriteFile(file, out.pbData, out.cbData, &written, nullptr) && written == out.cbData;
+        CloseHandle(file);
+    }
+    SecureZeroMemory(plain.data(), plain.size());
+    LocalFree(out.pbData);
+    return ok;
+}
+
+bool LoadSunshineCredentials(std::string& user, std::string& password) {
+    const std::wstring path = CredentialPath(false);
+    if (path.empty()) {
+        return false;
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER size{};
+    std::vector<BYTE> encrypted;
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart < (1 << 20)) {
+        encrypted.resize(static_cast<size_t>(size.QuadPart));
+        DWORD read = 0;
+        if (!ReadFile(file, encrypted.data(), (DWORD) encrypted.size(), &read, nullptr)
+            || read != encrypted.size()) {
+            encrypted.clear();
+        }
+    }
+    CloseHandle(file);
+    if (encrypted.empty()) {
+        return false;
+    }
+
+    DATA_BLOB in{static_cast<DWORD>(encrypted.size()), encrypted.data()};
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
+                            CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        Log("[agent] CryptUnprotectData failed: %lu", GetLastError());
+        return false;
+    }
+    const std::string plain(reinterpret_cast<char*>(out.pbData), out.cbData);
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+
+    const size_t split = plain.find('\n');
+    if (split == std::string::npos) {
+        return false;
+    }
+    user = plain.substr(0, split);
+    password = plain.substr(split + 1);
+    return !user.empty() && !password.empty();
+}
+
+std::string Base64(const std::string& raw) {
+    DWORD needed = 0;
+    if (!CryptBinaryToStringA(reinterpret_cast<const BYTE*>(raw.data()), (DWORD) raw.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &needed)) {
+        return {};
+    }
+    std::string out(needed, '\0');
+    if (!CryptBinaryToStringA(reinterpret_cast<const BYTE*>(raw.data()), (DWORD) raw.size(),
+                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out.data(), &needed)) {
+        return {};
+    }
+    out.resize(strlen(out.c_str()));
+    return out;
+}
+
+struct HttpResult {
+    bool sent = false;
+    DWORD status = 0;
+    std::string body;
+    std::string error;
+};
+
+/// POST to Sunshine's config API on loopback.
+HttpResult PostToSunshine(const wchar_t* path, const std::string& body,
+                          const std::string& user, const std::string& password,
+                          INTERNET_PORT port) {
+    HttpResult result;
+    HINTERNET session = WinHttpOpen(L"SolStreamAgent/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        result.error = "WinHttpOpen failed";
+        return result;
+    }
+    HINTERNET connection = WinHttpConnect(session, L"127.0.0.1", port, 0);
+    HINTERNET request = connection
+        ? WinHttpOpenRequest(connection, L"POST", path, nullptr, WINHTTP_NO_REFERER,
+                             WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+        : nullptr;
+    if (!request) {
+        result.error = "could not open a request to Sunshine";
+        if (connection) WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return result;
+    }
+
+    // Sunshine's web UI serves a self-signed certificate. Validation is waived
+    // only because this connection never leaves the loopback interface.
+    DWORD security = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+    WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &security, sizeof(security));
+
+    // No Origin and no Referer, deliberately: that is what lets Sunshine skip its
+    // CSRF check for a non-browser client.
+    const std::string headers = "Content-Type: application/json\r\nAuthorization: Basic "
+                                + Base64(user + ":" + password) + "\r\n";
+    const std::wstring wide_headers = ToWide(headers);
+    WinHttpAddRequestHeaders(request, wide_headers.c_str(), (DWORD) -1L,
+                             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+
+    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                           const_cast<char*>(body.data()), (DWORD) body.size(),
+                           (DWORD) body.size(), 0)
+        && WinHttpReceiveResponse(request, nullptr)) {
+        result.sent = true;
+        DWORD status = 0;
+        DWORD length = sizeof(status);
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX);
+        result.status = status;
+        for (;;) {
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
+                break;
+            }
+            std::string chunk(available, '\0');
+            DWORD read = 0;
+            if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) {
+                break;
+            }
+            chunk.resize(read);
+            result.body += chunk;
+            if (result.body.size() > 64 * 1024) {
+                break;
+            }
+        }
+    } else {
+        result.error = "Sunshine did not answer on 127.0.0.1:" + std::to_string(port)
+                     + " (error " + std::to_string(GetLastError()) + ")";
+    }
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return result;
+}
+
+/// Hand a client's pairing PIN to Sunshine, so nobody has to open its web UI.
+std::string PairJson(const std::string& pin, const std::string& name, INTERNET_PORT port) {
+    std::string user, password;
+    if (!LoadSunshineCredentials(user, password)) {
+        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"no-credentials\","
+               "\"message\":\"No Sunshine credentials stored. Run "
+               "SolStreamAgent.exe --set-sunshine-credentials on the host once.\"}";
+    }
+    const std::string body = "{\"pin\":\"" + JsonEscape(pin) + "\",\"name\":\""
+                           + JsonEscape(name) + "\"}";
+    const HttpResult reply = PostToSunshine(L"/api/pin", body, user, password, port);
+    SecureZeroMemory(password.data(), password.size());
+
+    if (!reply.sent) {
+        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"unreachable\",\"message\":\""
+               + JsonEscape(reply.error) + "\"}";
+    }
+    if (reply.status == 401) {
+        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"bad-credentials\","
+               "\"message\":\"Sunshine rejected the stored credentials.\"}";
+    }
+    // nvhttp::pin returns false when no client is actually waiting to pair, which
+    // still comes back as HTTP 200 — so the body decides, not the status.
+    const bool ok = reply.status == 200 && reply.body.find("\"status\":true") != std::string::npos;
+    Log("[agent] pair pin -> HTTP %lu %s", reply.status, ok ? "accepted" : "rejected");
+    if (ok) {
+        return "{\"type\":\"paired\",\"ok\":true}";
+    }
+    return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"refused\",\"message\":\""
+           + JsonEscape(reply.body.substr(0, 200)) + "\"}";
+}
+
 // ── Placement ────────────────────────────────────────────────────────────────
 
 /// Place a window so its CLIENT AREA lands exactly on the requested rectangle.
@@ -742,6 +980,19 @@ std::string HandleCommand(const std::string& line) {
         return AppsJson(EnumerateApps());
     }
 
+    if (command == "pair") {
+        std::string pin;
+        if (!FieldString(line, "pin", pin)) {
+            return "{\"type\":\"error\",\"message\":\"pair needs pin\"}";
+        }
+        std::string name;
+        FieldString(line, "name", name);
+        if (name.empty()) {
+            name = "SolStream client";
+        }
+        return PairJson(pin, name, g_sunshine_web_port);
+    }
+
     if (command == "window") {
         long long id = 0;
         if (!FieldNumber(line, "id", id)) {
@@ -925,16 +1176,92 @@ void ServeClient(SOCKET client) {
 
 }  // namespace
 
+/// Read one line from stdin without echoing it, for the password prompt.
+std::string ReadLineHidden() {
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    const bool console = GetConsoleMode(input, &mode) != 0;
+    if (console) {
+        SetConsoleMode(input, mode & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
+    }
+    std::string line;
+    int ch = 0;
+    while ((ch = std::fgetc(stdin)) != EOF && ch != '\n') {
+        if (ch != '\r') {
+            line.push_back(static_cast<char>(ch));
+        }
+    }
+    if (console) {
+        SetConsoleMode(input, mode);
+        std::fputs("\n", stdout);
+    }
+    return line;
+}
+
+/// One-time setup: remember Sunshine's web UI credentials so the agent can pair
+/// clients on the user's behalf.
+///
+/// Prompted rather than taken as an argument, because a password on a command line
+/// is visible to every process on the machine through the process list.
+int SetSunshineCredentials() {
+    std::fputs("Sunshine web UI username: ", stdout);
+    std::fflush(stdout);
+    std::string user;
+    int ch = 0;
+    while ((ch = std::fgetc(stdin)) != EOF && ch != '\n') {
+        if (ch != '\r') {
+            user.push_back(static_cast<char>(ch));
+        }
+    }
+    std::fputs("Sunshine web UI password: ", stdout);
+    std::fflush(stdout);
+    const std::string password = ReadLineHidden();
+
+    if (user.empty() || password.empty()) {
+        std::fputs("Nothing stored: both a username and a password are required.\n", stderr);
+        return 1;
+    }
+    if (!StoreSunshineCredentials(user, password)) {
+        std::fputs("Could not store the credentials.\n", stderr);
+        return 1;
+    }
+
+    // Prove they work now rather than failing later, mid-pairing. An empty PIN is
+    // rejected by Sunshine, but only after it has checked the credentials — so a
+    // 401 distinguishes bad credentials from a bad PIN.
+    const HttpResult reply = PostToSunshine(L"/api/pin", "{\"pin\":\"\",\"name\":\"SolStream\"}",
+                                            user, password, g_sunshine_web_port);
+    if (!reply.sent) {
+        std::fprintf(stdout, "Stored, but Sunshine could not be reached: %s\n", reply.error.c_str());
+        return 0;
+    }
+    if (reply.status == 401) {
+        std::fputs("Stored, but Sunshine REJECTED them. Re-run with the right ones.\n", stderr);
+        return 1;
+    }
+    std::fputs("Stored and accepted by Sunshine. Pairing will no longer need the web UI.\n", stdout);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     unsigned short port = kDefaultPort;
     bool listen_all = false;
+    bool set_credentials = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--port" && i + 1 < argc) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
+        } else if (arg == L"--sunshine-port" && i + 1 < argc) {
+            g_sunshine_web_port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         } else if (arg == L"--listen-all") {
             listen_all = true;
+        } else if (arg == L"--set-sunshine-credentials") {
+            set_credentials = true;
         }
+    }
+
+    if (set_credentials) {
+        return SetSunshineCredentials();
     }
 
     // Without this every coordinate we read or write is silently rescaled by
