@@ -197,7 +197,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.picker = picker
         picker.show()
 
-        agent.onState = { [weak picker] state in
+        // [weak agent] throughout: `agent` stores these closures, so a strong
+        // capture makes it retain itself — deinit never runs, the socket is never
+        // cancelled, and in onDisplays below the AppPicker and its icon cache
+        // (raw BGRA, one entry per window and per Start Menu app scrolled past)
+        // are pinned to it as well.
+        agent.onState = { [weak picker, weak agent] state in
             switch state {
             case .failed(let message):
                 DispatchQueue.main.async {
@@ -210,7 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             picker?.showFailure("\(host) needs a pairing token to go any further.")
                             return
                         }
-                        agent.supplyToken(token)
+                        agent?.supplyToken(token)
                     }
                 }
             default:
@@ -220,12 +225,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Both lists, then show them together — a half-populated picker that
         // grows under the cursor is worse than a moment's wait.
-        agent.onDisplays = { [weak self] _ in
+        agent.onDisplays = { [weak self, weak agent, weak picker] _ in
+            guard let agent else { return }
             agent.windows { windows in
                 agent.apps { apps in
                     DispatchQueue.main.async {
                         guard self != nil else { return }
-                        picker.present(windows: windows, apps: apps)
+                        picker?.present(windows: windows, apps: apps)
                     }
                 }
             }
@@ -252,7 +258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             }
         }
-        agent.onDisplays = { [weak self] _ in
+        agent.onDisplays = { [weak self, weak agent] _ in
+            guard let agent else { return }
             agent.apps { apps in
                 guard let match = apps.first(where: {
                     $0.name.localizedCaseInsensitiveContains(query)
@@ -458,8 +465,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        agent.onDisplays = { [weak self] displays in
-            guard let self,
+        agent.onDisplays = { [weak self, weak agent] displays in
+            guard let self, let agent,
                   let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
                 Log.error("[app] host reported no displays")
                 return

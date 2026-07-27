@@ -46,6 +46,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     var onClose: (() -> Void)?
 
+    /// Backstop for any path that deallocates the window without a close
+    /// notification — a run-loop timer outlives its target quite happily.
+    deinit {
+        lifeTimer?.invalidate()
+        qualityTimer?.invalidate()
+    }
+
     init(session: StreamSession, agent: AgentConnection,
          remote: RemoteWindow, display: RemoteDisplay, tile: CGRect) {
         self.session = session
@@ -355,6 +362,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
         isClosing = true
         lifeTimer?.invalidate()
         lifeTimer = nil
+        // The quality poll was stepped straight past here. Its block captures
+        // [weak self], so the window itself still went away and the leak never
+        // showed up as a retain cycle — but RunLoop.main kept the timer forever
+        // and went on waking the main thread once a second, per closed window,
+        // for the rest of the process's life.
+        qualityTimer?.invalidate()
+        qualityTimer = nil
         resizeWork?.cancel()
         agent.setResizeLock(windowID: remoteWindowID, false)
         agent.setTopmost(windowID: remoteWindowID, false)

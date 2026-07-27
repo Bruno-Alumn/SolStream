@@ -144,15 +144,29 @@ if [ "$DO_NOTARIZE" = true ]; then
     else
         # Option B: Apple ID (interactive)
         echo "No API key found. Using Apple ID..."
+
+        # The Team ID is the 10 characters in brackets at the end of the
+        # certificate's common name -- "Developer ID Application: Name (AB12CD34EF)".
+        # This used to reuse the awk '{print $2}' pipeline from the signing step,
+        # which yields the certificate's SHA-1 fingerprint instead: notarytool
+        # would reject it, after asking for a password.
+        TEAM_ID=$(security find-identity -v -p codesigning \
+            | grep "Developer ID Application" | head -1 \
+            | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')
+        if [ -z "$TEAM_ID" ]; then
+            echo "ERROR: Could not read a Team ID from the Developer ID certificate."
+            echo "Run: security find-identity -v -p codesigning"
+            exit 1
+        fi
+        echo "Team ID: $TEAM_ID"
+
         read -rp "Apple ID: " APPLE_ID
         read -rsp "App-specific password: " APP_PASSWORD
         echo ""
         xcrun notarytool submit "$DMG_NAME" \
             --apple-id "$APPLE_ID" \
             --password "$APP_PASSWORD" \
-            --team-id "$(security find-identity -v -p codesigning \
-                | grep "Developer ID Application" | head -1 \
-                | awk '{print $2}')" \
+            --team-id "$TEAM_ID" \
             --wait
     fi
 
