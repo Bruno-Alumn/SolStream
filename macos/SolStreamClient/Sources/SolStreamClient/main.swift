@@ -610,6 +610,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Not on `.streaming`: that only means video is arriving. A resumed
+        // session is already sending it, so the first frame can land before PLAY
+        // returns and the control stream exists — and synthetic keys sent then
+        // go nowhere at all.
+        session.connection.onControlConnected = { [weak session] in
+            guard let session else { return }
+            HostCursor.apply(to: session.connection, host: host)
+        }
+
         session.onPhase = { [weak self] phase in
             guard let self else { return }
             switch phase {
@@ -761,6 +770,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostMenu.addItem(withTitle: "Disconnect",
                          action: #selector(disconnectHost), keyEquivalent: "d")
         hostMenu.addItem(.separator())
+        let cursorItem = NSMenuItem(title: "Hide the PC's Cursor",
+                                    action: #selector(toggleHostCursor), keyEquivalent: "")
+        cursorItem.state = HostCursor.hidePreferred ? .on : .off
+        hostMenu.addItem(cursorItem)
+        hostMenu.addItem(.separator())
         hostMenu.addItem(withTitle: "Forget Paired Hosts…",
                          action: #selector(forgetHosts), keyEquivalent: "")
         hostMenuItem.submenu = hostMenu
@@ -831,6 +845,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
+    }
+
+    /// Two cursors, one of them a round trip behind, is what streaming looks
+    /// like by default. This turns the host's off.
+    @objc private func toggleHostCursor(_ sender: NSMenuItem) {
+        HostCursor.hidePreferred.toggle()
+        sender.state = HostCursor.hidePreferred ? .on : .off
+        // Apply straight away if something is streaming, rather than making the
+        // user reconnect to see the setting take effect.
+        if let session {
+            HostCursor.apply(to: session.connection, host: session.host)
+        }
     }
 
     @objc private func forgetHosts() {
