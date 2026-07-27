@@ -106,6 +106,12 @@ public final class InputCapture {
     /// a key it never sees released — so a missed key-up repeats forever.
     private var heldKeys: Set<UInt16> = []
 
+    /// Buttons currently down, for exactly the reason above. Capture stops the
+    /// moment the window resigns key, so the matching mouse-up is never seen and
+    /// the host is left holding the button — which on a desktop means a
+    /// rubber-band selection or a drag that follows the cursor around forever.
+    private var heldButtons: Set<InputProtocol.MouseButton> = []
+
     public init() {}
 
     deinit {
@@ -128,7 +134,7 @@ public final class InputCapture {
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
-        releaseHeldKeys()
+        releaseHeldInput()
         removeMonitors()
     }
 
@@ -206,11 +212,16 @@ public final class InputCapture {
     /// Release everything still held when focus leaves. Without this the host
     /// keeps the key down — and Windows auto-repeats a key it never sees
     /// released, so a single missed key-up types forever.
-    private func releaseHeldKeys() {
+    private func releaseHeldInput() {
         for code in heldKeys {
             onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
         }
         heldKeys.removeAll()
+
+        for button in heldButtons {
+            onInput?(InputProtocol.mouseButton(button, pressed: false))
+        }
+        heldButtons.removeAll()
 
         for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             onInput?(InputProtocol.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
@@ -242,19 +253,27 @@ public final class InputCapture {
             // Position first: Windows clicks wherever the pointer currently is.
             sendPosition(for: event, in: view)
             if let button = button(for: event) {
+                heldButtons.insert(button)
                 onInput?(InputProtocol.mouseButton(button, pressed: true))
             }
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
             sendPosition(for: event, in: view)
             if let button = button(for: event) {
+                heldButtons.remove(button)
                 onInput?(InputProtocol.mouseButton(button, pressed: false))
             }
 
         case .scrollWheel:
-            // Windows counts a wheel click as 120 units.
-            let vertical = Int((event.scrollingDeltaY * 12).rounded())
-            let horizontal = Int((event.scrollingDeltaX * 12).rounded())
+            // Windows counts a wheel click as 120 units, and macOS reports the
+            // two kinds of scroll in different units: a trackpad gives points,
+            // a wheel mouse gives lines, one line per detent. Sending both at
+            // the trackpad's scale meant a real mouse wheel moved the host a
+            // tenth of a notch per click -- technically scrolling, in practice
+            // a wheel that does nothing.
+            let unit: CGFloat = event.hasPreciseScrollingDeltas ? 12 : 120
+            let vertical = Int((event.scrollingDeltaY * unit).rounded())
+            let horizontal = Int((event.scrollingDeltaX * unit).rounded())
             if vertical != 0 { onInput?(InputProtocol.scroll(amount: vertical)) }
             if horizontal != 0 { onInput?(InputProtocol.horizontalScroll(amount: horizontal)) }
 
