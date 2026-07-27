@@ -241,8 +241,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     guard let id else {
-                        self.picker?.clearBusy()
-                        self.picker?.showFailure("\(app.name) didn't open a window.")
+                        // No new window is often not a failure. An application
+                        // that was already running usually reuses the window it
+                        // has — Explorer opens a tab in it — and if that window
+                        // was already focused, the host has nothing to notice
+                        // either. The name the user picked is the best clue we
+                        // have, and only this side knows it.
+                        agent.windows { windows in
+                            DispatchQueue.main.async {
+                                guard let existing = windows.first(where: {
+                                    $0.title.localizedCaseInsensitiveContains(app.name)
+                                }) else {
+                                    self.picker?.clearBusy()
+                                    self.picker?.showFailure("\(app.name) didn't open a window.")
+                                    return
+                                }
+                                Log.info("[app] \"\(app.name)\" was already open; "
+                                         + "attaching to \"\(existing.title)\"")
+                                self.picker?.close()
+                                self.picker = nil
+                                self.start(host: host, agent: agent, targets: [existing])
+                            }
+                        }
                         return
                     }
                     // Re-enumerate rather than trusting the launch reply: the

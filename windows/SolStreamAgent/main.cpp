@@ -1404,7 +1404,9 @@ int SetSunshineCredentials() {
 
 int wmain(int argc, wchar_t** argv) {
     unsigned short port = kDefaultPort;
-    bool listen_all = false;
+    // Loopback by default. This socket has no authentication yet, so the address
+    // it binds is the only thing limiting who can drive it.
+    std::string bind_address = kLoopback;
     bool set_credentials = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -1412,8 +1414,12 @@ int wmain(int argc, wchar_t** argv) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         } else if (arg == L"--sunshine-port" && i + 1 < argc) {
             g_sunshine_web_port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
+        } else if (arg == L"--bind" && i + 1 < argc) {
+            // Prefer a single address — a VPN interface such as Tailscale, whose
+            // peers are already device-authenticated — over every interface.
+            bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
-            listen_all = true;
+            bind_address = "0.0.0.0";
         } else if (arg == L"--set-sunshine-credentials") {
             set_credentials = true;
         }
@@ -1446,13 +1452,18 @@ int wmain(int argc, wchar_t** argv) {
     sockaddr_in address{};
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
-    if (listen_all) {
-        address.sin_addr.s_addr = INADDR_ANY;
+    if (inet_pton(AF_INET, bind_address.c_str(), &address.sin_addr) != 1) {
+        Log("[agent] --bind %s is not a valid IPv4 address", bind_address.c_str());
+        return 1;
+    }
+    if (bind_address == "0.0.0.0") {
         Log("[agent] WARNING: listening on ALL interfaces. This socket is");
         Log("[agent] WARNING: unauthenticated and can move any window on this");
-        Log("[agent] WARNING: machine. Prefer the default loopback bind.");
-    } else {
-        inet_pton(AF_INET, kLoopback, &address.sin_addr);
+        Log("[agent] WARNING: machine and launch applications on it. Prefer");
+        Log("[agent] WARNING: --bind with one address on a trusted network.");
+    } else if (bind_address != kLoopback) {
+        Log("[agent] reachable on %s only; this socket is not yet authenticated",
+            bind_address.c_str());
     }
 
     if (bind(listener, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
@@ -1465,7 +1476,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     Log("[agent] SolStream agent v%d listening on %s:%u",
-        kProtocolVersion, listen_all ? "0.0.0.0" : kLoopback, port);
+        kProtocolVersion, bind_address.c_str(), port);
     for (const Display& display : EnumerateDisplays()) {
         Log("[agent]   display %s %ldx%ld at (%ld,%ld)%s",
             display.device_name.c_str(),

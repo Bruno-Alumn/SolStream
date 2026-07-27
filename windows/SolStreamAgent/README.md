@@ -71,6 +71,23 @@ On connect the agent sends a `hello` then a `displays` message unprompted.
 Only one client is served at a time, which is all the Mac needs — but it does
 mean a second connection blocks in the accept backlog rather than being refused.
 
+## Where it listens
+
+Loopback by default, so out of the box the Mac cannot reach it at all. This
+socket has **no authentication yet**, so the address it binds is the only thing
+deciding who can drive it — and what it can do is move any window on the machine
+and launch applications.
+
+```
+--bind 100.64.0.5     one address; prefer a VPN interface
+--listen-all          every interface; a plain LAN is an open door
+```
+
+Binding a Tailscale (or similar) address is the sensible middle: those peers are
+already device-authenticated at the network layer, so the socket is reachable from
+your own machines and from nowhere else. That is a real control rather than a fig
+leaf, but it is not a substitute for authenticating the protocol itself.
+
 | request | reply |
 |---|---|
 | `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary"}]}` |
