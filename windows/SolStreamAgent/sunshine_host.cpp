@@ -260,7 +260,20 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
                << "log_path = " << Narrow(config_dir) << "\\sunshine.log\n"
                << "credentials_file = " << Narrow(config_dir) << "\\credentials.json\n"
                << "file_state = " << Narrow(config_dir) << "\\state.json\n"
-               << "file_apps = " << Narrow(config_dir) << "\\apps.json\n";
+               << "file_apps = " << Narrow(config_dir) << "\\apps.json\n"
+               // The TLS identity, and the reason a second Sunshine died where
+               // the first did not. Left unset, these default to the install
+               // directory -- C:\\Program Files\\Sunshine\\config -- which the
+               // service can write to as SYSTEM and an ordinary user cannot.
+               // nvhttp starts on a std::jthread, so the failure to create them
+               // came out as std::terminate: exit code 0xC0000409, no message,
+               // and a log that simply stops.
+               << "cert = " << Narrow(config_dir) << "\\cert.pem\n"
+               << "pkey = " << Narrow(config_dir) << "\\pkey.pem\n"
+               // Nothing about SolStream's Sunshine is meant to be user-visible,
+               // and a second tray icon for a thing the user did not start is
+               // the opposite of that.
+               << "system_tray = disabled\n";
     }
 
     // Sunshine needs an apps file; without one it has nothing to launch and the
