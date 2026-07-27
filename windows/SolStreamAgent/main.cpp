@@ -1076,6 +1076,15 @@ bool LockWindow(HWND window) {
     }
 
     EnterCriticalSection(&g_lock_cs);
+    // The lock was released across the un-maximise above, so re-establish that
+    // this slot is still this window's. Nothing reclaims slots concurrently
+    // today — commands and the disconnect cleanup all run on the client thread —
+    // but reviving a slot that had been cleared would restore a zeroed style
+    // onto a real window, and that is not a failure worth finding later.
+    if (!g_locks[slot].active || g_locks[slot].window != window) {
+        LeaveCriticalSection(&g_lock_cs);
+        return false;
+    }
     g_locks[slot].geometry_locked = true;
     g_locks[slot].desired = ClientAreaInScreen(window);
     const LONG_PTR stripped =
