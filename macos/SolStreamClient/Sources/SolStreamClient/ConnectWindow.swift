@@ -340,7 +340,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     private static var recentHosts: [String] {
-        UserDefaults.standard.stringArray(forKey: recentHostsKey) ?? ["100.101.102.103"]
+        // No default. This used to seed one developer's Tailscale address into
+        // every install's recents list, where it showed up as a host the user
+        // had supposedly connected to before.
+        UserDefaults.standard.stringArray(forKey: recentHostsKey) ?? []
     }
 
     private static func remember(host: String) {

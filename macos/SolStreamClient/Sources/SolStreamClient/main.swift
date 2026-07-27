@@ -198,9 +198,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker.show()
 
         agent.onState = { [weak picker] state in
-            guard case .failed(let message) = state else { return }
-            DispatchQueue.main.async {
-                picker?.showFailure("Can't reach the SolStream agent on \(agentHost): \(message)")
+            switch state {
+            case .failed(let message):
+                DispatchQueue.main.async {
+                    picker?.showFailure("Can't reach the SolStream agent on \(agentHost): \(message)")
+                }
+            case .needsToken(let host, let rejected):
+                DispatchQueue.main.async {
+                    TokenPrompt.present(host: host, rejected: rejected) { token in
+                        guard let token else {
+                            picker?.showFailure("\(host) needs a pairing token to go any further.")
+                            return
+                        }
+                        agent.supplyToken(token)
+                    }
+                }
+            default:
+                break
             }
         }
 
@@ -225,8 +239,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.agent = agent
 
         agent.onState = { state in
-            if case .failed(let message) = state {
+            switch state {
+            case .failed(let message):
                 Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+            case .needsToken(let host, _):
+                // No window to ask in on this path, so say what to do instead of
+                // waiting for an answer that cannot arrive.
+                Log.error("[app] \(host) needs a pairing token. Run "
+                          + "\"SolStreamAgent.exe --print-token\" there, then start "
+                          + "SolStream once with --agent-token <token>.")
+            default:
+                break
             }
         }
         agent.onDisplays = { [weak self] _ in
@@ -421,8 +444,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.agent = agent
 
         agent.onState = { state in
-            if case .failed(let message) = state {
+            switch state {
+            case .failed(let message):
                 Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+            case .needsToken(let host, _):
+                // No window to ask in on this path, so say what to do instead of
+                // waiting for an answer that cannot arrive.
+                Log.error("[app] \(host) needs a pairing token. Run "
+                          + "\"SolStreamAgent.exe --print-token\" there, then start "
+                          + "SolStream once with --agent-token <token>.")
+            default:
+                break
             }
         }
 
