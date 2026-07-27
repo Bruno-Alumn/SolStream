@@ -59,6 +59,13 @@ public final class MetalView: NSView {
             layer.isOpaque = true
             layer.backgroundColor = NSColor.black.cgColor
             layer.contentsGravity = .resizeAspect
+            // Say what these pixels are. A CAMetalLayer with no colorspace is
+            // taken to be in the display's own space and passed through without
+            // conversion, which on a P3 MacBook panel means sRGB content from
+            // Windows gets shown at P3 saturation — reds that glow and skin
+            // tones that sunburn. Tagging it sRGB asks the compositor to
+            // convert properly for whichever display the window is on.
+            layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         }
 
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
