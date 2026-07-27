@@ -77,6 +77,7 @@ mean a second connection blocks in the accept backlog rather than being refused.
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","captionInset","occluded"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
 | `{"cmd":"pair","pin":"1234","name":"…"}` | `{"type":"paired","ok":bool,"reason","message"}` |
+| `{"cmd":"canvas","display":"\\\\.\\DISPLAY7","w":..,"h":..}` | `{"type":"canvas","ok":bool,"w","h"}` |
 | `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}` |
 | `{"cmd":"window","id":N}` | `{"type":"window","id":N,"alive":bool,"minimized":bool,"x","y","w","h","captionInset"}` |
 | `{"cmd":"place","id":N,"x":..,"y":..,"w":..,"h":..}` | `{"type":"placed","ok":true,"x","y","w","h"}` |
@@ -107,6 +108,16 @@ seconds for a cold start. It watches for a window that was not open before,
 preferring one belonging to the process it started; if none appears it falls back
 to a newly-focused window, because an application that was already running
 usually reuses its existing window instead of opening another.
+
+`canvas` points a display at the mode that best fits what the Mac asks for — the
+smallest offered mode covering both axes, so a window is never upscaled, falling
+back to the largest if nothing covers it. It only ever *switches* between modes
+the driver already offers, which is immediate. Adding a mode is the expensive
+operation (a device restart), so the modes are seeded once by
+`windows/VirtualDisplay/setup-virtual-display.ps1`.
+
+The Mac only asks this of a **virtual** display. A physical monitor is somebody's
+actual screen and its mode is not ours to change.
 
 ## Pairing without the web UI
 

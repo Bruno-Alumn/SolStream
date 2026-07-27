@@ -181,6 +181,77 @@ std::vector<Display> EnumerateDisplays() {
     return displays;
 }
 
+/// Point a display at the mode that best fits a requested canvas.
+///
+/// The Mac asks the host to render at the Mac's own resolution: a bigger canvas
+/// spends encoder time and bitrate on pixels nobody sees, and a smaller one gets
+/// upscaled and looks soft.
+///
+/// This only ever SWITCHES between modes the driver already offers, which is
+/// immediate. Adding a mode to a virtual display is the expensive operation — it
+/// needs a device restart — so the modes are seeded once at setup instead.
+/// Picks the smallest mode that still covers the request, so the Mac's window is
+/// never upscaled, and falls back to the largest available if nothing covers it.
+bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
+                    int& out_w, int& out_h) {
+    DEVMODEW best{};
+    DEVMODEW largest{};
+    bool have_best = false;
+    bool have_largest = false;
+
+    for (DWORD i = 0;; ++i) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsW(device.c_str(), i, &mode)) {
+            break;
+        }
+        if (mode.dmBitsPerPel != 32) {
+            continue;
+        }
+        const long long area = (long long) mode.dmPelsWidth * mode.dmPelsHeight;
+        if (!have_largest || area > (long long) largest.dmPelsWidth * largest.dmPelsHeight) {
+            largest = mode;
+            have_largest = true;
+        }
+        if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
+            continue;
+        }
+        if (!have_best || area < (long long) best.dmPelsWidth * best.dmPelsHeight) {
+            best = mode;
+            have_best = true;
+        }
+    }
+    if (!have_best) {
+        if (!have_largest) {
+            return false;
+        }
+        best = largest;
+    }
+
+    DEVMODEW current{};
+    current.dmSize = sizeof(current);
+    if (EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &current)
+        && current.dmPelsWidth == best.dmPelsWidth
+        && current.dmPelsHeight == best.dmPelsHeight) {
+        out_w = (int) current.dmPelsWidth;
+        out_h = (int) current.dmPelsHeight;
+        return true;  // already there; do not make the screen flash for nothing
+    }
+
+    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    const LONG rc = ChangeDisplaySettingsExW(device.c_str(), &best, nullptr,
+                                             CDS_UPDATEREGISTRY, nullptr);
+    if (rc != DISP_CHANGE_SUCCESSFUL) {
+        Log("[agent] mode change to %ux%u failed: %ld",
+            best.dmPelsWidth, best.dmPelsHeight, rc);
+        return false;
+    }
+    out_w = (int) best.dmPelsWidth;
+    out_h = (int) best.dmPelsHeight;
+    Log("[agent] display mode -> %dx%d", out_w, out_h);
+    return true;
+}
+
 // ── Windows ──────────────────────────────────────────────────────────────────
 
 struct WindowInfo {
@@ -902,6 +973,18 @@ std::string WindowStatusJson(uint64_t id) {
 // The command set is small and fixed, so a full JSON parser would be more
 // surface area than the protocol itself. Extract by key instead.
 
+/// Extract a JSON string value, honouring escapes.
+///
+/// The escape handling is not decoration. Every string the Mac sends us is full
+/// of backslashes — Windows device names like \\.\DISPLAY7 and shortcut paths
+/// like C:\Users\... — and JSON doubles every one of them on the wire. Taking the
+/// raw substring gives back the doubled form, and it also stops at the first
+/// quote, so any window title containing one truncates.
+///
+/// Path arguments survived that for a while because Windows collapses duplicate
+/// separators, so C:\\Users\\x opens the same file as C:\Users\x. Device names do
+/// not: they are matched literally, and \\\\.\\DISPLAY7 resolves to nothing at
+/// all.
 bool FieldString(const std::string& json, const char* key, std::string& out) {
     const std::string needle = std::string("\"") + key + "\"";
     size_t at = json.find(needle);
@@ -916,12 +999,68 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
     if (at == std::string::npos) {
         return false;
     }
-    const size_t end = json.find('"', at + 1);
-    if (end == std::string::npos) {
-        return false;
+
+    std::string value;
+    for (size_t i = at + 1; i < json.size(); ++i) {
+        const char c = json[i];
+        if (c == '"') {
+            out = std::move(value);
+            return true;
+        }
+        if (c != '\\') {
+            value.push_back(c);
+            continue;
+        }
+        if (++i >= json.size()) {
+            return false;
+        }
+        switch (json[i]) {
+            case '"':  value.push_back('"');  break;
+            case '\\': value.push_back('\\'); break;
+            case '/':  value.push_back('/');  break;
+            case 'b':  value.push_back('\b'); break;
+            case 'f':  value.push_back('\f'); break;
+            case 'n':  value.push_back('\n'); break;
+            case 'r':  value.push_back('\r'); break;
+            case 't':  value.push_back('\t'); break;
+            case 'u': {
+                if (i + 4 >= json.size()) {
+                    return false;
+                }
+                unsigned code = 0;
+                for (int k = 1; k <= 4; ++k) {
+                    const char digit = json[i + k];
+                    code <<= 4;
+                    if (digit >= '0' && digit <= '9') {
+                        code |= static_cast<unsigned>(digit - '0');
+                    } else if (digit >= 'a' && digit <= 'f') {
+                        code |= static_cast<unsigned>(digit - 'a' + 10);
+                    } else if (digit >= 'A' && digit <= 'F') {
+                        code |= static_cast<unsigned>(digit - 'A' + 10);
+                    } else {
+                        return false;
+                    }
+                }
+                i += 4;
+                // UTF-8, without reassembling surrogate pairs: nothing we parse
+                // carries characters outside the basic multilingual plane.
+                if (code < 0x80) {
+                    value.push_back(static_cast<char>(code));
+                } else if (code < 0x800) {
+                    value.push_back(static_cast<char>(0xC0 | (code >> 6)));
+                    value.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                } else {
+                    value.push_back(static_cast<char>(0xE0 | (code >> 12)));
+                    value.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+                    value.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+                }
+                break;
+            }
+            default:
+                return false;
+        }
     }
-    out = json.substr(at + 1, end - at - 1);
-    return true;
+    return false;
 }
 
 bool FieldNumber(const std::string& json, const char* key, long long& out) {
@@ -978,6 +1117,26 @@ std::string HandleCommand(const std::string& line) {
 
     if (command == "apps") {
         return AppsJson(EnumerateApps());
+    }
+
+    if (command == "canvas") {
+        std::string device;
+        long long want_w = 0, want_h = 0;
+        if (!FieldString(line, "display", device)
+            || !FieldNumber(line, "w", want_w) || !FieldNumber(line, "h", want_h)) {
+            return "{\"type\":\"error\",\"message\":\"canvas needs display,w,h\"}";
+        }
+        if (want_w < 640 || want_h < 480 || want_w > 8192 || want_h > 8192) {
+            return "{\"type\":\"error\",\"message\":\"canvas size out of range\"}";
+        }
+        int got_w = 0, got_h = 0;
+        if (!SetDisplayMode(ToWide(device), (int) want_w, (int) want_h, got_w, got_h)) {
+            return "{\"type\":\"canvas\",\"ok\":false,\"message\":\"could not set a display mode\"}";
+        }
+        char buffer[192];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"type\":\"canvas\",\"ok\":true,\"w\":%d,\"h\":%d}", got_w, got_h);
+        return buffer;
     }
 
     if (command == "pair") {

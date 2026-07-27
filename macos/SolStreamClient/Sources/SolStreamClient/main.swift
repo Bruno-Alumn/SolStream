@@ -266,7 +266,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Resolve the capture display, then hand off to the shared open path.
+    /// The canvas this Mac wants the host to render at.
+    ///
+    /// Its screen in points times the backing scale factor: that is exactly how
+    /// many pixels a full-screen window here can show, so anything larger is
+    /// bitrate spent on pixels that get thrown away and anything smaller is
+    /// upscaled. Clamped to NVENC's H.264 maximum, above which a session
+    /// negotiates fine and then never delivers a frame.
+    private static func desiredCanvas() -> CGSize? {
+        guard let screen = NSScreen.main else { return nil }
+        let scale = screen.backingScaleFactor
+        let limit: CGFloat = 4096
+        return CGSize(width: min((screen.frame.width * scale).rounded(), limit),
+                      height: min((screen.frame.height * scale).rounded(), limit))
+    }
+
+    /// Resolve the capture display, size it to this Mac, then open the windows.
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
         guard let capture = Self.selectDisplay(from: agent.displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
@@ -276,8 +291,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                  + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                  + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
         Log.info("[app] Sunshine's output_name must resolve to \(capture.name)")
-        openApps(host: host, agent: agent, targets: targets,
-                 display: capture, config: baseConfig)
+
+        // Only ever resize a virtual display. A physical monitor is somebody's
+        // actual screen, and changing its mode to suit a remote client would be
+        // rude at best.
+        guard capture.isVirtual, let wanted = Self.desiredCanvas(),
+              Int(wanted.width) != capture.width || Int(wanted.height) != capture.height else {
+            openApps(host: host, agent: agent, targets: targets,
+                     display: capture, config: baseConfig)
+            return
+        }
+
+        Log.info("[app] asking the host to render at \(Int(wanted.width))x\(Int(wanted.height))")
+        agent.setCanvas(display: capture.name,
+                        width: Int(wanted.width), height: Int(wanted.height)) { [weak self] achieved in
+            guard let self else { return }
+            guard achieved != nil else {
+                Log.info("[app] host kept \(capture.width)x\(capture.height)")
+                DispatchQueue.main.async {
+                    self.openApps(host: host, agent: agent, targets: targets,
+                                  display: capture, config: self.baseConfig)
+                }
+                return
+            }
+            // Re-enumerate rather than patching the size in: a mode change can move
+            // the display's origin too, and every tile is expressed in
+            // virtual-desktop coordinates.
+            agent.refreshDisplays { displays in
+                DispatchQueue.main.async {
+                    let updated = displays.first { $0.name == capture.name } ?? capture
+                    Log.info("[app] host now rendering at \(updated.width)x\(updated.height) "
+                             + "@ \(updated.x),\(updated.y)")
+                    self.openApps(host: host, agent: agent, targets: targets,
+                                  display: updated, config: self.baseConfig)
+                }
+            }
+        }
     }
 
     private func startStreaming(host: String, config: StreamConnection.Config = .init()) {
