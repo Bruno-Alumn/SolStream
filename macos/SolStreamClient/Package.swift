@@ -109,7 +109,7 @@ let package = Package(
         .testTarget(
             name: "SolStreamClientTests",
             dependencies: ["SolStreamClient", "SolStreamLogging",
-                           "StreamConnection", "VideoDecoder"],
+                           "StreamConnection", "VideoDecoder", "AudioRenderer"],
             linkerSettings: [
                 .linkedFramework("XCTest"),
             ]

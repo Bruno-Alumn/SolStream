@@ -2,7 +2,7 @@ import Foundation
 import AudioUnit
 import CoreAudio
 import AVFoundation
-import SolStreamLogging
+import os
 import SolStreamLogging
 
 /// Renders Opus/S16LE audio frames using AudioUnit for low-latency playback.
@@ -12,7 +12,6 @@ import SolStreamLogging
 /// queued in a ring buffer for the AudioUnit playback callback.
 public final class AudioRenderer {
     private var audioUnit: AudioUnit?
-    private var audioQueue: AudioQueueRef?
     private var isRunning = false
 
     // Audio format: 16-bit signed PCM, 48kHz, stereo
@@ -20,8 +19,8 @@ public final class AudioRenderer {
     private let channelCount: UInt32 = 2
     private let bitsPerChannel: UInt32 = 16
 
-    // Simple ring buffer for audio data (internal for callback access)
-    var ringBuffer = RingBuffer<Int16>(capacity: 48000 * 2 * 2) // ~1 second
+    /// Interleaved stereo samples waiting to be played (internal for the callback).
+    let ringBuffer = AudioRingBuffer()
 
     public init() {
         setupAudio()
@@ -45,18 +44,15 @@ public final class AudioRenderer {
     public func playAudio(_ data: Data) {
         guard !data.isEmpty, isRunning else { return }
 
-        // Process each 16-bit sample.
-        let samples = data.withUnsafeBytes { buffer -> [Int16] in
-            guard let baseAddress = buffer.baseAddress else { return [] }
-            let count = buffer.count / MemoryLayout<Int16>.stride
-            return Array(UnsafeBufferPointer(
-                start: baseAddress.assumingMemoryBound(to: Int16.self),
-                count: count
-            ))
-        }
-
-        for sample in samples {
-            ringBuffer.write(sample)
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            let count = raw.count / MemoryLayout<Int16>.stride
+            // Whole stereo frames only — see AudioRingBuffer on why a stray odd
+            // sample is not a rounding error but a permanent channel swap.
+            let usable = count - (count % 2)
+            guard usable > 0 else { return }
+            ringBuffer.write(UnsafeBufferPointer(
+                start: base.assumingMemoryBound(to: Int16.self), count: usable))
         }
     }
 
@@ -156,51 +152,158 @@ private let renderCallback: AURenderCallback = {(
 
     for buffer in bufferList {
         guard let data = buffer.mData else { continue }
-        let frameCount = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.stride
-        let samples = data.assumingMemoryBound(to: Int16.self)
-
-        for i in 0..<frameCount {
-            if renderer.ringBuffer.available > 0 {
-                samples[i] = renderer.ringBuffer.read()
-            } else {
-                samples[i] = 0  // Silence underflow
-            }
-        }
+        let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.stride
+        // One block copy rather than a per-sample loop with a lock acquisition
+        // and a bounds check each time round.
+        renderer.ringBuffer.read(into: data.assumingMemoryBound(to: Int16.self),
+                                 count: sampleCount)
     }
 
     return noErr
 }
 
-// MARK: - Simple Ring Buffer
-/// Simple ring buffer for audio data (internal access for callback).
-final class RingBuffer<T: ExpressibleByIntegerLiteral> {
-    private var buffer: [T]
-    private var writeIndex = 0
-    private var readIndex = 0
-    private var count = 0
+// MARK: - Ring buffer
+
+/// Interleaved stereo audio waiting to be played, with a bounded backlog.
+///
+/// Three things this has to get right that the previous version did not.
+///
+/// **It is shared across threads.** `write` runs on the stream's audio queue and
+/// `read` on the CoreAudio HAL's realtime thread. The indices used to be plain
+/// `Int`s incremented from both — a data race, and undefined behaviour, whose
+/// visible form is a read pointer that drifts permanently out of step with the
+/// write pointer and never recovers.
+///
+/// **The backlog has to be trimmed.** On overrun the old version dropped the
+/// *arriving* sample (its comment claimed the opposite). Since the render
+/// callback consumes at exactly the device rate and nothing ever drained the
+/// buffer, every jitter burst that filled it became permanent latency — a
+/// one-way ratchet that saturated at the full capacity of two seconds behind
+/// video and stayed there. The host's audio clock and this Mac's output clock
+/// are not the same clock, so a backlog left uncorrected only grows.
+///
+/// **Everything moves in whole frames.** The stream is interleaved L,R,L,R.
+/// Writing sample-by-sample meant the buffer could fill part-way through a
+/// packet and reject an odd number of samples, which shifts the parity of the
+/// interleave for everything after it: left channel out of the right speaker,
+/// for the rest of the session.
+///
+/// A lock on the realtime thread is not ideal. `os_unfair_lock` donates priority
+/// so the audio queue cannot leave the IO thread waiting on a descheduled
+/// writer, and the critical section is a bounded `memcpy` of at most one buffer.
+/// That is a real trade, but the alternative it replaces was undefined
+/// behaviour, not a faster correct thing.
+final class AudioRingBuffer {
+    private let storage: UnsafeMutablePointer<Int16>
     private let capacity: Int
+    /// Backlog to aim for after a trim, and the level that triggers one.
+    private let target: Int
+    private let ceiling: Int
 
-    init(capacity: Int) {
-        self.capacity = capacity
-        self.buffer = [T](repeating: 0, count: capacity)
-    }
+    private var head = 0     // next write
+    private var tail = 0     // next read
+    private var filled = 0
 
-    var available: Int { count }
+    private let lock: UnsafeMutablePointer<os_unfair_lock>
 
-    func write(_ value: T) {
-        if count < capacity {
-            buffer[writeIndex] = value
-            writeIndex = (writeIndex + 1) % capacity
-            count += 1
+    /// Whole frames discarded to keep latency bounded, for diagnostics.
+    private(set) var framesDropped: UInt64 = 0
+
+    init(sampleRate: Int = 48000, channels: Int = 2,
+         capacityMilliseconds: Int = 500,
+         targetMilliseconds: Int = 50,
+         ceilingMilliseconds: Int = 120) {
+        func samples(_ milliseconds: Int) -> Int {
+            let frames = sampleRate * milliseconds / 1000
+            return frames * channels
         }
-        // If full, drop the oldest sample.
+        capacity = samples(capacityMilliseconds)
+        target = samples(targetMilliseconds)
+        ceiling = samples(ceilingMilliseconds)
+
+        storage = .allocate(capacity: capacity)
+        storage.initialize(repeating: 0, count: capacity)
+
+        lock = .allocate(capacity: 1)
+        lock.initialize(to: os_unfair_lock())
     }
 
-    func read() -> T {
-        precondition(count > 0)
-        let value = buffer[readIndex]
-        readIndex = (readIndex + 1) % capacity
-        count -= 1
-        return value
+    deinit {
+        storage.deinitialize(count: capacity)
+        storage.deallocate()
+        lock.deinitialize(count: 1)
+        lock.deallocate()
+    }
+
+    var available: Int {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return filled
+    }
+
+    func write(_ samples: UnsafeBufferPointer<Int16>) {
+        guard let source = samples.baseAddress, !samples.isEmpty else { return }
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+
+        // A packet bigger than the whole ring can only be partly kept; keep its
+        // newest end, which is what dropping the oldest means at that scale.
+        var count = samples.count
+        var offset = 0
+        if count > capacity {
+            offset = count - capacity
+            count = capacity
+        }
+
+        if filled + count > capacity {
+            discardOldest(filled + count - capacity)
+        }
+
+        let first = min(count, capacity - head)
+        storage.advanced(by: head).update(from: source.advanced(by: offset), count: first)
+        if count > first {
+            storage.update(from: source.advanced(by: offset + first), count: count - first)
+        }
+        head = (head + count) % capacity
+        filled += count
+
+        // Correct drift continuously rather than only at saturation.
+        if filled > ceiling {
+            discardOldest(filled - target)
+        }
+    }
+
+    /// Fill `destination`, padding with silence on underrun.
+    func read(into destination: UnsafeMutablePointer<Int16>, count: Int) {
+        guard count > 0 else { return }
+        os_unfair_lock_lock(lock)
+        let take = min(count, filled)
+        if take > 0 {
+            let first = min(take, capacity - tail)
+            destination.update(from: storage.advanced(by: tail), count: first)
+            if take > first {
+                destination.advanced(by: first).update(from: storage, count: take - first)
+            }
+            tail = (tail + take) % capacity
+            filled -= take
+        }
+        os_unfair_lock_unlock(lock)
+
+        if take < count {
+            destination.advanced(by: take).update(repeating: 0, count: count - take)
+        }
+    }
+
+    /// Drop the oldest audio, always in whole frames so the L,R interleave keeps
+    /// its parity. Call with the lock held.
+    private func discardOldest(_ samples: Int) {
+        var amount = samples
+        if amount % 2 != 0 { amount += 1 }   // round up to a whole frame
+        amount = min(amount, filled)
+        amount -= amount % 2                  // and stay on the frame boundary
+        guard amount > 0 else { return }
+        tail = (tail + amount) % capacity
+        filled -= amount
+        framesDropped &+= UInt64(amount / 2)
     }
 }
