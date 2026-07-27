@@ -31,31 +31,35 @@ public enum DS {
     }
 
     /// The furthest-back surface. Window backgrounds.
-    public static let ground = dynamic(dark: hex(0x161826), light: hex(0xF7F7FA))
+    public static let ground = dynamic(dark: hex(0x161826), light: hex(0xF3F5FE))
     /// Raised surfaces: cards, rows, fields.
-    public static let chrome = dynamic(dark: hex(0x232532), light: hex(0xFFFFFF))
+    public static let chrome = dynamic(dark: hex(0x232532), light: hex(0xE4E7F5))
     /// A pressed or selected row.
-    public static let chromeRaised = dynamic(dark: hex(0x292B31), light: hex(0xEDEDF3))
+    public static let chromeRaised = dynamic(dark: hex(0x292B31), light: hex(0xF9FAFE))
     /// The one accent. Lines, dots and glows only — never a filled area larger
     /// than a button.
-    public static let accent = dynamic(dark: hex(0x9184D9), light: hex(0x5D52A8))
+    public static let accent = dynamic(dark: hex(0x9184D9), light: hex(0x5D5294))
     /// Accent for text on the ground, where the base value is too dim to read.
     public static let accentBright = dynamic(dark: hex(0xB5ABFC), light: hex(0x4B4190))
+    /// Text inside an outlined action. Its own step in the design, lighter
+    /// than `accentBright` — that one is the link-hover tone and reads hot
+    /// against a border of the same hue.
+    public static let accentOnOutline = dynamic(dark: hex(0xD2CEFD), light: hex(0x423A6A))
     /// A wash of accent, for the inside of a selected row or a focus ring.
-    public static let accentTint = dynamic(dark: hex(0x423A6A), light: hex(0xE2DEFB))
-    public static let textPrimary = dynamic(dark: hex(0xE9E9ED), light: hex(0x191A21))
-    public static let textSecondary = dynamic(dark: hex(0xB2B6CA), light: hex(0x4A4D5C))
+    public static let accentTint = dynamic(dark: hex(0x423A6A), light: hex(0xE8E5FF))
+    public static let textPrimary = dynamic(dark: hex(0xE9E9ED), light: hex(0x292B31))
+    public static let textSecondary = dynamic(dark: hex(0xB2B6CA), light: hex(0x595D6C))
     /// Labels, units, anything explanatory.
-    public static let textMuted = dynamic(dark: hex(0x9397AB), light: hex(0x75798C))
+    public static let textMuted = dynamic(dark: hex(0x9397AB), light: hex(0x595D6C))
     /// The dimmest readable step: placeholder text, disabled labels.
-    public static let textFaint = dynamic(dark: hex(0x75798C), light: hex(0x9397AB))
+    public static let textFaint = dynamic(dark: hex(0x75798C), light: hex(0x424450))
     /// Separators. One pixel, never a border box.
-    public static let hairline = dynamic(dark: hex(0x3F424D), light: hex(0xD9DBE4))
+    public static let hairline = dynamic(dark: hex(0x3F424D), light: hex(0xCFD3E5))
     /// Degraded: the accent with its chroma pulled down rather than a new hue.
     public static let degraded = dynamic(dark: hex(0x796CBF, alpha: 0.55),
                                          light: hex(0x796CBF, alpha: 0.55))
     /// Dead. Not red — nothing in this palette shouts.
-    public static let dead = dynamic(dark: hex(0x595D6C), light: hex(0x9397AB))
+    public static let dead = dynamic(dark: hex(0x595D6C), light: hex(0xB2B6CA))
 
     // MARK: - Type
 
@@ -209,7 +213,7 @@ public enum DS {
 
         private func apply(step: Int) {
             switch step {
-            case 0: tint = DS.accentTint;   label.textColor = DS.accentBright
+            case 0: tint = DS.accentTint;   label.textColor = DS.accentOnOutline
             case 1: tint = DS.chromeRaised; label.textColor = DS.accentBright
             case 2: tint = DS.chromeRaised; label.textColor = DS.textSecondary
             default: tint = DS.chrome;      label.textColor = DS.textMuted
@@ -308,7 +312,7 @@ public enum DS {
             layer?.cornerRadius = 6
             layer?.cornerCurve = .continuous
             layer?.borderWidth = 1
-            contentTintColor = primary ? DS.accentBright : DS.textSecondary
+            contentTintColor = primary ? DS.accentOnOutline : DS.textSecondary
             translatesAutoresizingMaskIntoConstraints = false
             heightAnchor.constraint(equalToConstant: 30).isActive = true
             // A minimum width so short labels ("Quit") still read as a button
@@ -337,7 +341,9 @@ public enum DS {
             layer?.backgroundColor = (isPrimary ? DS.accentTint : .clear).cgColor
             attributedTitle = NSAttributedString(string: title, attributes: [
                 .font: DS.secondary,
-                .foregroundColor: isPrimary ? DS.accentBright : DS.textSecondary,
+                // This is what actually draws — an attributedTitle wins over
+                // contentTintColor, so both have to agree.
+                .foregroundColor: isPrimary ? DS.accentOnOutline : DS.textSecondary,
             ])
         }
 
