@@ -662,6 +662,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
+        // Host carries everything that acts on the connection rather than on a
+        // window, so "which PC am I on" never has to be inferred from a title bar.
+        let hostMenuItem = NSMenuItem()
+        let hostMenu = NSMenu(title: "Host")
+        hostMenu.addItem(withTitle: "Switch App…",
+                         action: #selector(switchApp), keyEquivalent: "o")
+        hostMenu.addItem(withTitle: "Disconnect",
+                         action: #selector(disconnectHost), keyEquivalent: "d")
+        hostMenu.addItem(.separator())
+        hostMenu.addItem(withTitle: "Forget Paired Hosts…",
+                         action: #selector(forgetHosts), keyEquivalent: "")
+        hostMenuItem.submenu = hostMenu
+        mainMenu.addItem(hostMenuItem)
+
+        // One NSWindow per streamed application, so the standard Window menu is
+        // already the list of what is open — AppKit maintains it for us.
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Enter Full Screen",
@@ -670,8 +686,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    /// Back to the picker without dropping the host connection. Closing the last
+    /// application window already routes there, so this is that path taken
+    /// deliberately rather than a second one.
+    @objc private func switchApp() {
+        guard !appWindows.isEmpty else { return }
+        appWindows.forEach { $0.close() }
+    }
+
+    @objc private func disconnectHost() {
+        appWindows.forEach { $0.close() }
+        session?.stop()
+        session = nil
+        agent?.disconnect()
+        agent = nil
+        picker?.close()
+        picker = nil
+        showConnectWindow()
     }
 
     @objc private func revealIdentity() {

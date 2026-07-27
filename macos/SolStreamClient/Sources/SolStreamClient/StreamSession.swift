@@ -41,6 +41,8 @@ final class StreamSession {
     private var audioDecoder: OpusDecoder?
     private var audioRenderer: AudioRenderer?
     private var lastAudioSequence: UInt16?
+    /// Supplied by the focused window so the stats line can report input.
+    var pointerStats: (() -> (Int, Int))?
     private(set) var audioFramesDecoded: UInt64 = 0
     private(set) var audioParityDropped: UInt64 = 0
     private(set) var audioGaps: UInt64 = 0
@@ -99,6 +101,16 @@ final class StreamSession {
         }
         connection.onAudioStats = { [weak self] in
             (self?.audioFramesDecoded ?? 0, self?.audioParityDropped ?? 0)
+        }
+        // Pointer counters come from whichever window is capturing. Without this
+        // the stats line reported moved=0/sent=0 for the single-application path
+        // no matter how much the mouse moved — only the old whole-desktop window
+        // ever set it, which made input look broken when it was working.
+        connection.onPointerStats = { [weak self] in
+            guard let self else { return (0, 0) }
+            self.sinkLock.lock()
+            defer { self.sinkLock.unlock() }
+            return self.pointerStats?() ?? (0, 0)
         }
         connection.connect()
         Log.info("[session] started for \(host), canvas \(Int(canvasSize.width))x\(Int(canvasSize.height))")

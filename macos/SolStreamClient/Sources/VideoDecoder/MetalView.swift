@@ -1,4 +1,5 @@
 import AppKit
+import DesignSystem
 import Metal
 import CoreVideo
 import QuartzCore
@@ -191,15 +192,17 @@ private final class StatusOverlay: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
 
-        // The card always sits over black video, so it styles itself rather
-        // than following the system appearance — that keeps the text legible
-        // whether the Mac is in light or dark mode.
+        // The card always sits over video, so it holds the dark ramp regardless of
+        // the system appearance — a light card over someone's application would be
+        // the brightest thing on screen, which is the opposite of the intent.
         card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 0.94).cgColor
+        card.layer?.backgroundColor = NSColor(srgbRed: 0x16 / 255, green: 0x18 / 255,
+                                              blue: 0x26 / 255, alpha: 0.95).cgColor
         card.layer?.cornerRadius = 14
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor(calibratedWhite: 1.0, alpha: 0.10).cgColor
+        card.layer?.borderColor = NSColor(srgbRed: 0x3F / 255, green: 0x42 / 255,
+                                          blue: 0x4D / 255, alpha: 1).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
@@ -209,19 +212,22 @@ private final class StatusOverlay: NSView {
         spinner.appearance = NSAppearance(named: .darkAqua)
         spinner.startAnimation(nil)
 
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        titleLabel.textColor = .white
+        titleLabel.font = DS.section
+        titleLabel.textColor = DS.textPrimary
         titleLabel.alignment = .center
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        detailLabel.font = .systemFont(ofSize: 12, weight: .regular)
-        detailLabel.textColor = NSColor(calibratedWhite: 1.0, alpha: 0.62)
+        detailLabel.font = DS.secondary
+        detailLabel.textColor = DS.textMuted
         detailLabel.alignment = .center
         detailLabel.maximumNumberOfLines = 3
         detailLabel.lineBreakMode = .byWordWrapping
 
-        pinLabel.font = .monospacedDigitSystemFont(ofSize: 44, weight: .bold)
-        pinLabel.textColor = .white
+        // The PIN is the hero of that screen: the confusion is never the digits,
+        // it is not knowing where they go, so they are large and the instruction
+        // sits directly under them.
+        pinLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 46, weight: .medium)
+        pinLabel.textColor = DS.accentBright
         pinLabel.alignment = .center
         pinLabel.isHidden = true
 

@@ -1,13 +1,14 @@
 import AppKit
+import DesignSystem
 import SolStreamLogging
 import StreamConnection
 
-/// "Which application?" — shown once the host's agent answers.
+/// "Which application?"
 ///
-/// Two kinds of entry, deliberately in one list: windows already open on the
-/// host, which are attached to instantly, and applications from its Start Menu,
-/// which are launched first. A user thinks "I want Photoshop", not "I want to
-/// attach to a window" — so the distinction is a subtitle, not a mode.
+/// One ranked list, no modes and no group headers. Windows already open sort
+/// first, carry a live dot and say "Attach"; installed applications say "Launch".
+/// Typing re-ranks the whole list by match score with open windows keeping a
+/// bonus, because the thing you can see is usually the thing you meant.
 final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
 
     enum Choice {
@@ -18,7 +19,14 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private struct Row {
         let title: String
         let subtitle: String
+        /// Stable across the list, so the tile colour never depends on position.
+        let key: String
+        let isRunning: Bool
+        /// The application paints its own window buttons, which the crop cannot
+        /// remove without taking its tabs with them.
+        let drawsOwnControls: Bool
         let choice: Choice
+        var score: Int = 0
     }
 
     private let window: NSWindow
@@ -26,11 +34,14 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private let hintLabel = NSTextField(labelWithString: "↩ to open")
     private let spinner = NSProgressIndicator()
+    private let backButton: DS.OutlinedButton
+    private let openButton: DS.OutlinedButton
 
     private var allRows: [Row] = []
     private var rows: [Row] = []
+    private var busyRow: Int?
 
     private let onChoose: (Choice) -> Void
     private let onCancel: () -> Void
@@ -38,74 +49,92 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     init(host: String, onChoose: @escaping (Choice) -> Void, onCancel: @escaping () -> Void) {
         self.onChoose = onChoose
         self.onCancel = onCancel
+        backButton = DS.OutlinedButton(title: "Back", target: nil, action: nil)
+        openButton = DS.OutlinedButton(title: "Open", primary: true, target: nil, action: nil)
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "Open on \(host)"
-        // See AppWindow.build(): a directly-created NSWindow releases itself on
-        // close, which double-releases against the strong property below.
+        window.title = host
+        window.subtitle = "Choose an application"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 380, height: 320)
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = DS.ground
+        window.minSize = NSSize(width: 420, height: 380)
 
         super.init()
+        build(host: host)
+        window.delegate = self
+    }
 
-        let heading = NSTextField(labelWithString: "Choose an application")
-        heading.font = .systemFont(ofSize: 17, weight: .semibold)
-
-        searchField.placeholderString = "Search"
+    private func build(host: String) {
+        searchField.placeholderString = "Search windows and apps on \(host)"
+        searchField.font = DS.body
         searchField.target = self
         searchField.action = #selector(searchChanged)
         searchField.sendsWholeSearchString = false
         searchField.sendsSearchStringImmediately = true
+        searchField.focusRingType = .none
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("app"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = 38
+        tableView.rowHeight = DS.Metric.rowHeight
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
         tableView.doubleAction = #selector(openTapped)
-        tableView.style = .inset
+        tableView.backgroundColor = .clear
+        tableView.style = .plain
+        tableView.selectionHighlightStyle = .regular
+        tableView.intercellSpacing = NSSize(width: 0, height: 2)
+        tableView.gridStyleMask = []
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
-        scrollView.borderType = .bezelBorder
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
 
-        statusLabel.font = .systemFont(ofSize: 11)
-        statusLabel.textColor = .tertiaryLabelColor
-        statusLabel.stringValue = "Asking the host what it can run…"
+        statusLabel.font = DS.monoSmall
+        statusLabel.textColor = DS.textFaint
+        statusLabel.stringValue = "asking the host what it can run…"
+        hintLabel.font = DS.monoSmall
+        hintLabel.textColor = DS.textFaint
+        hintLabel.alignment = .right
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
         spinner.startAnimation(nil)
 
-        openButton.bezelStyle = .rounded
-        openButton.keyEquivalent = "\r"
         openButton.target = self
         openButton.action = #selector(openTapped)
+        openButton.keyEquivalent = "\r"
         openButton.isEnabled = false
+        backButton.target = self
+        backButton.action = #selector(backTapped)
 
-        let backButton = NSButton(title: "Back", target: self, action: #selector(backTapped))
-        backButton.bezelStyle = .rounded
+        let footerSpacer = NSView()
+        footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let footer = NSStackView(views: [spinner, statusLabel, footerSpacer, hintLabel])
+        footer.orientation = .horizontal
+        footer.spacing = 7
 
-        let status = NSStackView(views: [spinner, statusLabel])
-        status.orientation = .horizontal
-        status.spacing = 6
-
-        let buttons = NSStackView(views: [backButton, NSView(), openButton])
+        let buttonSpacer = NSView()
+        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [backButton, buttonSpacer, openButton])
         buttons.orientation = .horizontal
         buttons.spacing = 10
 
-        let stack = NSStackView(views: [heading, searchField, scrollView, status, buttons])
+        let stack = NSStackView(views: [searchField, scrollView,
+                                        DS.hairlineView(), footer, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 18, right: 20)
+        stack.spacing = 12
+        stack.setCustomSpacing(8, after: scrollView)
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 22, bottom: 20, right: 22)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.setHuggingPriority(.defaultLow, for: .vertical)
 
@@ -116,13 +145,11 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            searchField.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            scrollView.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
         ])
-
+        for view in [searchField, scrollView, footer, buttons] as [NSView] {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -44).isActive = true
+        }
         window.contentView = content
-        window.delegate = self
     }
 
     func show() {
@@ -136,65 +163,97 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         window.orderOut(nil)
     }
 
-    /// Fill the list. Running windows come first: attaching is instant, and if
-    /// the thing you want is already open you almost never want a second copy.
+    // MARK: - Contents
+
     func present(windows: [RemoteWindow], apps: [RemoteApp]) {
         var built: [Row] = windows.map {
             Row(title: $0.title,
-                subtitle: $0.hidesCaptionWhenCropped
-                    ? "Running — title bar hidden"
-                    : "Running",
+                subtitle: $0.hidesCaptionWhenCropped ? "open · title bar hidden" : "open",
+                key: "\($0.className)/\($0.id)",
+                isRunning: true,
+                drawsOwnControls: !$0.hidesCaptionWhenCropped,
                 choice: .running($0))
         }
-        built += apps.map { Row(title: $0.name, subtitle: "Application", choice: .launch($0)) }
+        built += apps.map {
+            Row(title: $0.name, subtitle: "application", key: $0.path,
+                isRunning: false, drawsOwnControls: false, choice: .launch($0))
+        }
 
         allRows = built
         spinner.stopAnimation(nil)
-        statusLabel.stringValue = "\(windows.count) open, \(apps.count) installed"
+        statusLabel.stringValue = "\(windows.count) window\(windows.count == 1 ? "" : "s") open"
+            + " · \(apps.count) app\(apps.count == 1 ? "" : "s") installed"
+        statusLabel.textColor = DS.textMuted
         applyFilter()
-        if !rows.isEmpty {
-            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        }
     }
 
     func showFailure(_ message: String) {
         spinner.stopAnimation(nil)
         statusLabel.stringValue = message
-        statusLabel.textColor = .systemRed
+        statusLabel.textColor = DS.accentBright
     }
 
-    /// Launching is slow — a cold start can take many seconds — so the picker
-    /// stays up saying so rather than leaving a dead window on screen.
+    /// A launch is slow — a cold start is many seconds — so the row grows a
+    /// progress line in place rather than a modal taking the window over. The
+    /// list stays interactive; nothing about it moves.
     func showBusy(_ message: String) {
         spinner.startAnimation(nil)
-        statusLabel.textColor = .tertiaryLabelColor
+        statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
         openButton.isEnabled = false
-        tableView.isEnabled = false
+        busyRow = tableView.selectedRow >= 0 ? tableView.selectedRow : nil
+        if let busyRow { tableView.reloadData(forRowIndexes: [busyRow], columnIndexes: [0]) }
     }
 
     func clearBusy() {
         spinner.stopAnimation(nil)
-        tableView.isEnabled = true
+        let previous = busyRow
+        busyRow = nil
+        if let previous, previous < rows.count {
+            tableView.reloadData(forRowIndexes: [previous], columnIndexes: [0])
+        }
         openButton.isEnabled = tableView.selectedRow >= 0
     }
 
-    // MARK: - Filtering
+    // MARK: - Ranking
 
-    @objc private func searchChanged() {
-        applyFilter()
-    }
+    @objc private func searchChanged() { applyFilter() }
 
     private func applyFilter() {
-        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        rows = needle.isEmpty
-            ? allRows
-            : allRows.filter { $0.title.localizedCaseInsensitiveContains(needle) }
+        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        var scored: [Row] = []
+        for var row in allRows {
+            guard !needle.isEmpty else {
+                // No query: open windows first, each group alphabetical.
+                row.score = row.isRunning ? 1_000 : 0
+                scored.append(row)
+                continue
+            }
+            guard let score = Self.match(row.title.lowercased(), needle) else { continue }
+            // An open window keeps a bonus: what you can see is usually what you
+            // meant, and attaching is instant where launching is not.
+            row.score = score + (row.isRunning ? 40 : 0)
+            scored.append(row)
+        }
+        rows = scored.sorted {
+            $0.score != $1.score ? $0.score > $1.score
+                : $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+        }
         tableView.reloadData()
         if !rows.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         openButton.isEnabled = !rows.isEmpty
+    }
+
+    /// Prefix beats word-start beats substring; nil means no match at all.
+    static func match(_ haystack: String, _ needle: String) -> Int? {
+        guard !needle.isEmpty else { return 0 }
+        guard let range = haystack.range(of: needle) else { return nil }
+        if range.lowerBound == haystack.startIndex { return 100 }
+        let before = haystack[haystack.index(before: range.lowerBound)]
+        if before == " " || before == "-" || before == "_" { return 60 }
+        return 20
     }
 
     // MARK: - Actions
@@ -218,26 +277,90 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        PickerRowView()
+    }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,
                    row: Int) -> NSView? {
         let entry = rows[row]
 
+        let dot = DS.Dot(state: entry.isRunning ? .live : .idle)
+        dot.pulses = entry.isRunning
+        // Installed applications get no dot at all rather than a grey one: the
+        // dot means "this is live", and an absent one is quieter than a dim one.
+        dot.isHidden = !entry.isRunning
+
+        let monogram = DS.Monogram(name: entry.title, key: entry.key)
+
         let title = NSTextField(labelWithString: entry.title)
-        title.font = .systemFont(ofSize: 13)
+        title.font = DS.body
+        title.textColor = DS.textPrimary
         title.lineBreakMode = .byTruncatingTail
 
-        let subtitle = NSTextField(labelWithString: entry.subtitle)
-        subtitle.font = .systemFont(ofSize: 10)
-        subtitle.textColor = .secondaryLabelColor
+        let subtitle = NSTextField(labelWithString: row == busyRow
+                                   ? "starting on the PC — usually 10s cold"
+                                   : entry.subtitle)
+        subtitle.font = DS.monoSmall
+        subtitle.textColor = row == busyRow ? DS.accentBright : DS.textFaint
 
-        let stack = NSStackView(views: [title, subtitle])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 1
-        return stack
+        let labels = NSStackView(views: [title, subtitle])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 1
+
+        let action = NSTextField(labelWithString: entry.isRunning ? "Attach" : "Launch")
+        action.font = DS.monoSmall
+        action.textColor = DS.textFaint
+
+        let cell = NSView()
+        for child in [dot, monogram, labels, action] as [NSView] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(child)
+        }
+        var constraints: [NSLayoutConstraint] = [
+            dot.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            dot.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            monogram.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 23),
+            monogram.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            labels.leadingAnchor.constraint(equalTo: monogram.trailingAnchor, constant: 11),
+            labels.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            action.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            action.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            labels.trailingAnchor.constraint(lessThanOrEqualTo: action.leadingAnchor, constant: -10),
+        ]
+
+        // The chip warns before you open it, not after: these keep their own
+        // window buttons inside the picture.
+        if entry.drawsOwnControls {
+            let chip = DS.Chip("own controls")
+            cell.addSubview(chip)
+            constraints += [
+                chip.trailingAnchor.constraint(equalTo: action.leadingAnchor, constant: -12),
+                chip.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                labels.trailingAnchor.constraint(lessThanOrEqualTo: chip.leadingAnchor, constant: -10),
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        openButton.isEnabled = tableView.selectedRow >= 0
+        openButton.isEnabled = tableView.selectedRow >= 0 && busyRow == nil
+    }
+}
+
+/// Selection is an accent-tinted fill with a hairline, not the system blue —
+/// nothing in this palette shouts, and the accent is already the "live" colour.
+private final class PickerRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 0),
+                                 xRadius: DS.Metric.rowCorner, yRadius: DS.Metric.rowCorner)
+        DS.accentTint.setFill()
+        shape.fill()
+        DS.accent.withAlphaComponent(0.5).setStroke()
+        shape.lineWidth = 1
+        shape.stroke()
     }
 }

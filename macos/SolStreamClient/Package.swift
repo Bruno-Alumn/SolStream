@@ -21,7 +21,18 @@ let package = Package(
                 "AudioRenderer",
                 "InputCapture",
                 "StreamConnection",
-                "SolStreamLogging"
+                "SolStreamLogging",
+                "DesignSystem"
+            ]
+        ),
+
+        // -- Design tokens (Nocturne), shared with the video overlay --
+        .target(
+            name: "DesignSystem",
+            dependencies: [],
+            path: "Sources/DesignSystem",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
             ]
         ),
 
@@ -35,7 +46,7 @@ let package = Package(
         // -- Video decoder (VideoToolbox + CAMetalLayer) --
         .target(
             name: "VideoDecoder",
-            dependencies: ["SolStreamLogging"],
+            dependencies: ["SolStreamLogging", "DesignSystem"],
             linkerSettings: [
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreVideo"),

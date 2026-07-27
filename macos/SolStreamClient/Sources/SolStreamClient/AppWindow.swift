@@ -38,6 +38,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// handler does not bounce the request straight back at it.
     private var isMatchingHostSize = false
 
+    private let pill = QualityPill()
+    private var qualityTimer: Timer?
+    private var lastFrameCount: UInt64 = 0
+    private var lastByteCount: UInt64 = 0
+    private var lastSample = Date()
+
     var onClose: (() -> Void)?
 
     init(session: StreamSession, agent: AgentConnection,
@@ -62,6 +68,39 @@ final class AppWindow: NSObject, NSWindowDelegate {
                      + "window buttons stay visible; watching for it to be closed")
         }
         startWatchingForExit()
+    }
+
+    /// Sample the stream once a second for the pill.
+    ///
+    /// Rates are differenced from cumulative counters rather than read from a
+    /// running average, so a stall shows up as the number falling to zero instead
+    /// of decaying slowly towards it.
+    private func startPollingQuality() {
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isClosing else { return }
+            let now = Date()
+            let elapsed = now.timeIntervalSince(self.lastSample)
+            guard elapsed > 0.2 else { return }
+
+            let snapshot = self.session.connection.mediaCounters
+            let frames = snapshot.frames &- self.lastFrameCount
+            let bytes = snapshot.bytes &- self.lastByteCount
+            self.lastFrameCount = snapshot.frames
+            self.lastByteCount = snapshot.bytes
+            self.lastSample = now
+
+            var stats = QualityPill.Stats()
+            stats.fps = Int((Double(frames) / elapsed).rounded())
+            stats.bitrateMbps = Double(bytes) * 8 / elapsed / 1_000_000
+            stats.droppedFrames = snapshot.dropped
+            stats.totalFrames = snapshot.frames
+            stats.audioActive = snapshot.audioFrames > 0
+            stats.hostDisplay = "\(self.display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
+                + "· \(self.display.width)×\(self.display.height)"
+            self.pill.stats = stats
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        qualityTimer = timer
     }
 
     /// Poll the host for this window still existing.
@@ -128,6 +167,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = title
+        window.titlebarAppearsTransparent = true
         // NSWindow created directly defaults to releasing itself on close, which
         // is a hangover from manual retain/release: ARC then releases it again
         // from the property below and the process dies in objc_release at the next
@@ -153,9 +193,25 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
         inputCapture = capture
 
+        // The quality pill lives in the title bar accessory so it sits in the
+        // chrome rather than over the application, and never moves as the window
+        // resizes.
+        let accessory = NSTitlebarAccessoryViewController()
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 78, height: 22))
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(pill)
+        NSLayoutConstraint.activate([
+            pill.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -10),
+            pill.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+        ])
+        accessory.view = holder
+        accessory.layoutAttribute = .right
+        window.addTitlebarAccessoryViewController(accessory)
+
         self.window = window
         session.attach(view)
         setTile(tile)
+        startPollingQuality()
 
         // Nothing may cover the tile: the crop would stream it as though it
         // were part of the app.
@@ -281,6 +337,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         inputCapture?.enableCapture()
+        // The stats line reports whichever window is actually taking input.
+        session.pointerStats = { [weak self] in
+            guard let capture = self?.inputCapture else { return (0, 0) }
+            return (capture.mouseMovedSeen, capture.positionsSent)
+        }
         // Give the host window focus too, so keystrokes land in the right app.
         agent.focus(windowID: remoteWindowID)
     }
