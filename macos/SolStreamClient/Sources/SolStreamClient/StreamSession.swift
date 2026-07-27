@@ -42,7 +42,20 @@ final class StreamSession {
     private var audioRenderer: AudioRenderer?
     private var lastAudioSequence: UInt16?
     /// Supplied by the focused window so the stats line can report input.
-    var pointerStats: (() -> (Int, Int))?
+    ///
+    /// Private, and written only through `setPointerStats`, because the reader
+    /// takes `sinkLock` and the writer used not to. A closure is two words — a
+    /// function pointer and a context — and storing one retains the incoming
+    /// context while releasing the outgoing one; a concurrent read can retain a
+    /// context that is being released to zero. Locking one side of that is worse
+    /// than locking neither, because it reads as though it were handled.
+    private var pointerStats: (() -> (Int, Int))?
+
+    func setPointerStats(_ block: (() -> (Int, Int))?) {
+        sinkLock.lock()
+        pointerStats = block
+        sinkLock.unlock()
+    }
     private(set) var audioFramesDecoded: UInt64 = 0
     private(set) var audioParityDropped: UInt64 = 0
     private(set) var audioGaps: UInt64 = 0

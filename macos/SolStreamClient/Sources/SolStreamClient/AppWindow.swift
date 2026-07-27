@@ -339,7 +339,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         inputCapture?.enableCapture()
         // The stats line reports whichever window is actually taking input.
-        session.pointerStats = { [weak self] in
+        session.setPointerStats { [weak self] in
             guard let capture = self?.inputCapture else { return (0, 0) }
             return (capture.mouseMovedSeen, capture.positionsSent)
         }
