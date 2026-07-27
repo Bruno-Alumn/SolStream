@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         buildMenu()
-        Log.info("SolStream macOS client v0.3 started")
+        Log.startSession(version: "v0.3")
 
         let arguments = CommandLine.arguments
         testMode = arguments.contains("--test-screenshot")
@@ -664,6 +664,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Reveal Identity in Finder",
                         action: #selector(revealIdentity), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Reveal Log in Finder",
+                        action: #selector(revealLog), keyEquivalent: "")
         appMenu.addItem(withTitle: "Forget Paired Hosts…",
                         action: #selector(forgetHosts), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -736,6 +738,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func revealIdentity() {
         let path = ClientIdentity.shared.certPath
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
+
+    /// Flush before revealing: the point of the menu item is that someone is
+    /// about to open the file, and the last few lines are usually the ones that
+    /// matter.
+    @objc private func revealLog() {
+        Log.flush()
+        guard let url = Log.fileURL else {
+            let alert = NSAlert()
+            alert.messageText = "No log file"
+            alert.informativeText = "SolStream could not create a log directory in ~/Library/Logs."
+            alert.runModal()
+            return
+        }
+        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
     }
 
     @objc private func forgetHosts() {
