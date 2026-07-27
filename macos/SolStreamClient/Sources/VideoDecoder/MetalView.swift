@@ -90,6 +90,24 @@ public final class MetalView: NSView {
 
     public override var isOpaque: Bool { true }
 
+    /// The cursor to show over the video.
+    ///
+    /// Set from the host's own cursor, so hovering a text field on Windows gives
+    /// an I-beam here too. Applied through a cursor rect rather than
+    /// `NSCursor.set()`, because AppKit resets the cursor whenever it crosses a
+    /// view boundary and a directly-set cursor is lost the first time the pointer
+    /// touches the title bar.
+    public var remoteCursor: NSCursor = .arrow {
+        didSet {
+            guard remoteCursor !== oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    public override func resetCursorRects() {
+        addCursorRect(bounds, cursor: remoteCursor)
+    }
+
     // MARK: - Status overlay
 
     /// Update the overlay. Passing `pin` shows the pairing code prominently.

@@ -28,8 +28,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         CGRect(x: display.x, y: display.y, width: display.width, height: display.height)
     }
 
-    /// Coalesces live-resize into one placement request per settle.
-    private var resizeWork: DispatchWorkItem?
+    /// One `place` in flight at a time — see `requestResize`.
+    private var resizeInFlight = false
+    private var resizeAgain = false
+    private var wantsSettle = false
 
     /// Watches for the application being closed on the host.
     private var lifeTimer: Timer?
@@ -143,6 +145,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
         window?.close()
     }
 
+    /// Show the cursor the host is showing, so hovering a text field over the
+    /// stream gives an I-beam here too.
+    func setRemoteCursor(_ cursor: NSCursor) {
+        metalView?.remoteCursor = cursor
+    }
+
     /// Point this window at a different region of the canvas.
     func setTile(_ rect: CGRect) {
         tile = rect
@@ -232,14 +240,48 @@ final class AppWindow: NSObject, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowDidResize(_ notification: Notification) {
-        // Resizing the macOS window resizes the real Windows window. Debounced:
-        // live-resize fires continuously, and SetWindowPos per frame would make
-        // the host app thrash.
+        // Resizing the macOS window resizes the real Windows window, and it does
+        // it *while* the drag is happening rather than after it. This used to be
+        // debounced by 200ms, which meant the host only caught up once the drag
+        // ended: until then the window showed the last frame stretched to a shape
+        // it was never rendered at, which is exactly the moment the illusion is
+        // most obviously an illusion.
         guard !isMatchingHostSize else { return }
-        resizeWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.applyResize() }
-        resizeWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        requestResize()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard !isMatchingHostSize else { return }
+        // The final size matters more than any intermediate one, and the last
+        // live update may have been coalesced away — so always send one more,
+        // and this time let the window settle onto whatever the host managed.
+        requestResize(settle: true)
+    }
+
+    /// Push this window's size to the host, at whatever rate the host keeps up
+    /// with.
+    ///
+    /// Sends immediately when nothing is outstanding; if the user keeps dragging
+    /// while a `place` is in flight, that is remembered and one more goes out
+    /// when the reply lands. The rate then self-adapts to the round trip instead
+    /// of guessing an interval, and no more than one request is ever queued
+    /// behind the user's hand — a queue is what would make the window lag rather
+    /// than track.
+    private func requestResize(settle: Bool = false) {
+        if settle { wantsSettle = true }
+        guard !resizeInFlight else {
+            resizeAgain = true
+            return
+        }
+        resizeInFlight = true
+        resizeAgain = false
+        let settling = wantsSettle
+        wantsSettle = false
+        syncGeometry(matchBack: settling) { [weak self] in
+            guard let self else { return }
+            self.resizeInFlight = false
+            if self.resizeAgain || self.wantsSettle { self.requestResize() }
+        }
     }
 
     /// Place the host window to match this one, then stop it being resized there.
@@ -255,11 +297,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    private func applyResize() {
-        syncGeometry()
-    }
-
-    private func syncGeometry(_ completion: (() -> Void)? = nil) {
+    /// - Parameter matchBack: whether to snap this window onto the size the host
+    ///   actually achieved. Never mid-drag: the user's hand owns the window
+    ///   then, and resizing it under them fights the drag.
+    private func syncGeometry(matchBack: Bool = true, _ completion: (() -> Void)? = nil) {
         guard let window, let screen = window.screen ?? NSScreen.main else {
             completion?()
             return
@@ -303,7 +344,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 let visible = achieved.intersection(self.displayRect)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
-                self.matchWindow(to: visible, scale: scale)
+                if matchBack {
+                    self.matchWindow(to: visible, scale: scale)
+                }
                 if visible != achieved {
                     Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
                              + " does not fit the display; showing "
@@ -369,7 +412,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // for the rest of the process's life.
         qualityTimer?.invalidate()
         qualityTimer = nil
-        resizeWork?.cancel()
+        // Nothing to cancel: a resize in flight completes into a closing window
+        // and `isClosing` stops it doing anything.
+        resizeAgain = false
+        wantsSettle = false
         agent.setResizeLock(windowID: remoteWindowID, false)
         agent.setTopmost(windowID: remoteWindowID, false)
         if let metalView {

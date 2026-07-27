@@ -2025,9 +2025,21 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
 
 // ΓöÇΓöÇ Server ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+// Serialises writes to the client socket.
+//
+// Command replies come from the serving thread and cursor notices from the
+// watcher below, and a line torn in half by the other thread's send() is a
+// protocol desync the Mac cannot recover from -- it has no request ids to
+// resynchronise against, so it drops the connection.
+CRITICAL_SECTION g_send_cs;
+
 bool SendLine(SOCKET client, const std::string& text) {
     std::string payload = text;
     payload += '\n';
+    EnterCriticalSection(&g_send_cs);
+    struct Unlock {
+        ~Unlock() { LeaveCriticalSection(&g_send_cs); }
+    } unlock;
     size_t sent = 0;
     while (sent < payload.size()) {
         const int n = send(client, payload.data() + sent, (int) (payload.size() - sent), 0);
@@ -2037,6 +2049,124 @@ bool SendLine(SOCKET client, const std::string& text) {
         sent += static_cast<size_t>(n);
     }
     return true;
+}
+
+// ── Cursor shape ─────────────────────────────────────────────────────────────
+//
+// The Mac draws its own pointer over the video, so it has to know what the
+// Windows cursor currently *is* — an I-beam over a text field, a resize arrow
+// over a split, and so on — or the pointer stays an arrow while it hovers
+// things that are plainly not arrows.
+//
+// Pushed rather than polled. The Mac already polls this socket for window
+// status, and the agent serves one command at a time on one thread, so a poll
+// fast enough to feel immediate would sit in front of every `place` sent during
+// a live resize. This costs one line per actual change instead.
+
+struct NamedCursor {
+    const wchar_t* id;
+    const char* name;
+    HCURSOR handle;
+};
+
+/// The standard cursors, resolved once. A custom cursor belonging to some
+/// application matches none of them and is reported as "arrow", which is the
+/// honest answer: its bitmap means nothing to macOS.
+NamedCursor g_cursors[] = {
+    {IDC_ARROW, "arrow", nullptr},
+    {IDC_IBEAM, "ibeam", nullptr},
+    {IDC_WAIT, "wait", nullptr},
+    {IDC_CROSS, "crosshair", nullptr},
+    {IDC_UPARROW, "uparrow", nullptr},
+    {IDC_SIZENWSE, "resizeNWSE", nullptr},
+    {IDC_SIZENESW, "resizeNESW", nullptr},
+    {IDC_SIZEWE, "resizeWE", nullptr},
+    {IDC_SIZENS, "resizeNS", nullptr},
+    {IDC_SIZEALL, "move", nullptr},
+    {IDC_NO, "no", nullptr},
+    {IDC_HAND, "hand", nullptr},
+    {IDC_APPSTARTING, "appstarting", nullptr},
+    {IDC_HELP, "help", nullptr},
+};
+
+SOCKET g_cursor_client = INVALID_SOCKET;
+HANDLE g_cursor_thread = nullptr;
+volatile LONG g_cursor_stop = 0;
+/// Nothing is pushed before the client has proved who it is. The display list is
+/// withheld until then for the same reason, and a notice that leaks the host's
+/// UI state to anyone who can open the socket would quietly undo that.
+volatile LONG g_cursor_authorised = 0;
+
+const char* CursorName(HCURSOR cursor) {
+    for (NamedCursor& known : g_cursors) {
+        if (known.handle == nullptr) {
+            known.handle = LoadCursorW(nullptr, known.id);
+        }
+        if (known.handle == cursor) {
+            return known.name;
+        }
+    }
+    return "arrow";
+}
+
+DWORD WINAPI CursorWatcherProc(LPVOID) {
+    HCURSOR last = nullptr;
+    bool logged_once = false;
+    while (InterlockedCompareExchange(&g_cursor_stop, 0, 0) == 0) {
+        CURSORINFO info{};
+        info.cbSize = sizeof(info);
+        const BOOL got = GetCursorInfo(&info);
+        HCURSOR current = got ? info.hCursor : nullptr;
+        if (InterlockedCompareExchange(&g_cursor_authorised, 0, 0) == 0) {
+            // Not authenticated yet. Forget the last shape too, so the first
+            // push after authentication carries the current one rather than
+            // being skipped as unchanged.
+            last = nullptr;
+            Sleep(40);
+            continue;
+        }
+        if (!logged_once) {
+            logged_once = true;
+            Log("[cursor] reporting shape changes (currently %s)", CursorName(current));
+        }
+        if (current != last) {
+            last = current;
+            const SOCKET client = g_cursor_client;
+            if (client != INVALID_SOCKET) {
+                std::string line = "{\"type\":\"cursor\",\"shape\":\"";
+                line += CursorName(current);
+                line += "\"}";
+                // A failure here means the client has gone; the serving thread
+                // notices that on its own recv, so there is nothing to do but
+                // stop bothering it.
+                if (!SendLine(client, line)) {
+                    break;
+                }
+            }
+        }
+        Sleep(40);
+    }
+    return 0;
+}
+
+void StartCursorWatcher(SOCKET client, bool authorised) {
+    g_cursor_client = client;
+    InterlockedExchange(&g_cursor_stop, 0);
+    InterlockedExchange(&g_cursor_authorised, authorised ? 1 : 0);
+    g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc, nullptr, 0, nullptr);
+}
+
+void StopCursorWatcher() {
+    InterlockedExchange(&g_cursor_stop, 1);
+    if (g_cursor_thread) {
+        // Bounded by the 40ms poll, so this is a short wait, and it has to
+        // happen before the socket closes underneath the thread.
+        WaitForSingleObject(g_cursor_thread, 2000);
+        CloseHandle(g_cursor_thread);
+        g_cursor_thread = nullptr;
+    }
+    g_cursor_client = INVALID_SOCKET;
+    InterlockedExchange(&g_cursor_authorised, 0);
 }
 
 void ServeClient(SOCKET client) {
@@ -2118,6 +2248,7 @@ void ServeClient(SOCKET client) {
             // the hello sequence, withheld until now, and the Mac waits for it
             // before doing anything else.
             if (!was_authenticated && authenticated) {
+                InterlockedExchange(&g_cursor_authorised, 1);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
                 }
@@ -2287,6 +2418,7 @@ int wmain(int argc, wchar_t** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     InitializeCriticalSection(&g_lock_cs);
+    InitializeCriticalSection(&g_send_cs);
 
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
@@ -2381,7 +2513,11 @@ int wmain(int argc, wchar_t** argv) {
             continue;
         }
         Log("[agent] client connected");
+        // Loopback needs no token, so it is authorised from the start.
+        StartCursorWatcher(client, !g_require_auth);
         ServeClient(client);
+        // Stopped before the socket closes: the watcher writes to it.
+        StopCursorWatcher();
         closesocket(client);
         // Give every managed window its resize border back. A Mac that goes away
         // must not leave applications permanently unresizable on someone's desktop.

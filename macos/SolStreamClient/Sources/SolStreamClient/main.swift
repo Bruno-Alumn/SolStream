@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        HostCursor.registerDefaults()   // before buildMenu, which reads the value
         buildMenu()
         Log.startSession(version: "v0.3")
 
@@ -614,6 +615,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // session is already sending it, so the first frame can land before PLAY
         // returns and the control stream exists — and synthetic keys sent then
         // go nowhere at all.
+        // The host pushes this whenever its cursor changes shape. Applied to
+        // every window: the cursor is global to the host, and only the one the
+        // pointer is actually over can show it anyway.
+        agent.onCursorShape = { [weak self] shape in
+            guard let self else { return }
+            let cursor = HostCursor.macCursor(for: shape)
+            self.appWindows.forEach { $0.setRemoteCursor(cursor) }
+        }
+
         session.connection.onControlConnected = { [weak session] in
             guard let session else { return }
             HostCursor.apply(to: session.connection, host: host)

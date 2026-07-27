@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SolStreamLogging
 import StreamConnection
@@ -28,6 +29,16 @@ enum HostCursor {
 
     private static func beliefKey(for host: String) -> String {
         "SolStream.hostCursorHidden.\(host)"
+    }
+
+    /// Hiding is the default. The point of the window is to feel like a local
+    /// application, and two cursors — one of them a round trip behind — is the
+    /// most obvious way it does not.
+    ///
+    /// Registered rather than written, so it remains a default the user can
+    /// override rather than a value stored on their behalf. Call once at launch.
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [preferenceKey: true])
     }
 
     /// The user's preference, applied to every host.
@@ -71,6 +82,32 @@ enum HostCursor {
         setBelief(nowHidden, for: host)
         Log.info("[cursor] asked \(host) to \(nowHidden ? "hide" : "show") its cursor")
         return true
+    }
+
+    // MARK: - Shape
+
+    /// The macOS cursor closest to a Windows one.
+    ///
+    /// Approximate by necessity: the two sets do not correspond. Windows has
+    /// diagonal resize cursors and a four-way move cursor that AppKit exposes no
+    /// public equivalent for before macOS 15, and macOS has no busy pointer an
+    /// application is allowed to set — the spinner belongs to the system and
+    /// means *this* app is not responding, which would be a lie. Those fall back
+    /// to the arrow rather than to something that looks deliberate and is wrong.
+    static func macCursor(for shape: String) -> NSCursor {
+        switch shape {
+        case "ibeam":      return .iBeam
+        case "hand":       return .pointingHand
+        case "crosshair":  return .crosshair
+        case "resizeWE":   return .resizeLeftRight
+        case "resizeNS":   return .resizeUpDown
+        case "no":         return .operationNotAllowed
+        case "uparrow":    return .resizeUp
+        case "help":       return .contextualMenu
+        // "wait", "appstarting", "move", "resizeNWSE", "resizeNESW" and anything
+        // an application drew itself all land here.
+        default:           return .arrow
+        }
     }
 
     // MARK: - The shortcut
