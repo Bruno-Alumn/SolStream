@@ -54,12 +54,21 @@ namespace {
 
 constexpr unsigned short kDefaultPort = 47997;
 
-// Anyone who can reach this socket can enumerate every window title and move or
-// focus any window on the machine. There is no authentication, so by default it
-// is bound to loopback only and reached through an SSH tunnel. --listen-all is
-// opt-in and prints a warning.
+// By default this socket is bound to loopback only and reached through an SSH
+// tunnel; anywhere else a token is required. --listen-all is opt-in and warns.
 constexpr const char* kLoopback = "127.0.0.1";
 constexpr int kProtocolVersion = 1;
+
+// Transport and payload budgets. These have to be picked together, and together
+// with the matching pair in AgentConnection.swift, because the clipboard is the
+// one command whose payload is sized by the user rather than by the protocol.
+//
+// JSON escaping can expand text sixfold — a control byte becomes \u00xx — so the
+// line limit must clear six times the payload cap at both ends. Getting this
+// wrong is not a truncated clipboard: whichever side hits its line cap first
+// tears down the control channel mid-session.
+constexpr size_t kMaxClipboardBytes = 256 * 1024;
+constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 
 /// Sunshine's web UI / config API port. It is the stream port plus one, so a host
 /// that moved Sunshine off its default needs --sunshine-port to match.
@@ -694,10 +703,16 @@ std::string ClipboardGetJson() {
 
     // A clipboard can hold a whole document; this channel is for text people
     // copy, not for bulk transfer.
-    constexpr size_t kMaxBytes = 1 << 20;
     bool truncated = false;
-    if (text.size() > kMaxBytes) {
-        text.resize(kMaxBytes);
+    if (text.size() > kMaxClipboardBytes) {
+        // Cut between codepoints, not at a byte offset. resize() alone can slice
+        // a multi-byte character in half, and the Mac rejects the whole line as
+        // malformed JSON — losing the reply, not just the tail of the text.
+        size_t cut = kMaxClipboardBytes;
+        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        text.resize(cut);
         truncated = true;
     }
     return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":" + std::to_string(ClipboardSequence())
@@ -1968,6 +1983,10 @@ void ServeClient(SOCKET client) {
 
     std::string buffer;
     char chunk[4096];
+    // Set once a line has outgrown the cap, and cleared at the newline that ends
+    // it. The rest of an oversized line has not arrived yet — it comes in later
+    // recv() chunks — so this cannot be a one-off scan of what is in hand.
+    bool discarding = false;
     for (;;) {
         const int n = recv(client, chunk, sizeof(chunk), 0);
         if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
@@ -1978,6 +1997,16 @@ void ServeClient(SOCKET client) {
             return;
         }
         buffer.append(chunk, static_cast<size_t>(n));
+
+        if (discarding) {
+            const size_t end = buffer.find('\n');
+            if (end == std::string::npos) {
+                buffer.clear();
+                continue;
+            }
+            buffer.erase(0, end + 1);
+            discarding = false;
+        }
 
         size_t newline;
         while ((newline = buffer.find('\n')) != std::string::npos) {
@@ -2003,10 +2032,23 @@ void ServeClient(SOCKET client) {
             }
         }
 
-        // A client that never sends a newline must not grow this unbounded.
-        if (buffer.size() > 64 * 1024) {
-            Log("[agent] oversized request, dropping client");
-            return;
+        // A client that never sends a newline must not grow this unbounded —
+        // but refuse the line, not the client. Dropping the connection is far
+        // more destructive than it sounds: closing the socket runs UnlockAll(),
+        // which pulls every streamed window off the virtual display and back
+        // onto the real desktop, in the middle of a session the user is still
+        // watching. The Mac has no reconnect, so the picture stays live while
+        // every window command silently stops working.
+        if (buffer.size() > kMaxLineBytes) {
+            Log("[agent] request over %zu bytes, skipping it", kMaxLineBytes);
+            buffer.clear();
+            discarding = true;
+            // Exactly one line, because the Mac pops one waiting completion per
+            // reply. Zero or two desynchronises every later reply on this
+            // connection.
+            if (!SendLine(client, "{\"type\":\"error\",\"message\":\"request too large\"}")) {
+                return;
+            }
         }
     }
 }
