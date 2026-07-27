@@ -247,7 +247,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.onState = { state in
             switch state {
             case .failed(let message):
-                Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+                // No suffix: `explain` already says what to do about a genuine
+                // unreachable host, and a refusal is not unreachability — a
+                // hint to check the agent is running reads as nonsense when the
+                // agent answered and was turned down for impersonation.
+                Log.error("[app] \(message)")
             case .needsToken(let host, _):
                 // No window to ask in on this path, so say what to do instead of
                 // waiting for an answer that cannot arrive.
@@ -453,7 +457,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.onState = { state in
             switch state {
             case .failed(let message):
-                Log.error("[app] agent unreachable: \(message) — is SolStreamAgent running?")
+                // No suffix: `explain` already says what to do about a genuine
+                // unreachable host, and a refusal is not unreachability — a
+                // hint to check the agent is running reads as nonsense when the
+                // agent answered and was turned down for impersonation.
+                Log.error("[app] \(message)")
             case .needsToken(let host, _):
                 // No window to ask in on this path, so say what to do instead of
                 // waiting for an answer that cannot arrive.
