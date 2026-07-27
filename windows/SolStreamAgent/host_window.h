@@ -26,6 +26,8 @@ struct HostStatus {
     std::wstring sunshine_detail;
     std::wstring display_detail;
     int connected_clients = 0;
+    /// Sunshine's own pairing page, for the fallback card's button.
+    unsigned short web_ui_port = 0;
 };
 
 /// Create and show the window. Returns false if the window could not be made,

@@ -2086,7 +2086,21 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         if (name.empty()) {
             name = "SolStream client";
         }
-        return PairJson(pin, name, g_sunshine_web_port);
+        const std::string reply = PairJson(pin, name, g_sunshine_web_port);
+
+        // Put the code on screen here when it could not be approved for the
+        // user. The window has always been able to draw this card; nothing
+        // ever asked it to, so the one moment the host application exists for
+        // -- a Mac waiting on a code -- was the one moment it said nothing.
+        //
+        // The Mac shows the PIN too, but only the person at this PC can act on
+        // it, and they may not be the person holding the Mac.
+        if (reply.find("\"ok\":true") == std::string::npos) {
+            solstream::ShowPairingPin(ToWide(pin), ToWide(name));
+        } else {
+            solstream::ShowPairingPin(L"", L"");
+        }
+        return reply;
     }
 
     if (command == "window") {
@@ -2903,6 +2917,9 @@ int wmain(int argc, wchar_t** argv) {
             // Give every managed window its resize border back. A Mac that goes
             // away must not leave applications permanently unresizable.
             UnlockAll();
+            // A PIN nobody is waiting on any more is worse than no PIN: it is a
+            // code on screen that does nothing, for a Mac that has gone.
+            solstream::ShowPairingPin(L"", L"");
             g_clients_connected.fetch_sub(1);
             Log("[agent] client disconnected");
         }
@@ -2945,6 +2962,7 @@ int wmain(int argc, wchar_t** argv) {
                                    || state == solstream::SunshineState::kStarting;
             status.sunshine_detail = ToWide(solstream::SunshineStatusText());
 
+            status.web_ui_port = g_sunshine_web_port;
             status.virtual_display = solstream::HasVirtualDisplay();
             status.display_detail = status.virtual_display
                 ? (g_capture_display.empty() ? L"ready" : g_capture_display)

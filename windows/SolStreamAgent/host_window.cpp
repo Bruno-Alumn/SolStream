@@ -35,8 +35,7 @@ int g_height = kHeightCompact;
 enum ControlId {
     kIdCopyToken = 100,
     kIdInstallDriver = 101,
-    kIdPairApprove = 102,
-    kIdPairPin = 103,
+    kIdOpenPairingPage = 102,
 };
 
 std::mutex g_mutex;
@@ -158,15 +157,20 @@ void Paint(HWND window) {
 
         SelectObject(dc, g_body_font);
         SetTextColor(dc, kTextFaint);
-        RECT ask{36, y + 16, kWidth - 36, y + 38};
-        const std::wstring line = pin_client.empty()
-            ? L"A Mac is asking to pair. Enter this code there:"
-            : pin_client + L" is asking to pair. Enter this code there:";
+        RECT ask{36, y + 14, kWidth - 36, y + 56};
+        // Which end the code goes into is the whole instruction, and it goes
+        // into this PC: the Mac is the end that *shows* it. Saying "enter this
+        // code there" pointed at the machine already displaying it.
+        const std::wstring who = pin_client.empty() ? std::wstring(L"A Mac")
+                                                    : pin_client;
+        const std::wstring line =
+            who + L" is asking to pair, and SolStream could not approve it for you. "
+                  L"Enter this code on the pairing page of this PC:";
         DrawTextW(dc, line.c_str(), -1, &ask, DT_LEFT | DT_WORDBREAK);
 
         SelectObject(dc, g_pin_font);
         SetTextColor(dc, kAccent);
-        RECT code{36, y + 48, kWidth - 36, y + 110};
+        RECT code{36, y + 58, kWidth - 36, y + 120};
         DrawTextW(dc, pin.c_str(), -1, &code, DT_CENTER | DT_SINGLELINE);
         y += 166;
     }
@@ -212,6 +216,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                             kWidth - 130, g_height - 96, 100, 26,
                             window, (HMENU) (INT_PTR) kIdCopyToken,
                             nullptr, nullptr);
+            CreateWindowExW(0, L"BUTTON", L"Open pairing page",
+                            WS_CHILD | BS_OWNERDRAW,
+                            kWidth - 200, 176, 164, 28,
+                            window, (HMENU) (INT_PTR) kIdOpenPairingPage,
+                            nullptr, nullptr);
             CreateWindowExW(0, L"BUTTON", L"Install display driver",
                             WS_CHILD | BS_OWNERDRAW,
                             28, g_height - 56, 180, 28,
@@ -232,6 +241,23 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case kIdCopyToken: {
                     std::lock_guard<std::mutex> lock(g_mutex);
                     CopyToClipboard(g_status.pairing_token);
+                    return 0;
+                }
+                case kIdOpenPairingPage: {
+                    unsigned short port = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(g_mutex);
+                        port = g_status.web_ui_port;
+                    }
+                    if (port != 0) {
+                        // Sunshine's own page, on this machine. Opened here so
+                        // the instruction is two clicks rather than a URL the
+                        // user has to be told how to assemble.
+                        const std::wstring url =
+                            L"https://localhost:" + std::to_wstring(port) + L"/pin";
+                        ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr,
+                                      SW_SHOWNORMAL);
+                    }
                     return 0;
                 }
                 case kIdInstallDriver: {
@@ -304,12 +330,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         case WM_TIMER: {
             // The install button only exists while it would do something.
             bool needs_driver = false;
+            bool pairing = false;
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 needs_driver = !g_status.virtual_display;
+                pairing = !g_pending_pin.empty();
             }
             ShowWindow(GetDlgItem(window, kIdInstallDriver),
                        needs_driver ? SW_SHOW : SW_HIDE);
+            ShowWindow(GetDlgItem(window, kIdOpenPairingPage),
+                       pairing ? SW_SHOW : SW_HIDE);
             InvalidateRect(window, nullptr, FALSE);
             return 0;
         }

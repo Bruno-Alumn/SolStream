@@ -107,8 +107,20 @@ std::wstring BundledDriverPackage() {
 bool InstallBundledDriver(std::string& error) {
     const std::wstring inf = BundledDriverPackage();
     if (inf.empty()) {
-        error = "SolStream does not have a display driver bundled with it. "
-                "Install the Virtual Display Driver, then start SolStream again.";
+        // Say what is missing, where it goes, and what happens without it.
+        // "No driver bundled" on its own tells the user nothing they can act
+        // on, and this is the one message they will see at exactly the moment
+        // they cannot stream properly.
+        error = "This build of SolStream has no display driver bundled with it.\r\n\r\n"
+                "SolStream streams a virtual display so the window can be any size, "
+                "can be matched to your Mac's resolution exactly, and can never show "
+                "what is on your real monitor. Without one it captures a real screen "
+                "instead, and all three of those stop being true.\r\n\r\n"
+                "Install any indirect display driver - the Virtual Display Driver "
+                "from github.com/itsmikethetech/Virtual-Display-Driver is the one "
+                "SolStream is tested against - then start SolStream again.\r\n\r\n"
+                "To have SolStream install it for you, put the driver package in a "
+                "'driver' folder beside SolStream.exe, named SolStreamDisplay.inf.";
         return false;
     }
 

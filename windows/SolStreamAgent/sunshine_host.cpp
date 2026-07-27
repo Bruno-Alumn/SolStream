@@ -107,6 +107,84 @@ bool SomethingListensOn(unsigned short port) {
     return answered;
 }
 
+/// Where the generated web credentials are kept between runs.
+///
+/// They have to survive a restart. Sunshine stores only a salted hash of its
+/// password, so a SolStream that forgot the plaintext could never talk to its
+/// own Sunshine again — and the symptom would not be an error, it would be
+/// pairing quietly falling back to asking the user for a PIN it was supposed to
+/// handle for them.
+///
+/// DPAPI, so the file is readable only by this Windows user account. It is a
+/// password to a service listening on this machine; another account on the same
+/// machine should not be able to lift it off disk.
+std::wstring CredentialsPath(const std::wstring& config_dir) {
+    return config_dir + L"\\web.cred";
+}
+
+bool SaveCredentials(const std::wstring& config_dir,
+                     const std::string& user, const std::string& password) {
+    std::string plain = user;
+    plain.push_back('\n');
+    plain += password;
+
+    DATA_BLOB in{(DWORD) plain.size(), (BYTE*) plain.data()};
+    DATA_BLOB out{};
+    if (!CryptProtectData(&in, L"SolStream Sunshine web credentials", nullptr, nullptr,
+                          nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        return false;
+    }
+    HANDLE file = CreateFileW(CredentialsPath(config_dir).c_str(), GENERIC_WRITE, 0,
+                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = false;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = WriteFile(file, out.pbData, out.cbData, &written, nullptr)
+             && written == out.cbData;
+        CloseHandle(file);
+    }
+    LocalFree(out.pbData);
+    return ok;
+}
+
+bool LoadCredentials(const std::wstring& config_dir,
+                     std::string& user, std::string& password) {
+    HANDLE file = CreateFileW(CredentialsPath(config_dir).c_str(), GENERIC_READ,
+                              FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::string encrypted;
+    char chunk[1024];
+    DWORD read = 0;
+    while (ReadFile(file, chunk, sizeof(chunk), &read, nullptr) && read > 0) {
+        encrypted.append(chunk, read);
+    }
+    CloseHandle(file);
+    if (encrypted.empty()) {
+        return false;
+    }
+
+    DATA_BLOB in{(DWORD) encrypted.size(), (BYTE*) encrypted.data()};
+    DATA_BLOB out{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
+                            CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        return false;
+    }
+    const std::string plain((const char*) out.pbData, out.cbData);
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+
+    const size_t split = plain.find('\n');
+    if (split == std::string::npos) {
+        return false;
+    }
+    user = plain.substr(0, split);
+    password = plain.substr(split + 1);
+    return !user.empty() && !password.empty();
+}
+
 }  // namespace
 
 std::wstring SunshineConfigDir() {
@@ -194,10 +272,19 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
     // reaches stops being knowable.
     if (SomethingListensOn(
             MapPort(base_port, SunshinePort::kHttp))) {
-        char buffer[128];
+        // Adopting is not just "leave it alone": without the credentials for
+        // whatever is listening, this program cannot approve a pairing PIN, and
+        // the user is asked to type a code for a reason they cannot see. If it
+        // is our own Sunshine from a previous run, the credentials are on disk.
+        if (g_user.empty()) {
+            LoadCredentials(SunshineConfigDir(), g_user, g_password);
+        }
+        char buffer[192];
         std::snprintf(buffer, sizeof(buffer),
-                      "Using the Sunshine already listening on port %u",
-                      (unsigned) MapPort(base_port, SunshinePort::kHttp));
+                      "Using the Sunshine already listening on port %u (%s)",
+                      (unsigned) MapPort(base_port, SunshinePort::kHttp),
+                      g_user.empty() ? "credentials unknown - pairing needs a PIN"
+                                     : "pairing handled here");
         SetStatus(SunshineState::kRunning, buffer);
         return true;
     }
@@ -224,6 +311,12 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
         return false;
     }
 
+    // Reuse the credentials from last time if there are any; Sunshine keeps
+    // only a hash of the password, so a fresh one every start would mean
+    // rewriting its store on every start too.
+    if (g_user.empty()) {
+        LoadCredentials(config_dir, g_user, g_password);
+    }
     if (g_user.empty()) {
         g_user = "solstream";
         g_password = RandomHex(24);
@@ -231,6 +324,7 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
             SetStatus(SunshineState::kFailed, "Could not generate web credentials");
             return false;
         }
+        SaveCredentials(config_dir, g_user, g_password);
     }
 
     // Written every start, not just the first: the ports and the capture display
