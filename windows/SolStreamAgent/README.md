@@ -73,10 +73,10 @@ mean a second connection blocks in the accept backlog rather than being refused.
 
 ## Where it listens
 
-Loopback by default, so out of the box the Mac cannot reach it at all. This
-socket has **no authentication yet**, so the address it binds is the only thing
-deciding who can drive it — and what it can do is move any window on the machine
-and launch applications.
+Loopback by default, so out of the box the Mac cannot reach it at all. Anywhere
+else, a token is required as well (see below) — but the bound address is still
+worth choosing carefully, so that the token is a second lock rather than the
+only one.
 
 ```
 --bind 100.64.0.5     one address; prefer a VPN interface
@@ -99,13 +99,18 @@ profile at `%LOCALAPPDATA%\SolStream\agent.token`.
 SolStreamAgent.exe --print-token
 ```
 
-Give it to the Mac once with `--agent-token <token>`; it is remembered per host
-after that.
+Paste it into the prompt SolStream shows the first time it connects, or pass it
+once with `--agent-token <token>`. Either way it is remembered per host.
 
 Loopback is exempt, because reaching it already means running as a user on this
 machine — strictly more access than the agent grants. That exemption is what lets
-an SSH port forward work without a token. `--no-auth` disables the check
-elsewhere and warns loudly; there is no good reason to use it.
+an SSH port forward work without a token.
+
+`--no-auth` waives the token, and is **refused on any address but loopback** —
+the agent exits rather than starting. It used to be allowed anywhere with a
+warning, which was the wrong instrument: the agent starts from a scheduled task
+at logon, so the warning went to a log nobody reads on a machine whose owner
+believed the VPN was the boundary.
 
 Comparison is constant-time and a wrong token costs a one-second delay, which a
 legitimate client never pays and a guesser always does.

@@ -16,6 +16,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../macos/SolStreamClient"
 
 PRODUCT_NAME="SolStream"
+# What SwiftPM actually builds, which differs from the bundle name.
+EXECUTABLE_NAME="SolStreamClient"
 BUNDLE_ID="com.solstream.macclient"
 BUILD_DIR=".build/release"
 DMG_NAME="${PRODUCT_NAME}.dmg"
@@ -40,14 +42,16 @@ echo ""
 echo "--- Step 1: Building ---"
 swift build --configuration release
 
-# Locate the built binary
+# Assemble the bundle. SPM puts the executable in .build/release/ directly,
+# under the product's name -- which is not the bundle's name, so it is renamed
+# on the way in to match CFBundleExecutable below.
 APP_PATH="$BUILD_DIR/$PRODUCT_NAME.app"
-if [ ! -d "$APP_PATH" ]; then
-    # SPM puts executables in .build/release/ directly
-    mkdir -p "$APP_PATH/Contents/MacOS"
-    mkdir -p "$APP_PATH/Contents/Resources"
-    cp "$BUILD_DIR/$PRODUCT_NAME" "$APP_PATH/Contents/MacOS/"
-fi
+mkdir -p "$APP_PATH/Contents/MacOS"
+mkdir -p "$APP_PATH/Contents/Resources"
+# Unconditionally, not just when the .app is missing: guarding this on the
+# directory's existence meant every run after the first packaged the previous
+# build's binary.
+cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
 
 # Step 2: Create Info.plist if missing
 echo ""
