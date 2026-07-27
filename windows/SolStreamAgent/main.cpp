@@ -535,6 +535,30 @@ std::vector<AppEntry> EnumerateApps() {
     return apps;
 }
 
+/// Is this one of the applications the agent itself advertised?
+///
+/// `launch` used to run whatever path arrived on the wire, which made the agent
+/// socket a remote code execution primitive: one line of JSON naming
+/// `\\attacker\share\payload.exe` ran it as the logged-in user, and `icon` would
+/// happily reach the same UNC path and hand over a set of NTLM credentials on
+/// the way. Checking against the list the agent just produced costs one
+/// directory walk and removes the primitive rather than narrowing it — there is
+/// no path a client can name that the user could not have clicked in their own
+/// Start Menu.
+///
+/// Deliberately an exact match against paths this process constructed, not a
+/// prefix or extension test. There is no traversal to reason about, no
+/// canonicalisation to get subtly wrong, and no argument about what `..` means
+/// halfway through a UNC path.
+bool IsAdvertisedApp(const std::wstring& path) {
+    for (const AppEntry& app : EnumerateApps()) {
+        if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Start an application and return the window it opens.
 ///
 /// Matching on the launched process id alone is not enough: plenty of shortcuts
@@ -943,7 +967,14 @@ struct WindowLock {
     HWND window = nullptr;
     RECT desired{};           // client area, in virtual-desktop coordinates
     LONG_PTR saved_style = 0;
-    bool active = false;
+    // How the window looked before the agent touched it. Everything the agent
+    // changes has to be recorded, because the client that changed it may never
+    // come back to change it again: a Mac that loses its network leaves the
+    // window exactly as it was mid-session.
+    WINDOWPLACEMENT saved_placement{};
+    bool saved_topmost = false;
+    bool geometry_locked = false;  // the watcher holds this one in place
+    bool active = false;           // the agent owes this window a restore
 };
 
 CRITICAL_SECTION g_lock_cs;
@@ -961,7 +992,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             HWND window = nullptr;
             RECT desired{};
             EnterCriticalSection(&g_lock_cs);
-            if (g_locks[i].active && IsWindow(g_locks[i].window)) {
+            if (g_locks[i].geometry_locked && IsWindow(g_locks[i].window)) {
                 window = g_locks[i].window;
                 desired = g_locks[i].desired;
             }
@@ -997,36 +1028,55 @@ void StartWatcher() {
     g_watcher = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
 }
 
+/// Find this window's slot, claiming a free one and recording how the window
+/// looked first. Call with `g_lock_cs` held.
+///
+/// Recording happens here, once, rather than in each caller: `lock` and
+/// `topmost` both change a window and both owe it a restore, and a window that
+/// was only ever made topmost still has to come back down.
+int ClaimSlot(HWND window) {
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window == window) {
+            return i;
+        }
+    }
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active) {
+            continue;
+        }
+        g_locks[i] = WindowLock{};
+        g_locks[i].window = window;
+        g_locks[i].active = true;
+        g_locks[i].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
+        g_locks[i].saved_topmost =
+            (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        // WINDOWPLACEMENT rather than GetWindowRect: it carries the restored
+        // size *and* whether the window was maximised, so a window that was
+        // full screen before the session goes back to full screen after it.
+        g_locks[i].saved_placement.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(window, &g_locks[i].saved_placement);
+        return i;
+    }
+    return -1;
+}
+
 /// Take away a window's ability to be resized from the host side.
 bool LockWindow(HWND window) {
+    EnterCriticalSection(&g_lock_cs);
+    const int slot = ClaimSlot(window);
+    LeaveCriticalSection(&g_lock_cs);
+    if (slot < 0) {
+        return false;
+    }
+
+    // Un-maximise only now that the placement is recorded, or the restore would
+    // believe the window had always been this size.
     if (IsZoomed(window)) {
         ShowWindow(window, SW_RESTORE);
     }
+
     EnterCriticalSection(&g_lock_cs);
-    int slot = -1;
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && g_locks[i].window == window) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0) {
-        for (int i = 0; i < kMaxLocks; ++i) {
-            if (!g_locks[i].active) {
-                slot = i;
-                break;
-            }
-        }
-    }
-    if (slot < 0) {
-        LeaveCriticalSection(&g_lock_cs);
-        return false;
-    }
-    if (!g_locks[slot].active) {
-        g_locks[slot].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
-        g_locks[slot].window = window;
-        g_locks[slot].active = true;
-    }
+    g_locks[slot].geometry_locked = true;
     g_locks[slot].desired = ClientAreaInScreen(window);
     const LONG_PTR stripped =
         g_locks[slot].saved_style & ~static_cast<LONG_PTR>(WS_THICKFRAME | WS_MAXIMIZEBOX);
@@ -1042,12 +1092,12 @@ bool LockWindow(HWND window) {
 }
 
 void UnlockWindow(HWND window) {
-    LONG_PTR restore = 0;
+    WindowLock saved{};
     bool found = false;
     EnterCriticalSection(&g_lock_cs);
     for (int i = 0; i < kMaxLocks; ++i) {
         if (g_locks[i].active && g_locks[i].window == window) {
-            restore = g_locks[i].saved_style;
+            saved = g_locks[i];
             g_locks[i] = WindowLock{};
             found = true;
             break;
@@ -1057,9 +1107,22 @@ void UnlockWindow(HWND window) {
     if (!found || !IsWindow(window)) {
         return;
     }
-    SetWindowLongPtrW(window, GWL_STYLE, restore);
-    SetWindowPos(window, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    SetWindowLongPtrW(window, GWL_STYLE, saved.saved_style);
+    // Drop back out of the always-on-top band unless the window was already in
+    // it. Leaving it set is the worst of the three things left behind here: the
+    // window floats above everything the user does next, with no visible cause
+    // and no way to fix it short of restarting the application.
+    SetWindowPos(window, saved.saved_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    // And put it back where it was. Managed windows are parked on the virtual
+    // display, whose origin sits off the side of the real desktop, so a window
+    // left at those coordinates is not merely misplaced — it is invisible, on a
+    // monitor that stops existing when the session ends.
+    if (saved.saved_placement.length == sizeof(WINDOWPLACEMENT)) {
+        SetWindowPlacement(window, &saved.saved_placement);
+    }
 }
 
 /// Give every locked window its resize border back.
@@ -1655,9 +1718,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         if (!FieldString(line, "path", path)) {
             return "{\"type\":\"error\",\"message\":\"icon needs id or path\"}";
         }
+        const std::wstring wide = ToWide(path);
+        if (!IsAdvertisedApp(wide)) {
+            return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
+        }
         HICON large = nullptr;
         // ExtractIconEx resolves a .lnk to its target on its own.
-        if (ExtractIconExW(ToWide(path).c_str(), 0, &large, nullptr, 1) == 0 || !large) {
+        if (ExtractIconExW(wide.c_str(), 0, &large, nullptr, 1) == 0 || !large) {
             return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
         }
         return IconJson(path, large, true);
@@ -1708,6 +1775,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         std::string path;
         if (!FieldString(line, "path", path)) {
             return "{\"type\":\"error\",\"message\":\"launch needs path\"}";
+        }
+        const std::wstring wide = ToWide(path);
+        if (!IsAdvertisedApp(wide)) {
+            Log("[agent] refused to launch %s: not an advertised application", path.c_str());
+            return "{\"type\":\"error\",\"message\":\"not an installed application\"}";
         }
         long long timeout = 20000;
         FieldNumber(line, "timeoutMs", timeout);
@@ -1785,6 +1857,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         // Pinning a managed window above ordinary ones stops other apps
         // covering the tile. Safe for our own tiles because they never
         // overlap each other.
+        //
+        // Claim a slot even when this window is not geometry-locked, so that
+        // whatever happens to the session — a clean disconnect or a Mac that
+        // simply vanishes — the window is known to be owed a trip back down.
+        EnterCriticalSection(&g_lock_cs);
+        ClaimSlot(window);
+        LeaveCriticalSection(&g_lock_cs);
         const BOOL ok = SetWindowPos(window, on ? HWND_TOPMOST : HWND_NOTOPMOST,
                                      0, 0, 0, 0,
                                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -2038,14 +2117,25 @@ int wmain(int argc, wchar_t** argv) {
     // Loopback needs no token: reaching it already means running as a user on
     // this machine, which is strictly more access than the agent grants. Keeping
     // that exemption is what lets an SSH port forward work without one.
+    // --no-auth used to be honoured anywhere, with a warning. A warning is the
+    // wrong instrument: the agent starts from a scheduled task at logon, so the
+    // log line lands in a file nobody is reading, on a machine whose owner
+    // believes their VPN is the boundary. Refuse instead.
+    if (no_auth && bind_address != kLoopback) {
+        Log("[agent] --no-auth is only allowed on %s, not on %s.",
+            kLoopback, bind_address.c_str());
+        Log("[agent] Anything that could open that socket would be able to launch");
+        Log("[agent] applications as this user without presenting anything.");
+        return 1;
+    }
+
+    // Loopback needs no token: reaching it already means running as a user on
+    // this machine, which is strictly more access than the agent grants. Keeping
+    // that exemption is what lets an SSH port forward work without one.
     g_require_auth = !no_auth && bind_address != kLoopback;
     if (g_require_auth && g_token.empty()) {
         Log("[agent] refusing to listen on %s without a token", bind_address.c_str());
         return 1;
-    }
-    if (no_auth && bind_address != kLoopback) {
-        Log("[agent] WARNING: --no-auth on a reachable address. Anything that can");
-        Log("[agent] WARNING: open this socket can launch applications here.");
     }
 
     // Without this every coordinate we read or write is silently rescaled by
@@ -2085,12 +2175,13 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     if (bind_address == "0.0.0.0") {
-        Log("[agent] WARNING: listening on ALL interfaces. This socket is");
-        Log("[agent] WARNING: unauthenticated and can move any window on this");
-        Log("[agent] WARNING: machine and launch applications on it. Prefer");
-        Log("[agent] WARNING: --bind with one address on a trusted network.");
+        Log("[agent] WARNING: listening on ALL interfaces. The token is the only");
+        Log("[agent] WARNING: thing between an attacker and launching applications");
+        Log("[agent] WARNING: as this user. Prefer --bind with the one address of a");
+        Log("[agent] WARNING: trusted network, so the token is a second lock and");
+        Log("[agent] WARNING: not the only one.");
     } else if (bind_address != kLoopback) {
-        Log("[agent] reachable on %s only; this socket is not yet authenticated",
+        Log("[agent] reachable on %s only, and a token is required",
             bind_address.c_str());
     }
 
