@@ -1973,8 +1973,34 @@ int wmain(int argc, wchar_t** argv) {
             bind_address.c_str());
     }
 
-    if (bind(listener, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
-        Log("[agent] bind(%u) failed: %d", port, WSAGetLastError());
+    // Wait for the address to exist rather than giving up on it.
+    //
+    // The agent starts at logon, and a VPN interface does not. Binding a Tailscale
+    // address the moment the desktop appears fails with WSAEADDRNOTAVAIL, because
+    // the interface is seconds away from existing — so the agent would exit and
+    // the Mac would find nothing there until somebody started it by hand. The same
+    // applies to DHCP on a slow network.
+    bool bound = false;
+    for (int attempt = 0; attempt < 150 && !bound; ++attempt) {
+        if (bind(listener, (sockaddr*) &address, sizeof(address)) != SOCKET_ERROR) {
+            bound = true;
+            break;
+        }
+        const int error = WSAGetLastError();
+        if (error != WSAEADDRNOTAVAIL) {
+            Log("[agent] bind(%u) failed: %d", port, error);
+            return 1;
+        }
+        if (attempt == 0) {
+            // ASCII only in log output: the console reads these bytes in the
+            // active code page, so anything above 7-bit comes out as mojibake.
+            Log("[agent] %s does not exist yet, waiting for the interface",
+                bind_address.c_str());
+        }
+        Sleep(2000);
+    }
+    if (!bound) {
+        Log("[agent] gave up waiting for %s to exist", bind_address.c_str());
         return 1;
     }
     if (listen(listener, 1) == SOCKET_ERROR) {
