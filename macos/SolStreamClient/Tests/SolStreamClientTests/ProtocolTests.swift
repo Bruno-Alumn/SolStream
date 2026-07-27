@@ -266,6 +266,33 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(units[1], Data([0x68, 0x03]))
     }
 
+    // MARK: - Control channel routing
+
+    /// Keystrokes must not queue behind mouse movement. ENet orders reliable
+    /// delivery per channel, so the classification below is the whole mechanism
+    /// keeping a lost mouse-move from stalling the keyboard.
+    func testKeyboardAndMouseTakeDifferentChannels() {
+        let keyDown = InputProtocol.key(code: 0x41, pressed: true, modifiers: [])
+        let keyUp = InputProtocol.key(code: 0x41, pressed: false, modifiers: [])
+        XCTAssertEqual(InputProtocol.channel(for: keyDown), .keyboard)
+        XCTAssertEqual(InputProtocol.channel(for: keyUp), .keyboard)
+
+        let move = InputProtocol.mouseMoveAbsolute(x: 10, y: 20,
+                                                   referenceWidth: 1920,
+                                                   referenceHeight: 1080)
+        let click = InputProtocol.mouseButton(.left, pressed: true)
+        let wheel = InputProtocol.scroll(amount: 120)
+        XCTAssertEqual(InputProtocol.channel(for: move), .mouse)
+        XCTAssertEqual(InputProtocol.channel(for: click), .mouse)
+        XCTAssertEqual(InputProtocol.channel(for: wheel), .mouse)
+    }
+
+    /// A packet too short to hold a magic must not read past its end.
+    func testChannelClassificationToleratesShortPackets() {
+        XCTAssertEqual(InputProtocol.channel(for: Data()), .mouse)
+        XCTAssertEqual(InputProtocol.channel(for: Data([0x00, 0x01, 0x02])), .mouse)
+    }
+
     // MARK: - Pairing identity
 
     func testCertificateSignatureIsExtractedFromDER() throws {
