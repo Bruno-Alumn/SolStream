@@ -26,6 +26,10 @@ public final class VideoDecoder {
     private var pps: Data?
     private var lastKeyframeRequest = Date.distantPast
     private var loggedFirstFrame = false
+    /// Last decode error and when it was logged, so a decoder failing on every
+    /// frame at 60fps cannot spend the whole log file on one repeated line.
+    private var lastDecodeError: OSStatus = noErr
+    private var lastDecodeErrorLog = Date.distantPast
 
     /// How often to re-ask the host for an IDR while we have no parameter sets.
     private static let keyframeRequestInterval: TimeInterval = 0.5
@@ -137,10 +141,7 @@ public final class VideoDecoder {
         )
 
         if status != noErr {
-            Log.error("[decode] VTDecompressionSessionDecodeFrame failed: \(status)")
-            if status == kVTInvalidSessionErr {
-                invalidateSession()
-            }
+            noteDecodeFailure(status)
         } else if !loggedFirstFrame {
             loggedFirstFrame = true
             Log.info("[decode] first frame submitted (\(avcc.count) bytes, IDR: \(isIDR))")
@@ -192,6 +193,40 @@ public final class VideoDecoder {
         return units
     }
 
+    /// Deal with a decode failure, rebuilding the session for the errors Apple
+    /// documents as recoverable only that way.
+    ///
+    /// Only `kVTInvalidSessionErr` used to drop the session. Everything else was
+    /// logged and the frame discarded — including `kVTVideoDecoderMalfunctionErr`
+    /// and `kVTVideoDecoderBadDataErr`, where recreating the session *is* the
+    /// documented recovery. That mattered more than it sounds: Sunshine repeats
+    /// the same SPS/PPS ahead of every IDR, so `parameterSetsChanged` stays
+    /// false, and the one other thing that rebuilds a session never fired. A
+    /// decoder that malfunctioned once stayed wedged for the rest of the
+    /// connection, showing a frozen picture that no keyframe could repair.
+    ///
+    /// Call with `lock` held.
+    func noteDecodeFailure(_ status: OSStatus) {
+        // A wedged decoder fails on every frame, 60 times a second. Unthrottled
+        // that is the log file's whole budget spent on one repeated line.
+        let now = Date()
+        if status != lastDecodeError || now.timeIntervalSince(lastDecodeErrorLog) > 5 {
+            Log.error("[decode] VTDecompressionSessionDecodeFrame failed: \(status)")
+            lastDecodeError = status
+            lastDecodeErrorLog = now
+        }
+
+        switch status {
+        case kVTInvalidSessionErr, kVTVideoDecoderMalfunctionErr, kVTVideoDecoderBadDataErr:
+            invalidateSession()
+            // The next frame carrying SPS/PPS rebuilds it; ask for one now
+            // rather than waiting for the host's own keyframe interval.
+            onKeyframeNeeded?()
+        default:
+            break
+        }
+    }
+
     // MARK: - Session
 
     private func rebuildSession(sps: Data, pps: Data) {
@@ -238,7 +273,13 @@ public final class VideoDecoder {
             guard let refcon else { return }
             let decoder = Unmanaged<VideoDecoder>.fromOpaque(refcon).takeUnretainedValue()
             guard status == noErr, let pixelBuffer = imageBuffer else {
-                if status != noErr { Log.error("[decode] frame dropped: \(status)") }
+                // Asynchronous failures were logged and nothing more, so a
+                // session that malfunctioned only on this path stayed wedged.
+                if status != noErr {
+                    decoder.lock.lock()
+                    decoder.noteDecodeFailure(status)
+                    decoder.lock.unlock()
+                }
                 return
             }
             decoder.frameCallback(pixelBuffer)

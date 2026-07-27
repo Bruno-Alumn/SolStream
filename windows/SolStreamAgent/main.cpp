@@ -580,13 +580,39 @@ std::vector<AppEntry> EnumerateApps() {
 /// prefix or extension test. There is no traversal to reason about, no
 /// canonicalisation to get subtly wrong, and no argument about what `..` means
 /// halfway through a UNC path.
-bool IsAdvertisedApp(const std::wstring& path) {
-    for (const AppEntry& app : EnumerateApps()) {
-        if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
-            return true;
-        }
+///
+/// Cached, because membership is asked once per icon and the picker asks for one
+/// icon per row as rows scroll into view. Re-walking two Start Menu trees to
+/// depth 4 for each of those put real disk I/O on the agent's single command
+/// thread, and every other command queues behind it.
+///
+/// No lock: commands are served one at a time, on one thread.
+std::set<std::wstring> g_advertised_paths;
+DWORD g_advertised_at = 0;
+constexpr DWORD kAdvertisedTtlMs = 5000;
+
+std::wstring FoldCase(const std::wstring& text) {
+    std::wstring lowered = text;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::towlower);
+    return lowered;
+}
+
+void RememberAdvertised(const std::vector<AppEntry>& apps) {
+    g_advertised_paths.clear();
+    for (const AppEntry& app : apps) {
+        g_advertised_paths.insert(FoldCase(app.path));
     }
-    return false;
+    // Zero means "never populated", so nudge past it on the once-in-49-days
+    // tick where GetTickCount returns 0.
+    g_advertised_at = GetTickCount() | 1;
+}
+
+bool IsAdvertisedApp(const std::wstring& path) {
+    const DWORD now = GetTickCount();
+    if (g_advertised_at == 0 || now - g_advertised_at > kAdvertisedTtlMs) {
+        RememberAdvertised(EnumerateApps());
+    }
+    return g_advertised_paths.count(FoldCase(path)) != 0;
 }
 
 /// Start an application and return the window it opens.
@@ -1728,7 +1754,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
     }
 
     if (command == "apps") {
-        return AppsJson(EnumerateApps());
+        const std::vector<AppEntry> apps = EnumerateApps();
+        // The client launches and fetches icons from exactly this list, so seed
+        // the membership cache with it rather than walking the tree again.
+        RememberAdvertised(apps);
+        return AppsJson(apps);
     }
 
     if (command == "clipboard") {

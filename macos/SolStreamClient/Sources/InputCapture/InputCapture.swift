@@ -251,7 +251,12 @@ public final class InputCapture {
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             // Position first: Windows clicks wherever the pointer currently is.
-            sendPosition(for: event, in: view)
+            // And only click at all if that position landed inside the picture.
+            // The monitor is application-wide, so it also sees clicks on the
+            // title bar, the quality pill and the status overlay -- all outside
+            // the video -- and those used to reach the host as clicks at
+            // whatever coordinate the pointer was last moved to.
+            guard sendPosition(for: event, in: view) else { return }
             if let button = button(for: event) {
                 heldButtons.insert(button)
                 onInput?(InputProtocol.mouseButton(button, pressed: true))
@@ -288,19 +293,23 @@ public final class InputCapture {
     /// Sunshine rescales onto the captured surface, so view points work
     /// directly — no DPI or stream-resolution maths needed here. macOS
     /// coordinates are bottom-left origin, Windows is top-left, hence the flip.
-    private func sendPosition(for event: NSEvent, in view: NSView) {
+    /// - Returns: whether a position actually went to the host. False means the
+    ///   event was outside the picture, and a click there is not a click on the
+    ///   remote application.
+    @discardableResult
+    private func sendPosition(for event: NSEvent, in view: NSView) -> Bool {
         let point = view.convert(event.locationInWindow, from: nil)
         let bounds = view.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return false }
 
         let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? bounds.size)
         let canvas = canvasSize ?? source.size
-        guard canvas.width > 0, canvas.height > 0 else { return }
+        guard canvas.width > 0, canvas.height > 0 else { return false }
 
         // Ignore events outside the video surface rather than clamping them to
         // the edge, which would drag the host pointer along the border.
         guard let unit = Self.unitPoint(viewPoint: point, viewSize: bounds.size,
-                                        source: source, isFlipped: view.isFlipped) else { return }
+                                        source: source, isFlipped: view.isFlipped) else { return false }
 
         let x = Int((source.minX + unit.x * source.width).rounded())
         let y = Int((source.minY + unit.y * source.height).rounded())
@@ -309,6 +318,7 @@ public final class InputCapture {
         onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
                                                  referenceWidth: Int(canvas.width),
                                                  referenceHeight: Int(canvas.height)))
+        return true
     }
 
     /// Where a point in the view falls within the video, as 0...1 from its
