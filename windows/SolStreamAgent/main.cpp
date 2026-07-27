@@ -47,13 +47,20 @@
 #include <cwchar>
 #include <cstring>
 #include <cwctype>
+#include <atomic>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "host_window.h"
+#include "ports.h"
+#include "sunshine_host.h"
+#include "vdd.h"
 
 namespace {
 
-constexpr unsigned short kDefaultPort = 47997;
+constexpr unsigned short kDefaultPort = solstream::kDefaultAgentPort;
 
 // By default this socket is bound to loopback only and reached through an SSH
 // tunnel; anywhere else a token is required. --listen-all is opt-in and warns.
@@ -71,9 +78,19 @@ constexpr int kProtocolVersion = 1;
 constexpr size_t kMaxClipboardBytes = 256 * 1024;
 constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 
-/// Sunshine's web UI / config API port. It is the stream port plus one, so a host
-/// that moved Sunshine off its default needs --sunshine-port to match.
-unsigned short g_sunshine_web_port = 47990;
+/// The base port SolStream's own Sunshine runs on. Everything Sunshine listens
+/// on is this plus a fixed offset -- see ports.h, which the Mac mirrors.
+unsigned short g_sunshine_base =
+    solstream::kDefaultSunshineBase;
+/// Sunshine's web UI / config API port, derived from the base.
+unsigned short g_sunshine_web_port =
+    solstream::MapPort(solstream::kDefaultSunshineBase, solstream::SunshinePort::kWebUi);
+/// The display SolStream captures. Resolved at startup to the virtual one when
+/// there is one, because a crop taken from a real monitor is a crop out of
+/// somebody's actual screen.
+std::wstring g_capture_display;
+/// How many Macs are connected right now, for the window.
+std::atomic<int> g_clients_connected{0};
 
 // ΓöÇΓöÇ Logging ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -1564,11 +1581,16 @@ HttpResult PostToSunshine(const wchar_t* path, const std::string& body,
 
 /// Hand a client's pairing PIN to Sunshine, so nobody has to open its web UI.
 std::string PairJson(const std::string& pin, const std::string& name, INTERNET_PORT port) {
+    // The supervised Sunshine first: SolStream generated its web credentials
+    // itself, so approving a PIN needs nothing from the user at all. Falling
+    // back to stored credentials covers the other case -- a Sunshine somebody
+    // installed and configured before SolStream existed.
     std::string user, password;
-    if (!LoadSunshineCredentials(user, password)) {
+    if (!solstream::SupervisedCredentials(user, password)
+        && !LoadSunshineCredentials(user, password)) {
         return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"no-credentials\","
-               "\"message\":\"No Sunshine credentials stored. Run "
-               "SolStreamAgent.exe --set-sunshine-credentials on the host once.\"}";
+               "\"message\":\"SolStream is not running its own Sunshine, and no "
+               "credentials are stored for the one that is.\"}";
     }
     const std::string body = "{\"pin\":\"" + JsonEscape(pin) + "\",\"name\":\""
                            + JsonEscape(name) + "\"}";
@@ -1924,6 +1946,30 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
     // silently.
     if (command == "ping") {
         return "{\"type\":\"pong\"}";
+    }
+
+    // What the host application is doing with itself: its Sunshine, its capture
+    // display, and the ports both. Answered before authentication because it
+    // says nothing a port scan could not already establish, and because it is
+    // what the Mac shows when it cannot get any further.
+    if (command == "status") {
+        const solstream::SunshineState state = solstream::GetSunshineState();
+        std::string out = "{\"type\":\"status\"";
+        out += ",\"sunshine\":\"";
+        switch (state) {
+            case solstream::SunshineState::kRunning: out += "running"; break;
+            case solstream::SunshineState::kStarting: out += "starting"; break;
+            case solstream::SunshineState::kFailed: out += "failed"; break;
+            case solstream::SunshineState::kNotBundled: out += "missing"; break;
+            default: out += "stopped"; break;
+        }
+        out += "\",\"sunshineDetail\":\"" + JsonEscape(solstream::SunshineStatusText()) + "\"";
+        out += ",\"basePort\":" + std::to_string(g_sunshine_base);
+        out += ",\"captureDisplay\":\"" + JsonEscape(ToUtf8(g_capture_display)) + "\"";
+        out += ",\"virtualDisplay\":"
+             + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
+        out += "}";
+        return out;
     }
 
     if (command == "auth") {
@@ -2578,12 +2624,30 @@ int wmain(int argc, wchar_t** argv) {
     bool set_credentials = false;
     bool print_token = false;
     bool no_auth = false;
+    // --headless keeps the original behaviour: no window, log to stderr. Every
+    // verification in this project is done over SSH, where there is no desktop
+    // to put a window on.
+    bool headless = false;
+    // --no-sunshine leaves an existing Sunshine alone, for a host that was set
+    // up before SolStream and wants to keep the one it has.
+    bool no_sunshine = false;
+    bool install_driver = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--port" && i + 1 < argc) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         } else if (arg == L"--sunshine-port" && i + 1 < argc) {
-            g_sunshine_web_port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
+            // The BASE port, not the web one -- everything else is derived from
+            // it, on both sides of the connection.
+            g_sunshine_base = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
+            g_sunshine_web_port =
+                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kWebUi);
+        } else if (arg == L"--headless") {
+            headless = true;
+        } else if (arg == L"--no-sunshine") {
+            no_sunshine = true;
+        } else if (arg == L"--install-display-driver") {
+            install_driver = true;
         } else if (arg == L"--bind" && i + 1 < argc) {
             // Prefer a single address ΓÇö a VPN interface such as Tailscale, whose
             // peers are already device-authenticated ΓÇö over every interface.
@@ -2601,6 +2665,16 @@ int wmain(int argc, wchar_t** argv) {
 
     if (set_credentials) {
         return SetSunshineCredentials();
+    }
+
+    if (install_driver) {
+        std::string error;
+        if (solstream::InstallBundledDriver(error)) {
+            std::fputs("Display driver installed.\n", stdout);
+            return 0;
+        }
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
     }
 
     g_token = LoadOrCreateToken();
@@ -2722,6 +2796,80 @@ int wmain(int argc, wchar_t** argv) {
 
     Log("[agent] SolStream agent v%d listening on %s:%u",
         kProtocolVersion, bind_address.c_str(), port);
+
+    // ── The virtual display ──────────────────────────────────────────────────
+    //
+    // Checked before Sunshine starts, because it decides what Sunshine captures.
+    // A machine without one can still stream — the real monitor is captured
+    // instead — but the window cannot be sized past that monitor's resolution,
+    // the crop shows anything dragged over it, and the mode cannot be matched to
+    // the Mac. So this is reported plainly rather than left for the user to
+    // discover as a bad picture.
+    {
+        const auto virtual_displays = solstream::FindVirtualDisplays();
+        if (virtual_displays.empty()) {
+            Log("[agent] no virtual display driver is installed.");
+            Log("[agent] SolStream will capture a real monitor, which means the");
+            Log("[agent] streamed window cannot be larger than it and anything");
+            Log("[agent] dragged over the window appears inside the stream.");
+            if (solstream::BundledDriverPackage().empty()) {
+                Log("[agent] no driver is bundled with this build; install the");
+                Log("[agent] Virtual Display Driver and restart SolStream.");
+            } else {
+                Log("[agent] a driver is bundled: use the window's Install button,");
+                Log("[agent] or run with --install-display-driver.");
+            }
+        } else {
+            for (const auto& display : virtual_displays) {
+                Log("[agent] virtual display: %s (%s)",
+                    ToUtf8(display.friendly_name).c_str(),
+                    display.running ? "running" : "present but not started");
+            }
+        }
+    }
+
+    // Pick what Sunshine captures: the virtual display when there is one, so a
+    // crop can never be a crop out of somebody's real screen.
+    for (const Display& display : EnumerateDisplays()) {
+        const std::string& adapter = display.adapter;
+        std::string lowered = adapter;
+        for (char& c : lowered) { c = (char) tolower((unsigned char) c); }
+        if (lowered.find("virtual") != std::string::npos
+            || lowered.find("idd") != std::string::npos) {
+            g_capture_display = ToWide(display.device_name);
+            Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
+            break;
+        }
+    }
+    if (g_capture_display.empty()) {
+        for (const Display& display : EnumerateDisplays()) {
+            if (display.primary) {
+                g_capture_display = ToWide(display.device_name);
+                Log("[agent] no virtual display; falling back to %s",
+                    display.device_name.c_str());
+                break;
+            }
+        }
+    }
+
+    // ── Sunshine ─────────────────────────────────────────────────────────────
+    //
+    // Started by us, configured by us, on our own ports. A Sunshine the user
+    // installed themselves keeps its own configuration and its own ports and is
+    // never touched.
+    if (!no_sunshine) {
+        if (solstream::StartSunshine(g_sunshine_base, g_capture_display)) {
+            Log("[agent] %s", solstream::SunshineStatusText().c_str());
+            Log("[agent] Sunshine ports: https %u, http %u, web %u, rtsp %u",
+                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kHttps),
+                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kHttp),
+                g_sunshine_web_port,
+                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kRtsp));
+        } else {
+            Log("[agent] %s", solstream::SunshineStatusText().c_str());
+        }
+    }
+
     for (const Display& display : EnumerateDisplays()) {
         Log("[agent]   display %s %ldx%ld at (%ld,%ld)%s",
             display.device_name.c_str(),
@@ -2731,22 +2879,87 @@ int wmain(int argc, wchar_t** argv) {
             display.primary ? " [primary]" : "");
     }
 
-    for (;;) {
-        SOCKET client = accept(listener, nullptr, nullptr);
-        if (client == INVALID_SOCKET) {
-            Log("[agent] accept failed: %d", WSAGetLastError());
-            continue;
+    // The accept loop moves off the main thread so the window can own it.
+    //
+    // A Win32 message loop has to run on the thread that created the window, and
+    // this loop blocks in accept() indefinitely — so one of the two has to be
+    // somewhere else, and it is easier to reason about a server thread than
+    // about a UI that only pumps between connections.
+    std::thread server([listener]() {
+        for (;;) {
+            SOCKET client = accept(listener, nullptr, nullptr);
+            if (client == INVALID_SOCKET) {
+                Log("[agent] accept failed: %d", WSAGetLastError());
+                continue;
+            }
+            Log("[agent] client connected");
+            g_clients_connected.fetch_add(1);
+            // Loopback needs no token, so it is authorised from the start.
+            StartCursorWatcher(client, !g_require_auth);
+            ServeClient(client);
+            // Stopped before the socket closes: the watcher writes to it.
+            StopCursorWatcher();
+            closesocket(client);
+            // Give every managed window its resize border back. A Mac that goes
+            // away must not leave applications permanently unresizable.
+            UnlockAll();
+            g_clients_connected.fetch_sub(1);
+            Log("[agent] client disconnected");
         }
-        Log("[agent] client connected");
-        // Loopback needs no token, so it is authorised from the start.
-        StartCursorWatcher(client, !g_require_auth);
-        ServeClient(client);
-        // Stopped before the socket closes: the watcher writes to it.
-        StopCursorWatcher();
-        closesocket(client);
-        // Give every managed window its resize border back. A Mac that goes away
-        // must not leave applications permanently unresizable on someone's desktop.
-        UnlockAll();
-        Log("[agent] client disconnected");
+    });
+    server.detach();
+
+    if (headless) {
+        Log("[agent] headless: no window, Ctrl+C to stop");
+        for (;;) {
+            Sleep(60000);
+        }
     }
+
+    if (!solstream::ShowHostWindow()) {
+        // No window station — a scheduled task in session 0, typically. The
+        // agent is still useful there, so carry on rather than exiting: the
+        // alternative is a host that silently refuses to start for a reason
+        // nobody can see.
+        Log("[agent] could not create a window; continuing without one");
+        for (;;) {
+            Sleep(60000);
+        }
+    }
+
+    // Keep the window's numbers current while it is up.
+    std::thread status([bind_address]() {
+        while (!solstream::HostWindowClosed()) {
+            solstream::HostStatus status;
+            wchar_t name[256] = {};
+            DWORD size = 256;
+            GetComputerNameW(name, &size);
+            status.computer_name = name;
+            status.address = ToWide(bind_address);
+            status.pairing_token = ToWide(g_token);
+            status.agent_listening = true;
+            status.connected_clients = g_clients_connected.load();
+
+            const solstream::SunshineState state = solstream::GetSunshineState();
+            status.sunshine_running = state == solstream::SunshineState::kRunning
+                                   || state == solstream::SunshineState::kStarting;
+            status.sunshine_detail = ToWide(solstream::SunshineStatusText());
+
+            status.virtual_display = solstream::HasVirtualDisplay();
+            status.display_detail = status.virtual_display
+                ? (g_capture_display.empty() ? L"ready" : g_capture_display)
+                : L"not installed";
+
+            solstream::UpdateHostStatus(status);
+            Sleep(1000);
+        }
+    });
+    status.detach();
+
+    const int code = solstream::RunHostWindowLoop();
+    // Closing the window takes the host down with it, Sunshine included. A
+    // Sunshine still holding the capture display after SolStream is gone is one
+    // nobody can see to stop.
+    solstream::StopSunshine();
+    return code;
 }

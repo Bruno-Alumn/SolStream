@@ -66,6 +66,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("packet size overridden to \(size)")
         }
 
+        // --sunshine-port points this client at a host whose Sunshine is not
+        // where SolStream puts its own. The common case is a machine somebody
+        // already had set up for Moonlight, still on the stock 47989.
+        if let index = arguments.firstIndex(of: "--sunshine-port"),
+           index + 1 < arguments.count,
+           let base = Int(arguments[index + 1]) {
+            config.ports = StreamPorts(base: base)
+            Log.info("[ports] talking to Sunshine on base \(base) "
+                     + "(https \(config.ports.https), rtsp \(config.ports.rtsp))")
+        } else {
+            Log.info("[ports] SolStream base \(config.ports.base) "
+                     + "(https \(config.ports.https), rtsp \(config.ports.rtsp), "
+                     + "agent \(StreamPorts.agent))")
+        }
+
         let host = arguments.firstIndex(of: "--host").flatMap { index in
             index + 1 < arguments.count ? arguments[index + 1] : nil
         }

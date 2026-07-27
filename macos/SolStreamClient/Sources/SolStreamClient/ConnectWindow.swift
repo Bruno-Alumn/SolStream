@@ -222,7 +222,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    private static func canReachSunshine(host: String, port: UInt16 = 47989) -> Bool {
+    /// Is a SolStream host — or a plain Sunshine — answering here?
+    ///
+    /// Both bases are tried, because both are real: SolStream's own Windows
+    /// application runs its Sunshine on its own base so it can live beside one
+    /// the user already had, and a host somebody set up for Moonlight answers on
+    /// the stock one. Which it is does not need to be the user's problem.
+    private static func canReachSunshine(host: String) -> Bool {
+        StreamPorts.candidates.contains { canReach(host: host, port: UInt16($0.http)) }
+    }
+
+    private static func canReach(host: String, port: UInt16) -> Bool {
         var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)

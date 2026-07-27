@@ -8,6 +8,8 @@ set -e
 CXX=${CXX:-x86_64-w64-mingw32-g++}
 cd "$(dirname "$0")"
 "$CXX" -std=c++20 -municode -O2 -Wall -Wextra -static \
-    -o SolStreamAgent.exe main.cpp \
-    -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32
+    -o SolStreamAgent.exe \
+    main.cpp sunshine_host.cpp vdd.cpp host_window.cpp \
+    -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32 \
+    -lsetupapi -lcfgmgr32 -lcomctl32 -lole32
 echo "built: $(pwd)/SolStreamAgent.exe"
