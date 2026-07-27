@@ -31,6 +31,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <wincrypt.h>
@@ -2051,6 +2052,56 @@ bool SendLine(SOCKET client, const std::string& text) {
     return true;
 }
 
+/// When the running Sunshine process started, as a 64-bit tick count, or 0 if it
+/// is not running.
+///
+/// The Mac needs this to track whether the host is drawing its cursor.
+/// Sunshine's `display_cursor` is a process-global that starts true and can only
+/// be *flipped*, never read, so a client that remembers "I hid it" has no way to
+/// notice that Sunshine restarted and put it back. Keyed against this, a restart
+/// is a new instance and the belief resets by itself.
+unsigned long long SunshineInstanceId() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    unsigned long long instance = 0;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, L"sunshine.exe") != 0) {
+                continue;
+            }
+            // The process id on its own already changes when Sunshine restarts,
+            // which is the whole question being asked. The creation time is
+            // added when it can be read, but Sunshine normally runs as a service
+            // under SYSTEM and this agent does not run elevated, so OpenProcess
+            // is usually denied — hence a pid-only answer has to be good enough
+            // rather than a failure.
+            instance = entry.th32ProcessID;
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                         entry.th32ProcessID);
+            if (process) {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
+                    ULARGE_INTEGER value{};
+                    value.LowPart = created.dwLowDateTime;
+                    value.HighPart = created.dwHighDateTime;
+                    // Mixed in rather than replacing the pid, so the answer is
+                    // still unique if the times are unavailable for one process
+                    // and not another.
+                    instance ^= value.QuadPart;
+                }
+                CloseHandle(process);
+            }
+            break;
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return instance;
+}
+
 // ── Cursor shape ─────────────────────────────────────────────────────────────
 //
 // The Mac draws its own pointer over the video, so it has to know what the
@@ -2191,6 +2242,7 @@ void ServeClient(SOCKET client) {
     hello += std::to_string(kProtocolVersion);
     hello += ",\"host\":\"" + JsonEscape(hostname) + "\"";
     hello += ",\"needsAuth\":" + std::string(g_require_auth ? "true" : "false");
+    hello += ",\"sunshineInstance\":\"" + std::to_string(SunshineInstanceId()) + "\"";
     hello += "}";
     if (!SendLine(client, hello)) {
         return;

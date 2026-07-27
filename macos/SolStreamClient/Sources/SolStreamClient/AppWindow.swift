@@ -32,6 +32,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var resizeInFlight = false
     private var resizeAgain = false
     private var wantsSettle = false
+    /// The smallest the host application has been willing to become, in host
+    /// pixels. Learned from what it actually does, since it will not say.
+    private var hostMinimum: CGSize = .zero
 
     /// Watches for the application being closed on the host.
     private var lifeTimer: Timer?
@@ -250,7 +253,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
         requestResize()
     }
 
+    func windowWillStartLiveResize(_ notification: Notification) {
+        // The user is dragging the frame, not working in the application. Left
+        // running, the pointer sits on the host window's own edge while both
+        // sides are being resized, and the host starts a resize of its own on
+        // top of ours — which is where the glitching during a drag comes from.
+        inputCapture?.isSuspended = true
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
+        inputCapture?.isSuspended = false
         guard !isMatchingHostSize else { return }
         // The final size matters more than any intermediate one, and the last
         // live update may have been coalesced away — so always send one more,
@@ -341,6 +353,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // so the visible rectangle is what the crop and this window must
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
+                self.learnMinimumSize(requested: requested, achieved: achieved, scale: scale)
                 let visible = achieved.intersection(self.displayRect)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
@@ -357,6 +370,37 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 }
             }
         }
+    }
+
+    /// Teach this window the size the host application refuses to go below.
+    ///
+    /// Windows applications have minimum sizes and some resize in whole rows, so
+    /// asking for 400px wide and getting 700 back is normal. Without this the
+    /// user could drag well past that floor, see nothing happen, and then watch
+    /// the window spring back to the host's size on release. Giving AppKit the
+    /// same limit makes the drag simply stop there, which is what a local window
+    /// does.
+    ///
+    /// Only ever grows. A limit that relaxed itself on one noisy measurement
+    /// would let the spring-back return.
+    private func learnMinimumSize(requested: CGRect, achieved: CGRect, scale: CGFloat) {
+        guard let window, scale > 0 else { return }
+        var minimum = hostMinimum
+        // A point of slack, so rounding between points and pixels is not read as
+        // a refusal.
+        if achieved.width > requested.width + 1 {
+            minimum.width = max(minimum.width, achieved.width)
+        }
+        if achieved.height > requested.height + 1 {
+            minimum.height = max(minimum.height, achieved.height)
+        }
+        guard minimum != hostMinimum else { return }
+        hostMinimum = minimum
+        window.contentMinSize = NSSize(width: minimum.width / scale,
+                                       height: minimum.height / scale)
+        Log.info("[window] host will not go below "
+                 + "\(Int(minimum.width))x\(Int(minimum.height)); "
+                 + "this window now stops there too")
     }
 
     /// Make this window exactly as tall and wide as the crop it is showing.

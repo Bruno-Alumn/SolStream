@@ -241,13 +241,24 @@ public final class InputCapture {
 
     // MARK: - Mouse
 
+    /// Set while the macOS window frame is being dragged.
+    ///
+    /// Pointer input is suspended for the duration: the user is resizing the
+    /// window, not working in the application, and the pointer sitting on the
+    /// host window's own edge while both sides are being resized makes the host
+    /// start a resize of its own on top of ours.
+    public var isSuspended = false
+
     private func handleMouseEvent(_ event: NSEvent) {
-        guard isCapturing, let view = targetView else { return }
+        guard isCapturing, !isSuspended, let view = targetView else { return }
 
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             if event.type == .mouseMoved { mouseMovedSeen += 1 }
-            sendPosition(for: event, in: view)
+            // A drag follows the pointer out of the window; a bare move does not,
+            // so letting go of the mouse outside leaves the host cursor exactly
+            // where the drag left it.
+            sendPosition(for: event, in: view, clampToEdge: !heldButtons.isEmpty)
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             // Position first: Windows clicks wherever the pointer currently is.
@@ -293,11 +304,17 @@ public final class InputCapture {
     /// Sunshine rescales onto the captured surface, so view points work
     /// directly — no DPI or stream-resolution maths needed here. macOS
     /// coordinates are bottom-left origin, Windows is top-left, hence the flip.
+    /// - Parameter clampToEdge: pin an outside point to the edge of the picture
+    ///   rather than refusing it. Used while a button is held: the host still has
+    ///   that button down, and a selection or drag that stops tracking the moment
+    ///   the pointer leaves the window is worse than one that tracks to the edge
+    ///   and waits there.
     /// - Returns: whether a position actually went to the host. False means the
     ///   event was outside the picture, and a click there is not a click on the
     ///   remote application.
     @discardableResult
-    private func sendPosition(for event: NSEvent, in view: NSView) -> Bool {
+    private func sendPosition(for event: NSEvent, in view: NSView,
+                              clampToEdge: Bool = false) -> Bool {
         let point = view.convert(event.locationInWindow, from: nil)
         let bounds = view.bounds
         guard bounds.width > 0, bounds.height > 0 else { return false }
@@ -307,9 +324,14 @@ public final class InputCapture {
         guard canvas.width > 0, canvas.height > 0 else { return false }
 
         // Ignore events outside the video surface rather than clamping them to
-        // the edge, which would drag the host pointer along the border.
-        guard let unit = Self.unitPoint(viewPoint: point, viewSize: bounds.size,
-                                        source: source, isFlipped: view.isFlipped) else { return false }
+        // the edge, which would drag the host pointer along the border — unless a
+        // drag is in progress, where stopping is the worse of the two.
+        let mapped = clampToEdge
+            ? Self.clampedUnitPoint(viewPoint: point, viewSize: bounds.size,
+                                    source: source, isFlipped: view.isFlipped)
+            : Self.unitPoint(viewPoint: point, viewSize: bounds.size,
+                             source: source, isFlipped: view.isFlipped)
+        guard let unit = mapped else { return false }
 
         let x = Int((source.minX + unit.x * source.width).rounded())
         let y = Int((source.minY + unit.y * source.height).rounded())
@@ -351,6 +373,24 @@ public final class InputCapture {
                            y: (fromTop - inset.y) / shown.height)
         guard (0...1).contains(unit.x), (0...1).contains(unit.y) else { return nil }
         return unit
+    }
+
+    /// The same mapping, but pinned to the edge instead of refused when the
+    /// point falls outside the picture.
+    static func clampedUnitPoint(viewPoint: CGPoint, viewSize: CGSize,
+                                 source: CGRect, isFlipped: Bool) -> CGPoint? {
+        guard viewSize.width > 0, viewSize.height > 0,
+              source.width > 0, source.height > 0 else { return nil }
+
+        let fit = min(viewSize.width / source.width, viewSize.height / source.height)
+        let shown = CGSize(width: source.width * fit, height: source.height * fit)
+        guard shown.width > 0, shown.height > 0 else { return nil }
+
+        let inset = CGPoint(x: (viewSize.width - shown.width) / 2,
+                            y: (viewSize.height - shown.height) / 2)
+        let fromTop = isFlipped ? viewPoint.y : viewSize.height - viewPoint.y
+        return CGPoint(x: min(max((viewPoint.x - inset.x) / shown.width, 0), 1),
+                       y: min(max((fromTop - inset.y) / shown.height, 0), 1))
     }
 
     private func button(for event: NSEvent) -> InputProtocol.MouseButton? {

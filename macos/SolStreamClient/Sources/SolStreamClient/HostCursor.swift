@@ -47,22 +47,34 @@ enum HostCursor {
         set { UserDefaults.standard.set(newValue, forKey: preferenceKey) }
     }
 
-    /// What we last left this host's cursor doing.
-    static func believedHidden(for host: String) -> Bool {
-        UserDefaults.standard.bool(forKey: beliefKey(for: host))
+    /// What we last left this host's cursor doing, and which Sunshine process we
+    /// left it that way on.
+    ///
+    /// Stored together on purpose. `display_cursor` lives in Sunshine's process
+    /// and starts out true, so a restart silently undoes whatever we did — and a
+    /// belief that outlived the process it described is worse than none, because
+    /// it stops the client ever trying again. Tying the two means a new instance
+    /// simply reads as "visible", which is exactly what it is.
+    static func believedHidden(for host: String, instance: String) -> Bool {
+        guard let stored = UserDefaults.standard.string(forKey: beliefKey(for: host)) else {
+            return false
+        }
+        let parts = stored.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2, parts[0] == instance else { return false }
+        return parts[1] == "1"
     }
 
-    private static func setBelief(_ hidden: Bool, for host: String) {
-        UserDefaults.standard.set(hidden, forKey: beliefKey(for: host))
+    private static func setBelief(_ hidden: Bool, for host: String, instance: String) {
+        UserDefaults.standard.set("\(instance):\(hidden ? 1 : 0)", forKey: beliefKey(for: host))
     }
 
     /// Bring a host into line with the preference, sending the shortcut only if
     /// it is not already there. Call from `onControlConnected`, not from the
     /// streaming phase: video can be arriving before the channel these keys
     /// travel on exists.
-    static func apply(to connection: StreamConnection, host: String) {
-        guard hidePreferred != believedHidden(for: host) else { return }
-        flip(on: connection, host: host)
+    static func apply(to connection: StreamConnection, host: String, instance: String) {
+        guard hidePreferred != believedHidden(for: host, instance: instance) else { return }
+        flip(on: connection, host: host, instance: instance)
     }
 
     /// Flip the host cursor, recording the new belief only if the keys actually
@@ -73,13 +85,13 @@ enum HostCursor {
     /// host had changed, so it never tried again and the setting appeared to do
     /// nothing for the rest of that host's life.
     @discardableResult
-    static func flip(on connection: StreamConnection, host: String) -> Bool {
+    static func flip(on connection: StreamConnection, host: String, instance: String) -> Bool {
         guard sendShortcut(on: connection) else {
             Log.error("[cursor] control channel not ready; cursor preference not applied")
             return false
         }
-        let nowHidden = !believedHidden(for: host)
-        setBelief(nowHidden, for: host)
+        let nowHidden = !believedHidden(for: host, instance: instance)
+        setBelief(nowHidden, for: host, instance: instance)
         Log.info("[cursor] asked \(host) to \(nowHidden ? "hide" : "show") its cursor")
         return true
     }

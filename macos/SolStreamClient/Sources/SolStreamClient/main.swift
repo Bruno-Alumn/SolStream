@@ -624,9 +624,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.appWindows.forEach { $0.setRemoteCursor(cursor) }
         }
 
-        session.connection.onControlConnected = { [weak session] in
+        session.connection.onControlConnected = { [weak session, weak agent] in
             guard let session else { return }
-            HostCursor.apply(to: session.connection, host: host)
+            HostCursor.apply(to: session.connection, host: host,
+                             instance: agent?.sunshineInstance ?? "")
         }
 
         session.onPhase = { [weak self] phase in
@@ -865,7 +866,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Apply straight away if something is streaming, rather than making the
         // user reconnect to see the setting take effect.
         if let session {
-            HostCursor.apply(to: session.connection, host: session.host)
+            HostCursor.apply(to: session.connection, host: session.host,
+                             instance: agent?.sunshineInstance ?? "")
         }
     }
 
