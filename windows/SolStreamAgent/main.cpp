@@ -604,6 +604,172 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     return fallback ? IdFromWindow(fallback) : 0;
 }
 
+// ── Geometry lock ────────────────────────────────────────────────────────────
+//
+// The Mac crops a FIXED rectangle out of the shared canvas, so a window resized
+// on the host stops lining up with it and the stream shows desktop where the
+// application used to be. Size has to be driven from the macOS window — the thing
+// the user is actually looking at — and only from there.
+//
+// Two layers, because one is not enough. Removing WS_THICKFRAME and
+// WS_MAXIMIZEBOX takes away the resize border and the maximise affordance, which
+// closes the ordinary routes. That alone does not hold: an application drawing its
+// own caption can still ask to be maximised, plenty do their own WM_NCHITTEST, and
+// some resize themselves when their content changes. So a watcher also puts the
+// window back whenever it moves or resizes anyway.
+
+constexpr int kMaxLocks = 8;
+
+struct WindowLock {
+    HWND window = nullptr;
+    RECT desired{};           // client area, in virtual-desktop coordinates
+    LONG_PTR saved_style = 0;
+    bool active = false;
+};
+
+CRITICAL_SECTION g_lock_cs;
+WindowLock g_locks[kMaxLocks];
+HANDLE g_watcher = nullptr;
+volatile LONG g_watcher_stop = 0;
+
+bool PlaceClientArea(HWND window, int x, int y, int width, int height);
+
+/// Put a locked window back if anything moved or resized it.
+DWORD WINAPI WatcherProc(LPVOID) {
+    while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
+        Sleep(120);
+        for (int i = 0; i < kMaxLocks; ++i) {
+            HWND window = nullptr;
+            RECT desired{};
+            EnterCriticalSection(&g_lock_cs);
+            if (g_locks[i].active && IsWindow(g_locks[i].window)) {
+                window = g_locks[i].window;
+                desired = g_locks[i].desired;
+            }
+            LeaveCriticalSection(&g_lock_cs);
+            if (!window) {
+                continue;
+            }
+            // A minimised window is the user's business; leave it alone and let it
+            // settle back when they restore it.
+            if (IsIconic(window)) {
+                continue;
+            }
+            if (IsZoomed(window)) {
+                ShowWindow(window, SW_RESTORE);
+            }
+            const RECT now = ClientAreaInScreen(window);
+            if (now.left == desired.left && now.top == desired.top
+                && now.right == desired.right && now.bottom == desired.bottom) {
+                continue;
+            }
+            PlaceClientArea(window, desired.left, desired.top,
+                            desired.right - desired.left, desired.bottom - desired.top);
+        }
+    }
+    return 0;
+}
+
+void StartWatcher() {
+    if (g_watcher) {
+        return;
+    }
+    InterlockedExchange(&g_watcher_stop, 0);
+    g_watcher = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
+}
+
+/// Take away a window's ability to be resized from the host side.
+bool LockWindow(HWND window) {
+    if (IsZoomed(window)) {
+        ShowWindow(window, SW_RESTORE);
+    }
+    EnterCriticalSection(&g_lock_cs);
+    int slot = -1;
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window == window) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < kMaxLocks; ++i) {
+            if (!g_locks[i].active) {
+                slot = i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) {
+        LeaveCriticalSection(&g_lock_cs);
+        return false;
+    }
+    if (!g_locks[slot].active) {
+        g_locks[slot].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
+        g_locks[slot].window = window;
+        g_locks[slot].active = true;
+    }
+    g_locks[slot].desired = ClientAreaInScreen(window);
+    const LONG_PTR stripped =
+        g_locks[slot].saved_style & ~static_cast<LONG_PTR>(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    LeaveCriticalSection(&g_lock_cs);
+
+    SetWindowLongPtrW(window, GWL_STYLE, stripped);
+    // SWP_FRAMECHANGED makes the window recompute its non-client area; without it
+    // the border is gone in style only and still drag-resizes.
+    SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    StartWatcher();
+    return true;
+}
+
+void UnlockWindow(HWND window) {
+    LONG_PTR restore = 0;
+    bool found = false;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window == window) {
+            restore = g_locks[i].saved_style;
+            g_locks[i] = WindowLock{};
+            found = true;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (!found || !IsWindow(window)) {
+        return;
+    }
+    SetWindowLongPtrW(window, GWL_STYLE, restore);
+    SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+/// Give every locked window its resize border back.
+///
+/// Called when a client disconnects, so a Mac that goes away does not leave
+/// applications permanently unresizable on someone's desktop.
+void UnlockAll() {
+    for (int i = 0; i < kMaxLocks; ++i) {
+        EnterCriticalSection(&g_lock_cs);
+        HWND window = g_locks[i].active ? g_locks[i].window : nullptr;
+        LeaveCriticalSection(&g_lock_cs);
+        if (window) {
+            UnlockWindow(window);
+        }
+    }
+}
+
+/// Tell the watcher a new size is legitimate, because the Mac asked for it.
+void SetLockedGeometry(HWND window, const RECT& client) {
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window == window) {
+            g_locks[i].desired = client;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+}
+
 // ── Sunshine pairing ─────────────────────────────────────────────────────────
 //
 // Sunshine pairs by showing a PIN on the client and having a human type it into
@@ -1193,12 +1359,38 @@ std::string HandleCommand(const std::string& line) {
         }
         const bool ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h);
         const RECT client = ClientAreaInScreen(window);
+        // The Mac asked for this, so it is the new truth — otherwise the watcher
+        // would immediately drag the window back to the previous size.
+        SetLockedGeometry(window, client);
         char buffer[256];
         std::snprintf(buffer, sizeof(buffer),
                       "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}",
                       ok ? "true" : "false",
                       client.left, client.top,
                       client.right - client.left, client.bottom - client.top);
+        return buffer;
+    }
+
+    if (command == "lock") {
+        long long id = 0, on = 1;
+        if (!FieldNumber(line, "id", id)) {
+            return "{\"type\":\"error\",\"message\":\"lock needs id\"}";
+        }
+        FieldNumber(line, "on", on);
+        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        if (!window) {
+            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+        }
+        bool ok = true;
+        if (on) {
+            ok = LockWindow(window);
+        } else {
+            UnlockWindow(window);
+        }
+        char buffer[96];
+        std::snprintf(buffer, sizeof(buffer),
+                      "{\"type\":\"locked\",\"ok\":%s,\"on\":%s}",
+                      ok ? "true" : "false", on ? "true" : "false");
         return buffer;
     }
 
@@ -1434,6 +1626,8 @@ int wmain(int argc, wchar_t** argv) {
     // display that is not at 100%.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+    InitializeCriticalSection(&g_lock_cs);
+
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         Log("[agent] WSAStartup failed");
@@ -1495,6 +1689,9 @@ int wmain(int argc, wchar_t** argv) {
         Log("[agent] client connected");
         ServeClient(client);
         closesocket(client);
+        // Give every managed window its resize border back. A Mac that goes away
+        // must not leave applications permanently unresizable on someone's desktop.
+        UnlockAll();
         Log("[agent] client disconnected");
     }
 }

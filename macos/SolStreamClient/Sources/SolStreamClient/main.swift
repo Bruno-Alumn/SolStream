@@ -472,12 +472,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindows.append(appWindow)
             appWindow.show()
 
-            // Move the real window onto its tile; follow whatever the host
-            // actually achieved.
-            agent.place(windowID: target.id, at: tile) { [weak appWindow] achieved in
-                guard let achieved else { return }
-                DispatchQueue.main.async { appWindow?.setTile(achieved) }
-            }
+            // Size the host window to this one and pin it there. The window owns
+            // its own geometry so the initial placement and a later drag go
+            // through identical code, and the lock is taken only once the window
+            // is where it belongs — it enforces whatever geometry it finds.
+            appWindow.placeAndLock()
             agent.focus(windowID: target.id)
             Log.info("[app] \"\(target.title)\" -> tile \(tile)")
         }

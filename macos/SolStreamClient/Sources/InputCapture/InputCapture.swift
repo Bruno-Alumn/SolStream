@@ -274,25 +274,54 @@ public final class InputCapture {
         let bounds = view.bounds
         guard bounds.width > 0, bounds.height > 0 else { return }
 
-        // View point -> normalised within the view -> canvas pixel.
-        let unitX = point.x / bounds.width
-        let unitY = (view.isFlipped ? point.y : bounds.height - point.y) / bounds.height
-
-        // Ignore events outside the video surface rather than clamping them to
-        // the edge, which would drag the host pointer along the border.
-        guard (0...1).contains(unitX), (0...1).contains(unitY) else { return }
-
         let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? bounds.size)
         let canvas = canvasSize ?? source.size
         guard canvas.width > 0, canvas.height > 0 else { return }
 
-        let x = Int((source.minX + unitX * source.width).rounded())
-        let y = Int((source.minY + unitY * source.height).rounded())
+        // Ignore events outside the video surface rather than clamping them to
+        // the edge, which would drag the host pointer along the border.
+        guard let unit = Self.unitPoint(viewPoint: point, viewSize: bounds.size,
+                                        source: source, isFlipped: view.isFlipped) else { return }
+
+        let x = Int((source.minX + unit.x * source.width).rounded())
+        let y = Int((source.minY + unit.y * source.height).rounded())
 
         positionsSent += 1
         onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
                                                  referenceWidth: Int(canvas.width),
                                                  referenceHeight: Int(canvas.height)))
+    }
+
+    /// Where a point in the view falls within the video, as 0...1 from its
+    /// top-left. Nil when the point is outside the picture.
+    ///
+    /// The video layer scales with `.resizeAspect`, so whenever the crop's shape
+    /// does not match the view's, the picture is letterboxed and sits inside a
+    /// smaller box than the view. Measuring from the view's edges then introduces
+    /// an error that GROWS with distance from the centre — the pointer drifts
+    /// further the further it travels, which is exactly how this presents.
+    ///
+    /// The shapes normally match, because the host window is sized to follow this
+    /// one. They stop matching for a few frames during a live resize, and
+    /// whenever the host cannot give us the size we asked for.
+    static func unitPoint(viewPoint: CGPoint, viewSize: CGSize,
+                          source: CGRect, isFlipped: Bool) -> CGPoint? {
+        guard viewSize.width > 0, viewSize.height > 0,
+              source.width > 0, source.height > 0 else { return nil }
+
+        let fit = min(viewSize.width / source.width, viewSize.height / source.height)
+        let shown = CGSize(width: source.width * fit, height: source.height * fit)
+        guard shown.width > 0, shown.height > 0 else { return nil }
+
+        let inset = CGPoint(x: (viewSize.width - shown.width) / 2,
+                            y: (viewSize.height - shown.height) / 2)
+        // macOS is bottom-left origin, Windows is top-left, hence the flip.
+        let fromTop = isFlipped ? viewPoint.y : viewSize.height - viewPoint.y
+
+        let unit = CGPoint(x: (viewPoint.x - inset.x) / shown.width,
+                           y: (fromTop - inset.y) / shown.height)
+        guard (0...1).contains(unit.x), (0...1).contains(unit.y) else { return nil }
+        return unit
     }
 
     private func button(for event: NSEvent) -> InputProtocol.MouseButton? {

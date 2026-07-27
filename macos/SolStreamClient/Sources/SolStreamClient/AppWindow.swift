@@ -22,12 +22,21 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Where this window's client area sits on the capture display.
     private(set) var tile: CGRect
 
+    /// The capture display, in virtual-desktop coordinates. Nothing outside this
+    /// is in the stream at all.
+    private var displayRect: CGRect {
+        CGRect(x: display.x, y: display.y, width: display.width, height: display.height)
+    }
+
     /// Coalesces live-resize into one placement request per settle.
     private var resizeWork: DispatchWorkItem?
 
     /// Watches for the application being closed on the host.
     private var lifeTimer: Timer?
     private var isClosing = false
+    /// Set while this window is being resized to match the host, so the resize
+    /// handler does not bounce the request straight back at it.
+    private var isMatchingHostSize = false
 
     var onClose: (() -> Void)?
 
@@ -105,7 +114,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
     // MARK: - Window
 
     private func build(title: String) {
-        let content = NSRect(x: 0, y: 0, width: tile.width / 2, height: tile.height / 2)
+        // The tile is in host pixels and this window measures in points, so the
+        // conversion is the backing scale — not a hardcoded 2. Clamped to what
+        // the Mac can actually show: a window created larger than the screen gets
+        // shrunk by AppKit, and then it no longer matches its crop.
+        let screen = NSScreen.main
+        let scale = screen?.backingScaleFactor ?? 2
+        let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
+        let content = NSRect(x: 0, y: 0,
+                             width: min(tile.width / scale, visible.width),
+                             height: min(tile.height / scale, visible.height))
         let window = NSWindow(contentRect: content,
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
@@ -142,6 +160,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // Nothing may cover the tile: the crop would stream it as though it
         // were part of the app.
         agent.setTopmost(windowID: remoteWindowID, true)
+        // The resize lock is taken AFTER the first placement, not here: locking
+        // records the window's current geometry as the one to enforce, and until
+        // it has been placed on its tile that is the wrong rectangle.
     }
 
     // MARK: - NSWindowDelegate
@@ -150,32 +171,112 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // Resizing the macOS window resizes the real Windows window. Debounced:
         // live-resize fires continuously, and SetWindowPos per frame would make
         // the host app thrash.
+        guard !isMatchingHostSize else { return }
         resizeWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.applyResize() }
         resizeWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
+    /// Place the host window to match this one, then stop it being resized there.
+    ///
+    /// The initial placement goes through exactly the same path as a drag, so
+    /// there is one rule for how big the host window is: whatever this window is.
+    /// Placing the raw tile instead would size the host window to the entire
+    /// display while this one is smaller, and the mismatch is drawn as bars.
+    func placeAndLock() {
+        syncGeometry { [weak self] in
+            guard let self else { return }
+            self.agent.setResizeLock(windowID: self.remoteWindowID, true)
+        }
+    }
+
     private func applyResize() {
-        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        syncGeometry()
+    }
+
+    private func syncGeometry(_ completion: (() -> Void)? = nil) {
+        guard let window, let screen = window.screen ?? NSScreen.main else {
+            completion?()
+            return
+        }
         // Ask for the size in host pixels, using the window's backing scale so a
         // Retina window does not request half the pixels it can display.
         let scale = screen.backingScaleFactor
         let size = window.contentView?.bounds.size ?? .zero
-        let requested = CGRect(x: tile.minX, y: tile.minY,
-                               width: (size.width * scale).rounded(),
-                               height: (size.height * scale).rounded())
-        guard requested.width >= 1, requested.height >= 1 else { return }
+
+        // Never ask for more than the capture display holds. The host will
+        // happily size a window past the edge of its display, and the part that
+        // hangs off is simply not in the captured frame — so the crop ends up
+        // partly outside the canvas and the window fills with desktop.
+        let maxWidth = CGFloat(display.width)
+        let maxHeight = CGFloat(display.height)
+        let wanted = CGSize(width: min((size.width * scale).rounded(), maxWidth),
+                            height: min((size.height * scale).rounded(), maxHeight))
+        let origin = CGPoint(x: min(tile.minX, CGFloat(display.x) + maxWidth - wanted.width),
+                             y: min(tile.minY, CGFloat(display.y) + maxHeight - wanted.height))
+        let requested = CGRect(origin: origin, size: wanted)
+        guard requested.width >= 1, requested.height >= 1 else {
+            completion?()
+            return
+        }
 
         agent.place(windowID: remoteWindowID, at: requested) { [weak self] achieved in
-            guard let self, let achieved else { return }
             DispatchQueue.main.async {
-                // Follow what the host actually did: an app with a minimum size
-                // will refuse, and the crop must match reality, not the request.
-                self.setTile(achieved)
-                Log.info("[window] resized to \(Int(achieved.width))x\(Int(achieved.height))")
+                guard let self else { return }
+                defer { completion?() }
+                guard let achieved else { return }
+                // Follow what the host actually did, then clip to the canvas.
+                //
+                // An application can refuse to be as small as we asked — and it
+                // can refuse to be small enough to FIT. A DPI-unaware application
+                // on a 200% display is scaled by Windows, so LibreOffice's
+                // ~1417px minimum height becomes 2834 real pixels, taller than
+                // this whole display. Only the part on the display is captured,
+                // so the visible rectangle is what the crop and this window must
+                // both follow. Matching the unclipped size instead is what draws
+                // bars: the window ends up a different shape from the picture.
+                let visible = achieved.intersection(self.displayRect)
+                guard visible.width >= 1, visible.height >= 1 else { return }
+                self.setTile(visible)
+                self.matchWindow(to: visible, scale: scale)
+                if visible != achieved {
+                    Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
+                             + " does not fit the display; showing "
+                             + "\(Int(visible.width))x\(Int(visible.height))")
+                } else {
+                    Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
+                             + " at \(Int(achieved.minX)),\(Int(achieved.minY))")
+                }
             }
         }
+    }
+
+    /// Make this window exactly as tall and wide as the crop it is showing.
+    ///
+    /// The video layer scales with .resizeAspect, so any difference in shape
+    /// between the crop and this window is drawn as bars down the sides or along
+    /// the top. It also throws the pointer off, because the video no longer fills
+    /// the view it is being measured against. Snapping to what the host achieved
+    /// keeps the two in step — including when the host refuses a size, which is
+    /// common: applications have minimum sizes and some resize in whole rows.
+    func matchWindow(to achieved: CGRect, scale: CGFloat) {
+        guard let window, scale > 0 else { return }
+        let target = NSSize(width: (achieved.width / scale).rounded(),
+                            height: (achieved.height / scale).rounded())
+        let current = window.contentView?.bounds.size ?? .zero
+        // A point of slack: rounding between points and pixels must not start a
+        // resize war between this window and the host.
+        guard abs(target.width - current.width) > 1 || abs(target.height - current.height) > 1 else {
+            return
+        }
+        isMatchingHostSize = true
+        window.setContentSize(target)
+        // Cleared on the next turn, not here: AppKit does not promise to deliver
+        // windowDidResize synchronously, and a late one would be read as the user
+        // dragging — which sends the size straight back to the host and can leave
+        // the two of them handing it to each other.
+        DispatchQueue.main.async { [weak self] in self?.isMatchingHostSize = false }
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -193,6 +294,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         lifeTimer?.invalidate()
         lifeTimer = nil
         resizeWork?.cancel()
+        agent.setResizeLock(windowID: remoteWindowID, false)
         agent.setTopmost(windowID: remoteWindowID, false)
         if let metalView {
             session.detach(metalView)

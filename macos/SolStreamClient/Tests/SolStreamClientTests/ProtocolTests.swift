@@ -1,6 +1,7 @@
 import XCTest
 @testable import StreamConnection
 @testable import VideoDecoder
+@testable import InputCapture
 
 /// Checks the client against the exact byte layouts Sunshine puts on the wire.
 ///
@@ -400,5 +401,85 @@ final class DisplaySelectionTests: XCTestCase {
     /// silently classed as virtual.
     func testMissingAdapterIsNotVirtual() {
         XCTAssertFalse(display("\\\\.\\DISPLAY1", adapter: "").isVirtual)
+    }
+}
+
+/// The pointer is mapped onto the picture, not onto the view.
+///
+/// The video layer scales with .resizeAspect, so a crop whose shape differs from
+/// the view's is letterboxed. Measuring from the view's edges then puts the host
+/// pointer off by an amount that grows with distance from the centre — a drift
+/// that gets worse the further the mouse travels.
+final class PointerMappingTests: XCTestCase {
+
+    private func unit(_ point: CGPoint, view: CGSize, source: CGRect) -> CGPoint? {
+        InputCapture.unitPoint(viewPoint: point, viewSize: view, source: source, isFlipped: true)
+    }
+
+    /// Shapes match, so the picture fills the view and the mapping is linear.
+    func testMatchingAspectMapsLinearly() {
+        let view = CGSize(width: 800, height: 500)
+        let source = CGRect(x: 100, y: 50, width: 1600, height: 1000)
+
+        XCTAssertEqual(unit(CGPoint(x: 0, y: 0), view: view, source: source)?.x ?? -1, 0, accuracy: 0.001)
+        XCTAssertEqual(unit(CGPoint(x: 400, y: 250), view: view, source: source)?.x ?? -1, 0.5, accuracy: 0.001)
+        XCTAssertEqual(unit(CGPoint(x: 400, y: 250), view: view, source: source)?.y ?? -1, 0.5, accuracy: 0.001)
+        XCTAssertEqual(unit(CGPoint(x: 800, y: 500), view: view, source: source)?.x ?? -1, 1, accuracy: 0.001)
+    }
+
+    /// A picture wider than the view is letterboxed top and bottom. The centre
+    /// still maps to the centre; the rows above and below it are not picture.
+    func testLetterboxedVerticallyIgnoresTheBars() {
+        let view = CGSize(width: 800, height: 800)
+        let source = CGRect(x: 0, y: 0, width: 1600, height: 800)   // 2:1 into a square
+        // Picture is 800x400, centred, so bars are 200pt tall.
+        XCTAssertNil(unit(CGPoint(x: 400, y: 100), view: view, source: source))
+        XCTAssertNil(unit(CGPoint(x: 400, y: 700), view: view, source: source))
+
+        let middle = unit(CGPoint(x: 400, y: 400), view: view, source: source)
+        XCTAssertEqual(middle?.y ?? -1, 0.5, accuracy: 0.001)
+        // Top edge of the picture, 200pt down the view.
+        XCTAssertEqual(unit(CGPoint(x: 400, y: 200), view: view, source: source)?.y ?? -1,
+                       0, accuracy: 0.001)
+    }
+
+    /// A picture taller than the view is pillarboxed — the case the user saw as
+    /// bars down each side.
+    func testPillarboxedHorizontallyIgnoresTheBars() {
+        let view = CGSize(width: 800, height: 800)
+        let source = CGRect(x: 0, y: 0, width: 400, height: 800)    // 1:2 into a square
+        // Picture is 400x800, centred, so bars are 200pt wide.
+        XCTAssertNil(unit(CGPoint(x: 100, y: 400), view: view, source: source))
+        XCTAssertEqual(unit(CGPoint(x: 200, y: 400), view: view, source: source)?.x ?? -1,
+                       0, accuracy: 0.001)
+        XCTAssertEqual(unit(CGPoint(x: 600, y: 400), view: view, source: source)?.x ?? -1,
+                       1, accuracy: 0.001)
+    }
+
+    /// The regression itself: measuring across the whole view instead of the
+    /// picture. Half way down a letterboxed view is NOT half way down the image,
+    /// and the error is largest at the extremes.
+    func testDriftGrowsWithDistanceWhenLetterboxed() {
+        let view = CGSize(width: 800, height: 800)
+        let source = CGRect(x: 0, y: 0, width: 1600, height: 800)
+
+        // Naive mapping: y / viewHeight. Correct mapping accounts for the bars.
+        for viewY in stride(from: 200.0, through: 600.0, by: 100.0) {
+            let naive = viewY / view.height
+            let correct = unit(CGPoint(x: 400, y: viewY), view: view, source: source)!.y
+            let error = abs(naive - correct)
+            if viewY == 400 {
+                XCTAssertEqual(error, 0, accuracy: 0.001, "no error at the centre")
+            } else {
+                XCTAssertGreaterThan(error, 0.1, "the naive mapping is off away from the centre")
+            }
+        }
+    }
+
+    func testDegenerateSizesAreRejected() {
+        XCTAssertNil(unit(CGPoint(x: 1, y: 1), view: .zero,
+                          source: CGRect(x: 0, y: 0, width: 10, height: 10)))
+        XCTAssertNil(unit(CGPoint(x: 1, y: 1), view: CGSize(width: 10, height: 10),
+                          source: .zero))
     }
 }
