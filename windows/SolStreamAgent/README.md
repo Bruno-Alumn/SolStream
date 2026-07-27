@@ -54,7 +54,7 @@ service. For development, `dev-remote.sh` builds over SSH but launches through
 an interactive scheduled task:
 
 ```
-schtasks /create /tn SolStreamAgentDev /tr "...\run_agent.bat" /sc ONCE /st 00:00 /it /f
+schtasks /create /tn SolStreamAgentDev /tr "...\run_agent.bat" /sc ONLOGON /it /f
 schtasks /run /tn SolStreamAgentDev
 ```
 
