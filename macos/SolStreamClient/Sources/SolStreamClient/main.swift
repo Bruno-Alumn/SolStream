@@ -74,6 +74,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             index + 1 < arguments.count ? arguments[index + 1] : nil
         }
 
+        // --agent-token supplies the host's shared secret once; it is remembered
+        // per host afterwards. Get it with "SolStreamAgent.exe --print-token".
+        if let index = arguments.firstIndex(of: "--agent-token"),
+           index + 1 < arguments.count {
+            let host = arguments.firstIndex(of: "--host").flatMap { hostIndex in
+                hostIndex + 1 < arguments.count ? arguments[hostIndex + 1] : nil
+            }
+            let target = (arguments.firstIndex(of: "--agent-host").flatMap { agentIndex in
+                agentIndex + 1 < arguments.count ? arguments[agentIndex + 1] : nil
+            }) ?? host
+            if let target {
+                AgentConnection.rememberToken(arguments[index + 1], for: target)
+                Log.info("[agent] token stored for \(target)")
+            }
+        }
+
         // --launch starts an installed application by name, skipping the picker.
         let launchQuery = arguments.firstIndex(of: "--launch").flatMap { index in
             index + 1 < arguments.count ? arguments[index + 1] : nil
@@ -231,59 +247,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func open(choice: AppPicker.Choice, host: String, agent: AgentConnection) {
         switch choice {
         case .running(let window):
-            picker?.close()
-            picker = nil
-            start(host: host, agent: agent, targets: [window])
+            attach(window, host: host, agent: agent)
 
         case .launch(let app):
-            picker?.showBusy("Starting \(app.name) on \(host)…")
-            agent.launch(path: app.path) { [weak self] id in
+            // If it is already open, attach to it instead of starting it.
+            //
+            // Launching an application that is already running usually produces
+            // no new window — it raises the one it has, or opens a tab in it — so
+            // the host waits out its whole launch timeout before giving up, and
+            // the Mac then attaches anyway. That is around 25 seconds of
+            // "Starting…" to reach the same place. Checking first makes it
+            // instant, and picking an application that is already running is a
+            // request to see it, not to start a second copy.
+            picker?.showBusy("Opening \(app.name) on \(host)…")
+            agent.windows { [weak self] windows in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    guard let id else {
-                        // No new window is often not a failure. An application
-                        // that was already running usually reuses the window it
-                        // has — Explorer opens a tab in it — and if that window
-                        // was already focused, the host has nothing to notice
-                        // either. The name the user picked is the best clue we
-                        // have, and only this side knows it.
-                        agent.windows { windows in
-                            DispatchQueue.main.async {
-                                guard let existing = windows.first(where: {
-                                    $0.title.localizedCaseInsensitiveContains(app.name)
-                                }) else {
-                                    self.picker?.clearBusy()
-                                    self.picker?.showFailure("\(app.name) didn't open a window.")
-                                    return
-                                }
-                                Log.info("[app] \"\(app.name)\" was already open; "
-                                         + "attaching to \"\(existing.title)\"")
-                                self.picker?.close()
-                                self.picker = nil
-                                self.start(host: host, agent: agent, targets: [existing])
-                            }
-                        }
+                    if let existing = windows.first(where: {
+                        $0.title.localizedCaseInsensitiveContains(app.name)
+                    }) {
+                        Log.info("[app] \"\(app.name)\" is already open; attaching to "
+                                 + "\"\(existing.title)\"")
+                        self.attach(existing, host: host, agent: agent)
                         return
                     }
-                    // Re-enumerate rather than trusting the launch reply: the
-                    // window list carries the title and caption geometry the
-                    // stream window needs, and the app may have retitled itself
-                    // in the moment since it appeared.
+                    self.launch(app: app, host: host, agent: agent)
+                }
+            }
+        }
+    }
+
+    private func launch(app: RemoteApp, host: String, agent: AgentConnection) {
+        picker?.showBusy("Starting \(app.name) on \(host)…")
+        agent.launch(path: app.path) { [weak self] id in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let id else {
+                    // Still not necessarily a failure: an application can open its
+                    // window under a title that does not contain the name we
+                    // matched on before launching, so try once more now.
                     agent.windows { windows in
                         DispatchQueue.main.async {
-                            guard let target = windows.first(where: { $0.id == id }) else {
+                            guard let existing = windows.first(where: {
+                                $0.title.localizedCaseInsensitiveContains(app.name)
+                            }) else {
                                 self.picker?.clearBusy()
-                                self.picker?.showFailure("\(app.name) opened a window that vanished.")
+                                self.picker?.showFailure("\(app.name) didn't open a window.")
                                 return
                             }
-                            self.picker?.close()
-                            self.picker = nil
-                            self.start(host: host, agent: agent, targets: [target])
+                            Log.info("[app] \"\(app.name)\" was already open; "
+                                     + "attaching to \"\(existing.title)\"")
+                            self.attach(existing, host: host, agent: agent)
                         }
+                    }
+                    return
+                }
+                // Re-enumerate rather than trusting the launch reply: the window
+                // list carries the title and caption geometry the stream window
+                // needs, and the app may have retitled itself in the moment since
+                // it appeared.
+                agent.windows { windows in
+                    DispatchQueue.main.async {
+                        guard let target = windows.first(where: { $0.id == id }) else {
+                            self.picker?.clearBusy()
+                            self.picker?.showFailure("\(app.name) opened a window that vanished.")
+                            return
+                        }
+                        self.attach(target, host: host, agent: agent)
                     }
                 }
             }
         }
+    }
+
+    /// Dismiss the picker and stream one window.
+    private func attach(_ window: RemoteWindow, host: String, agent: AgentConnection) {
+        picker?.close()
+        picker = nil
+        start(host: host, agent: agent, targets: [window])
     }
 
     /// The canvas this Mac wants the host to render at.

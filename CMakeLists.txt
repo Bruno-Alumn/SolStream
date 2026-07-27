@@ -158,7 +158,9 @@ include(CTest)
 # ---- Subdirectories ----
 add_subdirectory(windows/SolStreamAgent)
 add_subdirectory(windows/CaptureHelper)
-add_subdirectory(windows/sunshine)
+# windows/sunshine is deliberately NOT built — see its README. It builds a
+# sunshine_fork static library that nothing links, left over from an approach
+# that was abandoned once it turned out Sunshine only needs configuring.
 add_subdirectory(windows/ClipboardMonitor)
 add_subdirectory(windows/InputInjector)
 add_subdirectory(windows/FileTransferService)

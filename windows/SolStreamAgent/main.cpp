@@ -35,6 +35,7 @@
 #include <shellapi.h>
 #include <wincrypt.h>
 #include <winhttp.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -602,6 +603,103 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
         }
     }
     return fallback ? IdFromWindow(fallback) : 0;
+}
+
+// ── Authentication ───────────────────────────────────────────────────────────
+//
+// This socket can enumerate and move every window on the machine and launch
+// arbitrary applications. Binding a single trusted address limits who can reach
+// it, which is worth doing, but reachability is not authentication: anything else
+// on that network still gets in. So a client must present a shared token before
+// any command is accepted.
+//
+// The token is generated on first run and kept in the user's own profile. It is
+// not encrypted, deliberately — the point is for the person at the machine to be
+// able to read it and give it to their Mac.
+//
+// Plaintext over TCP means this authenticates the client to the host and nothing
+// more: it does not encrypt the session or protect against someone who can read
+// the traffic. On a home LAN or a VPN that is the right amount of security for
+// what it guards. Do not mistake it for more than that.
+
+std::string g_token;
+bool g_require_auth = true;
+
+std::wstring TokenPath() {
+    wchar_t buffer[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
+        return {};
+    }
+    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\agent.token";
+}
+
+std::string RandomToken() {
+    unsigned char bytes[16] = {};
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        return {};
+    }
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(sizeof(bytes) * 2);
+    for (unsigned char byte : bytes) {
+        out.push_back(hex[byte >> 4]);
+        out.push_back(hex[byte & 0x0F]);
+    }
+    return out;
+}
+
+std::string LoadOrCreateToken() {
+    const std::wstring path = TokenPath();
+    if (path.empty()) {
+        return {};
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        char buffer[128] = {};
+        DWORD read = 0;
+        const bool ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0;
+        CloseHandle(file);
+        if (ok) {
+            std::string existing(buffer, read);
+            while (!existing.empty()
+                   && (existing.back() == '\n' || existing.back() == '\r' || existing.back() == ' ')) {
+                existing.pop_back();
+            }
+            if (existing.size() >= 16) {
+                return existing;
+            }
+        }
+    }
+
+    const std::string fresh = RandomToken();
+    if (fresh.empty()) {
+        return {};
+    }
+    file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(file, fresh.data(), (DWORD) fresh.size(), &written, nullptr);
+        CloseHandle(file);
+    }
+    return fresh;
+}
+
+/// Constant-time compare, so a wrong token cannot be found a character at a time
+/// by timing the reply.
+bool TokenMatches(const std::string& supplied) {
+    if (supplied.size() != g_token.size() || g_token.empty()) {
+        return false;
+    }
+    unsigned char difference = 0;
+    for (size_t i = 0; i < g_token.size(); ++i) {
+        difference |= static_cast<unsigned char>(supplied[i] ^ g_token[i]);
+    }
+    return difference == 0;
 }
 
 // ── Geometry lock ────────────────────────────────────────────────────────────
@@ -1267,10 +1365,29 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
     return true;
 }
 
-std::string HandleCommand(const std::string& line) {
+std::string HandleCommand(const std::string& line, bool& authenticated) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
+    }
+
+    if (command == "auth") {
+        std::string supplied;
+        FieldString(line, "token", supplied);
+        if (TokenMatches(supplied)) {
+            authenticated = true;
+            return "{\"type\":\"auth\",\"ok\":true}";
+        }
+        // Deliberately slow: this is the only guess-and-check surface here, and
+        // the agent serves one client at a time, so a delay costs a legitimate
+        // client nothing and costs an attacker everything.
+        Sleep(1000);
+        Log("[agent] rejected a bad token");
+        return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
+    }
+
+    if (g_require_auth && !authenticated) {
+        return "{\"type\":\"error\",\"message\":\"unauthenticated\",\"needsAuth\":true}";
     }
 
     if (command == "displays") {
@@ -1482,10 +1599,21 @@ void ServeClient(SOCKET client) {
     DWORD hostname_size = sizeof(hostname);
     GetComputerNameA(hostname, &hostname_size);
 
+    // The greeting says whether a token is needed, so the Mac can ask for one up
+    // front rather than discovering it by having a command refused.
     std::string hello = "{\"type\":\"hello\",\"version\":";
     hello += std::to_string(kProtocolVersion);
-    hello += ",\"host\":\"" + JsonEscape(hostname) + "\"}";
-    if (!SendLine(client, hello) || !SendLine(client, DisplaysJson(EnumerateDisplays()))) {
+    hello += ",\"host\":\"" + JsonEscape(hostname) + "\"";
+    hello += ",\"needsAuth\":" + std::string(g_require_auth ? "true" : "false");
+    hello += "}";
+    if (!SendLine(client, hello)) {
+        return;
+    }
+    // The display list is only volunteered to a client that has no authenticating
+    // to do; otherwise it would leak the machine's monitor layout to anyone who
+    // can open a socket.
+    bool authenticated = !g_require_auth;
+    if (authenticated && !SendLine(client, DisplaysJson(EnumerateDisplays()))) {
         return;
     }
 
@@ -1512,8 +1640,17 @@ void ServeClient(SOCKET client) {
             if (line.empty()) {
                 continue;
             }
-            if (!SendLine(client, HandleCommand(line))) {
+            const bool was_authenticated = authenticated;
+            if (!SendLine(client, HandleCommand(line, authenticated))) {
                 return;
+            }
+            // Authenticating completes the greeting: the display list is part of
+            // the hello sequence, withheld until now, and the Mac waits for it
+            // before doing anything else.
+            if (!was_authenticated && authenticated) {
+                if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
+                    return;
+                }
             }
         }
 
@@ -1600,6 +1737,8 @@ int wmain(int argc, wchar_t** argv) {
     // it binds is the only thing limiting who can drive it.
     std::string bind_address = kLoopback;
     bool set_credentials = false;
+    bool print_token = false;
+    bool no_auth = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--port" && i + 1 < argc) {
@@ -1614,11 +1753,38 @@ int wmain(int argc, wchar_t** argv) {
             bind_address = "0.0.0.0";
         } else if (arg == L"--set-sunshine-credentials") {
             set_credentials = true;
+        } else if (arg == L"--print-token") {
+            print_token = true;
+        } else if (arg == L"--no-auth") {
+            no_auth = true;
         }
     }
 
     if (set_credentials) {
         return SetSunshineCredentials();
+    }
+
+    g_token = LoadOrCreateToken();
+    if (print_token) {
+        if (g_token.empty()) {
+            std::fputs("Could not read or create the agent token.\n", stderr);
+            return 1;
+        }
+        std::fprintf(stdout, "%s\n", g_token.c_str());
+        return 0;
+    }
+
+    // Loopback needs no token: reaching it already means running as a user on
+    // this machine, which is strictly more access than the agent grants. Keeping
+    // that exemption is what lets an SSH port forward work without one.
+    g_require_auth = !no_auth && bind_address != kLoopback;
+    if (g_require_auth && g_token.empty()) {
+        Log("[agent] refusing to listen on %s without a token", bind_address.c_str());
+        return 1;
+    }
+    if (no_auth && bind_address != kLoopback) {
+        Log("[agent] WARNING: --no-auth on a reachable address. Anything that can");
+        Log("[agent] WARNING: open this socket can launch applications here.");
     }
 
     // Without this every coordinate we read or write is silently rescaled by
@@ -1640,8 +1806,15 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
-    BOOL reuse = TRUE;
-    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*) &reuse, sizeof(reuse));
+    // EXCLUSIVE, not REUSEADDR. On Windows SO_REUSEADDR lets a second process
+    // bind a port that is already bound — it does not merely permit reusing a
+    // port in TIME_WAIT as it does on unix. A second agent, in another user's
+    // session, would therefore start successfully, and which of the two a given
+    // connection reached would be indeterminate: the Mac could silently end up
+    // driving somebody else's desktop.
+    BOOL exclusive = TRUE;
+    setsockopt(listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+               (const char*) &exclusive, sizeof(exclusive));
 
     sockaddr_in address{};
     address.sin_family = AF_INET;

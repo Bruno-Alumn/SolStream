@@ -85,8 +85,35 @@ and launch applications.
 
 Binding a Tailscale (or similar) address is the sensible middle: those peers are
 already device-authenticated at the network layer, so the socket is reachable from
-your own machines and from nowhere else. That is a real control rather than a fig
-leaf, but it is not a substitute for authenticating the protocol itself.
+your own machines and from nowhere else.
+
+## Token
+
+Reachability is not authentication, so a client on a non-loopback address must
+present a shared token before **any** command is accepted — including the display
+list, which would otherwise leak the machine's monitor layout to anyone who can
+open a socket. The token is generated on first run and kept in the user's own
+profile at `%LOCALAPPDATA%\SolStream\agent.token`.
+
+```
+SolStreamAgent.exe --print-token
+```
+
+Give it to the Mac once with `--agent-token <token>`; it is remembered per host
+after that.
+
+Loopback is exempt, because reaching it already means running as a user on this
+machine — strictly more access than the agent grants. That exemption is what lets
+an SSH port forward work without a token. `--no-auth` disables the check
+elsewhere and warns loudly; there is no good reason to use it.
+
+Comparison is constant-time and a wrong token costs a one-second delay, which a
+legitimate client never pays and a guesser always does.
+
+What this is **not**: the token authenticates the client to the host and nothing
+more. It is sent in plaintext, so it neither encrypts the session nor protects
+against someone who can read the traffic. On a home LAN or a VPN that is the right
+amount of security for what it guards; on a hostile network it is not.
 
 | request | reply |
 |---|---|
