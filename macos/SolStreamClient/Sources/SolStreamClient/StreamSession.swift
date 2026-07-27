@@ -222,6 +222,20 @@ final class StreamSession {
         isRunning = false
         watchdog?.cancel()
         watchdog = nil
+        // Silence the media sockets and wait for any callback still running
+        // before releasing anything those callbacks touch. `handleAudio` runs on
+        // the audio queue roughly 200 times a second and dereferences
+        // `audioDecoder` and `audioRenderer` — and until this call existed,
+        // nothing waited for it: the default path only *scheduled* the teardown,
+        // so the sockets were still delivering at the moment those two were
+        // released. `OpusDecoder.deinit` disposes the AudioConverter and frees
+        // the PCM buffer that `decode()` writes into, so a disconnect during
+        // playback was a genuine use-after-free rather than a lost frame.
+        //
+        // The video path already had this property by a different route: the
+        // decode callback captures `[weak decoder]` and `shutdown()` drains
+        // VideoToolbox. Audio had no equivalent.
+        connection.quiesceMedia()
         connection.disconnect(waitUntilDone: waitUntilDone)
         // Drain the decoder before dropping the sinks: its callback runs on a
         // VideoToolbox thread and is what hands frames to the views.

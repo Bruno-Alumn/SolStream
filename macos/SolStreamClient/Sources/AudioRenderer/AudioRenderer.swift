@@ -31,7 +31,13 @@ public final class AudioRenderer {
         stop()
         if let audioUnit {
             AudioUnitUninitialize(audioUnit)
+            // Uninitialize releases the unit's resources but not the instance
+            // itself. Without this each session left a live HAL output unit
+            // behind — and every one of them holds a render callback whose
+            // refcon is this object.
+            AudioComponentInstanceDispose(audioUnit)
         }
+        audioUnit = nil
     }
 
     /// Play a decoded audio frame. Called from the stream connection callback.
