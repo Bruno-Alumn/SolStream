@@ -14,12 +14,28 @@ cmake_policy(SET CMP0091 NEW)
 # Still a console subsystem target: the window is created explicitly, so the same
 # binary can be run headless from a terminal for diagnosis — which is how every
 # verification in this project's history has been done.
+# Sunshine can be carried inside the executable, so what ships is one file.
+# Optional: without it the build still works and the program expects a sunshine\
+# folder beside it, which is what a development tree has.
+set(SOLSTREAM_SUNSHINE_ZIP "" CACHE FILEPATH
+    "Zip of the sunshine\\ folder to embed, so the executable ships alone")
+
+set(SOLSTREAM_RESOURCES "")
+if(SOLSTREAM_SUNSHINE_ZIP AND EXISTS "${SOLSTREAM_SUNSHINE_ZIP}")
+    # RC treats a backslash as an escape, so the path has to arrive doubled.
+    string(REPLACE "\\" "\\\\" SOLSTREAM_SUNSHINE_ZIP_RC "${SOLSTREAM_SUNSHINE_ZIP}")
+    configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
+    set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
+    message(STATUS "SolStream: embedding ${SOLSTREAM_SUNSHINE_ZIP}")
+endif()
+
 add_executable(SolStreamAgent
     main.cpp
     sunshine_host.cpp
     vdd.cpp
     host_window.cpp
     installer.cpp
+    ${SOLSTREAM_RESOURCES}
 )
 
 set_target_properties(SolStreamAgent PROPERTIES

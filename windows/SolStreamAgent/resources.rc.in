@@ -1,0 +1,16 @@
+// resources.rc.in — carries Sunshine inside the executable.
+//
+// SolStream ships as one file. Sunshine is 65 MB of unmodified upstream binary
+// that has to end up beside the program, and a folder of loose files is not
+// something a person downloads and runs: they unzip it to Downloads, run the
+// exe out of there, and the install works but lives somewhere temporary.
+//
+// So the archive is a resource. `--install` writes it out and unpacks it into
+// Program Files, after which the executable and its Sunshine sit together the
+// way the rest of the program already expects. Nothing about the runtime layout
+// changes; only how it arrives.
+//
+// Configured by CMake, which substitutes the path to the archive it was told to
+// embed. Backslashes are doubled because RC treats them as escapes.
+
+SUNSHINE_ARCHIVE RCDATA "@SOLSTREAM_SUNSHINE_ZIP_RC@"

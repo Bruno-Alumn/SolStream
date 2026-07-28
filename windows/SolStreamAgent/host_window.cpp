@@ -324,16 +324,6 @@ Screen Describe(const HostStatus& status) {
     Screen screen;
     screen.connected = status.connected_clients > 0;
 
-    if (!status.virtual_display) {
-        screen.headline = L"Almost ready — the display driver is missing.";
-        screen.what = L"SolStream needs a virtual display.";
-        screen.why = L"It's a display with no monitor, sized to match your Mac. "
-                     L"Without it there is nowhere private to put the streamed window.";
-        screen.fix = L"Install driver";
-        screen.code = L"SS-201";
-        screen.shield = true;
-        return screen;
-    }
     if (status.address.empty()) {
         screen.headline = L"Ready, but your Mac can't reach this PC.";
         screen.what = L"This PC isn't on a network your Mac can see.";
@@ -351,11 +341,28 @@ Screen Describe(const HostStatus& status) {
         screen.code = L"SS-311";
         return screen;
     }
-    if (screen.connected) {
-        screen.headline = L"Streaming to your Mac.";
-        return screen;
+    screen.headline = screen.connected
+        ? L"Streaming to your Mac."
+        : L"Ready. Open SolStream on your Mac and pick this PC.";
+
+    // Missing driver is an advisory, not a failure. SolStream captures the main
+    // display instead and everything works — which is why this does not take
+    // over the headline, and why the row beside it is "needs you" rather than
+    // the grey mark that means broken.
+    //
+    // It is still worth saying, because the two things it costs are exactly the
+    // two a person would otherwise discover the hard way: whatever they drag
+    // over the streamed application goes down the wire with it, and the canvas
+    // is the monitor's size rather than the Mac's, so the picture is scaled.
+    if (!status.virtual_display) {
+        screen.what = L"Streaming your main display.";
+        screen.why = L"That works, but everything on that display goes to your Mac — "
+                     L"including anything you drag over the application — and the "
+                     L"picture is your monitor's size rather than your Mac's. A "
+                     L"virtual display fixes both.";
+        screen.fix = L"Install driver";
+        screen.shield = true;
     }
-    screen.headline = L"Ready. Open SolStream on your Mac and pick this PC.";
     return screen;
 }
 
@@ -475,9 +482,14 @@ void LayoutAndPaint(HWND window) {
                         status.sunshine_running ? L"running" : L"not running",
                         status.sunshine_running ? Mark::Good : Mark::Absent});
     }
-    rows.push_back({L"Virtual display",
-                    status.display_detail.empty() ? L"—" : status.display_detail,
-                    status.virtual_display ? Mark::Good : Mark::Absent});
+    // Named for what it is doing rather than for what is missing. "Virtual
+    // display: not installed" reads as a broken component; "Display: your main
+    // display" reads as a choice, which is what it is.
+    rows.push_back(status.virtual_display
+        ? Row{L"Virtual display",
+              status.display_detail.empty() ? L"—" : status.display_detail,
+              Mark::Good}
+        : Row{L"Display", L"your main display", Mark::NeedsYou});
 
     for (const Row& row : rows) {
         DrawMark(pad + 4.0f, y + metric::kRowH / 2.0f, row.mark);

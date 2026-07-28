@@ -146,6 +146,57 @@ void RemoveTree(const std::wstring& path) {
     RemoveDirectoryW(path.c_str());
 }
 
+/// Write the embedded Sunshine archive out and unpack it into `destination`.
+///
+/// Only reached when the executable is travelling alone — a development tree has
+/// a real sunshine\ folder beside it and that is copied normally. Returns false
+/// with `error` untouched when there is no embedded archive, which is not a
+/// failure, just the other arrangement.
+bool ExtractBundledSunshine(const std::wstring& destination, std::string& error) {
+    HRSRC found = FindResourceW(nullptr, L"SUNSHINE_ARCHIVE", RT_RCDATA);
+    if (!found) {
+        return false;
+    }
+    HGLOBAL loaded = LoadResource(nullptr, found);
+    const void* bytes = loaded ? LockResource(loaded) : nullptr;
+    const DWORD size = SizeofResource(nullptr, found);
+    if (!bytes || size == 0) {
+        return false;
+    }
+
+    wchar_t temp[MAX_PATH] = {0};
+    GetTempPathW(MAX_PATH, temp);
+    const std::wstring archive = std::wstring(temp) + L"solstream-sunshine.zip";
+    HANDLE file = CreateFileW(archive.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = "Could not write the bundled Sunshine archive to a temporary file.";
+        return false;
+    }
+    DWORD written = 0;
+    const bool wrote = WriteFile(file, bytes, size, &written, nullptr) && written == size;
+    CloseHandle(file);
+    if (!wrote) {
+        DeleteFileW(archive.c_str());
+        error = "Could not write the bundled Sunshine archive (out of disk?).";
+        return false;
+    }
+
+    SHCreateDirectoryExW(nullptr, destination.c_str(), nullptr);
+    // tar.exe has been in Windows since 10 1803 and reads zip through
+    // libarchive, so unpacking needs nothing shipped and no PowerShell.
+    const DWORD code = RunHidden(L"tar.exe -x -f \"" + archive + L"\" -C \""
+                                 + destination + L"\"");
+    DeleteFileW(archive.c_str());
+    if (code != 0) {
+        error = "Could not unpack the bundled Sunshine (tar returned "
+              + std::to_string((int) code) + ").";
+        return false;
+    }
+    InstallLog("unpacked the bundled Sunshine");
+    return true;
+}
+
 /// Stop anything already running out of the install directory, or the copy
 /// fails on a locked executable and leaves a half-installed folder.
 void StopInstalled(const std::wstring& destination) {
@@ -358,11 +409,16 @@ bool InstallSelf(std::string& error) {
         error = "SolStream is already installed here.";
         return false;
     }
-    if (GetFileAttributesW((source + L"\\sunshine\\sunshine.exe").c_str())
-        == INVALID_FILE_ATTRIBUTES) {
-        error = "This copy of SolStream has no sunshine\\ folder beside it, so it "
-                "cannot stream. Use the packaged folder rather than the bare "
-                "executable.";
+    // Two shapes are legitimate. A single downloaded executable carries Sunshine
+    // inside it; a development tree has the folder sitting beside it. Anything
+    // else cannot stream and should say so now rather than after copying.
+    const bool beside = GetFileAttributesW((source + L"\\sunshine\\sunshine.exe").c_str())
+                        != INVALID_FILE_ATTRIBUTES;
+    const bool embedded = FindResourceW(nullptr, L"SUNSHINE_ARCHIVE", RT_RCDATA) != nullptr;
+    if (!beside && !embedded) {
+        error = "This copy of SolStream has no Sunshine with it — neither bundled "
+                "inside the executable nor in a sunshine\\ folder beside it — so it "
+                "cannot stream.";
         return false;
     }
 
@@ -373,6 +429,13 @@ bool InstallSelf(std::string& error) {
         return false;
     }
     InstallLog("copied");
+    if (!beside) {
+        // Nothing was copied but the executable itself; Sunshine is inside it.
+        if (!ExtractBundledSunshine(destination, error)) {
+            InstallLog("unpack failed: " + error);
+            return false;
+        }
+    }
 
     // Sunshine creates this at startup whatever its configuration says, and under
     // Program Files an ordinary user cannot -- it exits 0 before its logging is

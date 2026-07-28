@@ -108,9 +108,24 @@ if ($DriverDir -ne "" -and (Test-Path $DriverDir)) {
 }
 
 # Step 5: licences
+# Loud, not silent. Sunshine is GPL-3.0 and distributing it obliges us to ship
+# its licence text; skipping quietly when the source install happens not to have
+# one produces a package that looks complete and is not distributable. Some
+# Sunshine installs genuinely do not carry the file, which is exactly how this
+# went unnoticed until a package was inspected.
 $sunshineLicense = Join-Path $SunshineDir "LICENSE"
-if (Test-Path $sunshineLicense) {
+if (-not (Test-Path $sunshineLicense)) {
+    $sunshineLicense = Get-ChildItem $SunshineDir -Filter "LICENSE*" -Recurse -ErrorAction SilentlyContinue |
+                       Select-Object -First 1 -ExpandProperty FullName
+}
+if ($sunshineLicense -and (Test-Path $sunshineLicense)) {
     Copy-Item $sunshineLicense "$OutDir\licenses\Sunshine-LICENSE.txt" -Force
+    Write-Host "  bundled Sunshine's licence text"
+} else {
+    Write-Warning ("No LICENSE file found under $SunshineDir, so this package does " +
+                   "NOT carry Sunshine's GPL-3.0 text. It is not fit to distribute " +
+                   "until you put the licence in $OutDir\licenses\Sunshine-LICENSE.txt. " +
+                   "Get it from https://github.com/LizardByte/Sunshine/blob/master/LICENSE")
 }
 @"
 SolStream ships Sunshine (https://github.com/LizardByte/Sunshine), which is
@@ -127,5 +142,35 @@ https://github.com/LizardByte/Sunshine at the tag matching sunshine\sunshine.exe
 
 $size = (Get-ChildItem $OutDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ""
-Write-Host ("=== Done: {0} ({1:N0} MB) ===" -f $OutDir, $size)
+Write-Host ("=== Folder: {0} ({1:N0} MB) ===" -f $OutDir, $size)
 Get-ChildItem $OutDir | Select-Object -ExpandProperty Name
+
+# ── Step 6: the single file ──────────────────────────────────────────────────
+#
+# What a person actually downloads. Everything the folder holds except the
+# executable is zipped and linked into the executable as a resource, so one file
+# arrives and `SolStream.exe --install` unpacks it into Program Files.
+#
+# The folder above is kept because a development tree wants the loose layout,
+# and because this step is a rebuild: the resource has to exist before the
+# linker runs, so the exe is necessarily built twice.
+
+Write-Host ""
+Write-Host "--- single file ---"
+$payload = Join-Path (Split-Path $OutDir -Parent) "solstream-payload.zip"
+if (Test-Path $payload) { Remove-Item $payload -Force }
+Compress-Archive -Path "$OutDir\sunshine", "$OutDir\licenses" -DestinationPath $payload
+Write-Host ("  payload: {0:N0} MB" -f ((Get-Item $payload).Length / 1MB))
+
+cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=$payload" | Out-Null
+cmake --build $BuildDir --target SolStreamAgent --config Release | Out-Null
+if (-not (Test-Path $exe)) { throw "the single-file rebuild produced no executable" }
+
+$single = Join-Path (Split-Path $OutDir -Parent) "SolStream.exe"
+Copy-Item $exe $single -Force
+
+# Leave the cache without the archive, or every later ordinary build silently
+# embeds whatever zip happened to be lying there.
+cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=" | Out-Null
+
+Write-Host ("=== Single file: {0} ({1:N0} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))
