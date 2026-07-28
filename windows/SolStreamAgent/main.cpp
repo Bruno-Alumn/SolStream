@@ -3677,10 +3677,26 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
-    // One window, one agent. The shortcuts point at this executable with no
-    // arguments, and a second copy would fight the first for the port and lose
-    // — so a shortcut press on a machine already running SolStream means "show
-    // me the window", which is what every program with a shortcut does.
+    g_token = LoadOrCreateToken();
+    if (print_token) {
+        if (g_token.empty()) {
+            std::fputs("Could not read or create the agent token.\n", stderr);
+            return 1;
+        }
+        std::fprintf(stdout, "%s\n", g_token.c_str());
+        return 0;
+    }
+
+    // Below here this process intends to BE the agent, and everything that only
+    // wanted to ask it something has already answered and gone. Putting the
+    // one-instance check any earlier makes `SolStream.exe --print-token` on an
+    // installed machine raise the window and exit 0 having printed nothing,
+    // which is the kind of regression a script discovers and a person does not.
+    //
+    // One window, one agent: the shortcuts point at this executable with no
+    // arguments, and a second copy would fight the first for the port and lose,
+    // so a shortcut press on a machine already running SolStream means "show me
+    // the window", which is what every program with a shortcut does.
     if (solstream::RunningInstalled() && solstream::FocusExistingHostWindow()) {
         return 0;
     }
@@ -3690,16 +3706,6 @@ int wmain(int argc, wchar_t** argv) {
     // window shows it. That is the lock, not the address.
     if (solstream::RunningInstalled() && bind_address == kLoopback) {
         bind_address = "0.0.0.0";
-    }
-
-    g_token = LoadOrCreateToken();
-    if (print_token) {
-        if (g_token.empty()) {
-            std::fputs("Could not read or create the agent token.\n", stderr);
-            return 1;
-        }
-        std::fprintf(stdout, "%s\n", g_token.c_str());
-        return 0;
     }
 
     // Loopback needs no token: reaching it already means running as a user on
