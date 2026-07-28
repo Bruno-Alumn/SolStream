@@ -128,6 +128,18 @@ robocopy $Package $Destination /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 $global:LASTEXITCODE = 0
 
+# Sunshine creates this at startup whatever its configuration says, and under
+# Program Files it cannot -- it exits 0 before its logging is up, leaving an
+# empty log and a host that reports "Sunshine keeps stopping" with no reason.
+# The package ships it empty, but an empty directory does not survive every way
+# a folder gets moved around (most zip tools drop them), and the cost of being
+# wrong here is a completely dead install. Made here too, where there are
+# administrator rights to make it with.
+$sunshineConfig = Join-Path $Destination "sunshine\config"
+if (-not (Test-Path $sunshineConfig)) {
+    New-Item -ItemType Directory -Path $sunshineConfig -Force | Out-Null
+}
+
 # ── Firewall, before anything has listened ───────────────────────────────────
 
 Write-Host "--- firewall ---"

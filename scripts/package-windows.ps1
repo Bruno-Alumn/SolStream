@@ -81,10 +81,21 @@ $global:LASTEXITCODE = 0
 # Its own config directory is never used — SolStream writes one per user under
 # LOCALAPPDATA — so drop anything the source install had, rather than shipping
 # somebody's paired clients and credentials to whoever installs this.
+#
+# Emptied, NOT deleted. Sunshine creates this directory at startup whatever its
+# configuration says, and under Program Files it cannot: it stops with
+# "Failed to apply config: cannot create directories: Permission denied" and
+# exits 0 before its own logging is up, so its log stays empty and the only
+# symptom is SolStream reporting "Sunshine keeps stopping". Deleting the folder
+# outright is what caused that -- the dev agent never showed it because it runs
+# the user's existing install, whose config directory is already there.
 $staleConfig = "$OutDir\sunshine\config"
 if (Test-Path $staleConfig) {
-    Remove-Item $staleConfig -Recurse -Force
-    Write-Host "removed the source install's config (it would have shipped its paired clients)"
+    Remove-Item "$staleConfig\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "emptied the source install's config (it would have shipped its paired clients)"
+} else {
+    New-Item -ItemType Directory -Path $staleConfig -Force | Out-Null
+    Write-Host "created an empty config directory for Sunshine to find"
 }
 
 # Step 4: the display driver, if one is being shipped
