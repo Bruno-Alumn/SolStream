@@ -25,3 +25,6 @@ windows/SolStreamAgent/*.exe
 
 # Packaged client (built by scripts/package-macos.sh)
 macos/SolStreamClient/*.dmg
+
+# Windows host package (built by scripts/package-windows.ps1)
+dist/

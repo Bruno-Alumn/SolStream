@@ -56,7 +56,11 @@ cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
 # Step 2: Create Info.plist if missing
 echo ""
 echo "--- Step 2: Info.plist ---"
-if [ ! -f "$APP_PATH/Contents/Info.plist" ]; then
+# Unconditionally, not "if missing". The first version of this guarded on the
+# file's existence, which meant every run after the first shipped the previous
+# build's plist -- exactly the bug that made this script never produce a working
+# bundle at all.
+if true; then
     cat > "$APP_PATH/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -81,6 +85,32 @@ if [ ! -f "$APP_PATH/Contents/Info.plist" ]; then
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>SolStream needs microphone access for audio streaming.</string>
+    <!--
+      App Transport Security has to allow cleartext, and this is not a corner
+      being cut.
+
+      GameStream pairing is plain HTTP by protocol design: /pair on the base
+      port is the unauthenticated half of the handshake, and it exists to
+      establish the client certificate that everything afterwards is
+      authenticated with. There is no TLS to require there, because the point of
+      the exchange is to agree on the identity TLS would have checked.
+
+      Everything that carries anything then runs over mTLS on the https port
+      with the host's public key pinned by SolStream itself (ServerTrust) --
+      which is a stronger check than ATS performs, since it is pinned per host
+      and port rather than trusted from a CA list.
+
+      Without this the packaged application cannot pair at all. It fails only on
+      a FIRST connection to a host, so a build with the pin already stored looks
+      perfectly healthy and every new user hits it: "The resource could not be
+      loaded because the App Transport Security policy requires the use of a
+      secure connection".
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 EOF
