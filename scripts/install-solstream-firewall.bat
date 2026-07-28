@@ -53,7 +53,25 @@ if "%~1"=="" (
 )
 
 echo Installing SolStream Windows Firewall rules...
-echo   install directory: !INSTALLDIR!
+echo.
+
+REM Find the two executables. The installed layout puts both under one root, but
+REM the case this script exists for does not: on a development machine the agent
+REM runs out of a build tree and Sunshine is wherever it was installed, so no
+REM single directory names them both. Ask the running processes rather than
+REM guessing, and fall back to the install layout when nothing is running.
+set AGENTEXE=
+set SUNEXE=
+
+call :Running SolStreamAgent AGENTEXE
+call :Running sunshine       SUNEXE
+
+if "!AGENTEXE!"=="" if exist "!INSTALLDIR!\SolStream.exe"          set AGENTEXE=!INSTALLDIR!\SolStream.exe
+if "!AGENTEXE!"=="" if exist "!INSTALLDIR!\SolStreamAgent.exe"     set AGENTEXE=!INSTALLDIR!\SolStreamAgent.exe
+if "!SUNEXE!"==""   if exist "!INSTALLDIR!\sunshine\sunshine.exe"  set SUNEXE=!INSTALLDIR!\sunshine\sunshine.exe
+
+echo   agent:    !AGENTEXE!
+echo   sunshine: !SUNEXE!
 echo.
 
 REM Profile scope. Tailscale's adapter is not reliably categorised as Private on
@@ -63,8 +81,8 @@ REM the agent still requires its token, and Sunshine still requires pairing.
 set PROFILE=private,public
 
 echo Programs:
-call :Program "SolStream - Agent (program)"    "!INSTALLDIR!\SolStreamAgent.exe"
-call :Program "SolStream - Sunshine (program)" "!INSTALLDIR!\sunshine\sunshine.exe"
+call :Program "SolStream - Agent (program)"    "!AGENTEXE!"
+call :Program "SolStream - Sunshine (program)" "!SUNEXE!"
 
 echo.
 echo Ports:
@@ -88,12 +106,28 @@ echo.
 endlocal
 exit /b 0
 
+REM Ask Windows where a running process's image actually is, so the rule names
+REM the file that will be listening rather than the file somebody expected.
+REM
+REM No pipe in the PowerShell. Inside for /f's backticks a `|` has to be written
+REM `^|`, and the caret is then handed to PowerShell literally -- "a positional
+REM parameter cannot be found that accepts argument '^'" -- so the lookup fails
+REM and the rule is silently skipped. An if-statement avoids the question.
+:Running
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p = Get-Process -Name '%~1' -ErrorAction SilentlyContinue; if ($p) { $p[0].Path }"`) do set %~2=%%P
+goto :EOF
+
 :Program
 set NAME=%~1
 set EXE=%~2
 
 echo   %NAME%
 
+if "%EXE%"=="" (
+    echo     SKIPPED - could not find the executable. Start it, or pass the
+    echo               install directory as the first argument to this script.
+    goto :EOF
+)
 if not exist "%EXE%" (
     echo     SKIPPED - not found at %EXE%
     goto :EOF
