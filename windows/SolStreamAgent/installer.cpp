@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <objbase.h>
 
 #include <cstdio>
 #include <string>
@@ -14,6 +15,17 @@ namespace solstream {
 namespace {
 
 constexpr wchar_t kTaskName[] = L"SolStream Host";
+constexpr wchar_t kUninstallKey[] =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SolStream";
+constexpr wchar_t kShortcutName[] = L"SolStream.lnk";
+
+std::wstring TempDirectory() {
+    wchar_t temp[MAX_PATH] = {0};
+    if (GetTempPathW(MAX_PATH, temp) == 0) {
+        return L"C:\\Windows\\Temp\\";
+    }
+    return temp;
+}
 
 /// Installing writes a log, because installing is the one thing that happens on
 /// a machine nobody is watching, before there is any window to report into, and
@@ -21,11 +33,7 @@ constexpr wchar_t kTaskName[] = L"SolStream Host";
 /// failure with no message and no file is a support conversation that cannot
 /// start; this is the file to ask for.
 void InstallLog(const std::string& line) {
-    wchar_t temp[MAX_PATH] = {0};
-    if (GetTempPathW(MAX_PATH, temp) == 0) {
-        return;
-    }
-    const std::wstring path = std::wstring(temp) + L"solstream-install.log";
+    const std::wstring path = InstallLogPath();
     HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -146,6 +154,30 @@ void RemoveTree(const std::wstring& path) {
     RemoveDirectoryW(path.c_str());
 }
 
+/// Add/Remove Programs shows a size, and an entry with no size looks like a
+/// broken one. Kilobytes, which is the unit that registry value is in.
+DWORD TreeSizeKb(const std::wstring& path) {
+    unsigned long long bytes = 0;
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    do {
+        const std::wstring name = found.cFileName;
+        if (name == L"." || name == L"..") {
+            continue;
+        }
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            bytes += (unsigned long long) TreeSizeKb(path + L"\\" + name) * 1024ull;
+        } else {
+            bytes += ((unsigned long long) found.nFileSizeHigh << 32) | found.nFileSizeLow;
+        }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    return (DWORD) (bytes / 1024ull);
+}
+
 /// Write the embedded Sunshine archive out and unpack it into `destination`.
 ///
 /// Only reached when the executable is travelling alone — a development tree has
@@ -164,9 +196,7 @@ bool ExtractBundledSunshine(const std::wstring& destination, std::string& error)
         return false;
     }
 
-    wchar_t temp[MAX_PATH] = {0};
-    GetTempPathW(MAX_PATH, temp);
-    const std::wstring archive = std::wstring(temp) + L"solstream-sunshine.zip";
+    const std::wstring archive = TempDirectory() + L"solstream-sunshine.zip";
     HANDLE file = CreateFileW(archive.c_str(), GENERIC_WRITE, 0, nullptr,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -207,6 +237,7 @@ void StopInstalled(const std::wstring& destination) {
     // "killed".
     const std::wstring mine = std::to_wstring(GetCurrentProcessId());
     RunHidden(L"taskkill.exe /F /IM SolStream.exe /FI \"PID ne " + mine + L"\"");
+    RunHidden(L"taskkill.exe /F /IM SolStreamSetup.exe /FI \"PID ne " + mine + L"\"");
     RunHidden(L"taskkill.exe /F /IM SolStreamAgent.exe /FI \"PID ne " + mine + L"\"");
     // Only the Sunshine that belongs to this install. A Sunshine the user set up
     // themselves is none of our business and killing it would be a rude surprise.
@@ -255,6 +286,148 @@ std::wstring PortList(std::initializer_list<int> offsets) {
     return out;
 }
 
+// ── Shortcuts ────────────────────────────────────────────────────────────────
+
+/// A .lnk, written the only way Windows writes one.
+///
+/// The all-users folders rather than the installing account's, because the
+/// install itself is machine-wide: it lives in Program Files and opens firewall
+/// rules for everyone. A shortcut visible only to whoever happened to approve
+/// the UAC prompt would be the one part of it that was not.
+bool CreateShortcut(const std::wstring& link_path, const std::wstring& target,
+                    const std::wstring& description) {
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_IShellLinkW, (void**) &link))
+        || link == nullptr) {
+        return false;
+    }
+    link->SetPath(target.c_str());
+    link->SetWorkingDirectory(DirectoryOf(target).c_str());
+    link->SetDescription(description.c_str());
+    link->SetIconLocation(target.c_str(), 0);
+
+    IPersistFile* persist = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, (void**) &persist))
+        && persist != nullptr) {
+        ok = SUCCEEDED(persist->Save(link_path.c_str(), TRUE));
+        persist->Release();
+    }
+    link->Release();
+    return ok;
+}
+
+/// CSIDL rather than KNOWNFOLDERID for the same reason InstallDirectory reads an
+/// environment variable: the FOLDERID GUIDs live in an import library the mingw
+/// cross-build does not link, and this program is cross-compiled from a Mac.
+std::wstring SystemFolder(int csidl) {
+    wchar_t path[MAX_PATH] = {0};
+    if (FAILED(SHGetFolderPathW(nullptr, csidl, nullptr, SHGFP_TYPE_CURRENT, path))) {
+        return {};
+    }
+    return path;
+}
+
+std::wstring StartMenuShortcutPath() {
+    const std::wstring folder = SystemFolder(CSIDL_COMMON_PROGRAMS);
+    return folder.empty() ? std::wstring() : folder + L"\\" + kShortcutName;
+}
+
+std::wstring DesktopShortcutPath() {
+    const std::wstring folder = SystemFolder(CSIDL_COMMON_DESKTOPDIRECTORY);
+    return folder.empty() ? std::wstring() : folder + L"\\" + kShortcutName;
+}
+
+void WriteShortcuts(const std::wstring& destination, const InstallOptions& options) {
+    const std::wstring exe = destination + L"\\SolStream.exe";
+    const std::wstring description = L"Stream one Windows application to your Mac";
+
+    // COM has to be up for IShellLink, and this process may not have initialised
+    // it: the install runs on its own in an elevated relaunch with no message
+    // loop and nothing else that needs it.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool started_com = SUCCEEDED(com);
+
+    const std::wstring start_menu = StartMenuShortcutPath();
+    if (options.start_menu_shortcut && !start_menu.empty()) {
+        InstallLog(CreateShortcut(start_menu, exe, description)
+                       ? "start menu shortcut written"
+                       : "could not write the start menu shortcut");
+    } else if (!start_menu.empty()) {
+        // Not asked for this time. Removing any earlier one keeps the ticks on
+        // the setup screen honest across a reinstall.
+        DeleteFileW(start_menu.c_str());
+    }
+
+    const std::wstring desktop = DesktopShortcutPath();
+    if (options.desktop_shortcut && !desktop.empty()) {
+        InstallLog(CreateShortcut(desktop, exe, description)
+                       ? "desktop shortcut written"
+                       : "could not write the desktop shortcut");
+    } else if (!desktop.empty()) {
+        DeleteFileW(desktop.c_str());
+    }
+
+    if (started_com) {
+        CoUninitialize();
+    }
+}
+
+void RemoveShortcuts() {
+    const std::wstring start_menu = StartMenuShortcutPath();
+    if (!start_menu.empty()) {
+        DeleteFileW(start_menu.c_str());
+    }
+    const std::wstring desktop = DesktopShortcutPath();
+    if (!desktop.empty()) {
+        DeleteFileW(desktop.c_str());
+    }
+}
+
+// ── Add/Remove Programs ──────────────────────────────────────────────────────
+
+void SetRegString(HKEY key, const wchar_t* name, const std::wstring& value) {
+    RegSetValueExW(key, name, 0, REG_SZ, (const BYTE*) value.c_str(),
+                   (DWORD) ((value.size() + 1) * sizeof(wchar_t)));
+}
+
+void SetRegDword(HKEY key, const wchar_t* name, DWORD value) {
+    RegSetValueExW(key, name, 0, REG_DWORD, (const BYTE*) &value, sizeof(value));
+}
+
+/// The entry in Settings > Apps, which is where somebody looks to remove a
+/// program and the only place they will think to look. Without it SolStream is
+/// a folder in Program Files that nothing offers to take away.
+void RegisterUninstallEntry(const std::wstring& destination) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        InstallLog("could not register in Add/Remove Programs");
+        return;
+    }
+    const std::wstring exe = destination + L"\\SolStream.exe";
+    SetRegString(key, L"DisplayName", L"SolStream");
+    SetRegString(key, L"DisplayVersion", kVersion);
+    SetRegString(key, L"Publisher", L"SolStream");
+    SetRegString(key, L"InstallLocation", destination);
+    SetRegString(key, L"DisplayIcon", exe);
+    SetRegString(key, L"UninstallString", L"\"" + exe + L"\" --uninstall");
+    SetRegString(key, L"QuietUninstallString", L"\"" + exe + L"\" --uninstall --quiet");
+    // Nothing to modify or repair: reinstalling is running setup again, which is
+    // one file and takes ten seconds. Offering buttons that do nothing is worse
+    // than not offering them.
+    SetRegDword(key, L"NoModify", 1);
+    SetRegDword(key, L"NoRepair", 1);
+    SetRegDword(key, L"EstimatedSize", TreeSizeKb(destination));
+    RegCloseKey(key);
+    InstallLog("registered in Add/Remove Programs");
+}
+
+void RemoveUninstallEntry() {
+    RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, KEY_WOW64_64KEY, 0);
+}
+
 /// The task is registered from XML rather than from schtasks' own switches.
 ///
 /// schtasks /tr takes the whole command as one string and splits it on spaces,
@@ -263,9 +436,7 @@ std::wstring PortList(std::initializer_list<int> offsets) {
 /// ERROR_FILE_NOT_FOUND. Quoting does not survive the trip. XML has somewhere
 /// to put the arguments, so the question never arises.
 bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
-    wchar_t temp[MAX_PATH] = {0};
-    GetTempPathW(MAX_PATH, temp);
-    const std::wstring xml_path = std::wstring(temp) + L"solstream-task.xml";
+    const std::wstring xml_path = TempDirectory() + L"solstream-task.xml";
 
     // Whoever is at the console, not whoever ran the installer: an administrator
     // setting this up for somebody else must not register a task that runs as
@@ -339,7 +510,72 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
     return true;
 }
 
+std::wstring ResultPath() {
+    return TempDirectory() + L"solstream-install-result.txt";
+}
+
 }  // namespace
+
+std::wstring InstallLogPath() {
+    return TempDirectory() + L"solstream-install.log";
+}
+
+std::wstring OptionArguments(const InstallOptions& options) {
+    // Named for what they turn OFF, so the arguments a person might type by hand
+    // do the expected thing when they are absent.
+    std::wstring out;
+    if (!options.desktop_shortcut) { out += L" --no-desktop-shortcut"; }
+    if (!options.start_menu_shortcut) { out += L" --no-start-menu"; }
+    if (!options.start_at_logon) { out += L" --no-logon"; }
+    return out;
+}
+
+InstallOptions OptionsFromArguments(int argc, wchar_t** argv) {
+    InstallOptions options;
+    for (int i = 1; i < argc; ++i) {
+        const std::wstring arg = argv[i];
+        if (arg == L"--no-desktop-shortcut") { options.desktop_shortcut = false; }
+        else if (arg == L"--no-start-menu") { options.start_menu_shortcut = false; }
+        else if (arg == L"--no-logon") { options.start_at_logon = false; }
+    }
+    return options;
+}
+
+void WriteInstallResult(bool ok, const std::string& error) {
+    const std::wstring path = ResultPath();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    const std::string text = ok ? "OK" : ("ERR " + error);
+    DWORD written = 0;
+    WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr);
+    CloseHandle(file);
+}
+
+bool ReadInstallResult(std::string& error) {
+    const std::wstring path = ResultPath();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        // No file at all means the elevated half never got far enough to write
+        // one — most often because the UAC prompt was dismissed.
+        error = "The install did not run.";
+        return false;
+    }
+    char buffer[2048] = {0};
+    DWORD read = 0;
+    ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr);
+    CloseHandle(file);
+    DeleteFileW(path.c_str());
+    const std::string text(buffer, read);
+    if (text.rfind("OK", 0) == 0) {
+        return true;
+    }
+    error = text.size() > 4 ? text.substr(4) : "The install failed.";
+    return false;
+}
 
 bool IsElevated() {
     HANDLE token = nullptr;
@@ -362,7 +598,10 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
     execute.lpVerb = L"runas";
     execute.lpFile = exe.c_str();
     execute.lpParameters = arguments.c_str();
-    execute.nShow = SW_SHOWNORMAL;
+    // Hidden, because the elevated half has no window worth showing: it is the
+    // same binary running its install path, and the window the user is looking
+    // at is the one that asked for it.
+    execute.nShow = SW_HIDE;
     if (!ShellExecuteExW(&execute)) {
         error = GetLastError() == ERROR_CANCELLED
                     ? "SolStream needs administrator rights to install, and the "
@@ -372,6 +611,33 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
     }
     if (execute.hProcess) {
         WaitForSingleObject(execute.hProcess, INFINITE);
+        CloseHandle(execute.hProcess);
+    }
+    return true;
+}
+
+bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
+    const std::wstring copy = TempDirectory() + L"SolStreamUninstall.exe";
+    // Best effort: a copy left behind by an earlier attempt is still running or
+    // still locked often enough that overwriting has to be allowed to fail
+    // without taking the uninstall with it.
+    DeleteFileW(copy.c_str());
+    if (!CopyFileW(ExePath().c_str(), copy.c_str(), FALSE)) {
+        error = "Could not make a temporary copy to uninstall from.";
+        return false;
+    }
+    SHELLEXECUTEINFOW execute{};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
+    execute.lpVerb = L"open";
+    execute.lpFile = copy.c_str();
+    execute.lpParameters = arguments.c_str();
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        error = "Could not start the uninstaller.";
+        return false;
+    }
+    if (execute.hProcess) {
         CloseHandle(execute.hProcess);
     }
     return true;
@@ -397,7 +663,7 @@ bool RunningInstalled() {
     return here == there;
 }
 
-bool InstallSelf(std::string& error) {
+bool InstallSelf(const InstallOptions& options, std::string& error) {
     InstallLog("install requested");
     if (!IsElevated()) {
         error = "Installing needs administrator rights.";
@@ -424,18 +690,37 @@ bool InstallSelf(std::string& error) {
 
     InstallLog("installing from " + Narrow(source) + " to " + Narrow(destination));
     StopInstalled(destination);
-    if (!CopyTree(source, destination, error)) {
-        InstallLog("copy failed: " + error);
-        return false;
-    }
-    InstallLog("copied");
-    if (!beside) {
-        // Nothing was copied but the executable itself; Sunshine is inside it.
+
+    if (beside) {
+        // A development tree: the folder is the package, so copy the folder.
+        if (!CopyTree(source, destination, error)) {
+            InstallLog("copy failed: " + error);
+            return false;
+        }
+    } else {
+        // A downloaded file, which lives wherever the browser put it — beside
+        // every other download the user has. Copying its DIRECTORY, which is
+        // what this used to do, would put all of that in Program Files. The one
+        // file is the package; Sunshine comes out of the resource.
+        if (!CreateDirectoryW(destination.c_str(), nullptr)
+            && GetLastError() != ERROR_ALREADY_EXISTS) {
+            error = "Could not create " + Narrow(destination);
+            InstallLog("copy failed: " + error);
+            return false;
+        }
+        if (!CopyFileW(ExePath().c_str(), (destination + L"\\SolStream.exe").c_str(),
+                       FALSE)) {
+            error = "Could not copy SolStream into " + Narrow(destination)
+                  + " (error " + std::to_string(GetLastError()) + ")";
+            InstallLog("copy failed: " + error);
+            return false;
+        }
         if (!ExtractBundledSunshine(destination, error)) {
             InstallLog("unpack failed: " + error);
             return false;
         }
     }
+    InstallLog("copied");
 
     // Sunshine creates this at startup whatever its configuration says, and under
     // Program Files an ordinary user cannot -- it exits 0 before its logging is
@@ -453,14 +738,24 @@ bool InstallSelf(std::string& error) {
     AddRule(L"SolStream - Sunshine UDP", sunshine, L"UDP",
             PortList({(int) SunshinePort::kVideo, (int) SunshinePort::kControl,
                       (int) SunshinePort::kAudio}));
-
     InstallLog("firewall rules written");
-    if (!RegisterLogonTask(destination, error)) {
-        InstallLog("task failed: " + error);
-        return false;
+
+    WriteShortcuts(destination, options);
+    RegisterUninstallEntry(destination);
+
+    if (options.start_at_logon) {
+        if (!RegisterLogonTask(destination, error)) {
+            InstallLog("task failed: " + error);
+            return false;
+        }
+        InstallLog("logon task registered");
+        RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
+    } else {
+        // Asked not to. Clear any task an earlier install left, or the tick on
+        // the setup screen is describing something that is not true.
+        RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
+        InstallLog("logon task not wanted");
     }
-    InstallLog("logon task registered");
-    RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
     return true;
 }
 
@@ -483,12 +778,15 @@ bool UninstallSelf(std::string& error) {
     DeleteRule(L"SolStream (SolStream.exe, UDP)");
     DeleteRule(L"SolStream (sunshine.exe, TCP)");
     DeleteRule(L"SolStream (sunshine.exe, UDP)");
+    RemoveShortcuts();
+    RemoveUninstallEntry();
     RemoveTree(destination);
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
         error = "Removed what it could, but " + Narrow(destination)
               + " is still there — something in it was in use.";
         return false;
     }
+    InstallLog("uninstalled");
     return true;
 }
 

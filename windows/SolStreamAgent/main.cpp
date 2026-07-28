@@ -53,6 +53,7 @@
 #include <thread>
 #include <vector>
 
+#include "display_setup.h"
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
@@ -95,16 +96,98 @@ std::atomic<int> g_clients_connected{0};
 
 // ΓöÇΓöÇ Logging ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+/// Where the running agent leaves a record of itself.
+///
+/// It did not used to leave one. Log() wrote to stderr, and an installed agent
+/// starts from a scheduled task with no console attached to write it to — so on
+/// every machine that was not a development box, the program that had just
+/// failed to stream had said exactly nothing about why. Beside the token, which
+/// is where this program's other state already lives.
+std::wstring AgentLogPath() {
+    wchar_t buffer[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
+        return {};
+    }
+    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\solstream.log";
+}
+
 void Log(const char* fmt, ...) {
+    char line[2048];
     va_list args;
     va_start(args, fmt);
-    std::vfprintf(stderr, fmt, args);
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
+    const int written = std::vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
+    if (written < 0) {
+        return;
+    }
+
+    std::fprintf(stderr, "%s\n", line);
+    std::fflush(stderr);
+
+    // Opened per line rather than held: this runs for days, and a handle held
+    // open for days is a log nobody can delete and a last line nobody can read
+    // until the process exits.
+    static const std::wstring path = AgentLogPath();
+    if (path.empty()) {
+        return;
+    }
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    // Rolled at a megabyte, from the top. A log that grows without bound on a
+    // machine nobody looks at is a disk that fills up eventually.
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        DeleteFileW((path + L".1").c_str());
+        MoveFileW(path.c_str(), (path + L".1").c_str());
+        file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            return;
+        }
+    }
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    char stamped[2176];
+    const int total = std::snprintf(stamped, sizeof(stamped),
+                                    "%04d-%02d-%02d %02d:%02d:%02d  %s\r\n",
+                                    now.wYear, now.wMonth, now.wDay, now.wHour,
+                                    now.wMinute, now.wSecond, line);
+    if (total > 0) {
+        DWORD put = 0;
+        WriteFile(file, stamped, (DWORD) total, &put, nullptr);
+    }
+    CloseHandle(file);
 }
 
 // ΓöÇΓöÇ Text ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+/// One log line per sentence. Several of the setup steps report a paragraph of
+/// what they did, and a log line with newlines inside it is a log line nothing
+/// downstream can count.
+std::vector<std::string> SplitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = text.substr(start, end == std::string::npos
+                                                        ? std::string::npos
+                                                        : end - start);
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return lines;
+}
 
 std::string ToUtf8(const std::wstring& text) {
     if (text.empty()) {
@@ -3242,7 +3325,49 @@ int SetSunshineCredentials() {
     return 0;
 }
 
+/// Give back a console nobody asked for.
+///
+/// The agent starts from a logon task and from a desktop shortcut, and being a
+/// console subsystem program it got a console window each time: a black
+/// rectangle sitting on the desktop for as long as SolStream ran, which the
+/// picker then offered to the user's Mac as a window it could stream.
+///
+/// The obvious fix — building as a GUI subsystem program — is wrong, and
+/// measurably so: a shell does not wait for a GUI program, so `SolStream.exe
+/// --print-token` returns to the prompt before it has printed anything and every
+/// script built on it silently reads nothing. That is a worse bug than a stray
+/// window, and it is invisible until something depends on it.
+///
+/// So: keep the console subsystem, and hand the console back only when this
+/// process is the only thing attached to it. One attached process means it was
+/// created for us and no shell is reading it, so nothing is lost by closing it;
+/// two or more means somebody ran this from a prompt and is waiting for output.
+void ReleaseUnwantedConsole() {
+    DWORD pids[4] = {0};
+    if (GetConsoleProcessList(pids, 4) != 1) {
+        return;
+    }
+    // Hidden first: FreeConsole tears the window down, but not before it has
+    // been painted at least once.
+    if (HWND console = GetConsoleWindow()) {
+        ShowWindow(console, SW_HIDE);
+    }
+    FreeConsole();
+    // The standard streams now point at handles that no longer exist. Writing
+    // to those is harmless but pointless; NUL makes every later fprintf a
+    // no-op instead of an error nobody checks.
+#ifdef _MSC_VER
+    FILE* stream = nullptr;
+    freopen_s(&stream, "NUL", "w", stdout);
+    freopen_s(&stream, "NUL", "w", stderr);
+#else
+    freopen("NUL", "w", stdout);
+    freopen("NUL", "w", stderr);
+#endif
+}
+
 int wmain(int argc, wchar_t** argv) {
+    ReleaseUnwantedConsole();
     unsigned short port = kDefaultPort;
     // Loopback by default. This socket has no authentication yet, so the address
     // it binds is the only thing limiting who can drive it.
@@ -3252,6 +3377,8 @@ int wmain(int argc, wchar_t** argv) {
     bool no_auth = false;
     bool install = false;
     bool uninstall = false;
+    bool uninstall_now = false;
+    bool configure_display = false;
     // --headless keeps the original behaviour: no window, log to stderr. Every
     // verification in this project is done over SSH, where there is no desktop
     // to put a window on.
@@ -3292,6 +3419,13 @@ int wmain(int argc, wchar_t** argv) {
             install = true;
         } else if (arg == L"--uninstall") {
             uninstall = true;
+        } else if (arg == L"--now" || arg == L"--quiet") {
+            // Do it rather than ask about it. What Add/Remove Programs invokes
+            // as its QuietUninstallString, and what the confirmation window
+            // passes to the elevated half of itself.
+            uninstall_now = true;
+        } else if (arg == L"--configure-display") {
+            configure_display = true;
         }
     }
 
@@ -3303,45 +3437,133 @@ int wmain(int argc, wchar_t** argv) {
     // which made the answer to "how do I install this" involve an execution
     // policy and a -Package path — for a program whose whole premise is that
     // none of this should be the user's problem.
-    if (install || uninstall) {
-        const wchar_t* verb = install ? L"--install" : L"--uninstall";
-        if (!solstream::IsElevated()) {
-            // Ask once, visibly. This is the moment the user agrees to a program
-            // writing to Program Files, opening ports and registering a logon
-            // task; doing it behind an invisible prompt would be doing it behind
-            // their back.
+    //
+    // --install always DOES the install; it is what the setup window's elevated
+    // half runs, and it never shows a window of its own. --uninstall ASKS first,
+    // in a window, because it is what Add/Remove Programs invokes; --uninstall
+    // --now does it.
+    if (uninstall) {
+        // Nothing can delete the directory it is running from, so step outside
+        // before anything else happens. Both halves below then run from the
+        // copy, and Program Files can go. Without this the uninstall leaves
+        // SolStream.exe behind and reports failure — from the one entry point
+        // every user would actually use.
+        if (solstream::RunningInstalled()) {
             std::string error;
-            if (!solstream::RelaunchElevated(verb, error)) {
+            const std::wstring pass = uninstall_now ? L"--uninstall --now"
+                                                    : L"--uninstall";
+            if (!solstream::RelaunchFromTemp(pass, error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
+            return 0;
+        }
+        if (!uninstall_now) {
+            if (solstream::ShowHostWindow(solstream::WindowMode::Uninstall)) {
+                return solstream::RunHostWindowLoop();
+            }
+            // No desktop to ask on — over SSH, or in session 0. Carry on and
+            // remove it, which is what somebody typing this there meant.
+        }
+        if (!solstream::IsElevated()) {
+            std::string error;
+            if (!solstream::RelaunchElevated(L"--uninstall --now", error)) {
                 std::fprintf(stderr, "%s\n", error.c_str());
                 return 1;
             }
             return 0;
         }
         std::string error;
-        const bool ok = install ? solstream::InstallSelf(error)
-                                : solstream::UninstallSelf(error);
+        const bool ok = solstream::UninstallSelf(error);
+        solstream::WriteInstallResult(ok, error);
         if (!ok) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
         }
-        if (install) {
-            std::fputs("SolStream is installed and running. It will start again "
-                       "when you log in.\n", stdout);
-        } else {
-            std::fputs("SolStream has been removed. Your pairing token and "
-                       "settings are kept in %LOCALAPPDATA%\\SolStream.\n", stdout);
-        }
+        std::fputs("SolStream has been removed. Your pairing token and "
+                   "settings are kept in %LOCALAPPDATA%\\SolStream.\n", stdout);
         return 0;
     }
 
-    if (install_driver) {
-        std::string error;
-        if (solstream::InstallBundledDriver(error)) {
-            std::fputs("Display driver installed.\n", stdout);
+    if (install) {
+        const solstream::InstallOptions options =
+            solstream::OptionsFromArguments(argc, argv);
+        if (!solstream::IsElevated()) {
+            // Ask once, visibly. This is the moment the user agrees to a program
+            // writing to Program Files, opening ports and registering a logon
+            // task; doing it behind an invisible prompt would be doing it behind
+            // their back.
+            std::string error;
+            if (!solstream::RelaunchElevated(
+                    L"--install" + solstream::OptionArguments(options), error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
             return 0;
         }
-        std::fprintf(stderr, "%s\n", error.c_str());
+        std::string error;
+        const bool ok = solstream::InstallSelf(options, error);
+        // The window that asked for this is in another process and cannot see a
+        // return code, so the reason goes in a file it knows to read.
+        solstream::WriteInstallResult(ok, error);
+        if (!ok) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        std::fputs("SolStream is installed and running. It will start again "
+                   "when you log in.\n", stdout);
+        return 0;
+    }
+
+    if (install_driver || configure_display) {
+        std::string error;
+        if (install_driver && !solstream::InstallBundledDriver(error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        // Installing the driver is not the same as having a display worth
+        // capturing: out of the box it offers a mode list that matches no Mac,
+        // scales wrong, and advertises HDR — which is what made streamed content
+        // arrive as a black rectangle with its chrome drawn correctly around it.
+        std::string note;
+        if (!solstream::ConfigureVirtualDisplay(solstream::kDefaultCanvasWidth,
+                                                solstream::kDefaultCanvasHeight,
+                                                solstream::kDefaultScalePercent,
+                                                note, error)) {
+            std::fprintf(stderr, "%s\n%s\n", note.c_str(), error.c_str());
+            return 1;
+        }
+        std::fprintf(stdout, "%s\n", note.c_str());
+        return 0;
+    }
+
+    // Nothing was asked for, and this copy is not the installed one: somebody
+    // has just downloaded the file and run it. That used to start the agent in
+    // place, find no Sunshine beside it, and report "No sunshine.exe found" —
+    // an error message as the entire first impression, with the actual install
+    // reachable only by knowing to type --install at a command line.
+    if (argc == 1 && !solstream::RunningInstalled()) {
+        if (solstream::ShowHostWindow(solstream::WindowMode::Setup)) {
+            return solstream::RunHostWindowLoop();
+        }
+        std::fputs("SolStream is not installed. Run it on the desktop to set it "
+                   "up, or pass --install here.\n", stderr);
         return 1;
+    }
+
+    // One window, one agent. The shortcuts point at this executable with no
+    // arguments, and a second copy would fight the first for the port and lose
+    // — so a shortcut press on a machine already running SolStream means "show
+    // me the window", which is what every program with a shortcut does.
+    if (solstream::RunningInstalled() && solstream::FocusExistingHostWindow()) {
+        return 0;
+    }
+
+    // An installed SolStream exists to serve a Mac, so it listens like one
+    // unless told otherwise. Off loopback the token is still required; the
+    // window shows it. That is the lock, not the address.
+    if (solstream::RunningInstalled() && bind_address == kLoopback) {
+        bind_address = "0.0.0.0";
     }
 
     g_token = LoadOrCreateToken();
@@ -3492,6 +3714,30 @@ int wmain(int argc, wchar_t** argv) {
                     ToUtf8(display.friendly_name).c_str(),
                     display.running ? "running" : "present but not started");
             }
+        }
+    }
+
+    // Make the virtual display fit to stream, before deciding what to capture —
+    // this is what attaches it, so doing it afterwards would pick from a list it
+    // was not on yet.
+    //
+    // The privileged half of this (teaching the driver its mode list) needs
+    // rights the agent does not have and will simply be noted as undone; the
+    // half that matters most does not. Turning "Use HDR" off is a per-display
+    // toggle any user can set, and leaving it on is what made streamed content
+    // arrive as a black rectangle inside correctly drawn window chrome — worst
+    // in terminals and browsers, invisible in anything pure black-on-white.
+    if (solstream::HasVirtualDisplay()) {
+        std::string note;
+        std::string display_error;
+        const bool ready = solstream::ConfigureVirtualDisplay(
+            solstream::kDefaultCanvasWidth, solstream::kDefaultCanvasHeight,
+            solstream::kDefaultScalePercent, note, display_error);
+        for (const std::string& line : SplitLines(note)) {
+            Log("[display] %s", line.c_str());
+        }
+        if (!ready) {
+            Log("[display] %s", display_error.c_str());
         }
     }
 

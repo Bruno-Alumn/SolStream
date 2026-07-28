@@ -145,18 +145,23 @@ Write-Host ""
 Write-Host ("=== Folder: {0} ({1:N0} MB) ===" -f $OutDir, $size)
 Get-ChildItem $OutDir | Select-Object -ExpandProperty Name
 
-# ── Step 6: the single file ──────────────────────────────────────────────────
+# ── Step 6: the setup program ────────────────────────────────────────────────
 #
 # What a person actually downloads. Everything the folder holds except the
 # executable is zipped and linked into the executable as a resource, so one file
-# arrives and `SolStream.exe --install` unpacks it into Program Files.
+# arrives and unpacks the rest into Program Files.
+#
+# Named SolStreamSetup.exe rather than SolStream.exe, because that is what it is
+# when it is downloaded: run from anywhere other than the install directory it
+# shows the setup screen, and what it copies into Program Files is itself, named
+# SolStream.exe. One binary, two names, no second project to keep in step.
 #
 # The folder above is kept because a development tree wants the loose layout,
 # and because this step is a rebuild: the resource has to exist before the
 # linker runs, so the exe is necessarily built twice.
 
 Write-Host ""
-Write-Host "--- single file ---"
+Write-Host "--- setup program ---"
 $payload = Join-Path (Split-Path $OutDir -Parent) "solstream-payload.zip"
 if (Test-Path $payload) { Remove-Item $payload -Force }
 Compress-Archive -Path "$OutDir\sunshine", "$OutDir\licenses" -DestinationPath $payload
@@ -166,11 +171,16 @@ cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=$payload" | O
 cmake --build $BuildDir --target SolStreamAgent --config Release | Out-Null
 if (-not (Test-Path $exe)) { throw "the single-file rebuild produced no executable" }
 
-$single = Join-Path (Split-Path $OutDir -Parent) "SolStream.exe"
+$single = Join-Path (Split-Path $OutDir -Parent) "SolStreamSetup.exe"
 Copy-Item $exe $single -Force
+
+# An earlier release of this script wrote SolStream.exe here. Leaving it beside
+# the new name would mean two downloads that differ only in which one is stale.
+$stale = Join-Path (Split-Path $OutDir -Parent) "SolStream.exe"
+if (Test-Path $stale) { Remove-Item $stale -Force }
 
 # Leave the cache without the archive, or every later ordinary build silently
 # embeds whatever zip happened to be lying there.
 cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=" | Out-Null
 
-Write-Host ("=== Single file: {0} ({1:N0} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))
+Write-Host ("=== Setup program: {0} ({1:N0} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))

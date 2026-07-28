@@ -9,11 +9,14 @@ cmake_minimum_required(VERSION 3.20)
 cmake_policy(SET CMP0091 NEW)
 
 # The host application. It supervises its own Sunshine (sunshine_host.cpp),
-# checks for the virtual display it streams (vdd.cpp), and serves the Mac.
+# checks for the virtual display it streams (vdd.cpp), sets that display up
+# (display_setup.cpp), installs itself (installer.cpp) and serves the Mac.
 #
-# Still a console subsystem target: the window is created explicitly, so the same
-# binary can be run headless from a terminal for diagnosis — which is how every
-# verification in this project's history has been done.
+# Deliberately still a console subsystem target. The stray console window the
+# agent used to leave on the desktop is dealt with at runtime instead
+# (ReleaseUnwantedConsole in main.cpp), because /SUBSYSTEM:WINDOWS would fix the
+# window by breaking every command line: a shell does not wait for a GUI
+# program, so `SolStream.exe --print-token` would return before printing.
 # Sunshine can be carried inside the executable, so what ships is one file.
 # Optional: without it the build still works and the program expects a sunshine\
 # folder beside it, which is what a development tree has.
@@ -33,6 +36,7 @@ add_executable(SolStreamAgent
     main.cpp
     sunshine_host.cpp
     vdd.cpp
+    display_setup.cpp
     host_window.cpp
     installer.cpp
     ${SOLSTREAM_RESOURCES}
@@ -49,6 +53,10 @@ target_link_libraries(SolStreamAgent PRIVATE
     # The host window draws with Direct2D and lays out text with DirectWrite.
     # Both are in-box, so this adds nothing to what has to be installed.
     d2d1 dwrite
+    # Shortcuts are IShellLink, which is COM (ole32) and needs its class and
+    # interface ids (uuid) -- mingw's import libraries do not carry those unless
+    # the library is named.
+    ole32 uuid
 )
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
