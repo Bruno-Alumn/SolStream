@@ -1351,6 +1351,166 @@ void NotifyWindowsChangedIfSettled() {
     SendLine(client, "{\"type\":\"windowsChanged\"}");
 }
 
+/// Windows already carried back to a real monitor. Kept so that someone who
+/// deliberately drags one onto the capture display is not fought over it.
+/// Watcher thread only.
+std::vector<HWND> g_rescued;
+
+/// Where a stranded window should go, if the capture display is one nobody can
+/// see. False when SolStream is capturing a real monitor: what is on that is
+/// visible to the person sitting at the PC, and rearranging their windows
+/// because a dialog opened would be interference, not help.
+bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
+    if (g_capture_display.empty()) {
+        return false;
+    }
+    const std::vector<Display> displays = EnumerateDisplays();
+    const Display* captured = nullptr;
+    const Display* primary = nullptr;
+    for (const Display& display : displays) {
+        if (ToWide(display.device_name) == g_capture_display) {
+            captured = &display;
+        }
+        if (display.primary) {
+            primary = &display;
+        }
+    }
+    if (!captured || !primary || captured == primary) {
+        return false;
+    }
+    if (captured->adapter.find("Virtual Display") == std::string::npos) {
+        return false;
+    }
+    capture = captured->bounds;
+    rescue_to = primary->bounds;
+    return true;
+}
+
+struct StrandedSearch {
+    std::vector<HWND> found;
+    RECT capture{};
+};
+
+BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
+    auto* search = reinterpret_cast<StrandedSearch*>(param);
+
+    if (!IsWindowVisible(window) || IsIconic(window)) {
+        return TRUE;
+    }
+    // Titled only. A person can act on a window they can name, and this is the
+    // line that separates the Windows Security dialog — which they need — from
+    // the shell's untitled modal dimmer behind it, which is a full-screen sheet
+    // there is no point carrying anywhere.
+    if (GetWindowTextLengthW(window) == 0) {
+        return TRUE;
+    }
+    const LONG_PTR ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    if (ex_style & WS_EX_TRANSPARENT) {
+        return TRUE;  // click-through overlay; moving it would break it
+    }
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+        && cloaked != 0) {
+        return TRUE;
+    }
+    // The shell's own furniture exists on every display and belongs to none.
+    char cls[64] = {0};
+    GetClassNameA(window, cls, sizeof(cls) - 1);
+    for (const char* shell : {"Progman", "WorkerW", "Shell_TrayWnd",
+                              "Shell_SecondaryTrayWnd", "SHELLDLL_DefView"}) {
+        if (std::strcmp(cls, shell) == 0) {
+            return TRUE;
+        }
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == GetCurrentProcessId()) {
+        return TRUE;
+    }
+    // The streamed windows live on this display on purpose, and so do their own
+    // menus and dialogs — those reach the user through the video, as part of the
+    // application they are looking at.
+    EnterCriticalSection(&g_lock_cs);
+    bool ours = false;
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && (g_locks[i].window == window || g_locks[i].pid == pid)) {
+            ours = true;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (ours) {
+        return TRUE;
+    }
+
+    RECT rect{};
+    if (!GetWindowRect(window, &rect) || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return TRUE;
+    }
+    // By its middle, so a dialog straddling the edge of two displays is judged
+    // by where it mostly is rather than by one stray corner.
+    const POINT middle{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+    if (!PtInRect(&search->capture, middle)) {
+        return TRUE;
+    }
+
+    if (std::find(g_rescued.begin(), g_rescued.end(), window) != g_rescued.end()) {
+        return TRUE;
+    }
+    search->found.push_back(window);
+    return TRUE;
+}
+
+/// Carry anything that is not ours off the capture display and onto a monitor.
+///
+/// The capture display has no panel. SolStream created it so that a streamed
+/// application could sit somewhere nothing else would ever cover it — and the
+/// consequence nobody planned for is that anything Windows puts there is
+/// invisible to the person at the PC. A Windows Firewall prompt landed on it and
+/// stayed unanswered for days: absent from every monitor, and present in the
+/// video only when it happened to overlap the crop. Its system-modal dimmer took
+/// every click meanwhile, so the streamed application looked perfectly healthy
+/// and completely dead.
+///
+/// Moving it is not answering it. Whatever the dialog asks stays the user's
+/// decision — this only puts the question somewhere they can read it.
+void RescueStrandedWindows() {
+    StrandedSearch search;
+    RECT rescue_to{};
+    if (!CaptureDisplayIsInvisible(search.capture, rescue_to)) {
+        return;
+    }
+    EnumWindows(StrandedProc, reinterpret_cast<LPARAM>(&search));
+
+    for (HWND window : search.found) {
+        RECT rect{};
+        if (!GetWindowRect(window, &rect)) {
+            continue;
+        }
+        const LONG width = rect.right - rect.left;
+        const LONG height = rect.bottom - rect.top;
+        LONG x = rescue_to.left + ((rescue_to.right - rescue_to.left) - width) / 2;
+        LONG y = rescue_to.top + ((rescue_to.bottom - rescue_to.top) - height) / 2;
+        if (x < rescue_to.left) { x = rescue_to.left; }
+        if (y < rescue_to.top) { y = rescue_to.top; }
+
+        // No activation. A modal dialog already holds the input queue, and
+        // taking the foreground out from under whatever the user is typing into
+        // would be its own bug.
+        if (!SetWindowPos(window, nullptr, x, y, 0, 0,
+                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+            continue;
+        }
+        if (g_rescued.size() < 64) {
+            g_rescued.push_back(window);
+        }
+        char title[128] = {0};
+        GetWindowTextA(window, title, sizeof(title) - 1);
+        Log("[rescue] \"%s\" opened on the capture display, where no monitor shows "
+            "it; moved it to the main display", title[0] ? title : "(untitled)");
+    }
+}
+
 /// What the agent last told the Mac was covering each streamed window, and how
 /// long the current answer has held. Watcher thread only.
 struct OcclusionState {
@@ -1652,6 +1812,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         ReportForegroundThief();
         ReportPointerTarget();
         ReportOcclusion();
+        RescueStrandedWindows();
         NotifyWindowsChangedIfSettled();
     }
     return 0;
@@ -3349,6 +3510,13 @@ int wmain(int argc, wchar_t** argv) {
             display.bounds.left, display.bounds.top,
             display.primary ? " [primary]" : "");
     }
+
+    // From here, not from the first client. Starting Sunshine is itself what
+    // makes Windows ask whether it may accept connections, and that prompt
+    // arrives long before any Mac has connected — onto the capture display,
+    // which no monitor shows. A watcher that only runs while someone is
+    // streaming would never see the one dialog most worth carrying back.
+    StartWatcher();
 
     // The accept loop moves off the main thread so the window can own it.
     //
