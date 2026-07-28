@@ -202,8 +202,15 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
     func present(windows: [RemoteWindow], apps: [RemoteApp]) {
         var built: [Row] = windows.map {
+            // Annotate the exception, not the rule. A Windows-drawn title bar is
+            // the normal case and is simply cropped away, so saying "title bar
+            // hidden" on nearly every row told the user nothing — and read as a
+            // claim about the window's state on the PC right now, which it never
+            // was. What is worth flagging is the opposite: an application that
+            // draws its own caption inside the client area, whose minimise and
+            // close buttons therefore arrive inside the stream.
             Row(title: $0.title,
-                subtitle: $0.hidesCaptionWhenCropped ? "open · title bar hidden" : "open",
+                subtitle: $0.hidesCaptionWhenCropped ? "open" : "open · has its own window buttons",
                 key: "\($0.className)/\($0.id)",
                 isRunning: true,
                 drawsOwnControls: !$0.hidesCaptionWhenCropped,
