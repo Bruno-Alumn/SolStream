@@ -242,7 +242,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case .needsToken(let host, let rejected):
                 DispatchQueue.main.async {
-                    TokenPrompt.present(host: host, rejected: rejected) { token in
+                    // Over the picker, so it arrives as a sheet on the window
+                    // the person is already looking at rather than as a panel
+                    // from nowhere.
+                    TokenPrompt.present(host: host, rejected: rejected,
+                                        over: picker?.window) { token in
                         guard let token else {
                             picker?.showFailure("\(host) needs a pairing token to go any further.")
                             return

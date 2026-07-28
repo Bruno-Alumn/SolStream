@@ -29,7 +29,9 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         var score: Int = 0
     }
 
-    private let window: NSWindow
+    /// Not private: the token sheet hangs off it, so that asking for a token
+    /// happens on the window the person is already looking at.
+    let window: NSWindow
     private let searchField = DS.Field(placeholder: "")
     /// The search row: the field plus its shortcut hint, on the design's plain
     /// surface rather than NSSearchField's own bezel and magnifier.
