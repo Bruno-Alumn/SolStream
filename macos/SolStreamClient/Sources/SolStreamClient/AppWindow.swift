@@ -1,4 +1,5 @@
 import AppKit
+import DesignSystem
 import SolStreamLogging
 import VideoDecoder
 import InputCapture
@@ -612,6 +613,31 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func hideStatus() {
         metalView?.hideStatus()
+    }
+
+    /// Name what is sitting on top of this window on the PC, or pass nil once
+    /// nothing is.
+    ///
+    /// Worth saying out loud because the picture alone does not explain itself.
+    /// The covering window is inside the captured rectangle, so it does arrive in
+    /// the video — but a Windows dialog appearing inside what is supposed to be
+    /// one application's window reads as SolStream having broken, and when it is
+    /// system-modal it silently eats every click while the application behind it
+    /// goes on looking completely normal.
+    /// The window's own subtitle rather than another view in the title bar
+    /// accessory: that accessory is a fixed-width holder with the quality pill
+    /// pinned to its trailing edge, so a label placed beside the pill has no room
+    /// and is silently clipped to nothing. AppKit sizes and truncates the
+    /// subtitle itself, next to the title, and cannot lose it.
+    func setOccludedBy(_ name: String?) {
+        guard let name, !name.isEmpty else {
+            window?.subtitle = ""
+            return
+        }
+        // Kept short on purpose. AppKit centres the title and the quality pill
+        // sits in a right-hand accessory, so a long subtitle runs under the pill
+        // on a narrow window instead of being truncated clear of it.
+        window?.subtitle = "⚠ \(name) in front"
     }
 
     /// Handler for the overlay's "Try Again" button. Only shown alongside an

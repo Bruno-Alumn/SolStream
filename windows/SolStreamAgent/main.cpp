@@ -1351,6 +1351,152 @@ void NotifyWindowsChangedIfSettled() {
     SendLine(client, "{\"type\":\"windowsChanged\"}");
 }
 
+/// What the agent last told the Mac was covering each streamed window, and how
+/// long the current answer has held. Watcher thread only.
+struct OcclusionState {
+    HWND reported = nullptr;   // what the Mac has been told about
+    HWND candidate = nullptr;  // what the last sample saw
+    int stable_ticks = 0;
+};
+OcclusionState g_occlusion[kMaxLocks];
+
+/// Say when a window belonging to something else is sitting on top of the one
+/// being streamed.
+///
+/// The user can see it — it is inside the captured rectangle, so it arrives in
+/// the video — but seeing it explains nothing. A Windows Security prompt landing
+/// on the streamed window is system-modal: it takes every click aimed anywhere
+/// near it, and the application behind carries on looking perfectly normal and
+/// completely dead. That failure cost days here, on this machine, before anyone
+/// worked out what it was.
+///
+/// Hit-testing, not enumeration. Two earlier attempts went through the visible
+/// window list and both failed: a heuristic about layered windows that take
+/// focus misfired on an ordinary application, and a check for the system dimmer
+/// by class name never fired at all, because the enumeration does not see the
+/// window `WindowFromPoint` returns. So ask the question Windows itself answers
+/// when it routes a click, at points inside the streamed window.
+///
+/// It also gets the hard case right for free: `WindowFromPoint` skips windows
+/// that are disabled or `WS_EX_TRANSPARENT`, which is exactly the screen-wide
+/// click-through overlay that made the heuristic version unusable.
+///
+/// Windows of the streamed application itself are not occluders. Its menus, its
+/// combo drop-downs, its tooltips and its own dialogs are all separate top-level
+/// windows, and every one of them would otherwise be reported as something
+/// covering the application — which, to the person who just opened the menu, it
+/// plainly is not.
+void ReportOcclusion() {
+    for (int i = 0; i < kMaxLocks; ++i) {
+        HWND window = nullptr;
+        RECT rect{};
+        DWORD owner = 0;
+        EnterCriticalSection(&g_lock_cs);
+        if (g_locks[i].active) {
+            window = g_locks[i].window;
+            rect = g_locks[i].desired;
+            owner = g_locks[i].pid;
+        }
+        LeaveCriticalSection(&g_lock_cs);
+        if (!window) {
+            g_occlusion[i] = OcclusionState{};
+            continue;
+        }
+
+        const LONG width = rect.right - rect.left;
+        const LONG height = rect.bottom - rect.top;
+        if (width <= 0 || height <= 0) {
+            continue;
+        }
+        // Five points rather than one: a dialog centred on the window covers the
+        // middle, and one docked to a corner covers no sample taken only there.
+        const POINT samples[5] = {
+            {rect.left + width / 2, rect.top + height / 2},
+            {rect.left + width / 4, rect.top + height / 4},
+            {rect.left + width * 3 / 4, rect.top + height / 4},
+            {rect.left + width / 4, rect.top + height * 3 / 4},
+            {rect.left + width * 3 / 4, rect.top + height * 3 / 4},
+        };
+
+        HWND found = nullptr;
+        for (const POINT& point : samples) {
+            HWND hit = WindowFromPoint(point);
+            if (!hit) {
+                continue;
+            }
+            HWND root = GetAncestor(hit, GA_ROOT);
+            if (root == window) {
+                continue;
+            }
+            DWORD hit_pid = 0;
+            GetWindowThreadProcessId(root, &hit_pid);
+            if (hit_pid == owner || hit_pid == GetCurrentProcessId()) {
+                continue;
+            }
+            found = root;
+            break;
+        }
+
+        // Hold an answer for a few ticks before believing it. The watcher runs
+        // every 120ms and a window being dragged across the screen is not worth
+        // a message in each direction.
+        if (found == g_occlusion[i].candidate) {
+            if (g_occlusion[i].stable_ticks < 100) {
+                ++g_occlusion[i].stable_ticks;
+            }
+        } else {
+            g_occlusion[i].candidate = found;
+            g_occlusion[i].stable_ticks = 0;
+        }
+        if (g_occlusion[i].stable_ticks < 4 || found == g_occlusion[i].reported) {
+            continue;
+        }
+        g_occlusion[i].reported = found;
+
+        char title[128] = {0};
+        char cls[64] = {0};
+        if (found) {
+            GetWindowTextA(found, title, sizeof(title) - 1);
+            GetClassNameA(found, cls, sizeof(cls) - 1);
+            Log("[occlusion] [%s] \"%s\" is on top of the streamed window",
+                cls[0] ? cls : "?", title[0] ? title : "(untitled)");
+        } else {
+            Log("[occlusion] the streamed window is clear again");
+        }
+
+        if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+            continue;
+        }
+        EnterCriticalSection(&g_send_cs);
+        const SOCKET client = g_push_client;
+        if (client != INVALID_SOCKET) {
+            // Empty means "nothing is on top any more", and it has to stay empty
+            // when there is no window: naming the absence would leave the Mac
+            // showing a warning that never goes away.
+            //
+            // Otherwise the important case is an untitled one — the shell's modal
+            // dimmer has no title at all — so it needs a name, and its class is
+            // not it. "Shell_SystemDim is in front" tells a person nothing; "a
+            // Windows dialog is in front" tells them why their clicks are going
+            // nowhere, which is the whole reason for saying anything.
+            std::string by;
+            if (found) {
+                by = title;
+                if (by.empty()) {
+                    const std::string klass = cls;
+                    by = (klass.rfind("Shell_System", 0) == 0 || klass == "#32770")
+                         ? "a Windows dialog"
+                         : "another window";
+                }
+            }
+            SendLine(client,
+                     "{\"type\":\"occluded\",\"id\":" + std::to_string(IdFromWindow(window))
+                     + ",\"by\":\"" + JsonEscape(by) + "\"}");
+        }
+        LeaveCriticalSection(&g_send_cs);
+    }
+}
+
 /// Say so when something on this PC takes the keyboard away from the window
 /// being streamed.
 ///
@@ -1505,6 +1651,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         }
         ReportForegroundThief();
         ReportPointerTarget();
+        ReportOcclusion();
         NotifyWindowsChangedIfSettled();
     }
     return 0;

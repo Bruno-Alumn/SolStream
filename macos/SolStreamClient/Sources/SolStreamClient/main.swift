@@ -671,6 +671,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .hostWindowClosed(noticedBy: "pushed by the host")
         }
 
+        // Named in the title bar of the window it is covering, not broadcast:
+        // with two windows open, only one of them may be behind a dialog.
+        agent.onOccluded = { [weak self] id, name in
+            self?.appWindows.first { $0.remoteWindowID == id }?
+                .setOccludedBy(name.isEmpty ? nil : name)
+        }
+
         // The host forgets every window it was managing when the socket drops,
         // so a reconnect has to say it all again.
         agent.onReconnected = { [weak self] in
