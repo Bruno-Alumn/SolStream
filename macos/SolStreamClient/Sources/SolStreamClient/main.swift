@@ -235,7 +235,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch state {
             case .failed(let message):
                 DispatchQueue.main.async {
-                    picker?.showFailure("Can't reach the SolStream agent on \(agentHost): \(message)")
+                    // No prefix: `explain` already names the host and says what
+                    // to do about it, and prefixing produced "Can't reach the
+                    // SolStream agent on X: No answer from X."
+                    picker?.showFailure(message)
                 }
             case .needsToken(let host, let rejected):
                 DispatchQueue.main.async {

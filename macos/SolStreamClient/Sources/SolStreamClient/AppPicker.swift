@@ -127,6 +127,14 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         statusLabel.font = DS.monoSmall
         statusLabel.textColor = DS.textFaint
         statusLabel.stringValue = "asking the host what it can run…"
+        // A failure message is a sentence, not a label. Left to size itself the
+        // window grew wider than the screen to fit one on a single line, and the
+        // end of the message — the part that says what to do — went off the
+        // right edge where it could not be read at all.
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.maximumNumberOfLines = 3
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusLabel.preferredMaxLayoutWidth = 380
         hintLabel.font = DS.monoSmall
         hintLabel.textColor = DS.textFaint
         hintLabel.alignment = .right
