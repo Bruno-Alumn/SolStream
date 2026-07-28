@@ -2,12 +2,41 @@
 REM install-solstream-firewall.bat - Windows Firewall rules for SolStream
 REM Run as Administrator.
 REM
-REM These are the ports the current architecture actually uses: Sunshine for the
-REM stream, plus the SolStream agent. An earlier version of this script opened
-REM 47991 and 47992 for a bespoke clipboard and file-transfer daemon that is no
-REM longer part of the connection, and never opened 47997 at all -- which is the
-REM agent, the one port without which the Mac cannot list windows, place them or
-REM pair. It also opened Sunshine's web UI as UDP rather than TCP.
+REM SECONDARY. install-windows.ps1 already does all of this, correctly, before
+REM anything has listened, and that is the path a real install takes. This script
+REM exists for a machine running SolStream without having been installed -- a
+REM development box, or one where the rules were removed -- and for nothing else.
+REM
+REM It had drifted badly by the time anyone ran it: it still opened the old
+REM 47984-48010 block and named the agent as 47997, none of which anything has
+REM listened on since the ports moved to base 47600. Two scripts configuring the
+REM same firewall is how that happened. If these ever disagree with
+REM install-windows.ps1 again, install-windows.ps1 is right.
+REM
+REM Two kinds of rule, and both are needed.
+REM
+REM PROGRAM rules are what stop Windows asking. When a program starts listening
+REM and no rule names that executable, Windows raises "Do you want to allow
+REM public and private networks to access this app?" and blocks it until someone
+REM answers. On this project that prompt landed on the virtual display -- which
+REM has no monitor -- so nobody could see it, and its system-modal dimmer ate
+REM every click aimed at the streamed application for days. Naming the two
+REM executables up front means the question is never asked.
+REM
+REM PORT rules cover the traffic itself, including the UDP media ports, which are
+REM bound by Sunshine's child processes rather than by sunshine.exe directly.
+REM
+REM The ports come from windows\SolStreamAgent\ports.h. SolStream runs its own
+REM Sunshine on base 47600, deliberately clear of Sunshine's default 47989, so a
+REM machine that already had Sunshine keeps it. Everything else is that base plus
+REM a fixed GameStream offset:
+REM
+REM     https  base - 5    47595      video    base + 9   47609
+REM     http   base + 0    47600      control  base + 10  47610
+REM     web UI base + 1    47601      audio    base + 11  47611
+REM     rtsp   base + 21   47621
+REM
+REM The agent sits outside that block entirely, on 47630.
 
 setlocal enabledelayedexpansion
 
@@ -17,7 +46,14 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+if "%~1"=="" (
+    set INSTALLDIR=%ProgramFiles%\SolStream
+) else (
+    set INSTALLDIR=%~1
+)
+
 echo Installing SolStream Windows Firewall rules...
+echo   install directory: !INSTALLDIR!
 echo.
 
 REM Profile scope. Tailscale's adapter is not reliably categorised as Private on
@@ -26,26 +62,61 @@ REM -- which looks exactly like the agent not running. private+public covers bot
 REM the agent still requires its token, and Sunshine still requires pairing.
 set PROFILE=private,public
 
-call :Rule "SolStream - Agent"            47997       TCP
-call :Rule "SolStream - Sunshine HTTPS"   47984       TCP
-call :Rule "SolStream - Sunshine HTTP"    47989       TCP
-call :Rule "SolStream - Sunshine Web UI"  47990       TCP
-call :Rule "SolStream - Sunshine RTSP"    48010       TCP
-call :Rule "SolStream - Stream Media"     47998-48000 UDP
+echo Programs:
+call :Program "SolStream - Agent (program)"    "!INSTALLDIR!\SolStreamAgent.exe"
+call :Program "SolStream - Sunshine (program)" "!INSTALLDIR!\sunshine\sunshine.exe"
+
+echo.
+echo Ports:
+call :Rule "SolStream - Agent"            47630       TCP
+call :Rule "SolStream - Sunshine HTTPS"   47595       TCP
+call :Rule "SolStream - Sunshine HTTP"    47600       TCP
+call :Rule "SolStream - Sunshine Web UI"  47601       TCP
+call :Rule "SolStream - Sunshine RTSP"    47621       TCP
+call :Rule "SolStream - Stream Media"     47609-47611 UDP
 
 echo.
 echo Done. Rules are active on: %PROFILE%
 echo.
 echo To remove them, run as Administrator:
-echo   netsh advfirewall firewall delete rule name="SolStream - Agent"
-echo   netsh advfirewall firewall delete rule name="SolStream - Sunshine HTTPS"
-echo   netsh advfirewall firewall delete rule name="SolStream - Sunshine HTTP"
-echo   netsh advfirewall firewall delete rule name="SolStream - Sunshine Web UI"
-echo   netsh advfirewall firewall delete rule name="SolStream - Sunshine RTSP"
-echo   netsh advfirewall firewall delete rule name="SolStream - Stream Media"
+echo   for %%%%N in ("SolStream - Agent (program)" "SolStream - Sunshine (program)"
+echo                 "SolStream - Agent" "SolStream - Sunshine HTTPS"
+echo                 "SolStream - Sunshine HTTP" "SolStream - Sunshine Web UI"
+echo                 "SolStream - Sunshine RTSP" "SolStream - Stream Media") do ^
+echo       netsh advfirewall firewall delete rule name=%%%%~N
 echo.
 endlocal
 exit /b 0
+
+:Program
+set NAME=%~1
+set EXE=%~2
+
+echo   %NAME%
+
+if not exist "%EXE%" (
+    echo     SKIPPED - not found at %EXE%
+    goto :EOF
+)
+
+REM Replace rather than skip: an install that moved leaves a rule naming a path
+REM that no longer exists, which allows nothing and hides the fact.
+netsh advfirewall firewall delete rule name="%NAME%" >nul 2>&1
+
+netsh advfirewall firewall add rule ^
+    name="%NAME%" ^
+    dir=in ^
+    action=allow ^
+    program="%EXE%" ^
+    profile=%PROFILE% ^
+    description="SolStream remote application streaming" >nul 2>&1
+
+if !errorlevel! equ 0 (
+    echo     OK
+) else (
+    echo     FAILED - check that this shell is elevated
+)
+goto :EOF
 
 :Rule
 set NAME=%~1
