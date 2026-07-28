@@ -419,6 +419,19 @@ bool IsUserWindow(HWND window) {
     if (!IsWindowVisible(window) || IsIconic(window)) {
         return false;
     }
+
+    // Never our own host window. It is visible, titled, unowned and not a tool
+    // window, so it passes every test below and a client could ask for its
+    // handle, `place` it onto the captured display and `focus` it -- which would
+    // put the pairing PIN, and anything else this program asks a human at the PC
+    // to confirm, inside the video feed of the client doing the asking, with the
+    // clicks to match. The confirmation is only worth anything if it happens
+    // somewhere the remote side cannot reach.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == GetCurrentProcessId()) {
+        return false;
+    }
     if (GetWindow(window, GW_OWNER) != nullptr) {
         return false;  // tool palettes, dialogs owned by another window
     }
@@ -523,9 +536,25 @@ std::vector<WindowInfo> EnumerateWindows() {
     return std::move(state.windows);
 }
 
+/// Resolve a window id from the wire, refusing our own windows.
+///
+/// Keeping the host window out of `windows` hides the handle but does not
+/// protect it: every id here arrives from the client, and a handle that is
+/// merely unlisted can still be guessed -- they are small, dense integers. This
+/// is the one place `focus`, `place`, `topmost` and `lock` all pass through, so
+/// it is the place the rule belongs.
 HWND WindowFromId(uint64_t id) {
     auto handle = reinterpret_cast<HWND>(static_cast<uintptr_t>(id));
-    return IsWindow(handle) ? handle : nullptr;
+    if (!IsWindow(handle)) {
+        return nullptr;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(handle, &pid);
+    if (pid == GetCurrentProcessId()) {
+        Log("[agent] refused a command aimed at SolStream's own window");
+        return nullptr;
+    }
+    return handle;
 }
 
 uint64_t IdFromWindow(HWND window) {
