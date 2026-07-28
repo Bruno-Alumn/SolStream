@@ -228,6 +228,15 @@ private final class StatusOverlay: NSView {
         card.layer?.borderWidth = 1
         card.layer?.borderColor = NSColor(srgbRed: 0x3F / 255, green: 0x42 / 255,
                                           blue: 0x4D / 255, alpha: 1).cgColor
+        // ...and having decided that, say so, or only half of it comes true.
+        // The card's colours above are fixed, but its text is not: the labels
+        // below take DS.textPrimary and DS.secondary, which follow the system
+        // appearance and resolve to near-black in the light one — dark text on
+        // the dark ramp this card just committed to. The spinner already names
+        // the appearance for exactly this reason a few lines down; the rest of
+        // the card needs the same thing said once, here, where it covers every
+        // subview.
+        card.appearance = NSAppearance(named: .darkAqua)
         card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
