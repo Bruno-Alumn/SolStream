@@ -118,3 +118,66 @@ final class HostDedupeTests: XCTestCase {
         XCTAssertTrue(HostBrowser.oneRowPerMachine([]).isEmpty)
     }
 }
+
+/// The connect list draws rows from two places — hosts discovered on the network
+/// now, and addresses this Mac has connected to before. They overlap, and an
+/// exact string match does not notice: seen for real, "DESKTOP-EXAMPLE(1)" from
+/// discovery sat directly above "DESKTOP-EXAMPLE.local" from recents.
+final class RecentsAgainstDiscoveryTests: XCTestCase {
+    private func host(_ name: String, _ address: String?) -> DiscoveredHost {
+        DiscoveredHost(name: name, address: address)
+    }
+
+    func testARecentThatIsAlreadyDiscoveredIsDropped() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["DESKTOP-EXAMPLE.local"],
+            discovered: [host("DESKTOP-EXAMPLE", nil)])
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    /// The case that was actually on screen: discovery only had the renamed
+    /// advertisement, and the remembered address used the real hostname.
+    func testTheRenamedAdvertisementStillMatchesTheRememberedHostname() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["DESKTOP-EXAMPLE.local"],
+            discovered: [host("DESKTOP-EXAMPLE(1)", nil)])
+        XCTAssertTrue(rows.isEmpty, "one PC was listed twice")
+    }
+
+    /// A remembered IP is the same machine when discovery resolved to it.
+    func testARecentAddressMatchesAResolvedHost() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["192.168.1.40"],
+            discovered: [host("GAMING-PC", "192.168.1.40")])
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    /// Hostnames are case-insensitive; the remembered spelling need not match.
+    func testMatchingIgnoresCase() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["desktop-example.LOCAL"],
+            discovered: [host("DESKTOP-EXAMPLE", nil)])
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    /// A remembered host that is genuinely elsewhere keeps its row — that is the
+    /// whole point of remembering it, since mDNS does not cross subnets.
+    func testAnUnrelatedRecentSurvives() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["10.7.0.2", "OFFICE-PC.local"],
+            discovered: [host("GAMING-PC", "192.168.1.40")])
+        XCTAssertEqual(rows, ["10.7.0.2", "OFFICE-PC.local"])
+    }
+
+    func testWithNothingDiscoveredEveryRecentSurvives() {
+        let recents = ["10.7.0.2", "GAMING-PC.local"]
+        XCTAssertEqual(HostBrowser.recentsWorthShowing(recents, discovered: []), recents)
+    }
+
+    /// Order is the caller's, not ours: recents are listed most-recent-first.
+    func testSurvivingRecentsKeepTheirOrder() {
+        let rows = HostBrowser.recentsWorthShowing(
+            ["c.local", "a.local", "b.local"], discovered: [])
+        XCTAssertEqual(rows, ["c.local", "a.local", "b.local"])
+    }
+}

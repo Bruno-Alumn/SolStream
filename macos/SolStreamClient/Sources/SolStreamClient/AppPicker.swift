@@ -306,6 +306,16 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         onChoose(rows[index].choice)
     }
 
+    /// Move the highlighted row, keeping it on screen. Clamped rather than
+    /// wrapped: holding ↓ should come to rest at the last row, not cycle.
+    private func moveSelection(by delta: Int) {
+        guard !rows.isEmpty else { return }
+        let current = tableView.selectedRow
+        let next = min(max((current < 0 ? 0 : current) + delta, 0), rows.count - 1)
+        tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tableView.scrollRowToVisible(next)
+    }
+
     @objc private func backTapped() {
         close()
         onCancel()
@@ -437,5 +447,33 @@ private final class PickerRowView: NSTableRowView {
 extension AppPicker: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         searchChanged()
+    }
+
+    /// Make the search field drive the list, which is what the footer promises.
+    ///
+    /// The Open button already carries "\r" as its key equivalent, but a focused
+    /// NSTextField swallows Return to fire its own action first, so the default
+    /// button never saw it: the footer said "↩ to open" and Return merely re-ran
+    /// the filter. Typing a few letters and pressing Return is the whole point of
+    /// a search field, and it did nothing at all.
+    ///
+    /// The arrows are here for the same reason — moving the selection should not
+    /// require leaving the field and reaching for the mouse.
+    func control(_ control: NSControl,
+                 textView: NSTextView,
+                 doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)):
+            openTapped()
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            moveSelection(by: 1)
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            moveSelection(by: -1)
+            return true
+        default:
+            return false
+        }
     }
 }

@@ -211,9 +211,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                   + "Check the PC is awake and SolStream is running."
             connectButton.title = "Connect"
         case (nil, _):
+            // Without stripping the suffix this line reads "Found
+            // DESKTOP-EXAMPLE(1)" — Bonjour's disambiguation for a machine
+            // advertising twice, which is exactly the detail the rest of the
+            // window works to keep out of the user's way. Nobody's PC is called
+            // that.
+            let names = discovered
+                .map { HostBrowser.baseName(of: $0.name) ?? $0.name }
+                .joined(separator: ", ")
             hintLabel.stringValue = discovered.isEmpty
                 ? "First connection shows a PIN, unless the PC can approve it itself."
-                : "Found \(discovered.map(\.name).joined(separator: ", ")) on this network."
+                : "Found \(names) on this network."
             connectButton.title = "Connect"
         }
         connectButton.setPrimary(true)
@@ -352,8 +360,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                      ? " · paired" : " · not paired"),
                               dotState: .live, kind: .discovered)
         }
-        let seen = Set(items.map(\.address))
-        items += Self.recentHosts.filter { !seen.contains($0) }.map { address in
+        items += HostBrowser.recentsWorthShowing(Self.recentHosts,
+                                                 discovered: discovered).map { address in
             HostDropdown.Item(address: address, name: nil,
                               detail: ClientIdentity.shared.isPaired(host: address)
                                   ? "paired" : "not paired",
