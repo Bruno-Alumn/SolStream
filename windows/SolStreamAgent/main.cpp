@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "host_window.h"
+#include "installer.h"
 #include "ports.h"
 #include "sunshine_host.h"
 #include "vdd.h"
@@ -3249,6 +3250,8 @@ int wmain(int argc, wchar_t** argv) {
     bool set_credentials = false;
     bool print_token = false;
     bool no_auth = false;
+    bool install = false;
+    bool uninstall = false;
     // --headless keeps the original behaviour: no window, log to stderr. Every
     // verification in this project is done over SSH, where there is no desktop
     // to put a window on.
@@ -3285,11 +3288,50 @@ int wmain(int argc, wchar_t** argv) {
             print_token = true;
         } else if (arg == L"--no-auth") {
             no_auth = true;
+        } else if (arg == L"--install") {
+            install = true;
+        } else if (arg == L"--uninstall") {
+            uninstall = true;
         }
     }
 
     if (set_credentials) {
         return SetSunshineCredentials();
+    }
+
+    // Installing is the executable's own job. It used to be a PowerShell script,
+    // which made the answer to "how do I install this" involve an execution
+    // policy and a -Package path — for a program whose whole premise is that
+    // none of this should be the user's problem.
+    if (install || uninstall) {
+        const wchar_t* verb = install ? L"--install" : L"--uninstall";
+        if (!solstream::IsElevated()) {
+            // Ask once, visibly. This is the moment the user agrees to a program
+            // writing to Program Files, opening ports and registering a logon
+            // task; doing it behind an invisible prompt would be doing it behind
+            // their back.
+            std::string error;
+            if (!solstream::RelaunchElevated(verb, error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
+            return 0;
+        }
+        std::string error;
+        const bool ok = install ? solstream::InstallSelf(error)
+                                : solstream::UninstallSelf(error);
+        if (!ok) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        if (install) {
+            std::fputs("SolStream is installed and running. It will start again "
+                       "when you log in.\n", stdout);
+        } else {
+            std::fputs("SolStream has been removed. Your pairing token and "
+                       "settings are kept in %LOCALAPPDATA%\\SolStream.\n", stdout);
+        }
+        return 0;
     }
 
     if (install_driver) {

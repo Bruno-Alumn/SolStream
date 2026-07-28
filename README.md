@@ -72,9 +72,10 @@ a green mingw build has hidden a total MSVC failure before.
 cmake --build build --target SolStreamAgent --config Release
 ```
 
-`scripts/package-windows.ps1` builds the folder that ships and
-`scripts/install-windows.ps1` puts it in place — installation is a real step, not
-a copy, because a firewall rule has to be created before the host ever listens.
+`scripts/package-windows.ps1` builds the folder that ships. Installing is the
+executable's own job — `SolStream.exe --install` copies itself into Program
+Files, opens the ports it needs and registers itself to start at logon, asking
+for administrator rights once, visibly. `--uninstall` undoes it.
 
 ## Licensing
 

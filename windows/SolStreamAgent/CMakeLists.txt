@@ -2,6 +2,12 @@
 # macOS/Linux with mingw-w64 via ./build-cross.sh
 cmake_minimum_required(VERSION 3.20)
 
+# Required for the MSVC_RUNTIME_LIBRARY property below to be honoured at all.
+# Without it CMake silently ignores the property and keeps the default dynamic
+# runtime, which is a failure that only shows up on a machine with no Visual
+# Studio on it.
+cmake_policy(SET CMP0091 NEW)
+
 # The host application. It supervises its own Sunshine (sunshine_host.cpp),
 # checks for the virtual display it streams (vdd.cpp), and serves the Mac.
 #
@@ -13,6 +19,7 @@ add_executable(SolStreamAgent
     sunshine_host.cpp
     vdd.cpp
     host_window.cpp
+    installer.cpp
 )
 
 set_target_properties(SolStreamAgent PROPERTIES
@@ -37,6 +44,22 @@ if(MSVC)
     # Without it MSVC reads them in the system code page and "token — the" is
     # rendered as "token a€" in the window.
     target_compile_options(SolStreamAgent PRIVATE /W4 /permissive- /utf-8)
+
+    # Static runtime, so the executable is genuinely self-contained.
+    #
+    # The default /MD build imports MSVCP140.dll and VCRUNTIME140.dll, which are
+    # NOT part of Windows -- they arrive with the Visual C++ Redistributable, or
+    # with Visual Studio. On a clean Windows 11 none of them exist, so the
+    # program cannot start at all: it dies at load with 0xC0000135,
+    # STATUS_DLL_NOT_FOUND, before main and therefore before any message it could
+    # have shown. Every development machine has them, which is exactly why this
+    # survived until the first install onto a machine that was not one.
+    #
+    # Shipping the redistributable instead would mean a second installer to chain
+    # and a reboot prompt to explain, for an application whose whole selling
+    # point is that there is one thing to run.
+    set_property(TARGET SolStreamAgent PROPERTY
+                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 else()
     target_compile_options(SolStreamAgent PRIVATE -Wall -Wextra -municode)
     target_link_options(SolStreamAgent PRIVATE -municode -static)

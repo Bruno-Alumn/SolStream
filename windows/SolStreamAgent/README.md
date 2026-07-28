@@ -233,7 +233,7 @@ Known divergences, all handled in the source:
 
 ## Installing
 
-`scripts/package-windows.ps1` builds the folder that ships; `scripts/install-windows.ps1`
+`scripts/package-windows.ps1` builds the folder that ships; `SolStream.exe --install`
 puts it in place. Installation is a step rather than a copy for one reason:
 
 Windows will not let a program accept connections it has never been asked

@@ -2,16 +2,16 @@
 REM install-solstream-firewall.bat - Windows Firewall rules for SolStream
 REM Run as Administrator.
 REM
-REM SECONDARY. install-windows.ps1 already does all of this, correctly, before
-REM anything has listened, and that is the path a real install takes. This script
-REM exists for a machine running SolStream without having been installed -- a
-REM development box, or one where the rules were removed -- and for nothing else.
+REM SECONDARY. `SolStream.exe --install` already does all of this, correctly,
+REM before anything has listened, and that is the path a real install takes.
+REM This script exists for a machine running SolStream without having been
+REM installed -- a development box, or one where the rules were removed.
 REM
 REM It had drifted badly by the time anyone ran it: it still opened the old
 REM 47984-48010 block and named the agent as 47997, none of which anything has
 REM listened on since the ports moved to base 47600. Two scripts configuring the
 REM same firewall is how that happened. If these ever disagree with
-REM install-windows.ps1 again, install-windows.ps1 is right.
+REM `SolStream.exe --install` again, the executable is right.
 REM
 REM Two kinds of rule, and both are needed.
 REM
