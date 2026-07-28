@@ -95,7 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // --agent-token supplies the host's shared secret once; it is remembered
-        // per host afterwards. Get it with "SolStreamAgent.exe --print-token".
+        // per host afterwards. It is shown on SolStream's own window on the
+        // host, under "Pairing token", with a Copy button beside it.
         if let index = arguments.firstIndex(of: "--agent-token"),
            index + 1 < arguments.count {
             let host = arguments.firstIndex(of: "--host").flatMap { hostIndex in
@@ -297,9 +298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .needsToken(let host, _):
                 // No window to ask in on this path, so say what to do instead of
                 // waiting for an answer that cannot arrive.
-                Log.error("[app] \(host) needs a pairing token. Run "
-                          + "\"SolStreamAgent.exe --print-token\" there, then start "
-                          + "SolStream once with --agent-token <token>.")
+                Log.error("[app] \(host) needs a pairing token. It is on "
+                          + "SolStream's own window on that PC, under \"Pairing "
+                          + "token\"; start SolStream here once with "
+                          + "--agent-token <token>.")
             default:
                 break
             }
@@ -507,9 +509,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .needsToken(let host, _):
                 // No window to ask in on this path, so say what to do instead of
                 // waiting for an answer that cannot arrive.
-                Log.error("[app] \(host) needs a pairing token. Run "
-                          + "\"SolStreamAgent.exe --print-token\" there, then start "
-                          + "SolStream once with --agent-token <token>.")
+                Log.error("[app] \(host) needs a pairing token. It is on "
+                          + "SolStream's own window on that PC, under \"Pairing "
+                          + "token\"; start SolStream here once with "
+                          + "--agent-token <token>.")
             default:
                 break
             }
@@ -736,7 +739,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     Log.info("[pair] host cannot approve automatically: \(detail)")
                     self.appWindows.forEach {
                         $0.setPairingPin(pin, host: host, reason:
-                            "Run SolStreamAgent.exe --set-sunshine-credentials on the host "
+                            "Run SolStream.exe --set-sunshine-credentials on the host "
                             + "once to skip this step in future.")
                     }
                 case .failed(let detail):

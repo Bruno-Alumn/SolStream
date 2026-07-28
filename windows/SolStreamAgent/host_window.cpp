@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -49,6 +50,18 @@ namespace solstream {
 namespace {
 
 constexpr wchar_t kClassName[] = L"SolStreamHostWindow";
+/// Setup gets its OWN class, and the reason is not tidiness.
+///
+/// The installed agent starts by asking whether SolStream is already running,
+/// by looking for a window of the host class, and bows out if one is — that is
+/// what makes a shortcut press show the window instead of starting a second
+/// agent to fight the first for the port. Sharing one class made the setup
+/// window answer that question: the agent the install had just started found
+/// setup's window, decided SolStream was already running, and exited. So did
+/// the one behind the "Open SolStream" button. The install completed perfectly
+/// and left nothing running, which is the hardest kind of failure to see —
+/// every step reported success.
+constexpr wchar_t kSetupClassName[] = L"SolStreamSetupWindow";
 constexpr UINT kTimerId = 1;
 constexpr int kEditId = 200;
 
@@ -215,6 +228,35 @@ void Text(const std::wstring& text, IDWriteTextFormat* format,
     g_brush->SetColor(colour);
     g_target->DrawTextW(text.c_str(), (UINT32) text.size(), format, rect, g_brush,
                         D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+/// How tall this text is when wrapped to `width`, in DIPs.
+///
+/// Every block on this window used to be given a height picked by eye — the
+/// banner's reason got 40 DIP, two lines' worth. The real strings run to four,
+/// and because every format here is vertically centred, a four-line block in a
+/// two-line box does not simply overflow downwards: it centres, so its first
+/// lines are drawn UP THROUGH the sentence above it and its last lines are
+/// clipped away. It reads as two paragraphs printed on top of each other, and
+/// only for the longest string, which is the one that matters most.
+/// `designed` is the height the design gives this block. It is honoured when the
+/// text fits inside it, so the window keeps the rhythm it was drawn with, and
+/// exceeded only when the alternative is losing words.
+float MeasureHeight(const std::wstring& text, IDWriteTextFormat* format, float width,
+                    float designed = 0.0f) {
+    if (!format || text.empty() || width <= 0.0f) {
+        return designed;
+    }
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(g_dwrite->CreateTextLayout(text.c_str(), (UINT32) text.size(), format,
+                                          width, 4096.0f, &layout))
+        || layout == nullptr) {
+        return 0.0f;
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    layout->GetMetrics(&metrics);
+    layout->Release();
+    return metrics.height > designed ? metrics.height : designed;
 }
 
 /// The focus ring: one geometry everywhere. Two DIPs of the parent's own ground
@@ -503,6 +545,32 @@ struct Row {
     Mark mark;
 };
 
+/// Make the window tall enough for what was just laid out.
+///
+/// The design fixes the window at 460x560 and every block inside it at a height
+/// chosen for the string that was in it when it was drawn. Real strings are
+/// longer on some machines than others — a longer computer name, a failure with
+/// a reason attached, a translated sentence — and a window that cannot grow
+/// answers that by clipping the sentence that explains what went wrong.
+///
+/// Only ever grows, and only by more than a DIP, so this cannot oscillate with
+/// the WM_SIZE it causes.
+void GrowToFit(HWND window, float content_bottom) {
+    if (!g_target) {
+        return;
+    }
+    const float wanted = content_bottom + space::kXl;
+    if (wanted <= g_target->GetSize().height + 1.0f) {
+        return;
+    }
+    const UINT dpi = (UINT) g_dpi;
+    RECT frame{0, 0, MulDiv((int) metric::kWindowW, dpi, 96),
+               MulDiv((int) wanted, dpi, 96)};
+    AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE, 0, dpi);
+    SetWindowPos(window, nullptr, 0, 0, frame.right - frame.left,
+                 frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER);
+}
+
 void HideAllControls() {
     for (Button& button : g_buttons) {
         button.visible = false;
@@ -610,16 +678,29 @@ void LayoutAndPaintSetup(HWND window) {
          D2D1::RectF(pad, y, right, y + 36.0f), g_palette.text);
     y += 36.0f + space::kMd;
 
+    const float headline_h = MeasureHeight(copy.headline, g_fmt_headline,
+                                           right - pad, 52.0f);
     Text(copy.headline, g_fmt_headline,
-         D2D1::RectF(pad, y, right, y + 52.0f), g_palette.text);
-    y += 52.0f + space::kLg;
+         D2D1::RectF(pad, y, right, y + headline_h), g_palette.text);
+    y += headline_h + space::kLg;
 
     // The card. In the choosing phase it says what is about to happen, which is
     // the whole of the consent the UAC prompt is about to ask for in the
-    // abstract; in the others it says what is happening or what happened.
-    constexpr float kLeadH = 44.0f;
-    constexpr float kBulletH = 24.0f;
-    const float bullets_h = (float) copy.bullets.size() * kBulletH;
+    // abstract; in the others it says what is happening or what happened — and
+    // a failure's reason is the longest string this window ever holds, so it is
+    // measured rather than allotted a height that fits the happy path.
+    const float kLeadH = MeasureHeight(copy.lead, g_fmt_value,
+                                       right - pad - space::kMd * 2.0f, 44.0f);
+    // Per bullet, not one height for all of them. "Keeps your pairing token, so
+    // a reinstall won't make your Mac pair again" wraps to two lines and ran
+    // straight out of the bottom of the card.
+    const float bullet_w = right - pad - space::kMd - space::kLg;
+    std::vector<float> bullet_h;
+    float bullets_h = 0.0f;
+    for (const wchar_t* bullet : copy.bullets) {
+        bullet_h.push_back(MeasureHeight(bullet, g_fmt_label, bullet_w, 24.0f));
+        bullets_h += bullet_h.back();
+    }
     const bool working = g_phase == Phase::Working;
     const float card_h = space::kMd + kLeadH
                        + (copy.bullets.empty() ? 0.0f : space::kSm + bullets_h)
@@ -639,13 +720,16 @@ void LayoutAndPaintSetup(HWND window) {
 
     if (!copy.bullets.empty()) {
         inner += space::kSm;
-        for (const wchar_t* bullet : copy.bullets) {
-            DrawMark(pad + space::kMd + 4.0f, inner + kBulletH / 2.0f, Mark::Good);
-            Text(bullet, g_fmt_label,
+        for (size_t i = 0; i < copy.bullets.size(); ++i) {
+            const float height = bullet_h[i];
+            // The mark sits on the first line rather than in the middle of the
+            // block, so a two-line bullet does not put its dot beside the gap.
+            DrawMark(pad + space::kMd + 4.0f, inner + 12.0f, Mark::Good);
+            Text(copy.bullets[i], g_fmt_label,
                  D2D1::RectF(pad + space::kMd + space::kLg, inner, right - space::kMd,
-                             inner + kBulletH),
+                             inner + height),
                  g_palette.muted);
-            inner += kBulletH;
+            inner += height;
         }
     }
     if (working) {
@@ -671,7 +755,12 @@ void LayoutAndPaintSetup(HWND window) {
 
         Text(L"Installs to " + InstallDirectory(), g_fmt_mono,
              D2D1::RectF(pad, y, right, y + 18.0f), g_palette.faint);
+        y += 18.0f;
     }
+    // The buttons are anchored to the bottom edge, so growing for the content
+    // has to leave room for them as well or a long failure message runs
+    // underneath them.
+    const float content_bottom = y + space::kLg + metric::kButtonH;
 
     // The buttons sit on the bottom edge, where a setup program's buttons are.
     const float button_top = size.height - pad - metric::kButtonH;
@@ -722,7 +811,9 @@ void LayoutAndPaintSetup(HWND window) {
     const HRESULT hr = g_target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardTarget();
+        return;
     }
+    GrowToFit(window, content_bottom);
 }
 
 void LayoutAndPaint(HWND window) {
@@ -756,9 +847,11 @@ void LayoutAndPaint(HWND window) {
     y += 36.0f + space::kMd;
 
     // The headline answers "is this PC ready" before anything else is read.
+    const float headline_h = MeasureHeight(screen.headline, g_fmt_headline,
+                                           right - pad, 52.0f);
     Text(screen.headline, g_fmt_headline,
-         D2D1::RectF(pad, y, right, y + 52.0f), g_palette.text);
-    y += 52.0f + space::kLg;
+         D2D1::RectF(pad, y, right, y + headline_h), g_palette.text);
+    y += headline_h + space::kLg;
 
     // The banner sits under the headline and above the rows, because the rows
     // are its evidence. One sentence, one reason, one button that does the
@@ -771,8 +864,9 @@ void LayoutAndPaint(HWND window) {
         // Height first, then the card, then its contents. D2D has no z-order —
         // the order of the calls is the z-order — so anything drawn before the
         // fill is simply painted over.
-        constexpr float kWhatH = 22.0f;
-        constexpr float kWhyH = 40.0f;
+        const float text_w = right - pad - space::kMd * 2.0f;
+        const float kWhatH = MeasureHeight(screen.what, g_fmt_value, text_w, 22.0f);
+        const float kWhyH = MeasureHeight(screen.why, g_fmt_label, text_w, 40.0f);
         const bool has_fix = fix && !screen.fix.empty();
         const float top = y;
         const float height = space::kMd + kWhatH + space::kXs + kWhyH
@@ -906,6 +1000,7 @@ void LayoutAndPaint(HWND window) {
         }
         y += metric::kFieldH + space::kLg;
     }
+    const float content_bottom = y;
 
     // The pairing page button only exists while a PIN is waiting on it.
     Button* page = FindButton(kIdOpenPairingPage);
@@ -951,6 +1046,12 @@ void LayoutAndPaint(HWND window) {
     const HRESULT hr = g_target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardTarget();
+        return;
+    }
+    // After EndDraw, never during it: resizing invalidates the render target
+    // this function is holding.
+    if (pin.empty()) {
+        GrowToFit(window, content_bottom);
     }
 }
 
@@ -1208,18 +1309,37 @@ void Activate(HWND window, int id) {
 /// deliberately the same contract Windows would give: Tab moves, Space and
 /// Enter activate, and the ring only appears for keyboard travel.
 void MoveFocus(HWND window, int direction) {
-    std::vector<int> order;
-    // Ticks before buttons, which is reading order on the setup screen and the
-    // order somebody filling it in would want.
+    // Reading order, taken from where the controls actually ARE.
+    //
+    // This used to walk the vectors in the order controls were pushed into
+    // them, which is a fact about the code and not about the window. On the
+    // uninstall screen that put Cancel before Remove — so the first Tab landed
+    // on Cancel, and anyone driving this from the keyboard pressed Space
+    // expecting to remove SolStream and closed the window instead. It only
+    // worked anywhere else by coincidence.
+    struct Stop { int id; float top; float left; };
+    std::vector<Stop> stops;
     for (const Check& check : g_checks) {
         if (check.visible) {
-            order.push_back(check.id);
+            stops.push_back({check.id, check.rect.top, check.rect.left});
         }
     }
     for (const Button& button : g_buttons) {
         if (button.visible) {
-            order.push_back(button.id);
+            stops.push_back({button.id, button.rect.top, button.rect.left});
         }
+    }
+    std::sort(stops.begin(), stops.end(), [](const Stop& a, const Stop& b) {
+        // A row's worth of tolerance, so two buttons side by side are ordered
+        // left to right even when their tops differ by a rounding error.
+        if (a.top + 4.0f < b.top) { return true; }
+        if (b.top + 4.0f < a.top) { return false; }
+        return a.left < b.left;
+    });
+    std::vector<int> order;
+    order.reserve(stops.size());
+    for (const Stop& stop : stops) {
+        order.push_back(stop.id);
     }
     if (order.empty()) {
         return;
@@ -1536,11 +1656,13 @@ bool ShowHostWindow(WindowMode mode) {
         return false;
     }
 
+    const wchar_t* class_name =
+        mode == WindowMode::Host ? kClassName : kSetupClassName;
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = kClassName;
+    wc.lpszClassName = class_name;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     if (!RegisterClassExW(&wc)) {
         return false;
@@ -1556,8 +1678,11 @@ bool ShowHostWindow(WindowMode mode) {
     RECT wanted{0, 0, width, height};
     AdjustWindowRectExForDpi(&wanted, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE,
                              0, dpi);
+    const wchar_t* title = mode == WindowMode::Host      ? L"SolStream"
+                         : mode == WindowMode::Uninstall ? L"Remove SolStream"
+                                                         : L"SolStream Setup";
     g_window = CreateWindowExW(
-        0, kClassName, mode == WindowMode::Host ? L"SolStream" : L"SolStream Setup",
+        0, class_name, title,
         // Not resizable: every part of this is a fixed-height card, and a
         // window draggable to a shape none of its content fits is worse than
         // one that cannot be dragged at all.

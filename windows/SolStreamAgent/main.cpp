@@ -93,6 +93,16 @@ unsigned short g_sunshine_web_port =
 std::wstring g_capture_display;
 /// How many Macs are connected right now, for the window.
 std::atomic<int> g_clients_connected{0};
+/// How many of those have presented the token, which is a different number and
+/// the one the window actually wants.
+///
+/// A Mac that has connected but not authenticated is a Mac SITTING ON THE TOKEN
+/// PROMPT — and the window used to treat it as a live session: it said
+/// "Streaming to your Mac", and it hid the pairing token, on the grounds that a
+/// visible token beside a live session is an invitation. Both are right about a
+/// real session and exactly backwards here. The one thing the user needs at that
+/// moment is the token, and connecting is what made it disappear.
+std::atomic<int> g_clients_authenticated{0};
 
 // ΓöÇΓöÇ Logging ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -166,6 +176,104 @@ void Log(const char* fmt, ...) {
 }
 
 // ΓöÇΓöÇ Text ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+
+/// An address somebody could actually type on their Mac.
+///
+/// The window used to show the BIND address, which for an installed host is
+/// "0.0.0.0" — true, and useless: it is the answer to "which interfaces am I
+/// listening on", printed under a label that asks "where should my Mac look".
+///
+/// Answered by asking the routing table, not by ranking a list of addresses.
+///
+/// A Windows PC has more addresses than it has networks. Hyper-V, WSL and
+/// Docker each add a virtual switch with its own private range, and on this
+/// project's own test machine the highest-ranked address by any sensible
+/// heuristic was 172.x.x.x — a Hyper-V switch that no Mac anywhere can
+/// reach, printed under "Address" as though it were the answer.
+///
+/// Connecting a UDP socket sends nothing; it only makes Windows choose the
+/// interface it would use to reach the outside world, which is the interface a
+/// Mac on the same network is on. Then ask the socket which address that was.
+std::string RoutedLocalAddress() {
+    SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (probe == INVALID_SOCKET) {
+        return {};
+    }
+    // A public address that is never contacted. 192.0.2.1 is TEST-NET-1,
+    // reserved by RFC 5737 for exactly this kind of use, so it cannot collide
+    // with anything real even if something did try to send.
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_port = htons(53);
+    inet_pton(AF_INET, "192.0.2.1", &target.sin_addr);
+
+    std::string address;
+    if (connect(probe, (sockaddr*) &target, sizeof(target)) == 0) {
+        sockaddr_in local{};
+        int size = sizeof(local);
+        char text[INET_ADDRSTRLEN] = {0};
+        if (getsockname(probe, (sockaddr*) &local, &size) == 0
+            && inet_ntop(AF_INET, &local.sin_addr, text, sizeof(text)) != nullptr) {
+            address = text;
+        }
+    }
+    closesocket(probe);
+    return address == "0.0.0.0" ? std::string() : address;
+}
+
+/// The fallback, for a machine with no route off itself at all. Ranked, and
+/// 172.16/12 is ranked BELOW the VPN range rather than with the other private
+/// blocks: in practice a 172.x address on Windows is a virtual switch far more
+/// often than it is somebody's home network.
+std::string BestLocalAddress() {
+    if (const std::string routed = RoutedLocalAddress(); !routed.empty()) {
+        return routed;
+    }
+    char host[256] = {0};
+    if (gethostname(host, sizeof(host)) != 0) {
+        return {};
+    }
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(host, nullptr, &hints, &found) != 0) {
+        return {};
+    }
+
+    std::string best;
+    int best_rank = 0;
+    for (addrinfo* at = found; at != nullptr; at = at->ai_next) {
+        const auto* in = reinterpret_cast<const sockaddr_in*>(at->ai_addr);
+        const unsigned long bits = ntohl(in->sin_addr.s_addr);
+        const unsigned a = (bits >> 24) & 0xFF;
+        const unsigned b = (bits >> 16) & 0xFF;
+
+        int rank = 1;
+        if (a == 127) {
+            continue;  // loopback is never the answer to "where should my Mac look"
+        } else if (a == 169 && b == 254) {
+            continue;  // link-local means DHCP did not answer
+        } else if (a == 192 && b == 168) {
+            rank = 5;
+        } else if (a == 10) {
+            rank = 4;
+        } else if (a == 100 && b >= 64 && b <= 127) {
+            rank = 3;  // CGNAT, which in practice means Tailscale
+        } else if (a == 172 && b >= 16 && b <= 31) {
+            rank = 2;  // usually a Hyper-V, WSL or Docker switch
+        }
+        if (rank > best_rank) {
+            char text[INET_ADDRSTRLEN] = {0};
+            if (inet_ntop(AF_INET, &in->sin_addr, text, sizeof(text)) != nullptr) {
+                best = text;
+                best_rank = rank;
+            }
+        }
+    }
+    freeaddrinfo(found);
+    return best;
+}
 
 /// One log line per sentence. Several of the setup steps report a paragraph of
 /// what they did, and a log line with newlines inside it is a log line nothing
@@ -2673,6 +2781,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
         std::string supplied;
         FieldString(line, "token", supplied);
         if (TokenMatches(supplied)) {
+            if (!authenticated) {
+                g_clients_authenticated.fetch_add(1);
+            }
             authenticated = true;
             return "{\"type\":\"auth\",\"ok\":true}";
         }
@@ -3179,8 +3290,23 @@ void ServeClient(SOCKET client) {
     // to do; otherwise it would leak the machine's monitor layout to anyone who
     // can open a socket.
     bool authenticated = !g_require_auth;
-    if (authenticated && !SendLine(client, DisplaysJson(EnumerateDisplays()))) {
-        return;
+    // Whatever this function returns through, the count comes back down with
+    // it: there are several early returns below and one of them forgotten would
+    // leave the window claiming a Mac that had gone.
+    struct AuthCount {
+        const bool& live;
+        ~AuthCount() {
+            if (live) {
+                g_clients_authenticated.fetch_sub(1);
+            }
+        }
+    } counted{authenticated};
+    if (authenticated) {
+        // Loopback, which needs no token and is therefore already a session.
+        g_clients_authenticated.fetch_add(1);
+        if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
+            return;
+        }
     }
 
     std::string buffer;
@@ -3913,10 +4039,16 @@ int wmain(int argc, wchar_t** argv) {
             DWORD size = 256;
             GetComputerNameW(name, &size);
             status.computer_name = name;
-            status.address = ToWide(bind_address);
+            // Listening on everything means the bind address says nothing about
+            // where to look, so find an address that does. Re-read every tick
+            // rather than cached: a laptop that joins a network, or a VPN that
+            // comes up, changes the answer while this window is open.
+            status.address = bind_address == "0.0.0.0"
+                                 ? ToWide(BestLocalAddress())
+                                 : ToWide(bind_address);
             status.pairing_token = ToWide(g_token);
             status.agent_listening = true;
-            status.connected_clients = g_clients_connected.load();
+            status.connected_clients = g_clients_authenticated.load();
 
             const solstream::SunshineState state = solstream::GetSunshineState();
             status.sunshine_running = state == solstream::SunshineState::kRunning

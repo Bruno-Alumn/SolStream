@@ -230,21 +230,28 @@ bool ExtractBundledSunshine(const std::wstring& destination, std::string& error)
 /// Stop anything already running out of the install directory, or the copy
 /// fails on a locked executable and leaves a half-installed folder.
 void StopInstalled(const std::wstring& destination) {
-    // Every process of that name EXCEPT this one. The installer is itself
-    // SolStream.exe, so an unfiltered taskkill terminates the install halfway
-    // through — which is exactly what it did: the log stopped after "installing
-    // from ... to ...", with nothing copied and an exit code that only meant
-    // "killed".
+    // By WHERE a process is running from, never by what it is called.
+    //
+    // The point of this is to release locks on files about to be overwritten,
+    // and only a process running out of the install directory holds one. Killing
+    // by image name instead was wrong twice over. It killed the installer itself
+    // — the installer IS SolStream.exe — which stopped the install dead after
+    // "installing from ... to ...", with nothing copied and an exit code that
+    // only meant "killed". Adding a PID filter fixed that and introduced the
+    // second one: the setup window and the elevated half it launches are the
+    // same file with different PIDs, so the install killed the window that was
+    // waiting to tell the user how it went. The user saw setup vanish.
+    //
+    // A path test has neither problem, and it also catches the sunshine.exe that
+    // belongs to this install without touching a Sunshine the user set up
+    // themselves — which is none of our business and would be a rude surprise.
     const std::wstring mine = std::to_wstring(GetCurrentProcessId());
-    RunHidden(L"taskkill.exe /F /IM SolStream.exe /FI \"PID ne " + mine + L"\"");
-    RunHidden(L"taskkill.exe /F /IM SolStreamSetup.exe /FI \"PID ne " + mine + L"\"");
-    RunHidden(L"taskkill.exe /F /IM SolStreamAgent.exe /FI \"PID ne " + mine + L"\"");
-    // Only the Sunshine that belongs to this install. A Sunshine the user set up
-    // themselves is none of our business and killing it would be a rude surprise.
-    const std::wstring ours = destination + L"\\sunshine\\sunshine.exe";
-    RunHidden(L"powershell.exe -NoProfile -Command \"Get-Process sunshine "
-              L"-ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '"
-              + ours + L"' } | Stop-Process -Force\"");
+    RunHidden(L"powershell.exe -NoProfile -Command \""
+              L"Get-CimInstance Win32_Process | Where-Object { "
+              L"$_.ProcessId -ne " + mine + L" -and $_.ExecutablePath -and "
+              L"$_.ExecutablePath.StartsWith('" + destination + L"\\', "
+              L"[System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "
+              L"Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"");
     Sleep(1500);
 }
 
