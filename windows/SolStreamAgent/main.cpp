@@ -1313,6 +1313,61 @@ void ReportForegroundThief() {
         title[0] ? title : "(untitled)", cls[0] ? cls : "?");
 }
 
+/// Say which window would receive a click at the pointer.
+///
+/// Diagnostic, and deliberately measured from here: the agent creates no window
+/// of its own, so unlike a probe launched as a scheduled task it cannot be the
+/// thing it is looking for. That mattered — a `WindowFromPoint` taken inside
+/// such a probe reported a system dim window over the stream that a second run
+/// could not find, and the probe's own console was a plausible cause of it.
+///
+/// It answers a question the streamed window cannot: keystrokes go to whatever
+/// holds the FOCUS, but clicks go to whatever is under the POINTER, so an
+/// invisible window over the tile breaks the mouse while leaving the keyboard
+/// working perfectly. Reported only on change, and only while something is
+/// being streamed.
+void ReportPointerTarget() {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+        return;
+    }
+    HWND under = WindowFromPoint(cursor);
+    static HWND reported = nullptr;
+    if (under == reported) {
+        return;
+    }
+
+    bool streaming = false;
+    bool ours = false;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (!g_locks[i].active) {
+            continue;
+        }
+        streaming = true;
+        // A control inside the streamed window is still the streamed window.
+        if (g_locks[i].window == under
+            || g_locks[i].window == GetAncestor(under, GA_ROOT)) {
+            ours = true;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (!streaming) {
+        return;
+    }
+
+    reported = under;
+    char cls[96] = {0};
+    char title[128] = {0};
+    if (under) {
+        GetClassNameA(under, cls, sizeof(cls) - 1);
+        GetWindowTextA(GetAncestor(under, GA_ROOT), title, sizeof(title) - 1);
+    }
+    Log("[pointer] at %ld,%ld a click would go to [%s] \"%s\"%s",
+        cursor.x, cursor.y, cls[0] ? cls : "?", title[0] ? title : "(untitled)",
+        ours ? "" : "  <-- NOT the streamed window");
+}
+
 /// Put a locked window back if anything moved or resized it.
 DWORD WINAPI WatcherProc(LPVOID) {
     while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
@@ -1359,6 +1414,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
                             desired.right - desired.left, desired.bottom - desired.top);
         }
         ReportForegroundThief();
+        ReportPointerTarget();
     }
     return 0;
 }
