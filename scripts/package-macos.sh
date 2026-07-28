@@ -111,6 +111,31 @@ if true; then
         <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
+    <!--
+      Local Network access, which macOS gates per application.
+
+      Everything SolStream does is a local network connection: the host is a PC
+      on the same LAN or the same VPN. Without this key the system denies those
+      connections, and it denies them by TIMING OUT rather than refusing, so the
+      failure reads as "the PC is not answering" and points the user at their
+      firewall, their host, and their network — anywhere but here.
+
+      This did not show up for a long time because a bare binary run from a
+      terminal inherits the terminal's own grant. Only the packaged application
+      has an identity of its own to be denied.
+    -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SolStream connects to your Windows PC on your local network or VPN to stream applications from it.</string>
+    <!--
+      And the service the host advertises itself with, so the connect window can
+      find PCs without anybody typing an address. Bonjour browsing is denied
+      unless the service type is declared here — silently, again: the browser
+      simply reports nothing and the list stays empty.
+    -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_nvstream._tcp</string>
+    </array>
 </dict>
 </plist>
 EOF
