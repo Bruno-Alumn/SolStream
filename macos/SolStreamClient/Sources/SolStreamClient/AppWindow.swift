@@ -163,6 +163,30 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// uses for document windows, which is the same problem.
     private static var cascadePoint = NSPoint.zero
 
+    /// How much of the screen a window may take when it opens. Not a limit on
+    /// the window — it resizes to anything afterwards — just a starting size that
+    /// leaves the desktop visible around it.
+    static let openingScreenFraction: CGFloat = 0.72
+
+    /// The size, in points, that a window showing a host window this big should
+    /// open at. Pure, so the rule can be tested without a screen.
+    static func openingSize(hostPixels: CGSize, scale: CGFloat, visible: CGSize) -> CGSize {
+        let room = CGSize(width: visible.width * openingScreenFraction,
+                          height: visible.height * openingScreenFraction)
+        guard hostPixels.width > 0, hostPixels.height > 0, scale > 0 else {
+            return room
+        }
+        let points = CGSize(width: hostPixels.width / scale, height: hostPixels.height / scale)
+        // One factor for both axes: a window that has to come down keeps the
+        // application's proportions instead of being squashed on whichever axis
+        // was the tighter fit. Never above 1 — this only ever shrinks, because
+        // stretching a small application to a "nicer" size would be worse than
+        // any size it chose for itself.
+        let shrink = min(1, min(room.width / points.width, room.height / points.height))
+        return CGSize(width: (points.width * shrink).rounded(),
+                      height: (points.height * shrink).rounded())
+    }
+
     func show() {
         if let window {
             if Self.cascadePoint == .zero {
@@ -249,16 +273,25 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // grey. The window still resizes to anything; it just starts where the
         // application put itself.
         //
-        // Host pixels to points is the backing scale, not a hardcoded 2. Clamped
-        // to what the Mac can show: a window created larger than the screen gets
-        // shrunk by AppKit, and then it no longer matches its crop.
+        // Host pixels to points is the backing scale, not a hardcoded 2.
+        //
+        // Then capped well short of the screen rather than at it. Clamping each
+        // axis to the visible frame meant any application that happened to be
+        // maximised on the PC — and one parked on a 3600x2338 virtual display
+        // usually is — opened edge to edge on the Mac. That reads as full screen,
+        // which is not what opening a window should do: it covers everything
+        // else, and there is nowhere left to drag it by.
+        //
+        // Shrunk by one factor on both axes, so a window that has to come down
+        // keeps the application's proportions instead of being squashed on
+        // whichever axis was the tighter fit.
         let screen = NSScreen.main
         let scale = screen?.backingScaleFactor ?? 2
         let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
         let wanted = naturalSize.width > 0 && naturalSize.height > 0 ? naturalSize : tile.size
-        let content = NSRect(x: 0, y: 0,
-                             width: min(wanted.width / scale, visible.width),
-                             height: min(wanted.height / scale, visible.height))
+        let content = NSRect(origin: .zero,
+                             size: Self.openingSize(hostPixels: wanted, scale: scale,
+                                                    visible: visible))
         let window = NSWindow(contentRect: content,
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
