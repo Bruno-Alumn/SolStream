@@ -65,7 +65,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.display = display
         self.tile = tile
         super.init()
-        build(title: remote.title)
+        build(title: remote.title,
+              naturalSize: CGSize(width: remote.width, height: remote.height))
 
         if remote.hidesCaptionWhenCropped {
             Log.info("[window] \"\(remote.title)\" has a standard title bar "
@@ -164,8 +165,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func show() {
         if let window {
             if Self.cascadePoint == .zero {
-                // Seed from wherever AppKit put the first one, so a single
-                // window still opens where it always did.
+                // Centre the first one, then cascade from there.
+                //
+                // The window is built at origin (0,0), which in macOS is the
+                // BOTTOM-left of the screen. That went unnoticed while every
+                // streamed window was very nearly screen-sized — it had nowhere
+                // to sit but roughly where it belonged. Opening applications at
+                // their own size made it plain: Character Map appeared in the
+                // bottom-left corner, half of it below the edge of the display.
+                window.center()
                 Self.cascadePoint = window.cascadeTopLeft(from: .zero)
             } else {
                 Self.cascadePoint = window.cascadeTopLeft(from: Self.cascadePoint)
@@ -229,17 +237,27 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     // MARK: - Window
 
-    private func build(title: String) {
-        // The tile is in host pixels and this window measures in points, so the
-        // conversion is the backing scale — not a hardcoded 2. Clamped to what
-        // the Mac can actually show: a window created larger than the screen gets
+    private func build(title: String, naturalSize: CGSize) {
+        // Open at the size the application already is, not at the size of the
+        // tile it is allowed to grow into.
+        //
+        // The tile for a single application is the whole capture display, so
+        // sizing from it stretched every launched application to fill a 3600px
+        // screen — Character Map opened at 940x761 and was immediately blown up
+        // to 3600x2196, where it drew its grid in one corner and left the rest
+        // grey. The window still resizes to anything; it just starts where the
+        // application put itself.
+        //
+        // Host pixels to points is the backing scale, not a hardcoded 2. Clamped
+        // to what the Mac can show: a window created larger than the screen gets
         // shrunk by AppKit, and then it no longer matches its crop.
         let screen = NSScreen.main
         let scale = screen?.backingScaleFactor ?? 2
         let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
+        let wanted = naturalSize.width > 0 && naturalSize.height > 0 ? naturalSize : tile.size
         let content = NSRect(x: 0, y: 0,
-                             width: min(tile.width / scale, visible.width),
-                             height: min(tile.height / scale, visible.height))
+                             width: min(wanted.width / scale, visible.width),
+                             height: min(wanted.height / scale, visible.height))
         let window = NSWindow(contentRect: content,
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
