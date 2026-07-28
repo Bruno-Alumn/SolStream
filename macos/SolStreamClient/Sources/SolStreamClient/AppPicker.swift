@@ -201,6 +201,20 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     // MARK: - Contents
 
     func present(windows: [RemoteWindow], apps: [RemoteApp]) {
+        // This is now a refresh as well as a first fill: the host says whenever a
+        // window opens or closes anywhere on the PC. Two things follow.
+        //
+        // A launch already under way owns the list — the row is showing its
+        // progress and the window it is waiting for is about to appear, which
+        // would rebuild the list out from under it.
+        guard busyRow == nil else { return }
+        // And nobody asked for this refresh, so it must not move the selection.
+        // applyFilter drops it back to the first row, which is right when the
+        // person is typing and wrong when something opened Notepad on the PC
+        // while they were arrowing down the list.
+        let keepKey = tableView.selectedRow >= 0 && tableView.selectedRow < rows.count
+            ? rows[tableView.selectedRow].key : nil
+
         var built: [Row] = windows.map {
             // Annotate the exception, not the rule. A Windows-drawn title bar is
             // the normal case and is simply cropped away, so saying "title bar
@@ -227,6 +241,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             + " · \(apps.count) app\(apps.count == 1 ? "" : "s") installed"
         statusLabel.textColor = DS.textMuted
         applyFilter()
+        if let keepKey, let again = rows.firstIndex(where: { $0.key == keepKey }) {
+            tableView.selectRowIndexes(IndexSet(integer: again), byExtendingSelection: false)
+            tableView.scrollRowToVisible(again)
+        }
     }
 
     func showFailure(_ message: String) {

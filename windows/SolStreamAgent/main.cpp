@@ -1290,6 +1290,67 @@ void NotifyWindowClosed(uint64_t id) {
     SendLine(client, "{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
 }
 
+/// Set when a window somewhere on this PC has come, gone or been renamed, with
+/// the tick it last happened on. Written by the event hook on the message-loop
+/// thread and read by the watcher, hence atomics rather than the lock.
+std::atomic<bool> g_window_set_dirty{false};
+std::atomic<ULONGLONG> g_window_set_touched{0};
+
+/// The picker's list is not a photograph.
+///
+/// Nothing told the Mac that the set of open windows had changed, so the list it
+/// drew on connecting was the list it kept: quit an application and its window
+/// stayed offerable, start one and it could not be picked without reconnecting.
+///
+/// The hook fires for every object on the desktop, including menu items and
+/// individual controls, so it is filtered hard to real top-level windows and
+/// then only sets a flag. The push itself is debounced on the watcher thread —
+/// opening one application emits a burst of these, and a message per event
+/// would have the Mac rebuild its list a dozen times for one visible change.
+void CALLBACK WindowSetChanged(HWINEVENTHOOK, DWORD, HWND window,
+                               LONG object, LONG child, DWORD, DWORD) {
+    if (object != OBJID_WINDOW || child != CHILDID_SELF || !window) {
+        return;
+    }
+    // Top-level only. A control being created inside a window that is already
+    // open changes nothing the picker shows.
+    if (GetAncestor(window, GA_ROOT) != window) {
+        return;
+    }
+    g_window_set_touched.store(GetTickCount64());
+    g_window_set_dirty.store(true);
+}
+
+/// Tell the Mac the window set moved, once the burst has settled.
+void NotifyWindowsChangedIfSettled() {
+    if (!g_window_set_dirty.load()) {
+        return;
+    }
+    // Long enough to swallow an application's startup burst, short enough that
+    // it still feels immediate to someone watching the picker.
+    if (GetTickCount64() - g_window_set_touched.load() < 400) {
+        return;
+    }
+    g_window_set_dirty.store(false);
+
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+        return;
+    }
+    EnterCriticalSection(&g_send_cs);
+    struct Unlock {
+        ~Unlock() { LeaveCriticalSection(&g_send_cs); }
+    } unlock;
+    const SOCKET client = g_push_client;
+    if (client == INVALID_SOCKET) {
+        return;
+    }
+    // Deliberately just a nudge, with no list attached. The Mac asks for
+    // `windows` when it wants them, and it needs `apps` in the same breath to
+    // redraw the picker anyway — so sending a list here would either be half
+    // the answer or a second copy of one it is about to fetch.
+    SendLine(client, "{\"type\":\"windowsChanged\"}");
+}
+
 /// Say so when something on this PC takes the keyboard away from the window
 /// being streamed.
 ///
@@ -1444,6 +1505,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         }
         ReportForegroundThief();
         ReportPointerTarget();
+        NotifyWindowsChangedIfSettled();
     }
     return 0;
 }
@@ -3196,6 +3258,12 @@ int wmain(int argc, wchar_t** argv) {
 
             Log("[agent] client connected");
             g_clients_connected.fetch_add(1);
+            // From here, not from `lock`. The watcher is what carries the
+            // debounced "the window set moved" push, and a Mac sitting in the
+            // application picker has locked nothing at all — which is precisely
+            // when a list that never refreshes is the thing being looked at.
+            // Idempotent, and its body does nothing while no window is held.
+            StartWatcher();
             std::thread([client]() {
                 // Loopback needs no token, so it is authorised from the start.
                 StartCursorWatcher(client, !g_require_auth);
@@ -3275,7 +3343,24 @@ int wmain(int argc, wchar_t** argv) {
     });
     status.detach();
 
+    // Installed here because an out-of-context hook delivers its callbacks on
+    // the thread that set it, through that thread's message loop — and this is
+    // the thread with one. Set from the watcher instead, the callbacks would
+    // have nowhere to arrive and the picker would go on showing a stale list.
+    HWINEVENTHOOK window_set_hook = SetWinEventHook(
+        EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, WindowSetChanged, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    HWINEVENTHOOK name_hook = SetWinEventHook(
+        EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, WindowSetChanged, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    if (!window_set_hook) {
+        Log("[agent] could not watch for window changes; the Mac's list will "
+            "only refresh when it reconnects");
+    }
+
     const int code = solstream::RunHostWindowLoop();
+    if (name_hook) { UnhookWinEvent(name_hook); }
+    if (window_set_hook) { UnhookWinEvent(window_set_hook); }
     // Closing the window takes the host down with it, Sunshine included. A
     // Sunshine still holding the capture display after SolStream is gone is one
     // nobody can see to stop.

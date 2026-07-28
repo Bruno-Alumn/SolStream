@@ -257,7 +257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Both lists, then show them together — a half-populated picker that
         // grows under the cursor is worse than a moment's wait.
-        agent.onDisplays = { [weak self, weak agent, weak picker] _ in
+        let fill: () -> Void = { [weak self, weak agent, weak picker] in
             guard let agent else { return }
             agent.windows { windows in
                 agent.apps { apps in
@@ -268,6 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        agent.onDisplays = { _ in fill() }
+        // The same fill, driven by the host noticing a window come or go. Without
+        // it the list is whatever was open at the moment of connecting: an
+        // application quit on the PC stays offerable and one started there cannot
+        // be picked at all.
+        agent.onWindowsChanged = fill
         agent.connect()
     }
 
