@@ -561,10 +561,15 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
                << "output_name = "
                << (g_capture_device_id.empty() ? Narrow(output_name)
                                                : g_capture_device_id) << "\n"
-               // SolStream crops a rectangle out of the captured display, so the
-               // cursor Sunshine composites in is a second cursor a round trip
-               // behind the local one. The client turns it off per session; this
-               // is the same answer for the first frame.
+               // Desktop Duplication, named rather than left to Sunshine's own
+               // probing so the capture path is the same on every machine.
+               //
+               // Not the cause of the "window draws its chrome, its content is a
+               // black rectangle" bug, though it looks like a capture fault and
+               // was tried as one: that was the virtual display advertising HDR,
+               // so the whole pipeline carried ST.2084 / Rec.2020 while the Mac
+               // decoded plain Rec.709 gamma. setup-virtual-display.ps1 turns HDR
+               // off; switching this to `wgc` changed nothing either way.
                << "capture = ddx\n"
                << "min_log_level = info\n"
                << "log_path = " << Narrow(config_dir) << "\\sunshine.log\n"

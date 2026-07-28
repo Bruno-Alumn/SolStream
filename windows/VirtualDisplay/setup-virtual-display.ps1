@@ -114,6 +114,18 @@ public class SolDisp {
     public int type; public uint size; public uint adapLow; public int adapHigh; public uint id;
     public int scaleRel;
   }
+  // Advanced colour — "Use HDR" — is a TARGET property, unlike DPI scaling which
+  // is a source one, so these take targetInfo's adapterId and id.
+  [StructLayout(LayoutKind.Sequential)] public struct ACGET {
+    public int type; public uint size; public uint adapLow; public int adapHigh; public uint id;
+    public uint flags;        // bit0 supported, bit1 enabled, bit2 wideColorEnforced
+    public uint colorEncoding;
+    public uint bitsPerColorChannel;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct ACSET {
+    public int type; public uint size; public uint adapLow; public int adapHigh; public uint id;
+    public uint enable;       // bit0 enableAdvancedColor
+  }
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "EnumDisplayDevicesW")]
   public static extern bool EnumAdapters(IntPtr dev, uint n, ref DISPLAY_DEVICE d, uint f);
   [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "EnumDisplaySettingsW")]
@@ -127,6 +139,8 @@ public class SolDisp {
   [DllImport("user32.dll")] public static extern int DisplayConfigGetDeviceInfo(ref SRCNAME r);
   [DllImport("user32.dll")] public static extern int DisplayConfigGetDeviceInfo(ref DPIGET r);
   [DllImport("user32.dll")] public static extern int DisplayConfigSetDeviceInfo(ref DPISET r);
+  [DllImport("user32.dll")] public static extern int DisplayConfigGetDeviceInfo(ref ACGET r);
+  [DllImport("user32.dll")] public static extern int DisplayConfigSetDeviceInfo(ref ACSET r);
 }
 "@
 
@@ -135,6 +149,8 @@ $szMode = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+DEVMODE])
 $szName = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+SRCNAME])
 $szGet  = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+DPIGET])
 $szSet  = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+DPISET])
+$szAcG  = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+ACGET])
+$szAcS  = [Runtime.InteropServices.Marshal]::SizeOf([type][SolDisp+ACSET])
 
 function Find-VddAdapter {
     for ($n = 0; $n -lt 32; $n++) {
@@ -186,9 +202,23 @@ foreach ($m in [regex]::Matches($raw, '<width>\s*(\d+)\s*</width>\s*<height>\s*(
 }
 $missing = @($wanted | Where-Object { -not $have.ContainsKey("$($_.w)x$($_.h)") })
 
+# Turn the driver's HDR off. SolStream is SDR Rec.709 from capture to screen and
+# the Mac client does no PQ tone mapping, so a display that advertises HDR is
+# actively harmful: Windows composites it in ST.2084 / Rec.2020, Sunshine encodes
+# that, and the client decodes it as ordinary gamma. White stays white and black
+# stays black -- both are endpoints of either curve -- while every mid-tone in
+# between is crushed to near-black. It presents as "the window draws its chrome
+# and its content is a black rectangle", and it is worst in precisely the
+# applications worth streaming: terminals and browsers. A pure black-on-white
+# application like Character Map looks perfect throughout, which is what makes
+# this so easy to misread as a capture bug.
+$before = $raw
+$raw = [regex]::Replace($raw, '(?is)<HDRPlus>\s*true\s*</HDRPlus>',   '<HDRPlus>false</HDRPlus>')
+$raw = [regex]::Replace($raw, '(?is)<SDR10bit>\s*true\s*</SDR10bit>', '<SDR10bit>false</SDR10bit>')
+$hdrDisabled = $raw -ne $before
+
 $modeAdded = $false
 if ($missing.Count -gt 0) {
-    Copy-Item $settings "$settings.solstream-backup" -Force -ErrorAction SilentlyContinue
     $idx = $raw.LastIndexOf('</resolutions>')
     if ($idx -lt 0) { throw "vdd_settings.xml has no <resolutions> block." }
     # One refresh rate per added resolution, not the file's global list: the driver
@@ -201,16 +231,21 @@ if ($missing.Count -gt 0) {
     foreach ($m in $missing) {
         $block += "        <resolution>`r`n            <width>$($m.w)</width>`r`n            <height>$($m.h)</height>`r`n            <refresh_rate>60</refresh_rate>`r`n        </resolution>`r`n"
     }
-    [System.IO.File]::WriteAllText($settings, $raw.Substring(0, $idx) + $block + "    " + $raw.Substring($idx),
-                                   (New-Object System.Text.UTF8Encoding($false)))
+    $raw = $raw.Substring(0, $idx) + $block + "    " + $raw.Substring($idx)
     Write-Host ("Added to vdd_settings.xml: " + (($missing | ForEach-Object { "$($_.w)x$($_.h)" }) -join ', '))
     $modeAdded = $true
 } else {
     Write-Host "All ladder modes already offered by the driver"
 }
 
-# The driver reads that file when the device starts, so a new mode needs a cycle.
-if ($modeAdded) {
+if ($modeAdded -or $hdrDisabled) {
+    Copy-Item $settings "$settings.solstream-backup" -Force -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText($settings, $raw, (New-Object System.Text.UTF8Encoding($false)))
+}
+if ($hdrDisabled) { Write-Host "Turned HDR off in vdd_settings.xml; the stream is SDR Rec.709" }
+
+# The driver reads that file when the device starts, so a change needs a cycle.
+if ($modeAdded -or $hdrDisabled) {
     Write-Host "Restarting the virtual display device..."
     Import-Module PnpDevice -ErrorAction SilentlyContinue
     $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
@@ -297,6 +332,37 @@ for ($i = 0; $i -lt $np; $i++) {
     if ([SolDisp]::DisplayConfigSetDeviceInfo([ref]$s) -ne 0) { throw "Setting DPI scale failed." }
     Write-Host "Set DPI scaling to ${Scale}% (Windows recommends $($TABLE[$rec])%)"
     $scaled = $true
+
+    # Turn "Use HDR" off. Clearing <HDRPlus> in vdd_settings.xml stops the driver
+    # ADVERTISING HDR, but Windows remembers the per-display toggle and re-applies
+    # it, so the display keeps composing in ST.2084 / Rec.2020 and only the bit
+    # depth drops. This is the setting that actually decides, and it has to be a
+    # target property: DPI above is a source one.
+    #
+    # It matters because SolStream is SDR Rec.709 end to end and the Mac client
+    # does no PQ tone mapping. Streaming a PQ display to it leaves white white and
+    # black black -- both curves share those endpoints -- and crushes everything
+    # between to near-black, which reads as "the window's chrome draws but its
+    # content is a black rectangle" in every terminal and every browser.
+    $t = $paths[$i].targetInfo
+    $ag = New-Object SolDisp+ACGET
+    $ag.type = 9; $ag.size = $szAcG      # GET_ADVANCED_COLOR_INFO
+    $ag.adapLow = $t.adapterId.LowPart; $ag.adapHigh = $t.adapterId.HighPart; $ag.id = $t.id
+    if ([SolDisp]::DisplayConfigGetDeviceInfo([ref]$ag) -eq 0) {
+        if (($ag.flags -band 2) -ne 0) {
+            $as = New-Object SolDisp+ACSET
+            $as.type = 10; $as.size = $szAcS  # SET_ADVANCED_COLOR_STATE
+            $as.adapLow = $t.adapterId.LowPart; $as.adapHigh = $t.adapterId.HighPart; $as.id = $t.id
+            $as.enable = 0
+            if ([SolDisp]::DisplayConfigSetDeviceInfo([ref]$as) -eq 0) {
+                Write-Host "Turned HDR off on this display (SolStream streams SDR Rec.709)"
+            } else {
+                Write-Warning "Could not turn HDR off; colours will look crushed until you turn it off in Settings > Display > Use HDR."
+            }
+        } else {
+            Write-Host "HDR already off on this display"
+        }
+    }
     break
 }
 if (-not $scaled) { Write-Warning "Could not set DPI scaling; the display is attached regardless." }
