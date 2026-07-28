@@ -355,8 +355,24 @@ bool CanPaintOver(HWND window) {
             // The call only succeeds for windows that used
             // SetLayeredWindowAttributes. A failure means per-pixel alpha via
             // UpdateLayeredWindow, which is how game and chat overlays are
-            // built ΓÇö screen-sized, and almost entirely transparent. Treating
+            // built -- screen-sized, and almost entirely transparent. Treating
             // those as occluders reports a permanent false positive.
+            //
+            // It is also how a modern Windows dialog draws its shadow, so this
+            // misses a real one: a Windows Security prompt about Sunshine sat
+            // in the middle of a streamed window and nothing reported it.
+            //
+            // Tried and reverted: counting a layered window as an occluder when
+            // it takes focus and does not span the screen. That is true of a
+            // dialog, and also true of a background window this machine happens
+            // to run called "AwsBuddyWindow" -- after which EVERY window on the
+            // host reported as occluded, permanently. A warning pinned over
+            // every stream forever is worse than missing an occasional dialog,
+            // and the comment above had already learned this once.
+            //
+            // A correct test needs to know whether the pixels are actually
+            // opaque, which neither the window styles nor the layered-window
+            // attributes answer.
             return false;
         }
     }
@@ -1759,6 +1775,28 @@ std::string WindowStatusJson(uint64_t id) {
     out += ",\"w\":" + std::to_string(client.right - client.left);
     out += ",\"h\":" + std::to_string(client.bottom - client.top);
     out += ",\"captionInset\":" + std::to_string((int) std::max(0L, client.top - frame.top));
+
+    // Whether anything is drawn over it, and by what.
+    //
+    // The crop is a rectangle on a shared display: anything covering the tile is
+    // streamed as though it were part of the application, with nothing on the
+    // Mac to say otherwise. It is not hypothetical — a Windows Firewall prompt
+    // about Sunshine appeared on the virtual display mid-test and sat over half
+    // the streamed window, looking for all the world like part of it.
+    //
+    // Computed from the same top-to-bottom enumeration the window list uses,
+    // which already works this out; asked once a second per window, which is
+    // the same rate the liveness poll runs at anyway.
+    for (const WindowInfo& info : EnumerateWindows()) {
+        if (info.handle != handle) {
+            continue;
+        }
+        out += ",\"occluded\":" + std::string(info.occluded ? "true" : "false");
+        if (info.occluded) {
+            out += ",\"occludedBy\":\"" + JsonEscape(info.occluded_by) + "\"";
+        }
+        break;
+    }
     out += "}";
     return out;
 }

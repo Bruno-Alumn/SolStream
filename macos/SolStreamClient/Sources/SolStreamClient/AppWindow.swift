@@ -139,21 +139,71 @@ final class AppWindow: NSObject, NSWindowDelegate {
             self.agent.windowStatus(id: self.remoteWindowID) { [weak self] status in
                 // A dropped agent connection reports nil, not death. Closing the
                 // window on a transient failure would be worse than doing nothing.
-                guard let status, !status.isAlive else { return }
-                DispatchQueue.main.async { self?.hostWindowClosed(noticedBy: "poll") }
+                guard let status else { return }
+                guard status.isAlive else {
+                    DispatchQueue.main.async { self?.hostWindowClosed(noticedBy: "poll") }
+                    return
+                }
+                DispatchQueue.main.async { self?.reportOcclusion(status) }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         lifeTimer = timer
     }
 
+    /// Where the next streamed window should be placed, so two of them do not
+    /// land on top of each other.
+    ///
+    /// Every window is built at the same default rectangle, so streaming two
+    /// applications opened one exactly behind the other: the log said two
+    /// windows were attached, the screen showed one, and the second was only
+    /// reachable through the Window menu. AppKit's own cascade is the answer it
+    /// uses for document windows, which is the same problem.
+    private static var cascadePoint = NSPoint.zero
+
     func show() {
+        if let window {
+            if Self.cascadePoint == .zero {
+                // Seed from wherever AppKit put the first one, so a single
+                // window still opens where it always did.
+                Self.cascadePoint = window.cascadeTopLeft(from: .zero)
+            } else {
+                Self.cascadePoint = window.cascadeTopLeft(from: Self.cascadePoint)
+            }
+        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func close() {
         window?.close()
+    }
+
+    /// Whether the last poll said something was covering the host window, so
+    /// the overlay is only touched when the answer changes.
+    private var wasOccluded = false
+
+    /// Say when something on the PC is covering the streamed window.
+    ///
+    /// The crop is a rectangle on a shared display, so anything drawn over the
+    /// tile arrives looking exactly like part of the application. A Windows
+    /// firewall prompt did precisely that during testing: half the streamed
+    /// window became a dialog about Sunshine, with nothing on this end to say it
+    /// was not the application's own.
+    private func reportOcclusion(_ status: RemoteWindowStatus) {
+        guard !isClosing, status.isOccluded != wasOccluded else { return }
+        wasOccluded = status.isOccluded
+        if status.isOccluded {
+            let culprit = status.occludedBy.flatMap { $0.isEmpty ? nil : $0 }
+            Log.info("[window] something on the host is covering this window"
+                     + (culprit.map { ": \($0)" } ?? ""))
+            setStatus("Something on the PC is covering this window",
+                      detail: culprit.map { "\($0) is on top of it. Move or close it there." }
+                          ?? "Move or close whatever is on top of it.")
+        } else {
+            Log.info("[window] the host window is clear again")
+            hideStatus()
+        }
     }
 
     /// Show the cursor the host is showing, so hovering a text field over the
