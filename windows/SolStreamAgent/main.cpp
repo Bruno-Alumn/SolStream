@@ -2913,22 +2913,64 @@ int wmain(int argc, wchar_t** argv) {
                 Log("[agent] accept failed: %d", WSAGetLastError());
                 continue;
             }
+
+            // One Mac at a time, said out loud rather than by hanging.
+            //
+            // Sunshine serves one session — it refuses a second /launch
+            // outright — so two Macs streaming from one PC is not something
+            // this can support however the socket is written. What it CAN do is
+            // say so.
+            //
+            // Saying so requires accept() to keep running, which is why serving
+            // moved onto its own thread. The first attempt at this put the
+            // check here and left ServeClient inline, which changed nothing:
+            // the loop was blocked inside ServeClient for the whole session, so
+            // the second connection never reached the check at all — it sat in
+            // the kernel's accept backlog exactly as before, with no error and
+            // no timeout. The refusal only works if something is still
+            // listening to refuse with.
+            //
+            // The refusal carries the same fields as `status`, so a second Mac
+            // can still tell whether the host is healthy — and so can anyone
+            // diagnosing it, which is how this was noticed at all.
+            if (g_clients_connected.load() > 0) {
+                char name[256] = {};
+                DWORD name_size = sizeof(name);
+                GetComputerNameA(name, &name_size);
+                std::string busy = "{\"type\":\"busy\",\"message\":\"";
+                busy += JsonEscape(std::string(name) + " is already streaming to "
+                                   "another Mac. Disconnect there first.");
+                busy += "\",\"sunshine\":\"";
+                busy += solstream::GetSunshineState() == solstream::SunshineState::kRunning
+                            ? "running" : "not running";
+                busy += "\",\"basePort\":" + std::to_string(g_sunshine_base);
+                busy += ",\"virtualDisplay\":"
+                     + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
+                busy += "}";
+                Log("[agent] refused a second client: one is already connected");
+                SendLine(client, busy);
+                closesocket(client);
+                continue;
+            }
+
             Log("[agent] client connected");
             g_clients_connected.fetch_add(1);
-            // Loopback needs no token, so it is authorised from the start.
-            StartCursorWatcher(client, !g_require_auth);
-            ServeClient(client);
-            // Stopped before the socket closes: the watcher writes to it.
-            StopCursorWatcher();
-            closesocket(client);
-            // Give every managed window its resize border back. A Mac that goes
-            // away must not leave applications permanently unresizable.
-            UnlockAll();
-            // A PIN nobody is waiting on any more is worse than no PIN: it is a
-            // code on screen that does nothing, for a Mac that has gone.
-            solstream::ShowPairingPin(L"", L"");
-            g_clients_connected.fetch_sub(1);
-            Log("[agent] client disconnected");
+            std::thread([client]() {
+                // Loopback needs no token, so it is authorised from the start.
+                StartCursorWatcher(client, !g_require_auth);
+                ServeClient(client);
+                // Stopped before the socket closes: the watcher writes to it.
+                StopCursorWatcher();
+                closesocket(client);
+                // Give every managed window its resize border back. A Mac that
+                // goes away must not leave applications permanently unresizable.
+                UnlockAll();
+                // A PIN nobody is waiting on any more is worse than no PIN: it
+                // is a code on screen that does nothing, for a Mac that has gone.
+                solstream::ShowPairingPin(L"", L"");
+                g_clients_connected.fetch_sub(1);
+                Log("[agent] client disconnected");
+            }).detach();
         }
     });
     server.detach();

@@ -228,3 +228,85 @@ Known divergences, all handled in the source:
 - Not yet implemented: `SetWinEventHook` lifecycle events (window created,
   renamed, destroyed) and icon extraction. The Mac currently has to poll
   `windows`.
+
+## Installing
+
+`scripts/package-windows.ps1` builds the folder that ships; `scripts/install-windows.ps1`
+puts it in place. Installation is a step rather than a copy for one reason:
+
+Windows will not let a program accept connections it has never been asked
+about. Normally it asks — the first time a program listens, a dialog appears and
+the answer becomes a firewall rule. SolStream starts from a logon task, which
+has no desktop to show a dialog on, so nothing asks and Windows decides for
+itself: it writes a **Block** rule, and the host silently accepts nothing.
+
+That block cannot be undone by adding permission afterwards. An explicit Block
+beats an Allow, so a later "allow this program" rule changes nothing. Measured:
+with SolStream's binaries blocked this way, ports 47595–47630 were refused from
+the Mac while 22, 47984 and 47989 stayed open, and neither a program-scoped nor
+a port-scoped Allow rule reopened them.
+
+So the installer creates its rules **before** anything listens, and removes
+stale Blocks for its own paths rather than trying to out-rank them.
+
+## Why a logon task rather than a Windows service
+
+Sunshine installs itself as a service, so the obvious question is why this does
+not. The answer is session 0.
+
+A service runs in session 0, which has a phantom 1024x768 display, no window
+station and no user desktop. From there this program can see none of the things
+it exists to see: `EnumWindows` returns nothing of the user's, the display list
+is a fiction, and it has nowhere to put its own window. A service could only
+launch the real work into the interactive session and supervise it — which is
+what Sunshine's `sunshinesvc.exe` does, and it is a meaningful amount of
+machinery to maintain.
+
+Against that, what a service buys is: the host keeps running when nobody is
+logged in. But nothing SolStream does is useful then. There is no desktop to
+capture, no application windows to place, and the virtual display's contents
+would be a logon screen. Streaming a PC that nobody is logged into is not a
+feature that was lost.
+
+So: a logon task, running interactively as the logged-on user. It starts when
+they log in, which is exactly when there is something to stream.
+
+## The virtual display
+
+SolStream streams a virtual display rather than a real monitor. That is not a
+preference:
+
+* a window can be any size, instead of being capped by the monitor's resolution;
+* the display's mode can be matched to the Mac exactly, so every pixel is 1:1
+  rather than resampled;
+* nothing can be dragged over the streamed window by somebody at the PC, because
+  nobody is looking at that display.
+
+Without one, SolStream captures a real screen and all three stop being true.
+
+No driver is bundled with this repository — a signed kernel driver is not
+something to vendor casually, and installing one should be the user's decision.
+To set one up:
+
+1. Install any indirect display driver. The one SolStream is tested against is
+   the Virtual Display Driver, <https://github.com/itsmikethetech/Virtual-Display-Driver>.
+2. Start SolStream. It reports the driver in its window, picks that display
+   automatically, and pins Sunshine to it.
+
+To have SolStream install one for you instead, put the driver package in a
+`driver\` folder beside `SolStream.exe`, named `SolStreamDisplay.inf`;
+`package-windows.ps1 -DriverDir <path>` does that at packaging time. The app
+then offers an Install button, which runs `pnputil` elevated so the user sees
+the UAC prompt — installing a kernel driver behind a prompt nobody sees is not
+something this should be able to do.
+
+## One Mac at a time
+
+The agent serves one client and refuses the next with a `busy` line naming the
+host, rather than leaving it in the accept backlog. Sunshine runs a single
+session — it refuses a second `/launch` outright — so two Macs streaming from
+one PC is not supportable however the socket is written. What it can do is say
+so in 8ms instead of appearing to connect forever.
+
+The refusal carries the same fields as `status`, so a second Mac (or a person
+diagnosing one) can still tell whether the host is healthy.
