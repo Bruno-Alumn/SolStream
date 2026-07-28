@@ -23,6 +23,9 @@ set_target_properties(SolStreamAgent PROPERTIES
 target_link_libraries(SolStreamAgent PRIVATE
     user32 ws2_32 dwmapi shell32 winhttp crypt32 bcrypt gdi32
     setupapi cfgmgr32 comctl32
+    # The host window draws with Direct2D and lays out text with DirectWrite.
+    # Both are in-box, so this adds nothing to what has to be installed.
+    d2d1 dwrite
 )
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
