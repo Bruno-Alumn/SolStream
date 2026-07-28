@@ -257,6 +257,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 self.state.isReachable = reachable
                 self.state.hasAgent = agent
                 self.state.latency = reachable ? elapsed : nil
+                // Remember it here rather than on Connect. Typing an address and
+                // then not connecting -- because the stream was for later, or the
+                // window was closed, or connecting failed once -- meant typing the
+                // whole thing again next time, since nothing but the Connect
+                // button ever wrote to the list.
+                //
+                // Gated on the probe having found something, which is what keeps
+                // the list free of half-typed addresses: every keystroke schedules
+                // one of these, and "192.168.1.5" on the way to "192.168.1.50" is
+                // not a host anyone wants offered back to them.
+                if reachable || agent { Self.remember(host: address) }
                 self.refresh()
             }
         }
