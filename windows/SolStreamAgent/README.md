@@ -225,9 +225,11 @@ Known divergences, all handled in the source:
   would be silently rescaled by Windows on any display not at 100%.
 - Cloaked windows are filtered out; UWP leaves invisible ghost windows that
   otherwise fill the list.
-- Not yet implemented: `SetWinEventHook` lifecycle events (window created,
-  renamed, destroyed) and icon extraction. The Mac currently has to poll
-  `windows`.
+- Window lifecycle is watched with `SetWinEventHook` (created, shown, hidden,
+  destroyed, renamed) and pushed to the Mac as a debounced `windowsChanged`
+  nudge, so the picker's list is live rather than a snapshot taken on connect.
+  The hook is installed on the message-loop thread, because an out-of-context
+  hook delivers its callbacks through the loop of the thread that set it.
 
 ## Installing
 
