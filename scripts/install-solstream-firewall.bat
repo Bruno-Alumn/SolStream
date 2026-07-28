@@ -112,9 +112,15 @@ REM
 REM No pipe in the PowerShell. Inside for /f's backticks a `|` has to be written
 REM `^|`, and the caret is then handed to PowerShell literally -- "a positional
 REM parameter cannot be found that accepts argument '^'" -- so the lookup fails
-REM and the rule is silently skipped. An if-statement avoids the question.
+REM and the rule is silently skipped. A foreach avoids the question.
+REM
+REM And not simply the first match either. There can be several processes of one
+REM name -- a machine with its own Sunshine service has that one and SolStream's
+REM child both running -- and Path comes back empty for any whose image this
+REM session cannot read. Taking [0] therefore skipped the Sunshine rule while
+REM cheerfully creating the agent's. Walk them and keep the first that answers.
 :Running
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$p = Get-Process -Name '%~1' -ErrorAction SilentlyContinue; if ($p) { $p[0].Path }"`) do set %~2=%%P
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$found = ''; foreach ($q in @(Get-Process -Name '%~1' -ErrorAction SilentlyContinue)) { if (-not $found) { try { if ($q.Path) { $found = $q.Path } } catch { } } }; $found"`) do set %~2=%%P
 goto :EOF
 
 :Program
