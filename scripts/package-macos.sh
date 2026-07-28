@@ -53,6 +53,19 @@ mkdir -p "$APP_PATH/Contents/Resources"
 # build's binary.
 cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
 
+# The icon. Cut by assets/logo/build.sh and committed, rather than generated
+# here: an icon that changes because a toolchain updated is an icon nobody
+# reviewed. Missing is not fatal — the bundle still runs, it just wears the
+# generic application icon — but it is worth saying, because a blank icon in the
+# Dock is the first thing anybody notices and the last thing anybody reports.
+ICON_SRC="Resources/AppIcon.icns"
+if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APP_PATH/Contents/Resources/AppIcon.icns"
+else
+    echo "  WARNING: no $ICON_SRC — run assets/logo/build.sh. The bundle will"
+    echo "           show the generic application icon in the Dock and Finder."
+fi
+
 # Step 2: Create Info.plist if missing
 echo ""
 echo "--- Step 2: Info.plist ---"
@@ -73,6 +86,14 @@ if true; then
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
     <string>$PRODUCT_NAME</string>
+    <!-- Both keys, and neither is redundant. CFBundleIconFile is what the Dock,
+         Finder and the Cmd-Tab switcher read out of a bundle that was not built
+         by Xcode; CFBundleIconName is what Sonoma and later prefer, and its
+         absence is why an icns can sit in Resources being ignored. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>0.2.0</string>
     <key>CFBundleShortVersionString</key>

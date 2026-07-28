@@ -610,9 +610,13 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
     // at is the one that asked for it.
     execute.nShow = SW_HIDE;
     if (!ShellExecuteExW(&execute)) {
+        // Not "to install": this is the same call the uninstaller makes, and it
+        // told somebody removing SolStream that it needed rights to install.
+        // Neither half of the sentence has to name the operation -- the window
+        // that raised the prompt is already saying which one it is.
         error = GetLastError() == ERROR_CANCELLED
-                    ? "SolStream needs administrator rights to install, and the "
-                      "prompt was dismissed."
+                    ? "Windows' permission prompt was dismissed, so nothing was "
+                      "changed."
                     : "Could not restart SolStream with administrator rights.";
         return false;
     }
@@ -624,6 +628,7 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
 }
 
 bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
+    InstallLog("stepping out to a temporary copy to uninstall from");
     const std::wstring copy = TempDirectory() + L"SolStreamUninstall.exe";
     // Best effort: a copy left behind by an earlier attempt is still running or
     // still locked often enough that overwriting has to be allowed to fail
@@ -647,6 +652,7 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     if (execute.hProcess) {
         CloseHandle(execute.hProcess);
     }
+    InstallLog("temporary copy started");
     return true;
 }
 
@@ -775,7 +781,9 @@ bool UninstallSelf(std::string& error) {
     const std::wstring destination = InstallDirectory();
     RunHidden(L"schtasks.exe /end /tn \"" + std::wstring(kTaskName) + L"\"");
     RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
+    InstallLog("logon task removed");
     StopInstalled(destination);
+    InstallLog("stopped what was running from the install directory");
     DeleteRule(L"SolStream - agent");
     DeleteRule(L"SolStream - Sunshine TCP");
     DeleteRule(L"SolStream - Sunshine UDP");
@@ -785,8 +793,10 @@ bool UninstallSelf(std::string& error) {
     DeleteRule(L"SolStream (SolStream.exe, UDP)");
     DeleteRule(L"SolStream (sunshine.exe, TCP)");
     DeleteRule(L"SolStream (sunshine.exe, UDP)");
+    InstallLog("firewall rules removed");
     RemoveShortcuts();
     RemoveUninstallEntry();
+    InstallLog("shortcuts and the Add/Remove Programs entry removed");
     RemoveTree(destination);
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
         error = "Removed what it could, but " + Narrow(destination)

@@ -3579,6 +3579,10 @@ int wmain(int argc, wchar_t** argv) {
             const std::wstring pass = uninstall_now ? L"--uninstall --now"
                                                     : L"--uninstall";
             if (!solstream::RelaunchFromTemp(pass, error)) {
+                // stderr is /dev/null in the case this matters -- an uninstall
+                // started from Add/Remove Programs has no console at all -- so
+                // the reason has to go where somebody can find it.
+                solstream::WriteInstallResult(false, error);
                 std::fprintf(stderr, "%s\n", error.c_str());
                 return 1;
             }

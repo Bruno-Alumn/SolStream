@@ -20,9 +20,18 @@
 
 namespace solstream {
 
-/// The version reported to Add/Remove Programs. One place, so the number in the
-/// control panel cannot disagree with the number in the window.
-constexpr wchar_t kVersion[] = L"1.0.0";
+// The version, set by CMake so the number compiled into the code and the one in
+// the executable's resource block come from the same place. The fallback is for
+// build-cross.sh, which compiles straight from the shell to catch errors early
+// and produces nothing anybody ships.
+#ifndef SOLSTREAM_VERSION_STRING
+#define SOLSTREAM_VERSION_STRING "1.0.0"
+#endif
+#define SOLSTREAM_WIDEN2(x) L##x
+#define SOLSTREAM_WIDEN(x) SOLSTREAM_WIDEN2(x)
+
+/// The version reported to Add/Remove Programs.
+constexpr wchar_t kVersion[] = SOLSTREAM_WIDEN(SOLSTREAM_VERSION_STRING);
 
 /// What the user ticked on the setup screen.
 ///

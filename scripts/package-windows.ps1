@@ -53,6 +53,16 @@ Write-Host "=== SolStream Windows package ==="
 # Step 1: build
 cmake -S "$PSScriptRoot\.." -B $BuildDir | Out-Null
 cmake --build $BuildDir --target SolStreamAgent --config Release
+# $ErrorActionPreference does not apply to a native command's exit code, so a
+# failed build carries straight on. It has already shipped one stale binary:
+# a running agent held SolStreamAgent.exe open, the link failed with LNK1104,
+# and the script packaged the PREVIOUS build -- which happened to be the one
+# without Sunshine embedded, so the setup program came out at 1 MB instead of
+# 26 and would have installed a host that could not stream. Check the code.
+if ($LASTEXITCODE -ne 0) {
+    throw ("the build failed ($LASTEXITCODE). If this is LNK1104, something is " +
+           "running the executable -- stop the agent and try again.")
+}
 
 $exe = Join-Path $BuildDir "bin\release\SolStreamAgent.exe"
 if (-not (Test-Path $exe)) {
@@ -169,7 +179,18 @@ Write-Host ("  payload: {0:N0} MB" -f ((Get-Item $payload).Length / 1MB))
 
 cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=$payload" | Out-Null
 cmake --build $BuildDir --target SolStreamAgent --config Release | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "the single-file rebuild failed ($LASTEXITCODE)" }
 if (-not (Test-Path $exe)) { throw "the single-file rebuild produced no executable" }
+
+# The whole point of this step is that Sunshine ends up INSIDE the executable,
+# and the only evidence of that is the size. An exe that came out the size of an
+# ordinary build is one that will report "no sunshine.exe found" on the first
+# machine it is installed on -- which is a bug report, not a build failure.
+$rebuilt = (Get-Item $exe).Length
+if ($rebuilt -lt (Get-Item $payload).Length) {
+    throw ("the rebuilt executable is {0:N0} bytes, smaller than the {1:N0}-byte " +
+           "payload it should contain -- the archive was not embedded") -f $rebuilt, (Get-Item $payload).Length
+}
 
 $single = Join-Path (Split-Path $OutDir -Parent) "SolStreamSetup.exe"
 Copy-Item $exe $single -Force

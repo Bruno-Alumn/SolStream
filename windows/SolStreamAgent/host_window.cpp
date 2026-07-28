@@ -276,6 +276,57 @@ void FocusRing(const D2D1_RECT_F& control, float control_radius) {
                                    g_brush, stroke);
 }
 
+/// The mark: a hairline frame with a solid accent rect straddling its right
+/// edge — the host display, and the application half out of it.
+///
+/// Drawn rather than loaded from the .ico beside it, because this is the only
+/// place it appears at a size Windows has no artboard for, and because at 34
+/// DIP on a 200% display it wants 68 real pixels: a scaled 48px icon there is
+/// visibly soft next to text DirectWrite has hinted. Two rounded rectangles
+/// cost less than the code to pick the right icon size would.
+///
+/// With its tile, which is not decoration: the mark's artwork occupies the
+/// middle 48% of the tile, so without one it reads as a small glyph floating
+/// beside large type rather than as the application's icon. Every lockup in the
+/// design shows the tile, on light grounds as well as dark.
+void DrawLogo(const D2D1_RECT_F& box) {
+    const float side = box.bottom - box.top;
+    const float stroke = side < 24.0f ? 1.0f : side / 17.0f;
+
+    // The design's own light-ground lockup, not the dark one inverted: on a
+    // light ground the tile lightens, the frame darkens toward the text, and the
+    // accent goes to its 700 step so a solid block of it still holds its
+    // contrast against a near-white card.
+    const D2D1_COLOR_F tile = g_palette.dark ? Hex(0x232532) : Hex(0xe4e7f5);
+    const D2D1_COLOR_F tileEdge = g_palette.dark ? Hex(0x3f424d) : Hex(0xcfd3e5);
+    const D2D1_COLOR_F frameInk = g_palette.dark ? Hex(0x595d6c) : Hex(0x9397ab);
+    const D2D1_COLOR_F accentInk = g_palette.dark ? Hex(0x9184d9) : Hex(0x5d5294);
+
+    // 22.4% — the macOS squircle radius, which is also what the tile is drawn at
+    // everywhere it appears beside the wordmark.
+    Fill(box, side * 0.224f, tile);
+    Stroke(box, side * 0.224f, tileEdge);
+
+    // The same fractions the icon artboards use, so the wordmark's companion and
+    // the taskbar icon are the same drawing rather than two things that look
+    // alike. See assets/logo/make-logo.swift.
+    const D2D1_RECT_F frame{box.left + side * 0.15f + stroke / 2,
+                            box.top + side * 0.26f + stroke / 2,
+                            box.left + side * 0.60f - stroke / 2,
+                            box.top + side * 0.74f - stroke / 2};
+    g_brush->SetColor(frameInk);
+    g_target->DrawRoundedRectangle(
+        D2D1::RoundedRect(frame, side * 0.055f, side * 0.055f), g_brush, stroke);
+
+    // Drawn second, so it covers the frame's right edge. The overlap IS the
+    // mark — a window that crossed a boundary and stopped being remote.
+    const D2D1_RECT_F accent{box.left + side * 0.44f, box.top + side * 0.38f,
+                             box.left + side * 0.85f, box.top + side * 0.74f};
+    g_brush->SetColor(accentInk);
+    g_target->FillRoundedRectangle(
+        D2D1::RoundedRect(accent, side * 0.047f, side * 0.047f), g_brush);
+}
+
 /// A status mark. Solid accent = good, accent in a ring = needs you, grey =
 /// not present. No new hues and never red: severity lives in the words.
 void DrawMark(float cx, float cy, Mark mark) {
@@ -545,6 +596,27 @@ struct Row {
     Mark mark;
 };
 
+/// The horizontal lockup: mark, gap, wordmark.
+///
+/// The design fixes the relationship rather than the sizes — the mark's artwork
+/// is as tall as the wordmark's cap height, and the gap between them is that
+/// height divided by 2.5. Segoe UI Variable's cap height is 0.7 of its em, so
+/// the 28 DIP wordmark wants 19.6 DIP of artwork; the artwork is the middle 48%
+/// of the tile, so the tile is 19.6 / 0.48 = 41. That is also the design's own
+/// lockup proportion — a 44 tile against 30 type — arrived at from the other
+/// end, which is the check that the rule and the drawing agree.
+constexpr float kLockupMark = 41.0f;
+constexpr float kLockupH = 42.0f;
+
+void DrawLockup(float left, float top, float right) {
+    const float mark_top = top + (kLockupH - kLockupMark) / 2.0f;
+    DrawLogo(D2D1::RectF(left, mark_top, left + kLockupMark, mark_top + kLockupMark));
+    const float gap = kLockupMark * 0.48f / 2.5f;
+    Text(L"SolStream", g_fmt_wordmark,
+         D2D1::RectF(left + kLockupMark + gap, top, right, top + kLockupH),
+         g_palette.text);
+}
+
 /// Make the window tall enough for what was just laid out.
 ///
 /// The design fixes the window at 460x560 and every block inside it at a height
@@ -674,9 +746,8 @@ void LayoutAndPaintSetup(HWND window) {
     HideAllControls();
 
     float y = pad;
-    Text(L"SolStream", g_fmt_wordmark,
-         D2D1::RectF(pad, y, right, y + 36.0f), g_palette.text);
-    y += 36.0f + space::kMd;
+    DrawLockup(pad, y, right);
+    y += kLockupH + space::kMd;
 
     const float headline_h = MeasureHeight(copy.headline, g_fmt_headline,
                                            right - pad, 52.0f);
@@ -841,10 +912,10 @@ void LayoutAndPaint(HWND window) {
 
     float y = pad;
 
-    // Wordmark. Segoe UI Variable Display at a real 500 axis stop.
-    Text(L"SolStream", g_fmt_wordmark,
-         D2D1::RectF(pad, y, right, y + 36.0f), g_palette.text);
-    y += 36.0f + space::kMd;
+    // The lockup: the mark, then the wordmark in Segoe UI Variable Display at a
+    // real 500 axis stop.
+    DrawLockup(pad, y, right);
+    y += kLockupH + space::kMd;
 
     // The headline answers "is this PC ready" before anything else is read.
     const float headline_h = MeasureHeight(screen.headline, g_fmt_headline,
@@ -1344,14 +1415,23 @@ void MoveFocus(HWND window, int direction) {
     if (order.empty()) {
         return;
     }
+    // Where the focus is NOW, and whether it is anywhere at all. The second
+    // half matters: a control can vanish under the focus when the screen
+    // changes phase -- press Remove, the job fails, and the Remove button is
+    // replaced by Try again and Close. Treating a stale id as "index 0" and
+    // advancing from it silently skipped the first button, so the next Tab
+    // landed on Close and closing was one keystroke from where retrying should
+    // have been.
     size_t index = 0;
+    bool focused = false;
     for (size_t i = 0; i < order.size(); ++i) {
         if (order[i] == g_focus) {
             index = i;
+            focused = true;
             break;
         }
     }
-    if (g_focus == 0) {
+    if (!focused) {
         index = direction > 0 ? 0 : order.size() - 1;
     } else {
         index = (index + order.size() + (direction > 0 ? 1 : -1)) % order.size();
@@ -1664,6 +1744,17 @@ bool ShowHostWindow(WindowMode mode) {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = class_name;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    // The title bar and Alt-Tab take the CLASS's icon, not the executable's.
+    // Leaving these null does not fall back to the .ico in the binary — it falls
+    // back to Windows' generic application icon, so the taskbar showed
+    // SolStream's mark while the title bar two inches above it showed a green
+    // square. Resource 1 is the icon group; see resources.rc.in.
+    wc.hIcon = (HICON) LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                  GetSystemMetrics(SM_CXICON),
+                                  GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON) LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                    GetSystemMetrics(SM_CXSMICON),
+                                    GetSystemMetrics(SM_CYSMICON), 0);
     if (!RegisterClassExW(&wc)) {
         return false;
     }

@@ -23,14 +23,28 @@ cmake_policy(SET CMP0091 NEW)
 set(SOLSTREAM_SUNSHINE_ZIP "" CACHE FILEPATH
     "Zip of the sunshine\\ folder to embed, so the executable ships alone")
 
-set(SOLSTREAM_RESOURCES "")
+# The resource script is built ALWAYS, not only when Sunshine is being embedded.
+# It used to be conditional, which meant every ordinary build produced an
+# executable with no icon and no version block -- and the only builds that had
+# them were the packaged ones nobody looks at until they are on somebody else's
+# machine.
+set(SOLSTREAM_VERSION "1.0.0")
+string(REPLACE "." "," SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION}")
+set(SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION_COMMA},0")
+
+# RC treats a backslash as an escape, so every path has to arrive doubled.
+string(REPLACE "\\" "\\\\" SOLSTREAM_ICON_RC "${CMAKE_CURRENT_SOURCE_DIR}/SolStream.ico")
+
 if(SOLSTREAM_SUNSHINE_ZIP AND EXISTS "${SOLSTREAM_SUNSHINE_ZIP}")
-    # RC treats a backslash as an escape, so the path has to arrive doubled.
     string(REPLACE "\\" "\\\\" SOLSTREAM_SUNSHINE_ZIP_RC "${SOLSTREAM_SUNSHINE_ZIP}")
-    configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
-    set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
+    set(SOLSTREAM_SUNSHINE_RC "SUNSHINE_ARCHIVE RCDATA \"${SOLSTREAM_SUNSHINE_ZIP_RC}\"")
     message(STATUS "SolStream: embedding ${SOLSTREAM_SUNSHINE_ZIP}")
+else()
+    set(SOLSTREAM_SUNSHINE_RC "")
 endif()
+
+configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
+set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
 
 add_executable(SolStreamAgent
     main.cpp
@@ -61,7 +75,11 @@ target_link_libraries(SolStreamAgent PRIVATE
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
 # of the API, on both toolchains.
-target_compile_definitions(SolStreamAgent PRIVATE UNICODE _UNICODE)
+target_compile_definitions(SolStreamAgent PRIVATE UNICODE _UNICODE
+    # One version number for the code and for the resource block, so what
+    # Add/Remove Programs lists and what the file's Properties dialog says
+    # cannot disagree.
+    SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
 
 if(MSVC)
     # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
