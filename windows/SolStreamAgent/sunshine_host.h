@@ -73,6 +73,11 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name);
 /// about the process it spawned.
 void StopSunshine();
 
+/// True when the last StartSunshine stopped only so it could come back pinned
+/// to the right display. Clears when read; the caller should simply call
+/// StartSunshine again.
+bool RestartedForDisplay();
+
 SunshineState GetSunshineState();
 std::string SunshineStatusText();
 

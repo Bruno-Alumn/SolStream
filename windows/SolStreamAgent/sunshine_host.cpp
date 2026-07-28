@@ -23,6 +23,8 @@ SunshineState g_state = SunshineState::kStopped;
 std::string g_status = "not started";
 std::string g_user;
 std::string g_password;
+/// Set when StartSunshine stopped only to come back with the right display.
+bool g_restart_for_device_id = false;
 
 void SetStatus(SunshineState state, const std::string& text) {
     g_state = state;
@@ -185,6 +187,93 @@ bool LoadCredentials(const std::wstring& config_dir,
     return !user.empty() && !password.empty();
 }
 
+/// Read a whole file, or an empty string.
+std::string ReadWholeFile(const std::wstring& path) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    std::string out;
+    char chunk[16384];
+    DWORD read = 0;
+    while (ReadFile(file, chunk, sizeof(chunk), &read, nullptr) && read > 0) {
+        out.append(chunk, read);
+    }
+    CloseHandle(file);
+    return out;
+}
+
+/// Undo JSON's backslash doubling, so "\\\\.\\DISPLAY5" reads as \\.\DISPLAY5.
+std::string JsonUnescape(const std::string& text) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\\' && i + 1 < text.size()) {
+            ++i;
+        }
+        out.push_back(text[i]);
+    }
+    return out;
+}
+
+std::string ValueAfter(const std::string& text, size_t from, const char* key) {
+    const size_t at = text.find(key, from);
+    if (at == std::string::npos) {
+        return {};
+    }
+    const size_t open = text.find('"', at + strlen(key));
+    if (open == std::string::npos) {
+        return {};
+    }
+    size_t close = open + 1;
+    while (close < text.size() && !(text[close] == '"' && text[close - 1] != '\\')) {
+        ++close;
+    }
+    return close < text.size() ? text.substr(open + 1, close - open - 1) : std::string{};
+}
+
+/// Sunshine's own id for a display, taken from its own log.
+///
+/// `output_name` is not the `\\.\DISPLAYn` name it looks like it should be.
+/// Sunshine runs the setting through libdisplaydevice first (map_output_name ->
+/// getDisplayName), which expects a device id — a GUID — and returns EMPTY for
+/// anything else. Empty then means "no filter", so a GDI name does not select
+/// the wrong display, it selects *no* display and Sunshine captures the first
+/// output it finds: the primary monitor. That is the user's real desktop, which
+/// is the one thing streaming a virtual display exists to avoid.
+///
+/// Sunshine logs the whole device table on every start ("Currently available
+/// display devices"), ids included, so this reads the answer from the program
+/// that has to agree with it rather than trying to recompute a UUIDv5 whose
+/// inputs are not documented.
+std::string DeviceIdForDisplay(const std::wstring& config_dir,
+                               const std::string& display_name) {
+    const std::string log = ReadWholeFile(config_dir + L"\\sunshine.log");
+    if (log.empty() || display_name.empty()) {
+        return {};
+    }
+    // The last enumeration, not the first: the log survives restarts.
+    const size_t table = log.rfind("Currently available display devices");
+    if (table == std::string::npos) {
+        return {};
+    }
+
+    size_t at = table;
+    for (;;) {
+        const size_t entry = log.find("\"device_id\"", at);
+        if (entry == std::string::npos) {
+            return {};
+        }
+        const std::string id = ValueAfter(log, entry, "\"device_id\"");
+        const std::string name = JsonUnescape(ValueAfter(log, entry, "\"display_name\""));
+        if (!id.empty() && name == display_name) {
+            return id;
+        }
+        at = entry + 1;
+    }
+}
+
 }  // namespace
 
 std::wstring SunshineConfigDir() {
@@ -239,6 +328,13 @@ bool SupervisedCredentials(std::string& user, std::string& password) {
     return true;
 }
 
+bool RestartedForDisplay() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const bool value = g_restart_for_device_id;
+    g_restart_for_device_id = false;
+    return value;
+}
+
 SunshineState GetSunshineState() {
     std::lock_guard<std::mutex> lock(g_mutex);
     // A process that exited on its own — a port already taken, a missing
@@ -259,6 +355,17 @@ std::string SunshineStatusText() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_status;
 }
+
+namespace {
+
+std::string g_capture_device_id;
+
+/// The id that pins the capture display, remembered between runs.
+std::wstring DeviceIdCachePath(const std::wstring& config_dir) {
+    return config_dir + L"\\display-id.txt";
+}
+
+}  // namespace
 
 bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -311,6 +418,15 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
         return false;
     }
 
+    if (g_capture_device_id.empty()) {
+        const std::string cached = ReadWholeFile(DeviceIdCachePath(config_dir));
+        const size_t split = cached.find('=');
+        if (split != std::string::npos
+            && cached.substr(0, split) == Narrow(output_name)) {
+            g_capture_device_id = cached.substr(split + 1);
+        }
+    }
+
     // Reuse the credentials from last time if there are any; Sunshine keeps
     // only a hash of the password, so a fresh one every start would mean
     // rewriting its store on every start too.
@@ -344,7 +460,13 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
                << "origin_web_ui_allowed = lan\n"
                // The capture display is pinned so the stream cannot show the
                // real desktop even for a frame.
-               << "output_name = " << Narrow(output_name) << "\n"
+               // The device id when it is known, because that is what
+               // Sunshine actually resolves. The GDI name is written only
+               // before the first enumeration has been read, and is corrected
+               // immediately afterwards.
+               << "output_name = "
+               << (g_capture_device_id.empty() ? Narrow(output_name)
+                                               : g_capture_device_id) << "\n"
                // SolStream crops a rectangle out of the captured display, so the
                // cursor Sunshine composites in is a second cursor a round trip
                // behind the local one. The client turns it off per session; this
@@ -456,10 +578,41 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
     const unsigned short http_port = MapPort(base_port, SunshinePort::kHttp);
     for (int attempt = 0; attempt < 30; ++attempt) {
         if (SomethingListensOn(http_port)) {
-            char buffer[192];
+            // Now that it has enumerated the displays, take its own id for the
+            // one we want and, if we were guessing before, say it properly and
+            // start again. Once per machine: the answer is cached beside the
+            // configuration.
+            if (g_capture_device_id.empty()) {
+                const std::string id = DeviceIdForDisplay(config_dir, Narrow(output_name));
+                if (!id.empty()) {
+                    g_capture_device_id = id;
+                    const std::string cache = Narrow(output_name) + "=" + id;
+                    HANDLE file = CreateFileW(DeviceIdCachePath(config_dir).c_str(),
+                                              GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                              FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (file != INVALID_HANDLE_VALUE) {
+                        DWORD written = 0;
+                        WriteFile(file, cache.data(), (DWORD) cache.size(), &written, nullptr);
+                        CloseHandle(file);
+                    }
+                    SetStatus(SunshineState::kStarting,
+                              "Restarting Sunshine on the virtual display");
+                    // Unlock-free restart: the caller holds g_mutex, so tear
+                    // this one down inline and go round again.
+                    TerminateProcess(g_process, 0);
+                    WaitForSingleObject(g_process, 5000);
+                    CloseHandle(g_process);
+                    g_process = nullptr;
+                    g_restart_for_device_id = true;
+                    return false;
+                }
+            }
+            char buffer[224];
             std::snprintf(buffer, sizeof(buffer),
-                          "Sunshine running on base port %u (%s copy)",
-                          (unsigned) base_port, location.bundled ? "bundled" : "installed");
+                          "Sunshine running on base port %u (%s copy, capturing %s)",
+                          (unsigned) base_port, location.bundled ? "bundled" : "installed",
+                          g_capture_device_id.empty() ? "the default display"
+                                                      : "the chosen display");
             SetStatus(SunshineState::kRunning, buffer);
             return true;
         }

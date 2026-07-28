@@ -2872,7 +2872,14 @@ int wmain(int argc, wchar_t** argv) {
     // installed themselves keeps its own configuration and its own ports and is
     // never touched.
     if (!no_sunshine) {
-        if (solstream::StartSunshine(g_sunshine_base, g_capture_display)) {
+        bool started = solstream::StartSunshine(g_sunshine_base, g_capture_display);
+        if (!started && solstream::RestartedForDisplay()) {
+            // The first start was only to read Sunshine's own display table.
+            // Now it knows which display it means, so say it properly.
+            Log("[agent] learned the capture display's id; restarting Sunshine");
+            started = solstream::StartSunshine(g_sunshine_base, g_capture_display);
+        }
+        if (started) {
             Log("[agent] %s", solstream::SunshineStatusText().c_str());
             Log("[agent] Sunshine ports: https %u, http %u, web %u, rtsp %u",
                 solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kHttps),
