@@ -171,9 +171,18 @@ final class HostDropdown: NSView {
         ])
 
         let height = stack.fittingSize.height
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: M.width, height: height),
-                            styleMask: [.borderless, .nonactivatingPanel],
-                            backing: .buffered, defer: false)
+        // Not a .nonactivatingPanel, and ListPanel exists only to say
+        // canBecomeKey — a borderless panel refuses to become key otherwise.
+        //
+        // As a non-activating panel this list could never become key, so nothing
+        // inside it ever saw a keystroke: ↓ ↑ ⏎ ⎋ and type-to-jump were all
+        // written, wired up, and dead, and the manual-entry field could be
+        // clicked but never typed into, which left no way at all to reach a host
+        // that mDNS had not found. It stays a child window, so the connect window
+        // behind it goes on drawing as active.
+        let panel = ListPanel(contentRect: NSRect(x: 0, y: 0, width: M.width, height: height),
+                              styleMask: [.borderless],
+                              backing: .buffered, defer: false)
         panel.contentView = content
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -196,6 +205,9 @@ final class HostDropdown: NSView {
         highlighted = selectedIndex
         applyHighlight()
         panel.makeFirstResponder(content)
+        // Adding it as a child is not enough: without this the key window is
+        // still the connect window and every key press goes there.
+        panel.makeKey()
 
         installMonitor()
         chevron.stringValue = "⌃"
@@ -381,6 +393,11 @@ final class HostDropdown: NSView {
 
     /// - Returns: true when the key was consumed.
     private func handle(_ event: NSEvent) -> Bool {
+        // ⌘K, which the manual row has always advertised and never honoured.
+        if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "k" {
+            if let field = manualField { panel?.makeFirstResponder(field) }
+            return true
+        }
         switch event.keyCode {
         case 125:  // ↓
             move(by: 1); return true
@@ -506,6 +523,12 @@ final class HostDropdown: NSView {
         override func mouseEntered(with event: NSEvent) { onHover?(true) }
         override func mouseExited(with event: NSEvent) { onHover?(false) }
         override func mouseDown(with event: NSEvent) { onClick?() }
+    }
+
+    /// A borderless panel returns false from `canBecomeKey`, whatever else is
+    /// done to it. This exists only to say otherwise.
+    private final class ListPanel: NSPanel {
+        override var canBecomeKey: Bool { true }
     }
 
     /// Content view that forwards key presses to the dropdown rather than
