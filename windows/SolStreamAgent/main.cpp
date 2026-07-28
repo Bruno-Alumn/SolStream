@@ -532,6 +532,63 @@ uint64_t IdFromWindow(HWND window) {
     return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window));
 }
 
+/// Actually give a window the keyboard focus, and say whether it worked.
+///
+/// SetForegroundWindow on its own is not enough. Windows refuses a foreground
+/// change requested by a process that does not already own the foreground, and
+/// the refusal is silent — the call returns FALSE and nothing happens. The
+/// agent is a background process, so it is refused by default.
+///
+/// That matters far more than it sounds. Sunshine injects keystrokes with
+/// SendInput, which delivers them to whatever window has the foreground on this
+/// PC — not to the window we happen to be streaming. So a failed focus does not
+/// mean "the window looks inactive": it means every key the user types goes
+/// into a DIFFERENT application, invisibly, while the streamed one sits on
+/// screen doing nothing. Measured: streaming an already-open terminal and then
+/// switching to Character Map left the terminal foreground, and everything
+/// typed at Character Map was fed to the terminal's command prompt instead.
+///
+/// The way out is AttachThreadInput. A thread sharing the foreground window's
+/// input queue counts as owning the foreground, so the call is permitted; we
+/// attach, ask, and detach again. Deliberately NOT used: the documented
+/// alternative is to turn the foreground lock off system-wide with
+/// SPI_SETFOREGROUNDLOCKTIMEOUT, which is the user's setting to make, not ours.
+///
+/// Returns what GetForegroundWindow actually says afterwards, never the result
+/// of the request — the whole problem here is a call that claims nothing and
+/// fails anyway.
+bool ForceForeground(HWND window) {
+    if (IsIconic(window)) {
+        ShowWindow(window, SW_RESTORE);
+    }
+    // Z-order first, and unconditionally: raising is not subject to the
+    // foreground restriction, and it is what capture needs even in the case
+    // where focus cannot be won.
+    SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    BringWindowToTop(window);
+
+    if (GetForegroundWindow() == window) {
+        return true;
+    }
+
+    const DWORD self_thread = GetCurrentThreadId();
+    const HWND holder = GetForegroundWindow();
+    const DWORD holder_thread = holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
+    const bool attached = holder_thread && holder_thread != self_thread &&
+                          AttachThreadInput(self_thread, holder_thread, TRUE);
+
+    SetForegroundWindow(window);
+    // Both, because they answer different questions: which top-level window is
+    // active, and which control inside it takes the keys.
+    SetActiveWindow(window);
+    SetFocus(window);
+
+    if (attached) {
+        AttachThreadInput(self_thread, holder_thread, FALSE);
+    }
+    return GetForegroundWindow() == window;
+}
+
 // ΓöÇΓöÇ Launchable applications ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 struct AppEntry {
@@ -1204,6 +1261,58 @@ void NotifyWindowClosed(uint64_t id) {
     SendLine(client, "{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
 }
 
+/// Say so when something on this PC takes the keyboard away from the window
+/// being streamed.
+///
+/// Sunshine injects keystrokes into whatever holds the foreground *here*, not
+/// into the window the Mac is showing. So a window that quietly takes the
+/// foreground does not merely look wrong — it silently receives everything the
+/// user types at their Mac, while the stream carries on looking perfect and
+/// completely unresponsive. Nothing in the video says why.
+///
+/// Only reports changes: the foreground is sampled every watcher tick, and a
+/// line per tick would bury the log.
+void ReportForegroundThief() {
+    HWND foreground = GetForegroundWindow();
+    static HWND reported = nullptr;
+    if (foreground == reported) {
+        return;
+    }
+
+    bool streaming = false;
+    bool ours = false;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (!g_locks[i].active) {
+            continue;
+        }
+        streaming = true;
+        if (g_locks[i].window == foreground) {
+            ours = true;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (!streaming) {
+        return;
+    }
+
+    reported = foreground;
+    if (ours) {
+        Log("[focus] the streamed window has the keyboard");
+        return;
+    }
+
+    char cls[96] = {0};
+    char title[128] = {0};
+    if (foreground) {
+        GetClassNameA(foreground, cls, sizeof(cls) - 1);
+        GetWindowTextA(foreground, title, sizeof(title) - 1);
+    }
+    Log("[focus] \"%s\" [%s] took the keyboard from the streamed window;"
+        " typing at the Mac is going there instead",
+        title[0] ? title : "(untitled)", cls[0] ? cls : "?");
+}
+
 /// Put a locked window back if anything moved or resized it.
 DWORD WINAPI WatcherProc(LPVOID) {
     while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
@@ -1249,6 +1358,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             PlaceClientArea(window, desired.left, desired.top,
                             desired.right - desired.left, desired.bottom - desired.top);
         }
+        ReportForegroundThief();
     }
     return 0;
 }
@@ -2273,23 +2383,21 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
             return "{\"type\":\"error\",\"message\":\"no such window\"}";
         }
 
-        // SetForegroundWindow alone is unreliable: Windows refuses foreground
-        // changes requested by a process that does not own the foreground, so
-        // it silently fails whenever a modal dialog or another app holds it.
-        // Raising in the Z-order is not subject to that restriction and is what
-        // actually matters for capture, so do that first and unconditionally.
-        if (IsIconic(window)) {
-            ShowWindow(window, SW_RESTORE);
+        const bool foreground = ForceForeground(window);
+        if (!foreground) {
+            // Worth a log line of its own: the window still streams, so nothing
+            // looks wrong, but the user's keystrokes are going somewhere else.
+            char title[128] = {0};
+            GetWindowTextA(window, title, sizeof(title) - 1);
+            std::printf("[focus] could not take the foreground for \"%s\";"
+                        " keystrokes will go to whatever holds it\n", title);
+            std::fflush(stdout);
         }
-        SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        BringWindowToTop(window);
-        const BOOL foreground = SetForegroundWindow(window);
 
         char buffer[128];
         std::snprintf(buffer, sizeof(buffer),
-                      "{\"type\":\"focused\",\"ok\":true,\"foreground\":%s}",
-                      foreground ? "true" : "false");
+                      "{\"type\":\"focused\",\"ok\":%s,\"foreground\":%s}",
+                      foreground ? "true" : "false", foreground ? "true" : "false");
         return buffer;
     }
 

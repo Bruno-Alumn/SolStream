@@ -835,6 +835,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
+        // Edit exists so that ⌘V works.
+        //
+        // macOS routes cut/copy/paste/select-all through menu key equivalents:
+        // with no Edit menu they are not merely missing from a menu bar nobody
+        // looks at, they DO NOTHING. The token prompt says "Paste the line it
+        // prints below" and pasting was impossible — a first connection to a new
+        // host meant typing 32 hex characters by hand, or giving up.
+        //
+        // It does not collide with the streamed application. InputCapture's
+        // local monitor runs ahead of menu key-equivalent matching and consumes
+        // every ⌘ combination it forwards, so ⌘V in a streamed window still
+        // reaches Windows as Ctrl+V; and while the picker or a prompt is
+        // focused, no stream window is key, so the monitor is not even
+        // installed and the menu handles it.
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
         // Host carries everything that acts on the connection rather than on a
         // window, so "which PC am I on" never has to be inferred from a title bar.
         let hostMenuItem = NSMenuItem()
