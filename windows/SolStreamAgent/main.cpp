@@ -1793,16 +1793,26 @@ std::string DisplaysJson(const std::vector<Display>& displays) {
     for (size_t i = 0; i < displays.size(); ++i) {
         const Display& display = displays[i];
         char buffer[1024];
+        // Which display Sunshine is actually encoding, said here rather than only
+        // in `status`. The Mac crops a rectangle out of whatever arrives, so if
+        // it places windows on a different display every crop is taken from the
+        // wrong pixels — and the result is not an error, it is a picture. Seen
+        // for real: a window titled "Character Map", frames arriving, nothing
+        // dropped, and a black strip beside an olive rectangle on screen.
+        // Sending it with the list means the client has it at the moment it
+        // chooses, with no second round trip to race.
+        const bool captured = ToWide(display.device_name) == g_capture_display;
         std::snprintf(buffer, sizeof(buffer),
                       "%s{\"name\":\"%s\",\"adapter\":\"%s\",\"x\":%ld,\"y\":%ld,"
-                      "\"w\":%ld,\"h\":%ld,\"primary\":%s}",
+                      "\"w\":%ld,\"h\":%ld,\"primary\":%s,\"captured\":%s}",
                       i ? "," : "",
                       JsonEscape(display.device_name).c_str(),
                       JsonEscape(display.adapter).c_str(),
                       display.bounds.left, display.bounds.top,
                       display.bounds.right - display.bounds.left,
                       display.bounds.bottom - display.bounds.top,
-                      display.primary ? "true" : "false");
+                      display.primary ? "true" : "false",
+                      captured ? "true" : "false");
         out += buffer;
     }
     out += "]}";

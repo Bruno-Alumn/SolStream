@@ -412,10 +412,27 @@ final class InputProtocolTests: XCTestCase {
 final class DisplaySelectionTests: XCTestCase {
 
     private func display(_ name: String, adapter: String,
-                         primary: Bool = false,
+                         primary: Bool = false, captured: Bool = false,
                          width: Int = 1920, height: Int = 1080) -> RemoteDisplay {
         RemoteDisplay(name: name, adapter: adapter, x: 0, y: 0,
-                      width: width, height: height, isPrimary: primary)
+                      width: width, height: height,
+                      isPrimary: primary, isCaptured: captured)
+    }
+
+    /// "Virtual" and "being streamed" are different questions, and the second is
+    /// the one that matters. The host decides what Sunshine encodes; a client
+    /// that infers it from the adapter string agrees only by luck, and against a
+    /// Sunshine the user set up themselves it does not agree at all.
+    func testBeingCapturedIsIndependentOfBeingVirtual() {
+        let physicalAndStreamed = display("\\\\.\\DISPLAY1",
+                                          adapter: "NVIDIA GeForce RTX 4070 SUPER",
+                                          primary: true, captured: true)
+        XCTAssertFalse(physicalAndStreamed.isVirtual)
+        XCTAssertTrue(physicalAndStreamed.isCaptured)
+
+        let virtualAndIdle = display("\\\\.\\DISPLAY5", adapter: "Virtual Display Driver")
+        XCTAssertTrue(virtualAndIdle.isVirtual)
+        XCTAssertFalse(virtualAndIdle.isCaptured)
     }
 
     func testVirtualDisplayIsRecognisedByAdapter() {

@@ -743,11 +743,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 $0.name.localizedCaseInsensitiveContains(query)
                     || $0.adapter.localizedCaseInsensitiveContains(query)
             }
-            if let match { return match }
+            if let match {
+                // Honour the request — it is explicit — but do not let it be
+                // quiet. Windows placed on a display Sunshine is not encoding
+                // are cropped out of the wrong pixels, and the result looks like
+                // a working stream of something else entirely.
+                if !match.isCaptured, let captured = displays.first(where: { $0.isCaptured }) {
+                    Log.error("[app] \(match.name) is not the display being streamed —"
+                              + " that is \(captured.name). Every window will be cropped"
+                              + " from the wrong pixels. Drop --display, or point"
+                              + " Sunshine's output_name at \(match.name).")
+                }
+                return match
+            }
             Log.error("[app] no display matched \"\(query)\"; falling back. Candidates: "
                       + displays.map { "\($0.name) [\($0.adapter)]" }.joined(separator: ", "))
         }
-        return displays.first(where: { $0.isVirtual })
+        // The host's own answer first. The agent configures Sunshine, so it knows
+        // which display is being encoded; guessing from "virtual, else primary"
+        // agreed with it only by luck, and disagreed outright against a Sunshine
+        // the user had set up themselves on the stock ports.
+        return displays.first(where: { $0.isCaptured })
+            ?? displays.first(where: { $0.isVirtual })
             ?? displays.first(where: { $0.isPrimary })
             ?? displays.first
     }
