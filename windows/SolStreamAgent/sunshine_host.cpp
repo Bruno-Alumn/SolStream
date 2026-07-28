@@ -14,6 +14,9 @@
 #include "ports.h"
 
 namespace solstream {
+
+bool StartSunshine(unsigned short base_port, const std::wstring& output_name);
+
 namespace {
 
 std::mutex g_mutex;
@@ -25,6 +28,30 @@ std::string g_user;
 std::string g_password;
 /// Set when StartSunshine stopped only to come back with the right display.
 bool g_restart_for_device_id = false;
+/// Whether Sunshine is MEANT to be running. Separate from whether it is,
+/// deliberately: the watchdog's first version keyed off the observed state and
+/// so raced the status poll, which calls GetSunshineState once a second and
+/// reaps the dead process itself. Whoever noticed first won — the poll set the
+/// state to kFailed, the watchdog then saw "not running" instead of "was
+/// running and stopped", and did nothing. It restarted correctly exactly once,
+/// by luck, and looked fixed.
+bool g_wanted = false;
+/// What StartSunshine was last asked for, so the watchdog can ask again.
+unsigned short g_base_port = 0;
+std::wstring g_output_name;
+HANDLE g_watchdog_thread = nullptr;
+volatile LONG g_watchdog_stop = 0;
+int g_restarts = 0;
+ULONGLONG g_last_restart_tick = 0;
+
+/// How many times to bring Sunshine back before concluding that it is not
+/// coming back. Five in a row is a broken machine, not a hiccup, and restarting
+/// forever would hide that behind a stream that never quite works.
+constexpr int kMaxRestarts = 5;
+/// A quiet spell this long means whatever went wrong was a one-off, so the
+/// count starts again. Without this a machine that loses Sunshine once a week
+/// would eventually stop trying.
+constexpr ULONGLONG kHealthyMillis = 10 * 60 * 1000;
 
 void SetStatus(SunshineState state, const std::string& text) {
     g_state = state;
@@ -367,7 +394,74 @@ std::wstring DeviceIdCachePath(const std::wstring& config_dir) {
 
 }  // namespace
 
+/// Bring Sunshine back if it stops.
+///
+/// The supervisor used to start it and then only ever *notice* that it had
+/// gone: GetSunshineState would report kFailed and nothing acted on it, so a
+/// Sunshine that crashed took the PC's ability to stream with it until somebody
+/// restarted SolStream by hand. Measured — killing it mid-stream left the Mac
+/// showing "Lost the stream" and the host with nothing listening, permanently.
+DWORD WINAPI SunshineWatchdog(LPVOID) {
+    while (InterlockedCompareExchange(&g_watchdog_stop, 0, 0) == 0) {
+        Sleep(2000);
+
+        unsigned short port = 0;
+        bool wanted = false;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            wanted = g_wanted;
+            port = MapPort(g_base_port, SunshinePort::kHttp);
+            if (g_process && WaitForSingleObject(g_process, 0) == WAIT_OBJECT_0) {
+                CloseHandle(g_process);
+                g_process = nullptr;
+            }
+        }
+        if (!wanted) {
+            continue;
+        }
+
+        // The question is not "did our handle exit" but "can this host stream" —
+        // which is answered by whether anything is listening. That covers the
+        // process dying whoever noticed it first, and it leaves an adopted
+        // Sunshine alone: something is listening, so there is nothing to do.
+        if (SomethingListensOn(port)) {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            const ULONGLONG now = GetTickCount64();
+            if (g_last_restart_tick != 0 && now - g_last_restart_tick > kHealthyMillis) {
+                g_restarts = 0;
+            }
+            g_last_restart_tick = now;
+        }
+
+        if (g_restarts >= kMaxRestarts) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            SetStatus(SunshineState::kFailed,
+                      "Sunshine keeps stopping; giving up until SolStream restarts");
+            continue;
+        }
+        ++g_restarts;
+        // StartSunshine takes the lock itself, so it must not be held here.
+        StartSunshine(g_base_port, g_output_name);
+    }
+    return 0;
+}
+
 bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_base_port = base_port;
+        g_output_name = output_name;
+        g_wanted = true;
+        if (!g_watchdog_thread) {
+            InterlockedExchange(&g_watchdog_stop, 0);
+            g_watchdog_thread = CreateThread(nullptr, 0, SunshineWatchdog,
+                                             nullptr, 0, nullptr);
+        }
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_process && WaitForSingleObject(g_process, 0) == WAIT_TIMEOUT) {
         return true;  // already supervising one
@@ -640,7 +734,16 @@ bool StartSunshine(unsigned short base_port, const std::wstring& output_name) {
 }
 
 void StopSunshine() {
+    // Before taking the lock: the watchdog can be inside StartSunshine, which
+    // takes it, and stopping is meant to mean stopped rather than restarted.
+    InterlockedExchange(&g_watchdog_stop, 1);
+    if (g_watchdog_thread) {
+        WaitForSingleObject(g_watchdog_thread, 6000);
+        CloseHandle(g_watchdog_thread);
+        g_watchdog_thread = nullptr;
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_wanted = false;
     if (g_process) {
         TerminateProcess(g_process, 0);
         WaitForSingleObject(g_process, 5000);

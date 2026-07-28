@@ -3047,7 +3047,18 @@ int wmain(int argc, wchar_t** argv) {
             const solstream::SunshineState state = solstream::GetSunshineState();
             status.sunshine_running = state == solstream::SunshineState::kRunning
                                    || state == solstream::SunshineState::kStarting;
-            status.sunshine_detail = ToWide(solstream::SunshineStatusText());
+            const std::string detail = solstream::SunshineStatusText();
+            status.sunshine_detail = ToWide(detail);
+
+            // Log every change, so a Sunshine that died and was brought back
+            // leaves a trail. The window shows the current state, but the
+            // question afterwards is always "did it restart, and when" — and
+            // the answer was nowhere before this.
+            static std::string last_detail;
+            if (detail != last_detail) {
+                last_detail = detail;
+                Log("[agent] sunshine: %s", detail.c_str());
+            }
 
             status.web_ui_port = g_sunshine_web_port;
             status.virtual_display = solstream::HasVirtualDisplay();
