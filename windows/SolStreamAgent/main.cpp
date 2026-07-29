@@ -48,6 +48,7 @@
 #include <cstring>
 #include <cwctype>
 #include <atomic>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -148,7 +149,22 @@ void Log(const char* fmt, ...) {
     if (path.empty()) {
         return;
     }
-    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+    // SERIALISED, AND SHARED WITH OTHER WRITERS. Nine threads log through here --
+    // the watcher, the cursor watcher, the client thread, the capture, the
+    // sender, the receive loop, the audio thread, the discovery responder and
+    // the status thread -- and the share mode was FILE_SHARE_READ, which forbids
+    // a second writer. So whenever two of them logged at once the second
+    // CreateFileW failed with a sharing violation and its line went nowhere:
+    // silently, with no error checked, on the one diagnostic this program has on
+    // a machine with no console. The rotation was worse -- MoveFileW cannot
+    // rename a file another handle has open without FILE_SHARE_DELETE, so a busy
+    // log simply grew past its cap for ever. The mutex is what makes the
+    // size-check-then-rotate sequence atomic; the wider share mode is what stops
+    // an external tail(1) or the other log file from breaking either.
+    static std::mutex writing;
+    std::lock_guard<std::mutex> held(writing);
+    constexpr DWORD kShare = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, kShare,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return;
@@ -160,7 +176,7 @@ void Log(const char* fmt, ...) {
         CloseHandle(file);
         DeleteFileW((path + L".1").c_str());
         MoveFileW(path.c_str(), (path + L".1").c_str());
-        file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+        file = CreateFileW(path.c_str(), FILE_APPEND_DATA, kShare, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) {
             return;
@@ -1684,16 +1700,10 @@ std::vector<unsigned char> DeriveMediaKeys(const std::vector<unsigned char>& cpu
     return HkdfExpand(prk, info, 108);
 }
 
-bool TokenMatches(const std::string& supplied) {
-    if (supplied.size() != g_token.size() || g_token.empty()) {
-        return false;
-    }
-    unsigned char difference = 0;
-    for (size_t i = 0; i < g_token.size(); ++i) {
-        difference |= static_cast<unsigned char>(supplied[i] ^ g_token[i]);
-    }
-    return difference == 0;
-}
+// There was a `TokenMatches` here, the constant-time compare the legacy auth
+// path used. Its one caller has gone -- see the refusal in the `auth` handler --
+// and the only comparison against the token now is `ProofMatches`, which
+// compares HMAC tags rather than the token itself.
 
 // ΓöÇΓöÇ Geometry lock ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 //
@@ -3090,18 +3100,27 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
         }
 
-        // Legacy, host side only. Accepting a token somebody already holds
-        // discloses nothing; SENDING one does, which is why the Mac's half of
-        // this path is deleted rather than deprecated.
-        std::string supplied;
-        FieldString(line, "token", supplied);
-        if (TokenMatches(supplied)) {
-            if (!authenticated) {
-                g_clients_authenticated.fetch_add(1);
-            }
-            authenticated = true;
-            Log("[agent] client authenticated with a legacy plaintext token");
-            return "{\"type\":\"auth\",\"ok\":true}";
+        // NO v1 FALLBACK, and now on this side too.
+        //
+        // The host used to accept `{"cmd":"auth","token":"..."}` on the grounds
+        // that taking a token somebody already holds discloses nothing, while
+        // sending one does -- which is why the Mac's half was deleted. Both
+        // halves of that were true and it still had to go, for a reason the
+        // asymmetry hid: a client that authenticated this way agreed no channel
+        // keys, because `channelCrypto` is negotiated inside the v2 branch above.
+        // So it was a downgrade route that ended in a working, fully authorised
+        // session with the window titles, the application list and every
+        // clipboard transfer crossing in the clear. Nothing has ever used it --
+        // the Mac refuses to carry on unencrypted, and no spike or probe sends a
+        // token -- and docs/architecture.md has claimed for its whole life that
+        // authentication here is v2 only. It is now.
+        if (std::string ignored; FieldString(line, "token", ignored)) {
+            ++auth_failures;
+            Log("[agent] refused a cleartext token: this host authenticates with a "
+                "v2 proof only (%d refusal%s on this connection)",
+                auth_failures, auth_failures == 1 ? "" : "s");
+            return "{\"type\":\"auth\",\"ok\":false,\"message\":\"this host needs a "
+                   "v2 proof, not a token. Update SolStream on the Mac.\"}";
         }
         // Counted rather than slept off. This is the only guess-and-check
         // surface here, and it used to answer a wrong token a second late on the
@@ -3630,6 +3649,19 @@ NamedCursor g_cursors[] = {
 
 HANDLE g_cursor_thread = nullptr;
 volatile LONG g_cursor_stop = 0;
+/// Which cursor watcher is the current one.
+///
+/// A shared stop flag was not enough. StopCursorWatcher waits two seconds for
+/// the thread to leave, and the thread can be inside SendLine for far longer
+/// than that -- SO_SNDTIMEO on this socket is thirty seconds, so a client whose
+/// receive window has filled up holds it there. When the wait timed out the
+/// handle was closed and the thread abandoned, and the NEXT client's
+/// StartCursorWatcher then cleared the stop flag out from under it: the
+/// abandoned thread carried on for ever, pushing cursor shapes down the new
+/// client's socket beside the new watcher's own. Each thread now keeps the
+/// generation it was started with and exits when it is no longer the current
+/// one, which no later Start can undo.
+volatile LONG g_cursor_generation = 0;
 
 const char* CursorName(HCURSOR cursor) {
     for (NamedCursor& known : g_cursors) {
@@ -3643,10 +3675,12 @@ const char* CursorName(HCURSOR cursor) {
     return "arrow";
 }
 
-DWORD WINAPI CursorWatcherProc(LPVOID) {
+DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
+    const LONG mine = (LONG) (LONG_PTR) parameter;
     HCURSOR last = nullptr;
     bool logged_once = false;
-    while (InterlockedCompareExchange(&g_cursor_stop, 0, 0) == 0) {
+    while (InterlockedCompareExchange(&g_cursor_stop, 0, 0) == 0
+           && InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
         CURSORINFO info{};
         info.cbSize = sizeof(info);
         const BOOL got = GetCursorInfo(&info);
@@ -3665,7 +3699,13 @@ DWORD WINAPI CursorWatcherProc(LPVOID) {
         }
         if (current != last) {
             last = current;
+            // Under the send lock, like every other reader of it: the client
+            // thread retires this socket under the same lock, so reading it
+            // outside was a torn read away from writing to a handle that had
+            // been closed and reissued to the next connection.
+            EnterCriticalSection(&g_send_cs);
             const SOCKET client = g_push_client;
+            LeaveCriticalSection(&g_send_cs);
             if (client != INVALID_SOCKET) {
                 std::string line = "{\"type\":\"cursor\",\"shape\":\"";
                 line += CursorName(current);
@@ -3689,14 +3729,25 @@ DWORD WINAPI CursorWatcherProc(LPVOID) {
 /// too, so this has to run for every client, not only the ones interested in the
 /// cursor.
 void StartCursorWatcher(SOCKET client, bool authorised) {
+    // Under the lock the window watcher and the cursor watcher both read it
+    // under. Only the clearing in StopCursorWatcher used to be, and a SOCKET is
+    // not written atomically -- so the two threads that read this while it was
+    // being assigned could see neither the old value nor the new one.
+    EnterCriticalSection(&g_send_cs);
     g_push_client = client;
+    LeaveCriticalSection(&g_send_cs);
     InterlockedExchange(&g_cursor_stop, 0);
     InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
-    g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc, nullptr, 0, nullptr);
+    const LONG generation = InterlockedIncrement(&g_cursor_generation);
+    g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc,
+                                   (LPVOID) (LONG_PTR) generation, 0, nullptr);
 }
 
 void StopCursorWatcher() {
     InterlockedExchange(&g_cursor_stop, 1);
+    // And retire this generation, so a thread that outlives the wait below
+    // cannot be revived by the next Start clearing the stop flag.
+    InterlockedIncrement(&g_cursor_generation);
     if (g_cursor_thread) {
         // Bounded by the 40ms poll, so this is a short wait, and it has to
         // happen before the socket closes underneath the thread.
@@ -3982,8 +4033,9 @@ void ServeClient(SOCKET client) {
         // more destructive than it sounds: closing the socket runs UnlockAll(),
         // which pulls every streamed window off the virtual display and back
         // onto the real desktop, in the middle of a session the user is still
-        // watching. The Mac has no reconnect, so the picture stays live while
-        // every window command silently stops working.
+        // watching. The Mac does reconnect and re-assert every window now, but
+        // the media session does not come back with it -- so what this costs is
+        // still a live picture of a window that has been moved out from under it.
         if (buffer.size() > kMaxLineBytes) {
 #ifdef SOLSTREAM_MEDIA
             // Newline framing only. Everything above -- clearing the buffer,
@@ -4080,14 +4132,32 @@ void StartDiscoveryResponder() {
             ToUtf8(name).c_str());
 
         char buffer[256];
+        bool complained = false;
         for (;;) {
             sockaddr_in from{};
             int fromLen = sizeof(from);
             const int n = recvfrom(listener, buffer, sizeof(buffer) - 1, 0,
                                    (sockaddr*) &from, &fromLen);
             if (n <= 0) {
+                // This socket has no receive timeout, so recvfrom blocks and a
+                // return here is an error rather than an idle moment. Windows
+                // reports an ICMP port-unreachable from an earlier reply as
+                // WSAECONNRESET on the next call, which returns instantly -- and
+                // a bare `continue` then spins this thread at the speed of the
+                // system call, for ever, on a discovery responder nobody is
+                // watching. Paced, and said once.
+                const int error = n < 0 ? WSAGetLastError() : 0;
+                if (error != 0) {
+                    if (!complained) {
+                        complained = true;
+                        Log("[discover] recvfrom failed with %d; pacing the loop",
+                            error);
+                    }
+                    Sleep(50);
+                }
                 continue;
             }
+            complained = false;
             buffer[n] = 0;
             if (std::string(buffer, (size_t) n) != "SOLSTREAM-DISCOVER/1") {
                 continue;
