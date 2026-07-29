@@ -36,6 +36,7 @@
 // with this code.
 #include <codecapi.h>
 #include <icodecapi.h>
+#include <d3d11.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -46,6 +47,7 @@
 #pragma comment(lib, "ole32.lib")
 // The CODECAPI_* GUIDs live here, not in mfuuid.
 #pragma comment(lib, "strmiids.lib")
+#pragma comment(lib, "d3d11.lib")
 
 namespace {
 
@@ -193,6 +195,55 @@ int main() {
     }();
     std::printf("[1] transform is %s\n\n", async ? "ASYNCHRONOUS (unlocked)" : "synchronous");
 
+    // A D3D11 device manager, BEFORE the media types.
+    //
+    // A hardware MFT advertises MF_SA_D3D11_AWARE, and several of them will
+    // accept every call in the setup sequence without one and then never emit a
+    // single METransformNeedInput -- which presents as a hang in GetEvent with
+    // nothing having failed. Sent before type negotiation because that is where
+    // the MFT decides what it can do.
+    UINT32 d3dAware = 0;
+    {
+        IMFAttributes* attributes = nullptr;
+        if (SUCCEEDED(encoder->GetAttributes(&attributes)) && attributes) {
+            attributes->GetUINT32(MF_SA_D3D11_AWARE, &d3dAware);
+            attributes->Release();
+        }
+    }
+    std::printf("[2] MF_SA_D3D11_AWARE %s\n", d3dAware ? "yes" : "no");
+
+    ID3D11Device* d3d = nullptr;
+    ID3D11DeviceContext* d3dContext = nullptr;
+    IMFDXGIDeviceManager* manager = nullptr;
+    if (d3dAware) {
+        D3D_FEATURE_LEVEL level{};
+        HRESULT made = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                         D3D11_CREATE_DEVICE_VIDEO_SUPPORT
+                                             | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                         nullptr, 0, D3D11_SDK_VERSION, &d3d, &level,
+                                         &d3dContext);
+        if (SUCCEEDED(made)) {
+            // Without multithread protection the encoder and this thread share a
+            // device context that is not safe to share, which corrupts in ways
+            // that look like encoder bugs.
+            ID3D10Multithread* threading = nullptr;
+            if (SUCCEEDED(d3d->QueryInterface(IID_PPV_ARGS(&threading)))) {
+                threading->SetMultithreadProtected(TRUE);
+                threading->Release();
+            }
+            UINT token = 0;
+            made = MFCreateDXGIDeviceManager(&token, &manager);
+            if (SUCCEEDED(made)) { made = manager->ResetDevice(d3d, token); }
+            if (SUCCEEDED(made)) {
+                made = encoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                                               (ULONG_PTR) manager);
+            }
+        }
+        std::printf("[2] D3D manager       %s (0x%08lX)\n",
+                    SUCCEEDED(made) ? "attached" : "FAILED", made);
+    }
+    std::printf("\n");
+
     // ── What can it do? ──────────────────────────────────────────────────────
     ICodecAPI* codec = nullptr;
     encoder->QueryInterface(IID_PPV_ARGS(&codec));
@@ -262,12 +313,24 @@ int main() {
     size_t encodedBytes = 0;
     int nextFrame = 1;
 
+    // Eight frames, generated ONCE and cycled. Filling 3 MB of NV12 per frame in
+    // a scalar loop costs more than encoding it, so the previous version starved
+    // the encoder: 300 frames of 5 seconds' content took over 20 seconds and the
+    // run timed out half way. The pipeline has to be saturated for a latency
+    // figure to mean anything, because a starved encoder is never queueing.
+    constexpr int kVariants = 8;
+    std::vector<std::vector<BYTE>> variants(kVariants);
+    for (int v = 0; v < kVariants; ++v) {
+        variants[v].resize(frameBytes);
+        FillNv12(variants[v].data(), kWidth, kHeight, v * 37);
+    }
+
     auto submit = [&](int frame) -> bool {
         IMFMediaBuffer* buffer = nullptr;
         if (FAILED(MFCreateMemoryBuffer(frameBytes, &buffer))) { return false; }
         BYTE* data = nullptr;
         buffer->Lock(&data, nullptr, nullptr);
-        FillNv12(data, kWidth, kHeight, frame);
+        memcpy(data, variants[frame % kVariants].data(), frameBytes);
         buffer->Unlock();
         buffer->SetCurrentLength(frameBytes);
 
@@ -332,18 +395,48 @@ int main() {
         // Hardware MFTs are event-driven: they say when they want a frame and
         // when they have one. Polling ProcessOutput on one of these returns
         // NEED_MORE_INPUT forever.
-        while (produced < kFrames) {
+        // POLLED, WITH A DEADLINE. A blocking GetEvent on an MFT that never
+        // emits an event hangs forever with nothing having failed, and a spike
+        // that hangs is worse than one that reports what it saw: the previous
+        // run had to be killed from another machine and produced no diagnosis
+        // at all. Counting the events makes "it emitted nothing" and "it
+        // emitted the wrong thing" different answers.
+        int needInput = 0, haveOutput = 0, otherEvents = 0;
+        const long long deadline = Now() + g_frequency.QuadPart * 40;
+        long long lastOutput = Now();
+        // Done when every frame has been submitted AND the encoder has been
+        // quiet for 300 ms. Waiting for N distinct first-outputs was wrong: with
+        // slices enabled several samples carry the SAME timestamp, so "unique
+        // frames seen" stalls below the frame count and the loop never ends.
+        while (Now() < deadline) {
+            if (nextFrame > kFrames
+                && (Now() - lastOutput) > g_frequency.QuadPart * 3 / 10) {
+                break;
+            }
             IMFMediaEvent* event = nullptr;
-            if (FAILED(events->GetEvent(0, &event)) || !event) { break; }
+            const HRESULT got = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
+            if (got == MF_E_NO_EVENTS_AVAILABLE || !event) {
+                Sleep(1);
+                continue;
+            }
+            if (FAILED(got)) { break; }
             MediaEventType type = 0;
             event->GetType(&type);
             event->Release();
             if (type == METransformNeedInput) {
+                ++needInput;
                 if (nextFrame <= kFrames) { submit(nextFrame++); }
             } else if (type == METransformHaveOutput) {
+                ++haveOutput;
+                lastOutput = Now();
                 drain();
+            } else {
+                ++otherEvents;
             }
         }
+        std::printf("  events: NeedInput %d, HaveOutput %d, other %d%s\n",
+                    needInput, haveOutput, otherEvents,
+                    Now() >= deadline ? "   (TIMED OUT after 20s)" : "");
     } else {
         for (int f = 1; f <= kFrames; ++f) {
             submit(f);
@@ -355,7 +448,7 @@ int main() {
     const double seconds = MillisSince(runStart) / 1000.0;
 
     std::printf("\n=== results ===\n");
-    std::printf("  frames encoded                 %d of %d\n", produced, kFrames);
+    std::printf("  frames with output             %d of %d submitted\n", produced, nextFrame - 1);
     std::printf("  output samples (slices)        %d  = %.2f per frame\n",
                 sliceCount, produced ? (double) sliceCount / produced : 0);
     std::printf("  encoded size                   %.2f MB, %.1f Mbit/s at %d fps\n",
