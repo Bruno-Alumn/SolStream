@@ -20,6 +20,12 @@ namespace {
 constexpr int kRing = 6;          ///< NV12 textures in flight
 constexpr int kMetaRing = 64;     ///< per-picture metadata slots
 
+/// How many output format changes one drain will renegotiate before giving up.
+/// A transform that answers every ProcessOutput with MF_E_TRANSFORM_STREAM_CHANGE
+/// would otherwise spin a work-queue thread here for ever, and a real encoder
+/// changes its output type at most once or twice in a session.
+constexpr int kMaxFormatChanges = 4;
+
 template <typename T>
 void Release(T*& p) {
     if (p) { p->Release(); p = nullptr; }
@@ -29,6 +35,17 @@ long long Now() {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     return now.QuadPart;
+}
+
+/// Ticks per second, for turning a QPC difference into a duration. Read once:
+/// the value is fixed for the life of the boot.
+long long QpcFrequency() {
+    static const long long ticks = [] {
+        LARGE_INTEGER frequency{};
+        QueryPerformanceFrequency(&frequency);
+        return frequency.QuadPart ? frequency.QuadPart : 1;
+    }();
+    return ticks;
 }
 
 /// Does this Annex B buffer already start with a sequence parameter set?
@@ -139,6 +156,14 @@ struct Encoder::Impl {
     std::atomic<bool> running{false};
 
     std::vector<unsigned char> sequenceHeader;
+
+    /// How many drains have ended on an HRESULT that is not one of the two ways
+    /// this transform says "nothing to give", and when that was last said out
+    /// loud. Drain-thread only. See the rate limit in Drain for why counting
+    /// beats logging: the first version of that line wrote 396 entries during a
+    /// session that delivered every picture it captured.
+    uint64_t drainFailures = 0;
+    long long lastDrainComplaint = 0;
     std::vector<unsigned char> picture;   ///< assembled coded picture
 
     std::mutex lock;
@@ -488,7 +513,14 @@ bool Encoder::Impl::FeedLocked() {
         Release(buffer);
         return false;
     }
-    sample->AddBuffer(buffer);
+    // Unchecked, a failed AddBuffer left an empty sample: the frame's pixels are
+    // in `buffer` and nothing else refers to it, so what went into ProcessInput
+    // below would have been a timestamp with no picture attached to it.
+    if (FAILED(sample->AddBuffer(buffer))) {
+        Release(sample);
+        Release(buffer);
+        return false;
+    }
     // ONE INTEGER TICK PER FRAME, so the timestamp divides back exactly.
     //
     // The obvious form -- frameId * 10^7 / fps -- does not round-trip. At 60 fps
@@ -535,19 +567,34 @@ void Encoder::Impl::Drain() {
     picture.clear();
     LONGLONG pictureTime = -1;
     bool isIdr = false;
+    int changes = 0;
 
     for (;;) {
         MFT_OUTPUT_STREAM_INFO info{};
-        mft->GetOutputStreamInfo(0, &info);
+        if (FAILED(mft->GetOutputStreamInfo(0, &info))) {
+            // Without this the flags stayed zero, which reads as "the transform
+            // does not allocate", and the sample below was made and fed to a
+            // transform that had just said it could not describe its own output.
+            break;
+        }
         const bool allocates =
             (info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES
                              | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0;
         IMFSample* outSample = nullptr;
         IMFMediaBuffer* outBuffer = nullptr;
         if (!allocates) {
-            MFCreateSample(&outSample);
-            MFCreateMemoryBuffer(info.cbSize ? info.cbSize : (1u << 21), &outBuffer);
-            outSample->AddBuffer(outBuffer);
+            // All three were unchecked. MFCreateSample fails under memory
+            // pressure like anything else, and AddBuffer was then called on a
+            // null pointer -- a crash on an MF work-queue thread, with the last
+            // line in the log being an ordinary frame.
+            if (FAILED(MFCreateSample(&outSample))
+                || FAILED(MFCreateMemoryBuffer(info.cbSize ? info.cbSize : (1u << 21),
+                                               &outBuffer))
+                || FAILED(outSample->AddBuffer(outBuffer))) {
+                Release(outSample);
+                Release(outBuffer);
+                break;
+            }
         }
         MFT_OUTPUT_DATA_BUFFER out{};
         out.dwStreamID = 0;
@@ -557,9 +604,76 @@ void Encoder::Impl::Drain() {
         if (FAILED(got)) {
             Release(outSample);
             Release(outBuffer);
+            if (out.pEvents) { out.pEvents->Release(); }
+            // Every failure used to end the drain silently, which is right for
+            // most of them and wrong for the one that matters. STREAM_CHANGE is
+            // not a failure at all -- the transform is telling us its output type
+            // has changed and it will produce nothing further until the new type
+            // is set, so treating it as "nothing more to drain" left the encoder
+            // silent for the rest of the session with no error anywhere.
+            //
+            // NEED_MORE_INPUT is the ordinary end: the encoder has given up
+            // everything it has. E_UNEXPECTED is the same thing said badly, and
+            // it is BY FAR the common case here rather than an edge: measured on
+            // the dev box's NVIDIA MFT, a 20-second session that delivered 314
+            // of 316 pictures with nothing damaged answered E_UNEXPECTED 396
+            // times. The asynchronous transform raises a NEED_INPUT/HAVE_OUTPUT
+            // event and then has nothing by the time the drain arrives, and this
+            // is what it says about that. Logging it cost 396 lines and rolled
+            // the megabyte log in minutes, which is how a diagnostic becomes the
+            // thing that destroys the evidence.
+            if (got == MF_E_TRANSFORM_NEED_MORE_INPUT || got == E_UNEXPECTED) {
+                break;
+            }
+            if (got == MF_E_TRANSFORM_STREAM_CHANGE) {
+                if (++changes > kMaxFormatChanges) {
+                    Log("[media] the encoder keeps changing its output format; "
+                        "abandoning this drain");
+                    break;
+                }
+                IMFMediaType* changed = nullptr;
+                HRESULT renegotiated = mft->GetOutputAvailableType(0, 0, &changed);
+                if (SUCCEEDED(renegotiated) && changed) {
+                    renegotiated = mft->SetOutputType(0, changed, 0);
+                    changed->Release();
+                }
+                if (FAILED(renegotiated)) {
+                    Log("[media] the encoder changed its output format and would "
+                        "not accept the new type (0x%08lX)", renegotiated);
+                    break;
+                }
+                // The parameter sets described the old format. Dropping the
+                // cached copy is what makes Emit ask the transform again on the
+                // next IDR that arrives without them inlined, rather than
+                // prefixing a stale SPS that no longer describes the stream.
+                sequenceHeader.clear();
+                continue;
+            }
+            // Rate-limited, for the reason above: a per-frame failure logged per
+            // frame is a log that holds nothing but that failure. Once every five
+            // seconds, carrying how many were swallowed, keeps a persistent
+            // problem visible without letting it push everything else out.
+            ++drainFailures;
+            const long long complainedAt = Now();
+            if (lastDrainComplaint == 0
+                || (complainedAt - lastDrainComplaint) > QpcFrequency() * 5) {
+                Log("[media] the encoder would not produce output (0x%08lX), "
+                    "%llu time%s so far", got,
+                    (unsigned long long) drainFailures,
+                    drainFailures == 1 ? "" : "s");
+                lastDrainComplaint = complainedAt;
+            }
             break;
         }
         IMFSample* result = out.pSample;
+        if (!result) {
+            // Success with nothing handed over. Dereferencing that is the same
+            // crash as the null sample above, one branch further on.
+            Release(outSample);
+            Release(outBuffer);
+            if (out.pEvents) { out.pEvents->Release(); }
+            break;
+        }
         LONGLONG time = 0;
         result->GetSampleTime(&time);
         UINT32 clean = 0;
@@ -780,7 +894,16 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
 
     IMFMediaType* outType = nullptr;
-    MFCreateMediaType(&outType);
+    // Checked because the next line dereferences it. MFStartup belongs to the
+    // session that owns this encoder rather than to this class, so an Open on a
+    // thread where Media Foundation is not running answers MF_E_SHUTDOWN here --
+    // and unchecked that was a null dereference one line later rather than the
+    // log line below.
+    if (FAILED(MFCreateMediaType(&outType)) || !outType) {
+        Log("[media] could not create the H.264 output media type");
+        Close();
+        return false;
+    }
     outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
     outType->SetUINT32(MF_MT_AVG_BITRATE, s.bitrate);
@@ -799,7 +922,11 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
 
     IMFMediaType* inType = nullptr;
-    MFCreateMediaType(&inType);
+    if (FAILED(MFCreateMediaType(&inType)) || !inType) {
+        Log("[media] could not create the NV12 input media type");
+        Close();
+        return false;
+    }
     inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
     MFSetAttributeSize(inType, MF_MT_FRAME_SIZE, s.width, s.height);
@@ -926,6 +1053,9 @@ void Encoder::Close() {
     // instead of swallowing it, that stale credit would be retried for ever.
     s.needInput = 0;
     s.havePending = false;
+    // And the reference Submit took on the last captured texture, which is this
+    // object's to drop rather than the capture's.
+    Release(s.pendingBgra);
 }
 
 bool Encoder::Running() const { return impl_->running.load(); }
@@ -951,7 +1081,16 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     }
 
     std::lock_guard<std::mutex> guard(s.lock);
-    s.pendingBgra = bgra;
+    // A reference of its own, not the caller's. On the cpuOnly path this texture
+    // is read in FeedLocked, and on an asynchronous transform FeedLocked runs
+    // from the event callback -- another thread, after Submit has returned and
+    // after the capture frame the caller was holding has gone out of scope. The
+    // reference is held until the next frame replaces it or Close drops it.
+    if (bgra != s.pendingBgra) {
+        bgra->AddRef();
+        Release(s.pendingBgra);
+        s.pendingBgra = bgra;
+    }
     s.pendingSrcWidth = srcWidth;
     s.pendingSrcHeight = srcHeight;
     if (s.havePending) {

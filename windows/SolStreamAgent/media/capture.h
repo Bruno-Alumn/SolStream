@@ -28,12 +28,29 @@ namespace solstream::media {
 
 /// What was captured, and when.
 struct Frame {
-    ID3D11Texture2D* texture = nullptr;   ///< BGRA, owned by the Capture
+    ID3D11Texture2D* texture = nullptr;   ///< BGRA, kept alive by `hold`
     UINT width = 0;
     UINT height = 0;
     uint64_t serial = 0;                  ///< increments once per delivered frame
     long long capturedAt = 0;             ///< QueryPerformanceCounter ticks
     bool isNew = false;                   ///< false means this is the retained frame
+
+    /// The reference that makes `texture` safe to touch after Acquire returns.
+    ///
+    /// Acquire used to hand back a pointer borrowed from the Capture and then
+    /// drop the lock that was the only thing protecting it. The capture thread
+    /// releases the retained texture and allocates another one whenever the
+    /// captured source changes size, so between Acquire returning and the
+    /// encoder reading the pixels that pointer could name a texture whose last
+    /// reference has gone. Nothing on this side would report that: what fails
+    /// is a D3D call inside the encoder, made against freed memory, and it
+    /// fails there rather than here. The frame now carries a reference of its
+    /// own, so the texture outlives every use the caller makes of it through
+    /// this struct.
+    ///
+    /// A custom deleter, not the default one: `delete` on a COM object is heap
+    /// corruption, and `Release` is what actually drops a reference.
+    std::shared_ptr<ID3D11Texture2D> hold;
 };
 
 class Capture {

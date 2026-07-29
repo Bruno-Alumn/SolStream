@@ -10,6 +10,7 @@
 
 #include <dxgi.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -46,18 +47,34 @@ struct Capture::Impl {
     com_ptr<ID3D11Texture2D> retained;
     UINT width = 0, height = 0;
 
+    /// The size the frame pool's textures were created at, and the size the
+    /// arrivals say the source has actually become. WGC does not resize the
+    /// pool's surfaces by itself, so these two disagreeing is what says the pool
+    /// has to be built again.
+    UINT poolWidth = 0, poolHeight = 0;
+    UINT pendingWidth = 0, pendingHeight = 0;
+    bool poolStale = false;
+
     std::mutex lock;
-    /// Held by OnFrame for the whole of its body, and taken by Stop. See Stop
-    /// for what goes wrong without it. It is always taken BEFORE `lock`.
+    /// Held by OnFrame for the whole of its body, and taken by Stop and by
+    /// RecreatePoolIfNeeded. See Stop for what goes wrong without it. It is
+    /// always taken BEFORE `lock`.
     std::mutex callback;
     std::condition_variable arrived;
     uint64_t serial = 0;
     long long capturedAt = 0;
     uint64_t delivered = 0;
-    bool running = false;
+    /// Atomic because the readers do not agree on a mutex: OnFrame and Stop go
+    /// through `callback`, Acquire's wait predicate goes through `lock`, and
+    /// Running() holds neither. As a plain bool that was a data race whatever
+    /// the mutexes did. The atomic makes the reads defined; it is still cleared
+    /// with `callback` held, and that -- not the atomic -- is what makes Stop
+    /// wait for an arrival that is already running.
+    std::atomic<bool> running{false};
 
     bool Begin(GraphicsCaptureItem newItem);
     void OnFrame(Direct3D11CaptureFramePool const& sender);
+    void RecreatePoolIfNeeded();
 };
 
 bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
@@ -115,7 +132,9 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
 
     width = (UINT) size.Width;
     height = (UINT) size.Height;
-    running = true;
+    poolWidth = (UINT) size.Width;
+    poolHeight = (UINT) size.Height;
+    running.store(true);
     session.StartCapture();
     return true;
 }
@@ -127,7 +146,7 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
     // it under, so an arrival that gets in after Stop touches neither the device
     // nor the retained texture.
     std::lock_guard<std::mutex> alive(callback);
-    if (!running) {
+    if (!running.load()) {
         return;
     }
     auto frame = sender.TryGetNextFrame();
@@ -135,18 +154,36 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
         return;
     }
     const long long at = Now();
+    // The frame pool's textures stay the size the pool was created at; WGC does
+    // not grow or shrink them because the source changed. ContentSize is where
+    // the real picture ends, and the pool has to be recreated to make the two
+    // agree again -- which is NOT done here. See RecreatePoolIfNeeded: doing it
+    // on this thread is what crashed the agent, with an access violation inside
+    // ntdll and four "the encoder would not produce output (0x8000FFFF)" lines
+    // in front of it, because Recreate frees the very surfaces this callback is
+    // being dispatched over. So this arrival is served from the part of the
+    // surface both sizes have in common -- on a shrink that is the content, and
+    // the stale band the source used to occupy is left out rather than streamed
+    // as a border -- and the consumer thread rebuilds the pool between frames.
+    const auto content = frame.ContentSize();
     auto access = frame.Surface().as<
         ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     com_ptr<ID3D11Texture2D> texture;
-    if (SUCCEEDED(access->GetInterface(guid_of<ID3D11Texture2D>(), texture.put_void()))) {
+    if (content.Width > 0 && content.Height > 0
+        && SUCCEEDED(access->GetInterface(guid_of<ID3D11Texture2D>(),
+                                          texture.put_void()))) {
         D3D11_TEXTURE2D_DESC desc{};
         texture->GetDesc(&desc);
+        const UINT usableWidth =
+            (UINT) content.Width < desc.Width ? (UINT) content.Width : desc.Width;
+        const UINT usableHeight =
+            (UINT) content.Height < desc.Height ? (UINT) content.Height : desc.Height;
         std::lock_guard<std::mutex> guard(lock);
-        if (!retained || desc.Width != width || desc.Height != height) {
+        if (!retained || usableWidth != width || usableHeight != height) {
             retained = nullptr;
             D3D11_TEXTURE2D_DESC mine{};
-            mine.Width = desc.Width;
-            mine.Height = desc.Height;
+            mine.Width = usableWidth;
+            mine.Height = usableHeight;
             mine.MipLevels = 1;
             mine.ArraySize = 1;
             mine.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -157,10 +194,14 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
                 frame.Close();
                 return;
             }
-            width = desc.Width;
-            height = desc.Height;
+            width = usableWidth;
+            height = usableHeight;
         }
-        context->CopyResource(retained.get(), texture.get());
+        // A region rather than the whole resource, because the surface is only
+        // the same size as the retained texture while nothing is resizing.
+        const D3D11_BOX box{0, 0, 0, usableWidth, usableHeight, 1};
+        context->CopySubresourceRegion(retained.get(), 0, 0, 0, 0, texture.get(), 0,
+                                       &box);
         // Flush, or the copy sits in the deferred queue and the encoder is
         // handed a texture whose contents have not been written yet -- which
         // shows up as one frame of lag that no timestamp explains.
@@ -168,9 +209,59 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
         ++serial;
         ++delivered;
         capturedAt = at;
+        if ((UINT) content.Width != poolWidth || (UINT) content.Height != poolHeight) {
+            pendingWidth = (UINT) content.Width;
+            pendingHeight = (UINT) content.Height;
+            poolStale = true;
+        }
     }
     frame.Close();
     arrived.notify_all();
+}
+
+/// Rebuild the frame pool at the size the source has actually become.
+///
+/// ON THE CONSUMER'S THREAD, NEVER ON THE CALLBACK'S. Recreate tears down and
+/// reallocates the surfaces the pool owns, and the frame-arrived handler is
+/// dispatched over exactly those -- so calling it from inside OnFrame is a
+/// use-after-free inside WGC's own thread pool. It presents as an access
+/// violation in ntdll with the last log lines being ordinary encoder failures,
+/// which is as far from the cause as a report can get. A C++ `catch` does not
+/// help: an access violation is not a C++ exception.
+///
+/// `callback` is taken first and held across the Recreate, which is what makes
+/// "no arrival is inside the pool" true rather than likely: OnFrame holds it for
+/// its whole body. The lock order is the same as everywhere else -- `callback`
+/// before `lock` -- and `lock` is released before `callback` is taken.
+void Capture::Impl::RecreatePoolIfNeeded() {
+    UINT wantWidth = 0, wantHeight = 0;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        if (!poolStale) {
+            return;
+        }
+        wantWidth = pendingWidth;
+        wantHeight = pendingHeight;
+    }
+    std::lock_guard<std::mutex> alive(callback);
+    if (!running.load() || !pool) {
+        return;
+    }
+    try {
+        pool.Recreate(winrtDevice, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
+                      {(int32_t) wantWidth, (int32_t) wantHeight});
+    } catch (hresult_error const&) {
+        // Left stale on purpose, so the next pass tries again rather than
+        // capturing at the old size for the rest of the session.
+        return;
+    }
+    std::lock_guard<std::mutex> guard(lock);
+    poolWidth = wantWidth;
+    poolHeight = wantHeight;
+    // Only if nothing has moved again while the pool was being rebuilt.
+    if (pendingWidth == wantWidth && pendingHeight == wantHeight) {
+        poolStale = false;
+    }
 }
 
 Capture::Capture() : impl_(std::make_unique<Impl>()) {}
@@ -224,7 +315,7 @@ bool Capture::StartMonitor(HMONITOR monitor) {
 }
 
 void Capture::Stop() {
-    if (!impl_ || !impl_->running) {
+    if (!impl_ || !impl_->running.load()) {
         return;
     }
     // The frame pool is created free-threaded, so OnFrame runs on a thread-pool
@@ -236,7 +327,7 @@ void Capture::Stop() {
     // retained texture out from under a CopyResource still in progress.
     {
         std::lock_guard<std::mutex> alive(impl_->callback);
-        impl_->running = false;
+        impl_->running.store(false);
     }
     impl_->frameArrived.revoke();
     try {
@@ -250,7 +341,7 @@ void Capture::Stop() {
     impl_->arrived.notify_all();
 }
 
-bool Capture::Running() const { return impl_ && impl_->running; }
+bool Capture::Running() const { return impl_ && impl_->running.load(); }
 
 ID3D11Device* Capture::Device() const { return impl_ ? impl_->device.get() : nullptr; }
 
@@ -262,15 +353,30 @@ uint64_t Capture::Delivered() const {
 
 bool Capture::Acquire(Frame& out, uint64_t sinceSerial, int timeoutMs) {
     if (!impl_) { return false; }
+    // Between frames, which is the only safe place for it. The pool was created
+    // once from the item's size, so a source resized after StartCapture went on
+    // being captured at its original size for the rest of the session.
+    impl_->RecreatePoolIfNeeded();
     std::unique_lock<std::mutex> guard(impl_->lock);
     if (impl_->serial <= sinceSerial) {
         impl_->arrived.wait_for(guard, std::chrono::milliseconds(timeoutMs),
-                                [&] { return impl_->serial > sinceSerial || !impl_->running; });
+                                [&] {
+                                    return impl_->serial > sinceSerial
+                                           || !impl_->running.load();
+                                });
     }
     if (!impl_->retained) {
         return false;
     }
-    out.texture = impl_->retained.get();
+    // Taken while `lock` is still held, so the arrival that swaps the retained
+    // texture out cannot get between reading the pointer and referencing it.
+    // The reference travels with the frame: see Frame::hold for what happened
+    // when the caller was handed the bare pointer instead.
+    ID3D11Texture2D* const texture = impl_->retained.get();
+    texture->AddRef();
+    out.hold = std::shared_ptr<ID3D11Texture2D>(
+        texture, [](ID3D11Texture2D* released) { released->Release(); });
+    out.texture = texture;
     out.width = impl_->width;
     out.height = impl_->height;
     out.serial = impl_->serial;
