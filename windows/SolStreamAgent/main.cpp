@@ -67,7 +67,9 @@ constexpr unsigned short kDefaultPort = solstream::kDefaultAgentPort;
 // By default this socket is bound to loopback only and reached through an SSH
 // tunnel; anywhere else a token is required. --listen-all is opt-in and warns.
 constexpr const char* kLoopback = "127.0.0.1";
-constexpr int kProtocolVersion = 1;
+// 2 since auth v2: the token is proved rather than sent. A v1 host and a v2
+// Mac cannot interoperate, and deliberately so -- see the client's refusal.
+constexpr int kProtocolVersion = 2;
 
 // Transport and payload budgets. These have to be picked together, and together
 // with the matching pair in AgentConnection.swift, because the clipboard is the
@@ -1310,6 +1312,95 @@ std::string LoadOrCreateToken() {
 
 /// Constant-time compare, so a wrong token cannot be found a character at a time
 /// by timing the reply.
+/// `count` random bytes as lowercase hex.
+std::string RandomHex(size_t count) {
+    std::vector<unsigned char> bytes(count);
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        return {};
+    }
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    out.reserve(count * 2);
+    for (unsigned char byte : bytes) {
+        out.push_back(hex[byte >> 4]);
+        out.push_back(hex[byte & 0x0F]);
+    }
+    return out;
+}
+
+std::vector<unsigned char> FromHex(const std::string& hex) {
+    std::vector<unsigned char> out;
+    if (hex.size() % 2 != 0) {
+        return out;
+    }
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        int high = -1, low = -1;
+        auto nibble = [](char c) -> int {
+            if (c >= '0' && c <= '9') { return c - '0'; }
+            if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+            if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+            return -1;
+        };
+        high = nibble(hex[i]);
+        low = nibble(hex[i + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        out.push_back((unsigned char) ((high << 4) | low));
+    }
+    return out;
+}
+
+std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
+                                      const std::vector<unsigned char>& data) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                                    nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG))) {
+        return {};
+    }
+    std::vector<unsigned char> out(32);
+    const bool ok = BCRYPT_SUCCESS(BCryptHash(algorithm, (PUCHAR) key.data(),
+                                              (ULONG) key.size(), (PUCHAR) data.data(),
+                                              (ULONG) data.size(), out.data(), 32));
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return ok ? out : std::vector<unsigned char>{};
+}
+
+/// Auth v2: the Mac proves it holds the token instead of sending it.
+///
+/// proof = HMAC-SHA256(tokenBytes, "SolStream agent auth v2" || challenge || cnonce)
+///
+/// The challenge is fresh per connection, so a recorded proof is worth nothing
+/// on the next one; the client's own nonce is in there because the same values
+/// seed the media key schedule later and neither side should be able to fix all
+/// of that input by itself.
+bool ProofMatches(const std::string& challengeHex, const std::string& cnonceHex,
+                  const std::string& proofHex) {
+    const std::vector<unsigned char> challenge = FromHex(challengeHex);
+    const std::vector<unsigned char> cnonce = FromHex(cnonceHex);
+    const std::vector<unsigned char> proof = FromHex(proofHex);
+    const std::vector<unsigned char> key = FromHex(g_token);
+    if (challenge.size() != 32 || cnonce.size() != 32 || proof.size() != 32
+        || key.empty()) {
+        return false;
+    }
+    static const char kLabel[] = "SolStream agent auth v2";
+    std::vector<unsigned char> message(kLabel, kLabel + sizeof(kLabel) - 1);
+    message.insert(message.end(), challenge.begin(), challenge.end());
+    message.insert(message.end(), cnonce.begin(), cnonce.end());
+
+    const std::vector<unsigned char> expected = HmacSha256(key, message);
+    if (expected.size() != 32) {
+        return false;
+    }
+    unsigned char difference = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        difference |= (unsigned char) (expected[i] ^ proof[i]);
+    }
+    return difference == 0;
+}
+
 bool TokenMatches(const std::string& supplied) {
     if (supplied.size() != g_token.size() || g_token.empty()) {
         return false;
@@ -2737,7 +2828,8 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
     return true;
 }
 
-std::string HandleCommand(const std::string& line, bool& authenticated) {
+std::string HandleCommand(const std::string& line, bool& authenticated,
+                          const std::string& challenge) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
@@ -2778,6 +2870,30 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
     }
 
     if (command == "auth") {
+        // v2 first. The token itself never crosses the wire: the client proves
+        // it holds one against a challenge this connection just invented.
+        std::string proof, cnonce;
+        if (FieldString(line, "proof", proof) && FieldString(line, "cnonce", cnonce)) {
+            if (ProofMatches(challenge, cnonce, proof)) {
+                if (!authenticated) {
+                    g_clients_authenticated.fetch_add(1);
+                }
+                authenticated = true;
+                // Said out loud. Which of the two auth paths a client took is
+                // the first question when one of them misbehaves, and until now
+                // a successful authentication left no trace at all -- only a
+                // failed one did.
+                Log("[agent] client authenticated with a v2 proof");
+                return "{\"type\":\"auth\",\"ok\":true}";
+            }
+            Sleep(1000);
+            Log("[agent] rejected a bad auth proof");
+            return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
+        }
+
+        // Legacy, host side only. Accepting a token somebody already holds
+        // discloses nothing; SENDING one does, which is why the Mac's half of
+        // this path is deleted rather than deprecated.
         std::string supplied;
         FieldString(line, "token", supplied);
         if (TokenMatches(supplied)) {
@@ -2785,6 +2901,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated) {
                 g_clients_authenticated.fetch_add(1);
             }
             authenticated = true;
+            Log("[agent] client authenticated with a legacy plaintext token");
             return "{\"type\":\"auth\",\"ok\":true}";
         }
         // Deliberately slow: this is the only guess-and-check surface here, and
@@ -3277,11 +3394,18 @@ void ServeClient(SOCKET client) {
 
     // The greeting says whether a token is needed, so the Mac can ask for one up
     // front rather than discovering it by having a command refused.
+    // Fresh per connection, so a proof recorded off the wire is worth nothing on
+    // the next one. Generated even when no auth is required, because the same
+    // value seeds the media key schedule later and the handshake should not have
+    // two shapes.
+    const std::string challenge = RandomHex(32);
+
     std::string hello = "{\"type\":\"hello\",\"version\":";
     hello += std::to_string(kProtocolVersion);
     hello += ",\"host\":\"" + JsonEscape(hostname) + "\"";
     hello += ",\"needsAuth\":" + std::string(g_require_auth ? "true" : "false");
     hello += ",\"sunshineInstance\":\"" + std::to_string(SunshineInstanceId()) + "\"";
+    hello += ",\"challenge\":\"" + challenge + "\"";
     hello += "}";
     if (!SendLine(client, hello)) {
         return;
@@ -3347,7 +3471,7 @@ void ServeClient(SOCKET client) {
                 continue;
             }
             const bool was_authenticated = authenticated;
-            if (!SendLine(client, HandleCommand(line, authenticated))) {
+            if (!SendLine(client, HandleCommand(line, authenticated, challenge))) {
                 return;
             }
             // Authenticating completes the greeting: the display list is part of
