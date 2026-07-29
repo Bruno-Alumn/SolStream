@@ -35,3 +35,4 @@ assets/logo/out/
 
 # The capture spike's build output
 build/spike-wgc/
+build/smt-vectors/
