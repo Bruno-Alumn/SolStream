@@ -1092,12 +1092,26 @@ void LayoutAndPaint(HWND window) {
         if (g_token_edit) {
             const float scale = g_dpi / 96.0f;
             const float inset = metric::kFieldInset + 6.0f;
-            SetWindowPos(g_token_edit, nullptr,
-                         (int) ((field.left + inset) * scale),
-                         (int) ((field.top + 8.0f) * scale),
-                         (int) ((field.right - field.left - inset * 2) * scale),
-                         (int) (18.0f * scale),
-                         SWP_NOZORDER | SWP_SHOWWINDOW);
+            const int x = (int) ((field.left + inset) * scale);
+            const int y_px = (int) ((field.top + 8.0f) * scale);
+            const int w = (int) ((field.right - field.left - inset * 2) * scale);
+            const int h = (int) (18.0f * scale);
+            // Only when it has actually moved. This runs on every paint, and a
+            // SetWindowPos that changes nothing still repaints the control and
+            // still carries SWP_SHOWWINDOW -- so the field was being redrawn
+            // once a second for the whole life of the window, at a position it
+            // was already in.
+            RECT now{};
+            GetWindowRect(g_token_edit, &now);
+            MapWindowPoints(HWND_DESKTOP, GetParent(g_token_edit), (POINT*) &now, 2);
+            const bool moved = now.left != x || now.top != y_px
+                            || now.right - now.left != w || now.bottom - now.top != h;
+            if (moved) {
+                SetWindowPos(g_token_edit, nullptr, x, y_px, w, h, SWP_NOZORDER);
+            }
+            if (!IsWindowVisible(g_token_edit)) {
+                ShowWindow(g_token_edit, SW_SHOW);
+            }
         }
 
         if (copy) {
