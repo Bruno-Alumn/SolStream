@@ -51,11 +51,20 @@ public final class MediaClient {
 
     private var fd: Int32 = -1
     private var receiveThread: Thread?
+    /// Guarded by `stateLock`. Read it through `isRunning`, never directly from
+    /// another thread: it is written by whichever of the three threads notices
+    /// the session ending first.
     private var running = false
     private let sendLock = NSLock()
     private let stateLock = NSLock()
+    /// Signalled by the receive thread as it leaves, so `stop()` can be sure
+    /// nothing is inside the socket before the descriptor is closed.
+    private let receiveFinished = DispatchSemaphore(value: 0)
 
     private var stats = Stats()
+    /// The reassembler's `lastCompleteFrame`, mirrored under `stateLock` so the
+    /// feedback packet can report it without reaching across a thread.
+    private var lastCompleteFrame: UInt32 = 0
     private var startedAt = DispatchTime.now().uptimeNanoseconds
     private var lastHeardAt: UInt64 = 0
 
@@ -80,6 +89,7 @@ public final class MediaClient {
             guard let self else { return }
             self.stateLock.lock()
             self.stats.framesComplete = self.reassembler.complete
+            self.lastCompleteFrame = picture.frameId
             self.stateLock.unlock()
             self.onVideo?(picture.bytes, picture.isIdr)
         }
@@ -151,19 +161,61 @@ public final class MediaClient {
         return true
     }
 
+    /// End the session and close the socket, in an order that cannot hand the
+    /// descriptor to somebody else while a thread is still inside it.
+    ///
+    /// THE OLD ORDER WAS UNSAFE, and ThreadSanitizer says so on every run:
+    /// `close(fd)` from the main thread while the receive thread sat between
+    /// `while running` and `recv(fd, …)`. A closed descriptor number is handed
+    /// straight back out by the kernel, and this process opens sockets while a
+    /// session is ending — the agent channel reconnects, the next session binds
+    /// its own — so the loser of that race does not get an error, it reads
+    /// somebody else's socket. Hard to hit and impossible to diagnose.
+    ///
+    /// So: stop the clock, make sure no timer handler is still in flight, then
+    /// `shutdown` — which wakes `recv` WITHOUT freeing the number — then wait
+    /// for the receive thread to actually leave, and only then close.
     public func stop() {
-        guard running else { return }
+        stateLock.lock()
+        guard running else { stateLock.unlock(); return }
         running = false
+        stateLock.unlock()
+
         timer?.cancel()
         timer = nil
+        // A cancelled DispatchSourceTimer may still have a handler running. Its
+        // handlers run on this queue, so a barrier here is what makes "no more
+        // sends" true rather than likely.
+        timerQueue.sync {}
+
         sendRaw(Data([SMT.typeBye]))
+
+        if fd >= 0 {
+            shutdown(fd, SHUT_RDWR)
+        }
+        // Bounded: the loop's own receive timeout is 200 ms, so a second is
+        // several chances to notice. Giving up and leaking one descriptor is
+        // better than hanging the main thread on a socket that will not wake.
+        if receiveThread != nil {
+            if receiveFinished.wait(timeout: .now() + 1.0) == .timedOut {
+                Log.error("[media] the receive thread did not stop; "
+                          + "leaving its socket open rather than pulling it")
+                receiveThread = nil
+                return
+            }
+            receiveThread = nil
+        }
         if fd >= 0 {
             close(fd)
             fd = -1
         }
     }
 
-    public var isRunning: Bool { running }
+    public var isRunning: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running
+    }
 
     public func requestKeyframe() {
         stateLock.lock()
@@ -193,7 +245,7 @@ public final class MediaClient {
     /// Queue one input event. The datagram carries it plus the unacknowledged
     /// tail, so a single loss costs nothing.
     public func sendInput(_ blob: Data) {
-        guard running, blob.count >= 2 else { return }
+        guard isRunning, blob.count >= 2 else { return }
         stateLock.lock()
         let seq = nextSeq
         nextSeq &+= 1
@@ -224,9 +276,13 @@ public final class MediaClient {
         stateLock.lock()
         let wantKeyframe = needKeyframe
         needKeyframe = false
-        let complete = reassembler.complete
-        let damaged = reassembler.damaged
-        let last = reassembler.lastCompleteFrame
+        // From the mirror, not from the reassembler. Its counters are written
+        // on the receive thread without this lock, so reading them here was a
+        // race on every feedback packet -- fifty a second, for the whole
+        // session. The callbacks above already copy them across under the lock.
+        let complete = stats.framesComplete
+        let damaged = stats.framesDamaged
+        let last = lastCompleteFrame
         let received = stats.datagramsReceived
         stateLock.unlock()
 
@@ -253,7 +309,7 @@ public final class MediaClient {
                         repeating: .milliseconds(10))
         var ticks = 0
         source.setEventHandler { [weak self] in
-            guard let self, self.running else { return }
+            guard let self, self.isRunning else { return }
             ticks += 1
 
             // Repeat the unacknowledged input tail.
@@ -283,10 +339,17 @@ public final class MediaClient {
             if ticks % 5 == 0 { self.sendFeedback() }        // 50 ms
             if ticks % 100 == 0 { self.sendPing() }          // 1 s
 
-            let silentMs = Self.millis(since: self.lastHeardAt)
+            // Copied under the lock: the receive thread writes it on every
+            // datagram that authenticates, roughly two hundred times a second.
+            self.stateLock.lock()
+            let heardAt = self.lastHeardAt
+            self.stateLock.unlock()
+            let silentMs = Self.millis(since: heardAt)
             if silentMs > 5000 {
                 Log.error("[media] the host has been silent for 5 s")
+                self.stateLock.lock()
                 self.running = false
+                self.stateLock.unlock()
                 self.onEnded?()
             }
             if ticks % 5 == 0 {
@@ -320,9 +383,18 @@ public final class MediaClient {
     }
 
     private func receiveLoop() {
+        // Signalled however this returns, including the early exits below:
+        // `stop()` waits on it before closing the socket, and a path that
+        // forgot to signal would stall it for a second and then leak the
+        // descriptor.
+        defer { receiveFinished.signal() }
         var buffer = [UInt8](repeating: 0, count: 2048)
-        while running {
-            let n = recv(fd, &buffer, buffer.count, 0)
+        // The descriptor is read once, here. `stop()` does not close it until
+        // this function has returned, so a local copy is valid for the whole
+        // loop and is not a field two threads share.
+        let socket = fd
+        while isRunning {
+            let n = recv(socket, &buffer, buffer.count, 0)
             if n <= 0 {
                 // A timeout, which is the only quiet moment there is: retire
                 // assemblies that will never complete.
@@ -342,7 +414,9 @@ public final class MediaClient {
                 stateLock.unlock()
                 continue
             }
+            stateLock.lock()
             lastHeardAt = DispatchTime.now().uptimeNanoseconds
+            stateLock.unlock()
             handle(plaintext)
         }
     }
@@ -379,7 +453,9 @@ public final class MediaClient {
             stateLock.unlock()
         case SMT.typeBye:
             Log.info("[media] the host ended the session")
+            stateLock.lock()
             running = false
+            stateLock.unlock()
             onEnded?()
         default:
             break
