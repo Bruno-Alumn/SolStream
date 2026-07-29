@@ -679,15 +679,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
         metalView?.setError(title, detail: detail)
     }
 
-    /// The fallback when the host cannot approve its own pairing: show the PIN and
-    /// say where it goes.
-    func setPairingPin(_ pin: String, host: String, reason: String?) {
-        var detail = "Open https://\(host):47990 → PIN and enter the code above."
-        if let reason, !reason.isEmpty {
-            detail += "\n\(reason)"
-        }
-        metalView?.setStatus("Enter this PIN in Sunshine", detail: detail, pin: pin)
-    }
+    // There was a `setPairingPin(_:host:reason:)` here, the last thing in this
+    // application that could put the words "Enter this PIN in Sunshine" and a
+    // link to port 47990 on screen. Nothing calls it: SolStream pairs with a
+    // token the host shows in its own window, and there is no PIN and no web UI
+    // to send anybody to. See the note where `brokerPairing` used to be.
 
     func hideStatus() {
         metalView?.hideStatus()

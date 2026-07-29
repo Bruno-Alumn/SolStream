@@ -15,8 +15,17 @@ public final class InputCapture {
 
     /// The region of the streamed canvas this view displays, in canvas pixels,
     /// and the canvas's full size. Pointer positions must be sent in canvas
-    /// coordinates: Sunshine rescales from the reference rectangle we declare
-    /// onto the captured display, and it knows nothing about our crop.
+    /// coordinates.
+    ///
+    /// The contract changed with the transport and this comment did not, which
+    /// for a coordinate contract is the worst kind of stale: it said the host
+    /// rescales from a reference rectangle the packet declares. SMT/1 carries no
+    /// reference rectangle. `kInputMouseAbs` is two 16-bit values normalised
+    /// 0..65535 across the host's TARGET — the streamed window's DWM frame bounds
+    /// for a window capture, the monitor rectangle for a display capture — and
+    /// `InputInjector::ScreenPoint` is the only thing that turns those into
+    /// pixels. So this side owes it a fraction of the canvas, and the crop is
+    /// this side's business alone.
     public var sourceRect: CGRect?
     public var canvasSize: CGSize?
 
@@ -170,8 +179,11 @@ public final class InputCapture {
     public private(set) var positionsSent = 0
 
     /// Non-modifier keys currently held, so they can be released on focus loss.
-    /// Sunshine hands key-down straight to SendInput, and Windows auto-repeats
-    /// a key it never sees released — so a missed key-up repeats forever.
+    /// The host hands key-down straight to SendInput, and Windows auto-repeats a
+    /// key it never sees released — so a missed key-up repeats forever. The host
+    /// releases everything it is holding when a session ends, which covers the
+    /// session going away; this covers the window merely losing focus, which it
+    /// does not.
     private var heldKeys: Set<UInt16> = []
 
     /// The subset of `heldKeys` pressed while ⌘ was down — see `releaseChordKeys`.
@@ -521,9 +533,10 @@ public final class InputCapture {
 
     /// Send the pointer position in the view's own coordinate space.
     ///
-    /// The packet carries the reference rectangle alongside the coordinates and
-    /// Sunshine rescales onto the captured surface, so view points work
-    /// directly — no DPI or stream-resolution maths needed here. macOS
+    /// View points are turned into a fraction of the canvas here, because that is
+    /// all the wire carries: `sourceRect` says which part of the canvas this view
+    /// is showing, and the host normalises the result across its own target. No
+    /// reference rectangle travels with the packet — see `sourceRect`. macOS
     /// coordinates are bottom-left origin, Windows is top-left, hence the flip.
     /// - Parameter clampToEdge: pin an outside point to the edge of the picture
     ///   rather than refusing it. Used while a button is held: the host still has

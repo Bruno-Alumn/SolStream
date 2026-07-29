@@ -9,7 +9,7 @@ import SolStreamLogging
 /// A remote display on the Windows host.
 public struct RemoteDisplay: Sendable, Equatable {
     /// The `DXGI_OUTPUT_DESC.DeviceName` form, e.g. `\\.\DISPLAY1`. This is the
-    /// exact string Sunshine's `output_name` setting takes.
+    /// exact string the `media open` command takes as its `display`.
     public let name: String
     /// The GDI adapter driving it, e.g. `NVIDIA GeForce RTX 4070 SUPER` or
     /// `Virtual Display Driver`.
@@ -19,7 +19,7 @@ public struct RemoteDisplay: Sendable, Equatable {
     public let width: Int
     public let height: Int
     public let isPrimary: Bool
-    /// Whether this is the display Sunshine is actually encoding.
+    /// Whether this is the display the host resolved as its capture display.
     ///
     /// Authoritative, and it has to be: the stream carries one display, the Mac
     /// crops a rectangle out of it, and placing windows anywhere else means
@@ -115,7 +115,7 @@ public final class AgentConnection {
     private let queue = DispatchQueue(label: "com.solstream.agent")
 
     /// Guards the few things below that the rest of the app reads from wherever
-    /// it happens to be standing — the display list, the Sunshine instance, and
+    /// it happens to be standing — the display list, and
     /// the flag `isConnected` answers from. Everything else in this class
     /// belongs to `queue` and is only ever touched there.
     ///
@@ -204,20 +204,6 @@ public final class AgentConnection {
     /// and this flag is what tells them apart — the two are byte-for-byte
     /// identical on the wire.
     private var greetingDisplaysPending = false
-
-    private var storedSunshineInstance = ""
-
-    /// Identifies the Sunshine process now running on the host, so a client can
-    /// tell a restart from a continuation. Empty if Sunshine is not running.
-    ///
-    /// Guarded for the same reason as `displays`: a String is a heap buffer with
-    /// a reference count too, and the greeting that sets it arrives on `queue`
-    /// while whoever is interested reads it from the main thread.
-    public var sunshineInstance: String {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return storedSunshineInstance
-    }
 
     public var onState: ((State) -> Void)?
     public var onDisplays: (([RemoteDisplay]) -> Void)?
@@ -901,38 +887,18 @@ public final class AgentConnection {
         }
     }
 
-    public enum PairingResult: Sendable, Equatable {
-        case paired
-        /// The host has no stored Sunshine credentials, so it cannot pair on the
-        /// user's behalf. Fall back to showing the PIN.
-        case needsHostSetup(String)
-        case failed(String)
-    }
-
-    /// Ask the host to approve this client's pairing PIN.
-    ///
-    /// Sunshine normally requires a human to type the PIN into its web UI. The
-    /// agent runs on the host and can post it to Sunshine's local API instead, so
-    /// the user never sees a browser, a certificate warning, or a PIN page.
-    public func pair(pin: String, clientName: String,
-                     completion: @escaping (PairingResult) -> Void) {
-        send(["cmd": "pair", "pin": pin, "name": clientName]) { result in
-            guard case .success(let message) = result else {
-                completion(.failed("the agent did not answer"))
-                return
-            }
-            if message["ok"] as? Bool == true {
-                completion(.paired)
-                return
-            }
-            let detail = message["message"] as? String ?? "the host refused the pairing"
-            if message["reason"] as? String == "no-credentials" {
-                completion(.needsHostSetup(detail))
-            } else {
-                completion(.failed(detail))
-            }
-        }
-    }
+    // There was a `pair(pin:clientName:)` here, and a `PairingResult` beside it.
+    //
+    // It brokered GameStream's PIN: the agent would post the client's PIN to
+    // Sunshine's local web API so the user never had to get past a self-signed
+    // certificate warning to type it in. SolStream has no PIN — the Mac proves an
+    // HMAC over a per-connection challenge, and the host's `pair` handler answers
+    // `{"reason":"gone"}` to anything that still asks. So this could only ever
+    // report a failure, and its one caller reported that failure by putting a PIN
+    // on screen for a handshake that does not have one.
+    //
+    // `sunshineInstance` went the same way: nothing has put that field in a
+    // greeting since the agent stopped launching Sunshine.
 
     public struct RemoteClipboard: Sendable, Equatable {
         public let text: String
@@ -1355,9 +1321,6 @@ public final class AgentConnection {
         case "hello":
             let host = message["host"] as? String ?? self.host
             let version = message["version"] as? Int ?? 0
-            stateLock.lock()
-            storedSunshineInstance = message["sunshineInstance"] as? String ?? ""
-            stateLock.unlock()
             // Before any branch below needs it: a token supplied later by the
             // user authenticates against the challenge from THIS greeting.
             authChallenge = message["challenge"] as? String
@@ -1503,6 +1466,13 @@ public final class AgentConnection {
             } else {
                 Log.error("[agent] token rejected")
                 Self.forgetToken(for: host)
+                // And forget it here too, not only on disk. It was cleared from
+                // UserDefaults and left in this object, so a reconnect before the
+                // user had typed a new one read the field rather than the store
+                // and sent the same refused proof again — burning one of the
+                // host's three attempts per reconnect, and reporting
+                // `rejected: true` about a token the person had never been shown.
+                token = nil
                 report(.needsToken(host: host, rejected: true))
             }
             // Whichever way it went, the framing is now settled on both ends.
@@ -1648,7 +1618,8 @@ public enum AgentError: Error {
     case oversizedResponse
     /// The host stopped asking for a token it had previously required.
     case unexpectedDowngrade
-    /// The host is already serving another Mac. Sunshine runs one session, so
-    /// this is a fact about the host rather than a transient failure.
+    /// The host is already serving another Mac. There is one capture, one encoder
+    /// and one media socket on that PC, so this is a fact about the host rather
+    /// than a transient failure.
     case hostBusy
 }

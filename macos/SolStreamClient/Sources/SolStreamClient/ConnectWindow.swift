@@ -19,15 +19,18 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private struct HostState {
         var address: String
         var name: String?
-        var isReachable: Bool?      // nil while unknown
-        /// Whether the SolStream host application itself answered, as opposed to
-        /// only the Sunshine beside it. Nil while unknown.
+        /// Whether the agent's port answered. Nil while unknown.
         ///
-        /// Kept apart from `isReachable` because the two really can disagree, and
-        /// the difference is the whole answer: Sunshine binds every interface,
-        /// the agent binds one, so a PC can be perfectly reachable for streaming
-        /// and still have nothing to take SolStream's commands.
-        var hasAgent: Bool?
+        /// There was a second flag beside this, `hasAgent`, for the case where the
+        /// PC was reachable for streaming but had nothing to take SolStream's
+        /// commands — Sunshine bound every interface and the agent bound one, so
+        /// the two genuinely disagreed. Both are gone: there is one port, and the
+        /// two probes had been reduced to two TCP connects to the same number, so
+        /// `hasAgent` could no longer differ from this and the branches that
+        /// reported the difference were unreachable. It also cost the agent two
+        /// connections per debounced keystroke, on a socket that serves one client
+        /// and logs every arrival it turns away.
+        var isReachable: Bool?
         var isPaired: Bool
         var latency: TimeInterval?
 
@@ -169,15 +172,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // address the field is already showing.
         if let name = state.name { parts.append(name) }
         switch state.isReachable {
-        case .some(true) where state.hasAgent == false:
-            // Not "paired": pairing is brokered by the host application, and
-            // saying anything about it here would describe a PC that cannot
-            // answer as though it were ready.
-            // Dead rather than live: the PC answers, but the thing SolStream
-            // needs does not, and that is what the dot is reporting on. There is
-            // no third colour in the design system to mean "half".
-            parts.append("SolStream not running")
-            dotState = .dead
         case .some(true):
             parts.append(state.isPaired ? "paired" : "not paired")
             if let latency = state.latency {
@@ -197,15 +191,13 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hostDropdown.isDiscovering = browser.isRunning
 
         switch (state.isReachable, state.needsPairing) {
-        // Said before anything about pairing: without the host application there
-        // is nothing to pair *with*. SolStream brokers pairing through the agent,
-        // so "reachable" here would promise a step that cannot happen.
-        case (.some(true), _) where state.hasAgent == false:
-            hintLabel.stringValue = "Something is streaming on this PC, but SolStream is not "
-                                  + "answering. Start SolStream there."
-            connectButton.title = "Connect"
         case (.some(true), true):
-            hintLabel.stringValue = "Pairing needed — the PC approves it for you, or shows a PIN."
+            // What the person will actually be asked for. It used to say the PC
+            // "approves it for you, or shows a PIN", which described GameStream's
+            // flow: there is no PIN anywhere in SolStream, and nothing on the PC
+            // approves anything — the token is on SolStream's own window there,
+            // and this Mac proves it.
+            hintLabel.stringValue = "Pairing needed — SolStream on the PC shows a token to type in."
             connectButton.title = "Pair & Connect"
         case (.some(true), false):
             hintLabel.stringValue = "Reachable and paired. Connecting is one step."
@@ -232,34 +224,30 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         connectButton.isEnabled = !state.address.isEmpty
     }
 
-    /// Reachability is checked by opening the ports, not by pinging: what matters
+    /// Reachability is checked by opening the port, not by pinging: what matters
     /// is whether the thing we need is listening, not whether the machine replies
     /// to ICMP.
     ///
-    /// Both ports are probed, because answering on one says nothing about the
-    /// other. Measured on this network: `NAME.local` resolves to the LAN address,
-    /// where Sunshine answers on 47600 because it binds every interface, while the
-    /// agent — bound to one address — does not. The window said "Reachable and
-    /// paired. Connecting is one step", and connecting then failed with "No answer
-    /// from NAME.local". The reachable thing was never the thing being asked for.
+    /// ONE probe, not two. There were two, back when a PC could answer for
+    /// streaming on a port Sunshine bound and have nothing on the agent's — that
+    /// is what `hasAgent` recorded. Once the second base port went, both calls
+    /// were connecting to 47630 and comparing the answer against itself, which
+    /// cost the agent a spare connection per keystroke and could only ever agree.
     private func scheduleProbe() {
         probe?.cancel()
         let address = state.address
         guard !address.isEmpty else {
             state.isReachable = nil
-            state.hasAgent = nil
             refresh()
             return
         }
         let work = DispatchWorkItem { [weak self] in
             let started = Date()
-            let reachable = Self.canReachSunshine(host: address)
+            let reachable = Self.canReach(host: address, port: StreamPorts.agent)
             let elapsed = Date().timeIntervalSince(started)
-            let agent = Self.canReach(host: address, port: UInt16(StreamPorts.agent))
             DispatchQueue.main.async {
                 guard let self, self.state.address == address else { return }
                 self.state.isReachable = reachable
-                self.state.hasAgent = agent
                 self.state.latency = reachable ? elapsed : nil
                 // Remember it here rather than on Connect. Typing an address and
                 // then not connecting -- because the stream was for later, or the
@@ -271,21 +259,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 // the list free of half-typed addresses: every keystroke schedules
                 // one of these, and "192.168.1.5" on the way to "192.168.1.50" is
                 // not a host anyone wants offered back to them.
-                if reachable || agent { Self.remember(host: address) }
+                if reachable { Self.remember(host: address) }
                 self.refresh()
             }
         }
         probe = work
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
-    }
-
-    /// Is a SolStream host — or a plain Sunshine — answering here?
-    ///
-    /// One port to try. There used to be two bases -- SolStream's own and the
-    /// stock Sunshine one -- because a host somebody had already set up for
-    /// Moonlight answered on a different number. Neither exists now.
-    private static func canReachSunshine(host: String) -> Bool {
-        canReach(host: host, port: StreamPorts.agent)
     }
 
     private static func canReach(host: String, port: UInt16) -> Bool {
@@ -334,7 +313,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.address = typed
         state.name = discovered.first { $0.connectTarget == typed }?.name
         state.isReachable = nil
-        state.hasAgent = nil
         state.latency = nil
         refresh()
         scheduleProbe()

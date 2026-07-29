@@ -14,9 +14,9 @@ import SolStreamLogging
 /// raw Annex-B makes the decoder read `00 00 00 01` as a 1-byte NAL and produce
 /// nothing, so the conversion below is what actually gets pictures on screen.
 ///
-/// SPS/PPS come in-band: Sunshine repeats them ahead of every IDR frame, so the
-/// format description is built from the stream itself and no SDP parsing is
-/// needed.
+/// SPS/PPS come in-band: the host prefixes them to every IDR that the encoder
+/// did not inline them into — see `Encoder::Emit` — so the format description is
+/// built from the stream itself and there is nothing to parse out of band.
 public final class VideoDecoder {
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
@@ -245,7 +245,7 @@ public final class VideoDecoder {
     /// Only `kVTInvalidSessionErr` used to drop the session. Everything else was
     /// logged and the frame discarded — including `kVTVideoDecoderMalfunctionErr`
     /// and `kVTVideoDecoderBadDataErr`, where recreating the session *is* the
-    /// documented recovery. That mattered more than it sounds: Sunshine repeats
+    /// documented recovery. That mattered more than it sounds: the host repeats
     /// the same SPS/PPS ahead of every IDR, so `parameterSetsChanged` stays
     /// false, and the one other thing that rebuilds a session never fired. A
     /// decoder that malfunctioned once stayed wedged for the rest of the

@@ -58,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         var config = StreamConfig()
         // --bitrate is the only stream knob left. The packet size is fixed by
-        // the MTU and the header, and there is no Sunshine port to point at.
+        // the MTU and the header, and there is no separate streaming port to aim at.
         if let index = arguments.firstIndex(of: "--bitrate"),
            index + 1 < arguments.count,
            let kbps = Int(arguments[index + 1]) {
@@ -117,9 +117,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // display, which is exactly what single-application mode exists to avoid,
         // so it is not the default any more.
         if let host, arguments.contains("--desktop") {
-            // Ask for a canvas shaped like this Mac. Sunshine letterboxes to
-            // preserve the source aspect, so a 16:9 request against a 3:2 display
-            // is where the black bars down each side came from.
+            // Ask for a canvas shaped like this Mac. A mismatched aspect ratio is
+            // where the black bars come from: the host encodes the capture display
+            // as it is, and this window then letterboxes what it cannot fill.
             var desktop = config
             if let screen = NSScreen.main {
                 let scale = screen.backingScaleFactor
@@ -189,8 +189,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Synchronous: the process is about to exit and the host needs to see
         // us go, or it stays busy for every other client.
-        streamWindows.forEach { $0.stopStreaming(waitUntilDone: true) }
-        session?.stop(waitUntilDone: true)
+        streamWindows.forEach { $0.stopStreaming() }
+        session?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -332,6 +332,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agent.onDisplays = { [weak self, weak agent] _ in
             guard let agent else { return }
+            // Once only, from here on. The other two entry points that hang the
+            // whole open flow off this push clear it and say why; this one did
+            // not, and it is the path `--launch` and every launch test take. The
+            // host greets EVERY connection with `displays` unprompted, including
+            // the one after a reconnect — so a dropped socket launched the
+            // application a second time and opened a second window over the first.
+            // Cleared before the work rather than after it: `apps` is a round trip
+            // and a second push can land inside it.
+            agent.onDisplays = nil
             agent.apps { apps in
                 guard let match = apps.first(where: {
                     $0.name.localizedCaseInsensitiveContains(query)
@@ -475,7 +484,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("[app] capture display \(capture.name) "
                  + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                  + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
-        Log.info("[app] Sunshine's output_name must resolve to \(capture.name)")
+        // No "Sunshine's output_name must resolve to …" line here any more. There
+        // is no separate configuration that could disagree: the media session
+        // names the display it wants captured, and the host captures that one.
 
         // Only ever resize a virtual display. A physical monitor is somebody's
         // actual screen, and changing its mode to suit a remote client would be
@@ -591,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Stream one or more Windows applications, each in its own native window.
     ///
     /// The agent is consulted BEFORE the stream launches, because the encode
-    /// canvas has to match the capture display exactly: when it does, Sunshine's
+    /// canvas has to match the capture display exactly: when it does, the
     /// scale factor is 1.0 and every crop is pixel-exact rather than resampled.
     private func startSingleApp(host: String, agentHost: String, matching query: String,
                                 displayQuery: String?, config: StreamConfig) {
@@ -978,41 +989,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session.start()
     }
 
-    /// Get the host to approve its own pairing PIN.
-    ///
-    /// Sunshine's own flow asks the user to open its web UI, get past a
-    /// self-signed certificate warning, create credentials and find the PIN page.
-    /// The agent is already on the host and can hand the PIN to Sunshine directly,
-    /// so all of that disappears. If the host has no stored credentials the PIN is
-    /// shown as before — degraded, but never worse than the original flow.
-    private func brokerPairing(pin: String, host: String, agent: AgentConnection) {
-        let name = Host.current().localizedName ?? "SolStream client"
-        appWindows.forEach { $0.setStatus("Pairing with \(host)", detail: "Asking the host to approve…") }
-        Log.info("[pair] asking the agent to approve PIN for \"\(name)\"")
-
-        agent.pair(pin: pin, clientName: name) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                switch result {
-                case .paired:
-                    Log.info("[pair] the host approved this Mac; no PIN entry needed")
-                    self.appWindows.forEach {
-                        $0.setStatus("Paired", detail: "Starting the stream…")
-                    }
-                case .needsHostSetup(let detail):
-                    Log.info("[pair] host cannot approve automatically: \(detail)")
-                    self.appWindows.forEach {
-                        $0.setPairingPin(pin, host: host, reason:
-                            "Run SolStream.exe --set-sunshine-credentials on the host "
-                            + "once to skip this step in future.")
-                    }
-                case .failed(let detail):
-                    Log.error("[pair] brokered pairing failed: \(detail)")
-                    self.appWindows.forEach { $0.setPairingPin(pin, host: host, reason: detail) }
-                }
-            }
-        }
-    }
+    // There was a `brokerPairing(pin:host:agent:)` here.
+    //
+    // It was the last of GameStream's pairing flow on this side: a PIN, posted to
+    // Sunshine's local web API by the agent so the user never had to get past a
+    // certificate warning to type it in. SolStream has no PIN, nothing called
+    // this, and the one thing it could still do was put a five-digit code on
+    // screen and tell the user to run a `--set-sunshine-credentials` switch that
+    // no longer exists. `AgentConnection.pair` and `AppWindow.setPairingPin` went
+    // with it.
 
     /// Choose which host display to stream.
     ///
@@ -1029,24 +1014,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if let match {
                 // Honour the request — it is explicit — but do not let it be
-                // quiet. Windows placed on a display Sunshine is not encoding
-                // are cropped out of the wrong pixels, and the result looks like
-                // a working stream of something else entirely.
+                // quiet. Windows placed on a display the host is not encoding are
+                // cropped out of the wrong pixels, and the result looks like a
+                // working stream of something else entirely.
+                //
+                // `isCaptured` is what the host says it would capture by default.
+                // The media session names its own display, so a --display that
+                // disagrees is honoured end to end -- but the host's own window
+                // rescue and its stranded-dialog logic key off the default, so
+                // saying so is still worth a line.
                 if !match.isCaptured, let captured = displays.first(where: { $0.isCaptured }) {
-                    Log.error("[app] \(match.name) is not the display being streamed —"
-                              + " that is \(captured.name). Every window will be cropped"
-                              + " from the wrong pixels. Drop --display, or point"
-                              + " Sunshine's output_name at \(match.name).")
+                    Log.error("[app] \(match.name) is not the display this host captures"
+                              + " by default — that is \(captured.name). Windows opened"
+                              + " on \(match.name) are outside what the host rescues"
+                              + " stranded dialogs from. Drop --display to use"
+                              + " \(captured.name).")
                 }
                 return match
             }
             Log.error("[app] no display matched \"\(query)\"; falling back. Candidates: "
                       + displays.map { "\($0.name) [\($0.adapter)]" }.joined(separator: ", "))
         }
-        // The host's own answer first. The agent configures Sunshine, so it knows
-        // which display is being encoded; guessing from "virtual, else primary"
-        // agreed with it only by luck, and disagreed outright against a Sunshine
-        // the user had set up themselves on the stock ports.
+        // The host's own answer first: it resolves its capture display at startup
+        // and reports which one that is, so guessing from "virtual, else primary"
+        // could only ever agree with it by luck.
         return displays.first(where: { $0.isCaptured })
             ?? displays.first(where: { $0.isVirtual })
             ?? displays.first(where: { $0.isPrimary })
