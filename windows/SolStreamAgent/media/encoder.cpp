@@ -95,6 +95,18 @@ struct Encoder::Impl {
     ID3D11VideoProcessorEnumerator* enumerator = nullptr;
 
     ID3D11Texture2D* nv12[kRing] = {};
+    /// Only for the software path: NV12 read back to the CPU, because an
+    /// encoder that is not D3D-aware cannot be handed a texture.
+    ID3D11Texture2D* staging = nullptr;
+    /// Only for the no-video-engine path: the captured BGRA, read back so the
+    /// colour conversion can be done on the CPU.
+    ID3D11Texture2D* stagingBgra = nullptr;
+    UINT stagingBgraWidth = 0, stagingBgraHeight = 0;
+    /// True when this D3D11 device has no video interfaces at all -- a virtual
+    /// machine, or a basic display adapter. Then there is no VideoProcessor to
+    /// convert with and no hardware encoder to feed, and everything happens on
+    /// the CPU.
+    bool cpuOnly = false;
     ID3D11VideoProcessorOutputView* nv12View[kRing] = {};
     int nextSlot = 0;
 
@@ -110,6 +122,9 @@ struct Encoder::Impl {
 
     UINT width = 0, height = 0, fps = 60, bitrate = 20000000;
     LONGLONG ticksPerFrame = 166666;
+    /// An asynchronous MFT says when it wants input and when it has output. A
+    /// software one does neither: it is fed and drained inline.
+    bool async = true;
     std::atomic<bool> running{false};
 
     std::vector<unsigned char> sequenceHeader;
@@ -119,6 +134,8 @@ struct Encoder::Impl {
     // The one frame waiting to be encoded. Latest wins.
     bool havePending = false;
     int pendingSlot = 0;
+    ID3D11Texture2D* pendingBgra = nullptr;   ///< cpuOnly: converted at feed time
+    UINT pendingSrcWidth = 0, pendingSrcHeight = 0;
     long long pendingCapturedAt = 0;
     bool pendingIdr = false;
     int needInput = 0;
@@ -135,6 +152,9 @@ struct Encoder::Impl {
     std::atomic<uint64_t> submitted{0}, pictures{0}, dropped{0}, extraSamples{0};
 
     bool MakeProcessor(UINT srcWidth, UINT srcHeight);
+    bool ReadBackNv12(int slot, IMFMediaBuffer** out);
+    bool ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
+                      IMFMediaBuffer** out);
     bool Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight, int slot);
     void FeedLocked();
     void Drain();
@@ -269,6 +289,133 @@ bool Encoder::Impl::Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight
     return true;
 }
 
+/// Copy one NV12 texture into a system-memory media buffer.
+///
+/// NV12 is a full-resolution Y plane followed by an interleaved half-height UV
+/// plane, and the mapped row pitch is almost never the width -- the driver picks
+/// its own alignment. Copying `height * pitch` bytes straight through would put
+/// the padding in the stream and shear the picture.
+/// BGRA on the GPU to NV12 in a media buffer, entirely on the CPU.
+///
+/// BT.709 limited range, integer coefficients, nearest-neighbour scaling. It is
+/// not fast and it is not meant to be: it exists so a machine with no video
+/// engine streams slowly instead of not at all.
+bool Encoder::Impl::ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
+                                 IMFMediaBuffer** out) {
+    if (!stagingBgra || stagingBgraWidth != srcWidth || stagingBgraHeight != srcHeight) {
+        Release(stagingBgra);
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = srcWidth;
+        desc.Height = srcHeight;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &stagingBgra))) {
+            return false;
+        }
+        stagingBgraWidth = srcWidth;
+        stagingBgraHeight = srcHeight;
+    }
+    context->CopyResource(stagingBgra, bgra);
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(stagingBgra, 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+    }
+    const DWORD bytes = width * height * 3 / 2;
+    IMFMediaBuffer* buffer = nullptr;
+    if (FAILED(MFCreateMemoryBuffer(bytes, &buffer))) {
+        context->Unmap(stagingBgra, 0);
+        return false;
+    }
+    BYTE* destination = nullptr;
+    if (FAILED(buffer->Lock(&destination, nullptr, nullptr))) {
+        buffer->Release();
+        context->Unmap(stagingBgra, 0);
+        return false;
+    }
+
+    const BYTE* source = (const BYTE*) mapped.pData;
+    BYTE* chroma = destination + (size_t) width * height;
+    for (UINT y = 0; y < height; ++y) {
+        const UINT sy = srcHeight == height ? y : y * srcHeight / height;
+        const BYTE* row = source + (size_t) sy * mapped.RowPitch;
+        BYTE* luma = destination + (size_t) y * width;
+        for (UINT x = 0; x < width; ++x) {
+            const UINT sx = srcWidth == width ? x : x * srcWidth / width;
+            const BYTE b = row[sx * 4 + 0];
+            const BYTE g = row[sx * 4 + 1];
+            const BYTE r = row[sx * 4 + 2];
+            luma[x] = (BYTE) (((47 * r + 157 * g + 16 * b) >> 8) + 16);
+            if ((y & 1) == 0 && (x & 1) == 0) {
+                BYTE* uv = chroma + (size_t) (y / 2) * width + x;
+                uv[0] = (BYTE) (((-26 * r - 87 * g + 113 * b) >> 8) + 128);
+                uv[1] = (BYTE) (((113 * r - 102 * g - 11 * b) >> 8) + 128);
+            }
+        }
+    }
+
+    buffer->Unlock();
+    buffer->SetCurrentLength(bytes);
+    context->Unmap(stagingBgra, 0);
+    *out = buffer;
+    return true;
+}
+
+bool Encoder::Impl::ReadBackNv12(int slot, IMFMediaBuffer** out) {
+    if (!staging) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) {
+            return false;
+        }
+    }
+    context->CopyResource(staging, nv12[slot]);
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        return false;
+    }
+    const DWORD bytes = width * height * 3 / 2;
+    IMFMediaBuffer* buffer = nullptr;
+    if (FAILED(MFCreateMemoryBuffer(bytes, &buffer))) {
+        context->Unmap(staging, 0);
+        return false;
+    }
+    BYTE* destination = nullptr;
+    if (FAILED(buffer->Lock(&destination, nullptr, nullptr))) {
+        buffer->Release();
+        context->Unmap(staging, 0);
+        return false;
+    }
+    const BYTE* source = (const BYTE*) mapped.pData;
+    for (UINT row = 0; row < height; ++row) {
+        memcpy(destination + (size_t) row * width, source + (size_t) row * mapped.RowPitch,
+               width);
+    }
+    const BYTE* chroma = source + (size_t) height * mapped.RowPitch;
+    BYTE* chromaOut = destination + (size_t) width * height;
+    for (UINT row = 0; row < height / 2; ++row) {
+        memcpy(chromaOut + (size_t) row * width,
+               chroma + (size_t) row * mapped.RowPitch, width);
+    }
+    buffer->Unlock();
+    buffer->SetCurrentLength(bytes);
+    context->Unmap(staging, 0);
+    *out = buffer;
+    return true;
+}
+
 // ── Submitting and draining ──────────────────────────────────────────────────
 
 void Encoder::Impl::FeedLocked() {
@@ -280,11 +427,13 @@ void Encoder::Impl::FeedLocked() {
     meta[frameId % kMetaRing].emitted = false;
 
     IMFMediaBuffer* buffer = nullptr;
-    if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[pendingSlot],
-                                         0, FALSE, &buffer))) {
-        return;
-    }
-    {
+    if (async) {
+        // THE POINT OF THE WHOLE PATH: the encoder is handed the texture, and
+        // the frame never touches the CPU.
+        if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[pendingSlot],
+                                             0, FALSE, &buffer))) {
+            return;
+        }
         IMF2DBuffer* two = nullptr;
         if (SUCCEEDED(buffer->QueryInterface(__uuidof(IMF2DBuffer), (void**) &two))) {
             DWORD length = 0;
@@ -292,6 +441,19 @@ void Encoder::Impl::FeedLocked() {
                 buffer->SetCurrentLength(length);
             }
             two->Release();
+        }
+    } else if (cpuOnly) {
+        // No video engine at all: the captured BGRA comes back to the CPU and
+        // the colour conversion happens here.
+        if (!ConvertOnCpu(pendingBgra, pendingSrcWidth, pendingSrcHeight, &buffer)) {
+            return;
+        }
+    } else {
+        // The software encoder is not D3D-aware, so the NV12 has to come back
+        // across the bus. This is exactly the copy the hardware path exists to
+        // avoid, and it is why this mode is a fallback rather than an option.
+        if (!ReadBackNv12(pendingSlot, &buffer)) {
+            return;
         }
     }
 
@@ -455,12 +617,16 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                                         (void**) &s.videoDevice))
         || FAILED(s.context->QueryInterface(__uuidof(ID3D11VideoContext),
                                             (void**) &s.videoContext))) {
-        Log("[media] this D3D11 device has no video interfaces");
-        Close();
-        return false;
+        // A Hyper-V guest reports exactly this. There is no VideoProcessor to
+        // convert BGRA to NV12 with, so the conversion moves to the CPU and the
+        // NV12 ring is never allocated.
+        Log("[media] this D3D11 device has no video engine; converting on the CPU");
+        Release(s.videoDevice);
+        Release(s.videoContext);
+        s.cpuOnly = true;
     }
 
-    for (int i = 0; i < kRing; ++i) {
+    for (int i = 0; i < kRing && !s.cpuOnly; ++i) {
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = s.width;
         desc.Height = s.height;
@@ -478,16 +644,40 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
 
     // ── The transform ────────────────────────────────────────────────────────
+    // HARDWARE FIRST, THEN ANYTHING.
+    //
+    // Asking only for hardware means SolStream cannot stream at all on a machine
+    // without an H.264 encoder in its GPU -- a virtual machine, a thin client, an
+    // old laptop. Windows ships a software H.264 MFT for exactly that case. It is
+    // far slower and it is synchronous rather than event-driven, so the pump
+    // below has two shapes; degrading to it beats refusing to run.
     MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, MFVideoFormat_H264};
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
-    if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-                         MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                         nullptr, &outInfo, &activates, &count))
-        || count == 0) {
-        Log("[media] no hardware H.264 encoder is present");
+    HRESULT enumerated = S_OK;
+    bool hardware = false;
+    if (!s.cpuOnly) {
+        enumerated = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                               MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                               nullptr, &outInfo, &activates, &count);
+        hardware = SUCCEEDED(enumerated) && count > 0;
+    }
+    if (!hardware) {
+        if (activates) { CoTaskMemFree(activates); activates = nullptr; }
+        count = 0;
+        enumerated = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                               MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT
+                                   | MFT_ENUM_FLAG_SORTANDFILTER,
+                               nullptr, &outInfo, &activates, &count);
+    }
+    if (FAILED(enumerated) || count == 0) {
+        Log("[media] this PC has no H.264 encoder at all, hardware or software");
         Close();
         return false;
+    }
+    if (!hardware) {
+        Log("[media] no hardware H.264 encoder; falling back to software, which "
+            "will not keep up at a high resolution");
     }
     const HRESULT activated = activates[0]->ActivateObject(IID_PPV_ARGS(&s.mft));
     for (UINT32 i = 0; i < count; ++i) { activates[i]->Release(); }
@@ -507,10 +697,11 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
             UINT32 async = 0;
             attributes->GetUINT32(MF_TRANSFORM_ASYNC, &async);
             if (async) { attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, 1); }
+            s.async = async != 0;
             attributes->Release();
         }
     }
-    {
+    if (hardware) {
         UINT token = 0;
         if (SUCCEEDED(MFCreateDXGIDeviceManager(&token, &s.manager))) {
             if (SUCCEEDED(s.manager->ResetDevice(s.device, token))) {
@@ -598,17 +789,14 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
     s.running.store(true);
-    if (SUCCEEDED(s.mft->QueryInterface(IID_PPV_ARGS(&s.events)))) {
+    if (s.async && SUCCEEDED(s.mft->QueryInterface(IID_PPV_ARGS(&s.events)))) {
         s.callback = new EncoderCallback();
         s.callback->owner = &s;
         s.events->BeginGetEvent(s.callback, nullptr);
     } else {
-        // A synchronous MFT would need a different pump entirely, and every
-        // hardware encoder this targets is asynchronous. Failing loudly beats
-        // running a path nothing has ever exercised.
-        s.running.store(false);
-        Close();
-        return false;
+        // Synchronous: nothing will ask for input, so Submit feeds and drains
+        // on the caller's thread.
+        s.async = false;
     }
     return true;
 }
@@ -632,6 +820,9 @@ void Encoder::Close() {
     Release(s.manager);
     Release(s.sourceView);
     s.sourceTexture = nullptr;
+    Release(s.staging);
+    Release(s.stagingBgra);
+    s.stagingBgraWidth = s.stagingBgraHeight = 0;
     for (int i = 0; i < kRing; ++i) {
         Release(s.nv12View[i]);
         Release(s.nv12[i]);
@@ -658,15 +849,20 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     if (!s.running.load() || !bgra) {
         return false;
     }
-    const int slot = s.nextSlot;
-    s.nextSlot = (s.nextSlot + 1) % kRing;
-
-    if (!s.Convert(bgra, srcWidth, srcHeight, slot)) {
-        s.dropped.fetch_add(1);
-        return false;
+    int slot = 0;
+    if (!s.cpuOnly) {
+        slot = s.nextSlot;
+        s.nextSlot = (s.nextSlot + 1) % kRing;
+        if (!s.Convert(bgra, srcWidth, srcHeight, slot)) {
+            s.dropped.fetch_add(1);
+            return false;
+        }
     }
 
     std::lock_guard<std::mutex> guard(s.lock);
+    s.pendingBgra = bgra;
+    s.pendingSrcWidth = srcWidth;
+    s.pendingSrcHeight = srcHeight;
     if (s.havePending) {
         s.dropped.fetch_add(1);   // latest wins
     }
@@ -674,6 +870,12 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     s.pendingSlot = slot;
     s.pendingCapturedAt = capturedAt;
     s.pendingIdr = forceIdr;
+    if (!s.async) {
+        // No events are coming. Feed it and take whatever comes out, here.
+        s.FeedLocked();
+        s.Drain();
+        return true;
+    }
     if (s.needInput > 0) {
         --s.needInput;
         s.FeedLocked();
