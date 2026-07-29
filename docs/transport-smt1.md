@@ -166,10 +166,34 @@ Each step is measurable before the next exists.
 - **`BCRYPT_KDF_RAW_SECRET` returns the ECDH x-coordinate little-endian** and
   CryptoKit does not. Getting this wrong means the two ends derive different keys
   and everything fails silently. Step 1 exists to catch exactly this.
-- **The agent channel stays plaintext.** After this lands, the media is encrypted
-  and the channel carrying window titles, application names, the display layout
-  and the entire clipboard is not. The auth-v2 handshake gives it the key
-  material to fix that; it should.
+- ~~**The agent channel stays plaintext.**~~ Closed 2026-07-29. It is sealed with
+  the same packet layer under its own keys, four-byte length framing, and an
+  ephemeral P-256 point in the proof and the reply makes it forward secret.
+
+  The switch from newline-JSON to sealed records happens exactly once per
+  connection, on the auth reply, and **all three ways of getting that wrong read
+  as a crypto failure while being nothing of the kind.** Each cost a live session
+  the day it was written, so they are worth stating plainly:
+
+  1. *Nothing may be sent between the proof and its reply.* The host begins
+     reading sealed records the instant it has written the reply, so a command
+     sent in that gap arrives in the clear at a host that has switched, fails its
+     tag and drops the connection — correctly. A first connection never notices;
+     a reconnect does, because re-applying window placement fires the moment the
+     socket is ready. The Mac holds outbound requests while the proof is in
+     flight.
+  2. *The keys belong to a socket, not to the process.* Refusing a second Mac
+     with `busy` used to seal that line with the connected Mac's keys and send it
+     down someone else's socket, skipping a counter the paired Mac never
+     received. Anyone who could open a socket to 47630 could end a session.
+  3. *A channel must not outlive its connection.* Clearing it when the first
+     message is handled cannot work: the framing check is consulted before that
+     message is parsed, so a stale channel intercepts the very line that would
+     have cleared it.
+
+  The receiver requires the next counter exactly — TCP already delivers in order
+  and once — so any record sealed and not delivered is fatal by design. That is
+  what made (2) visible rather than silent, and it should stay.
 - **The token is a bearer secret in a plaintext file** at
   `%LOCALAPPDATA%\SolStream\agent.token`. Keychain and DPAPI are the answer.
 - **IPv4 only**, inherited deliberately from the existing sockets.
