@@ -2,7 +2,7 @@
 
 The Windows half of single-application streaming. It places a chosen
 application window at a known rectangle on a chosen display and reports where
-it is, so the Mac can crop that rectangle out of the single Sunshine stream and
+it is, so the Mac can crop that rectangle out of the single video stream and
 present it as a native window.
 
 Plain Win32 only — `SetWindowPos`, `EnumWindows`, `GetMonitorInfo`, a socket.
@@ -68,8 +68,9 @@ Remove the dev task with `schtasks /delete /tn SolStreamAgentDev /f`.
 Newline-delimited JSON over TCP, one request per line, one reply per line.
 On connect the agent sends a `hello` then a `displays` message unprompted.
 
-Only one client is served at a time, which is all the Mac needs — but it does
-mean a second connection blocks in the accept backlog rather than being refused.
+Only one client is served at a time, which is all the Mac needs. A second
+connection is REFUSED with a `busy` line naming the host, rather than left in
+the accept backlog to look like a connection that is merely slow.
 
 ## Where it listens
 
@@ -125,7 +126,9 @@ amount of security for what it guards; on a hostile network it is not.
 | `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary"}]}` |
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","captionInset","occluded"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
-| `{"cmd":"pair","pin":"1234","name":"…"}` | `{"type":"paired","ok":bool,"reason","message"}` |
+| `{"cmd":"media","op":"open","cpub":"…","cnonce":"…","display":"\\\\.\\DISPLAY5"}` | `{"type":"media","ok":true,"hpub","hnonce","hcount","hauth","hport","streaming"}` |
+| `{"cmd":"media","op":"stats"}` | `{"type":"media","ok":true,"stats":{…}}` |
+| `{"cmd":"media","op":"stop"}` | `{"type":"media","ok":true}` |
 | `{"cmd":"canvas","display":"\\\\.\\DISPLAY7","w":..,"h":..}` | `{"type":"canvas","ok":bool,"w","h"}` |
 | `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}` |
 | `{"cmd":"window","id":N}` | `{"type":"window","id":N,"alive":bool,"minimized":bool,"x","y","w","h","captionInset"}` |
@@ -134,7 +137,7 @@ amount of security for what it guards; on a hostile network it is not.
 | `{"cmd":"topmost","id":N,"topmost":bool}` | `{"type":"topmost","ok":true}` |
 
 `displays[].name` is the `DXGI_OUTPUT_DESC.DeviceName` form (`\\.\DISPLAY1`) —
-the same string Sunshine's `output_name` setting takes, so the capture display
+the same string the media session names, so the capture display
 can be selected without the user copying anything by hand. `adapter` is the GDI
 adapter description, which is how the Mac tells a virtual display from a real one.
 
@@ -168,41 +171,21 @@ operation (a device restart), so the modes are seeded once by
 The Mac only asks this of a **virtual** display. A physical monitor is somebody's
 actual screen and its mode is not ours to change.
 
-## Pairing without the web UI
+## Pairing
 
-Sunshine's own pairing asks the user to open its web UI, get past a self-signed
-certificate warning, create credentials and find the PIN page. `pair` does that
-step for them: the Mac sends the PIN it is displaying and the agent POSTs it to
-Sunshine's local `/api/pin`.
+The Mac has to prove it holds this PC's pairing token before the agent answers
+anything. The token is sixteen random bytes, shown on the host application's own
+window under "Pairing token", and typed into the Mac once.
 
-Two things make that possible. `/api/pin` takes HTTP Basic auth, and its CSRF
-check is skipped outright for a request carrying neither `Origin` nor `Referer` —
-those cannot be browser-initiated, so a non-browser client needs no token
-(`confighttp.cpp`, `validate_csrf_token`). The reply is judged on its body rather
-than its status, because `nvhttp::pin()` returns false inside an HTTP 200 when no
-client is actually waiting to pair.
+It never crosses the wire. The host sends a challenge in its `hello`; the Mac
+answers `HMAC-SHA256(token, "SolStream agent auth v2" || challenge || cnonce)`,
+and the same token is mixed into the input key material of every media session.
 
-Sunshine stores only a salted hash of its web UI password, so the plaintext cannot
-be read back off disk. Supply it once:
-
-```
-SolStreamAgent.exe --set-sunshine-credentials
-```
-
-It prompts (the password is never taken as an argument, where the process list
-would expose it), stores it with DPAPI under `%LOCALAPPDATA%\SolStream\`, and
-immediately checks it against Sunshine so a wrong password fails now rather than
-mid-pairing. DPAPI ties the blob to the Windows *user account*, not the session —
-verified by writing it from an SSH session (session 0) and decrypting it from the
-agent in the console session.
-
-With no credentials stored, `pair` returns `reason:"no-credentials"` and the Mac
-falls back to displaying the PIN, which is no worse than Sunshine's own flow.
-
-Store/UWP applications are **not** listed by `apps`: it walks the Start Menu for
-`.lnk` shortcuts, and packaged apps (Notepad and Calculator on Windows 11) are
-surfaced from the app database rather than as shortcuts. Every classic desktop
-application is there.
+There used to be a whole section here about approving a Sunshine PIN on the
+user's behalf: its web UI behind a self-signed certificate, credentials the user
+had to create first, DPAPI storage for the password, and a POST to a local
+`/api/pin` that skipped its CSRF check because the request carried no Origin.
+All of it existed to spare a non-technical user a browser. There is no PIN now.
 
 ## Toolchain differences that bite
 
@@ -253,16 +236,15 @@ stale Blocks for its own paths rather than trying to out-rank them.
 
 ## Why a logon task rather than a Windows service
 
-Sunshine installs itself as a service, so the obvious question is why this does
-not. The answer is session 0.
+Every other program of this kind installs itself as a service, so the obvious
+question is why this does not. The answer is session 0.
 
 A service runs in session 0, which has a phantom 1024x768 display, no window
 station and no user desktop. From there this program can see none of the things
 it exists to see: `EnumWindows` returns nothing of the user's, the display list
 is a fiction, and it has nowhere to put its own window. A service could only
-launch the real work into the interactive session and supervise it — which is
-what Sunshine's `sunshinesvc.exe` does, and it is a meaningful amount of
-machinery to maintain.
+launch the real work into the interactive session and supervise it, which is a
+second program and a supervision protocol to maintain for no gain.
 
 Against that, what a service buys is: the host keeps running when nobody is
 logged in. But nothing SolStream does is useful then. There is no desktop to
@@ -292,12 +274,11 @@ To set one up:
 
 1. Install any indirect display driver. The one SolStream is tested against is
    the Virtual Display Driver, <https://github.com/itsmikethetech/Virtual-Display-Driver>.
-2. Start SolStream. It reports the driver in its window, picks that display
-   automatically, and pins Sunshine to it.
+2. Start SolStream. It reports the driver in its window and picks that display
+   automatically; the media session names it when a Mac connects.
 
 To have SolStream install one for you instead, put the driver package in a
-`driver\` folder beside `SolStream.exe`, named `SolStreamDisplay.inf`;
-`package-windows.ps1 -DriverDir <path>` does that at packaging time. The app
+`driver\` folder beside `SolStream.exe`, named `SolStreamDisplay.inf`. The app
 then offers an Install button, which runs `pnputil` elevated so the user sees
 the UAC prompt — installing a kernel driver behind a prompt nobody sees is not
 something this should be able to do.
@@ -305,10 +286,10 @@ something this should be able to do.
 ## One Mac at a time
 
 The agent serves one client and refuses the next with a `busy` line naming the
-host, rather than leaving it in the accept backlog. Sunshine runs a single
-session — it refuses a second `/launch` outright — so two Macs streaming from
-one PC is not supportable however the socket is written. What it can do is say
-so in 8ms instead of appearing to connect forever.
+host, rather than leaving it in the accept backlog. There is one capture, one
+encoder and one media socket, so two Macs streaming from one PC is not
+supportable however the socket is written. What it can do is say so in 8ms
+instead of appearing to connect forever.
 
 The refusal carries the same fields as `status`, so a second Mac (or a person
 diagnosing one) can still tell whether the host is healthy.
