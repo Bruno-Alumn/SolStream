@@ -1,4 +1,4 @@
-// resources.rc.in -- the executable's icon, its version block, and Sunshine.
+// resources.rc.in -- the executable's icon and its version block.
 //
 // Configured by CMake, which substitutes the paths. Backslashes are doubled
 // because RC treats them as escapes.
@@ -55,19 +55,3 @@ BEGIN
         VALUE "Translation", 0x409, 1200
     END
 END
-
-// -- Sunshine ---------------------------------------------------------------
-//
-// SolStream ships as one file. Sunshine is 65 MB of unmodified upstream binary
-// that has to end up beside the program, and a folder of loose files is not
-// something a person downloads and runs: they unzip it to Downloads, run the exe
-// out of there, and the install works but lives somewhere temporary.
-//
-// So the archive is a resource. Installing writes it out and unpacks it into
-// Program Files, after which the executable and its Sunshine sit together the
-// way the rest of the program already expects. Nothing about the runtime layout
-// changes; only how it arrives.
-//
-// Optional: an ordinary development build leaves this line empty and expects a
-// sunshine\ folder beside the executable, which is what a source tree has.
-@SOLSTREAM_SUNSHINE_RC@

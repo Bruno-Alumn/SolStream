@@ -30,7 +30,7 @@ endforeach()
 find_package(Microsoft.Windows.CppWinRT CONFIG QUIET)
 
 if(Microsoft.Windows.CppWinRT_FOUND)
-    # Alias the package's target so CaptureHelper can use SolStream::cppwinrt
+    # Alias the package's target so the agent can use SolStream::cppwinrt
     if(TARGET Microsoft.Windows.CppWinRT::CppWinRT)
         add_library(SolStream::cppwinrt ALIAS Microsoft.Windows.CppWinRT::CppWinRT)
     elseif(TARGET Microsoft::CppWinRT)
@@ -157,13 +157,6 @@ include(CTest)
 
 # ---- Subdirectories ----
 add_subdirectory(windows/SolStreamAgent)
-add_subdirectory(windows/CaptureHelper)
-# windows/sunshine is deliberately NOT built — see its README. It builds a
-# sunshine_fork static library that nothing links, left over from an approach
-# that was abandoned once it turned out Sunshine only needs configuring.
-add_subdirectory(windows/ClipboardMonitor)
-add_subdirectory(windows/InputInjector)
-add_subdirectory(windows/FileTransferService)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

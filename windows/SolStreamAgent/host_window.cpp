@@ -78,8 +78,6 @@ constexpr UINT WM_SOLSTREAM_JOB_STEP = WM_APP + 2;
 
 std::mutex g_mutex;
 HostStatus g_status;
-std::wstring g_pending_pin;
-std::wstring g_pending_client;
 bool g_closed = false;
 
 /// Which face the window is showing, fixed at creation.
@@ -355,7 +353,6 @@ struct Button {
 
 enum ButtonId {
     kIdCopyToken = 1,
-    kIdOpenPairingPage,
     kIdBannerFix,
     // Setup and uninstall. Kept in the same list and the same tab order as the
     // rest, because they are the same kind of control on the same window.
@@ -539,11 +536,11 @@ Screen Describe(const HostStatus& status) {
         screen.code = L"SS-104";
         return screen;
     }
-    if (!status.sunshine_running) {
+    if (!status.streaming_ready) {
         screen.headline = L"SolStream couldn't start streaming.";
-        screen.what = status.sunshine_detail.empty()
+        screen.what = status.streaming_detail.empty()
                           ? L"The streaming host stopped."
-                          : status.sunshine_detail;
+                          : status.streaming_detail;
         screen.why = L"SolStream restarts it on a crash, so a failure that reaches "
                      L"you is a real conflict rather than a hiccup.";
         screen.code = L"SS-311";
@@ -893,12 +890,9 @@ void LayoutAndPaint(HWND window) {
     }
 
     HostStatus status;
-    std::wstring pin, pin_client;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         status = g_status;
-        pin = g_pending_pin;
-        pin_client = g_pending_client;
     }
     const Screen screen = Describe(status);
 
@@ -996,8 +990,8 @@ void LayoutAndPaint(HWND window) {
                         Mark::Good});
     } else {
         rows.push_back({L"Streaming",
-                        status.sunshine_running ? L"running" : L"not running",
-                        status.sunshine_running ? Mark::Good : Mark::Absent});
+                        status.streaming_ready ? L"running" : L"not running",
+                        status.streaming_ready ? Mark::Good : Mark::Absent});
     }
     // Named for what it is doing rather than for what is missing. "Virtual
     // display: not installed" reads as a broken component; "Display: your main
@@ -1073,57 +1067,9 @@ void LayoutAndPaint(HWND window) {
     }
     const float content_bottom = y;
 
-    // The pairing page button only exists while a PIN is waiting on it.
-    Button* page = FindButton(kIdOpenPairingPage);
-    if (page) {
-        page->visible = !pin.empty();
-        if (page->visible) {
-            page->rect = D2D1::RectF(pad, size.height - pad - metric::kButtonH,
-                                     pad + 170.0f, size.height - pad);
-            page->caption = L"Open pairing page";
-            page->kind = ButtonKind::Secondary;
-            DrawButton(*page);
-        }
-    }
-
-    // The fallback pairing card. Rare, and it has to survive being seen once,
-    // so the digits are cells rather than a string: someone is reading this off
-    // one screen and typing it on another.
-    if (!pin.empty()) {
-        const float top = y;
-        Text(L"Pairing request", g_fmt_headline,
-             D2D1::RectF(pad + space::kMd, top + space::kMd, right - space::kMd,
-                         top + space::kMd + 26.0f), g_palette.text);
-        const std::wstring who = pin_client.empty() ? L"A Mac" : pin_client;
-        Text(who + L" is asking to pair. SolStream couldn't approve it for you, "
-                   L"because this PC has its own Sunshine with a password SolStream "
-                   L"doesn't know.",
-             g_fmt_label,
-             D2D1::RectF(pad + space::kMd, top + 44.0f, right - space::kMd,
-                         top + 92.0f), g_palette.muted);
-
-        float cell_x = pad + space::kMd;
-        const float cell_y = top + 100.0f;
-        for (wchar_t digit : pin) {
-            const D2D1_RECT_F cell{cell_x, cell_y, cell_x + 56.0f, cell_y + 68.0f};
-            Fill(cell, metric::kRadiusControl, g_palette.inset);
-            Stroke(cell, metric::kRadiusControl, g_palette.hairline);
-            Text(std::wstring(1, digit), g_fmt_pin, cell, g_palette.text,
-                 DWRITE_TEXT_ALIGNMENT_CENTER);
-            cell_x += 56.0f + space::kSm;
-        }
-    }
-
-    const HRESULT hr = g_target->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) {
-        DiscardTarget();
-        return;
-    }
     // After EndDraw, never during it: resizing invalidates the render target
     // this function is holding.
-    if (pin.empty()) {
-        GrowToFit(window, content_bottom);
-    }
+    GrowToFit(window, content_bottom);
 }
 
 // ── Theme ────────────────────────────────────────────────────────────────────
@@ -1308,20 +1254,6 @@ void Activate(HWND window, int id) {
             CopyToClipboard(g_status.pairing_token);
             break;
         }
-        case kIdOpenPairingPage: {
-            unsigned short port = 0;
-            {
-                std::lock_guard<std::mutex> lock(g_mutex);
-                port = g_status.web_ui_port;
-            }
-            if (port != 0) {
-                const std::wstring url =
-                    L"https://localhost:" + std::to_wstring(port) + L"/pin";
-                ShellExecuteW(window, L"open", url.c_str(), nullptr, nullptr,
-                              SW_SHOWNORMAL);
-            }
-            break;
-        }
         case kIdBannerFix: {
             // Doubles as the notice's "OK": if there is something being said,
             // this button dismisses it rather than starting the job again.
@@ -1451,8 +1383,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             g_buttons.clear();
             g_buttons.push_back({kIdBannerFix, L"", ButtonKind::Primary, false, {}, false});
             g_buttons.push_back({kIdCopyToken, L"Copy", ButtonKind::Secondary, false, {}, false});
-            g_buttons.push_back({kIdOpenPairingPage, L"Open pairing page",
-                                 ButtonKind::Secondary, false, {}, false});
             for (int id : {kIdInstall, kIdCancel, kIdOpenApp, kIdClose, kIdRetry,
                            kIdRemove}) {
                 g_buttons.push_back({id, L"", ButtonKind::Secondary, false, {}, false});
@@ -1818,32 +1748,6 @@ void UpdateHostStatus(const HostStatus& status) {
     }
 }
 
-void ShowPairingPin(const std::wstring& pin, const std::wstring& client_name) {
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_pending_pin = pin;
-        g_pending_client = client_name;
-    }
-    if (!g_window) {
-        return;
-    }
-    // Grow the existing window rather than opening a second one, and flash the
-    // taskbar — but never steal the foreground, because somebody is typing
-    // somewhere and this is not worth taking their keystrokes for.
-    const float wanted = pin.empty() ? metric::kWindowH : metric::kWindowH + 200.0f;
-    const UINT dpi = (UINT) g_dpi;
-    RECT frame{0, 0, MulDiv((int) metric::kWindowW, dpi, 96),
-               MulDiv((int) wanted, dpi, 96)};
-    AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE,
-                             0, dpi);
-    SetWindowPos(g_window, nullptr, 0, 0, frame.right - frame.left,
-                 frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER);
-    if (!pin.empty()) {
-        ShowWindow(g_window, SW_SHOW);
-        FlashWindow(g_window, TRUE);
-    }
-    InvalidateRect(g_window, nullptr, TRUE);
-}
 
 int RunHostWindowLoop() {
     MSG message{};

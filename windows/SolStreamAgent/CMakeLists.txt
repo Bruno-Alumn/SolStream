@@ -8,40 +8,26 @@ cmake_minimum_required(VERSION 3.20)
 # Studio on it.
 cmake_policy(SET CMP0091 NEW)
 
-# The host application. It supervises its own Sunshine (sunshine_host.cpp),
-# checks for the virtual display it streams (vdd.cpp), sets that display up
-# (display_setup.cpp), installs itself (installer.cpp) and serves the Mac.
+# The host application. It captures, encodes and sends the picture itself
+# (media/), checks for the virtual display it streams (vdd.cpp), sets that
+# display up (display_setup.cpp), installs itself (installer.cpp) and serves
+# the Mac.
 #
 # Deliberately still a console subsystem target. The stray console window the
 # agent used to leave on the desktop is dealt with at runtime instead
 # (ReleaseUnwantedConsole in main.cpp), because /SUBSYSTEM:WINDOWS would fix the
 # window by breaking every command line: a shell does not wait for a GUI
 # program, so `SolStream.exe --print-token` would return before printing.
-# Sunshine can be carried inside the executable, so what ships is one file.
-# Optional: without it the build still works and the program expects a sunshine\
-# folder beside it, which is what a development tree has.
-set(SOLSTREAM_SUNSHINE_ZIP "" CACHE FILEPATH
-    "Zip of the sunshine\\ folder to embed, so the executable ships alone")
-
-# The resource script is built ALWAYS, not only when Sunshine is being embedded.
-# It used to be conditional, which meant every ordinary build produced an
-# executable with no icon and no version block -- and the only builds that had
-# them were the packaged ones nobody looks at until they are on somebody else's
-# machine.
+# The resource script is built ALWAYS. It used to be conditional on Sunshine
+# being embedded, which meant every ordinary build produced an executable with
+# no icon and no version block -- and the only builds that had them were the
+# packaged ones nobody looks at until they are on somebody else's machine.
 set(SOLSTREAM_VERSION "1.0.0")
 string(REPLACE "." "," SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION}")
 set(SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION_COMMA},0")
 
 # RC treats a backslash as an escape, so every path has to arrive doubled.
 string(REPLACE "\\" "\\\\" SOLSTREAM_ICON_RC "${CMAKE_CURRENT_SOURCE_DIR}/SolStream.ico")
-
-if(SOLSTREAM_SUNSHINE_ZIP AND EXISTS "${SOLSTREAM_SUNSHINE_ZIP}")
-    string(REPLACE "\\" "\\\\" SOLSTREAM_SUNSHINE_ZIP_RC "${SOLSTREAM_SUNSHINE_ZIP}")
-    set(SOLSTREAM_SUNSHINE_RC "SUNSHINE_ARCHIVE RCDATA \"${SOLSTREAM_SUNSHINE_ZIP_RC}\"")
-    message(STATUS "SolStream: embedding ${SOLSTREAM_SUNSHINE_ZIP}")
-else()
-    set(SOLSTREAM_SUNSHINE_RC "")
-endif()
 
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
 set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
@@ -67,7 +53,6 @@ endif()
 
 add_executable(SolStreamAgent
     main.cpp
-    sunshine_host.cpp
     vdd.cpp
     display_setup.cpp
     host_window.cpp

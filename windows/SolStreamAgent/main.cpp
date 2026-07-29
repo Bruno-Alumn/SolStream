@@ -2,7 +2,7 @@
 //
 // It does one job: make a chosen application's window sit at a known,
 // non-overlapping rectangle on a chosen display, and tell the Mac where it is.
-// The Mac then crops that rectangle out of the single Sunshine stream and
+// The Mac then crops that rectangle out of the single SMT/1 stream and
 // presents it as a native window.
 //
 // Deliberately plain Win32 ΓÇö SetWindowPos, EnumWindows, GetMonitorInfo, a
@@ -57,13 +57,13 @@
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
-#include "sunshine_host.h"
 
 // The media path is MSVC-only: Windows.Graphics.Capture and Media Foundation
 // both arrive through C++/WinRT and the Windows SDK, neither of which mingw
 // has. The cross-compiled build is a development convenience; what ships is
 // built on Windows.
 #ifdef SOLSTREAM_MEDIA
+#include "media/capture.h"
 #include "media/log.h"
 #include "media/session.h"
 #endif
@@ -71,7 +71,7 @@
 
 namespace {
 
-constexpr unsigned short kDefaultPort = solstream::kDefaultAgentPort;
+constexpr unsigned short kDefaultPort = solstream::kDefaultPort;
 
 // By default this socket is bound to loopback only and reached through an SSH
 // tunnel; anywhere else a token is required. --listen-all is opt-in and warns.
@@ -91,13 +91,6 @@ constexpr int kProtocolVersion = 2;
 constexpr size_t kMaxClipboardBytes = 256 * 1024;
 constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 
-/// The base port SolStream's own Sunshine runs on. Everything Sunshine listens
-/// on is this plus a fixed offset -- see ports.h, which the Mac mirrors.
-unsigned short g_sunshine_base =
-    solstream::kDefaultSunshineBase;
-/// Sunshine's web UI / config API port, derived from the base.
-unsigned short g_sunshine_web_port =
-    solstream::MapPort(solstream::kDefaultSunshineBase, solstream::SunshinePort::kWebUi);
 /// The display SolStream captures. Resolved at startup to the virtual one when
 /// there is one, because a crop taken from a real monitor is a crop out of
 /// somebody's actual screen.
@@ -365,7 +358,7 @@ std::string JsonEscape(const std::string& text) {
 // ΓöÇΓöÇ Displays ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 struct Display {
-    std::string device_name;  // matches Sunshine's output_name / DXGI DeviceName
+    std::string device_name;  // matches the DXGI DeviceName
     std::string adapter;      // e.g. "NVIDIA GeForce RTX 4070 SUPER", "Virtual Display Driver"
     RECT bounds{};
     bool primary = false;
@@ -562,7 +555,7 @@ bool CanPaintOver(HWND window) {
             // those as occluders reports a permanent false positive.
             //
             // It is also how a modern Windows dialog draws its shadow, so this
-            // misses a real one: a Windows Security prompt about Sunshine sat
+            // misses a real one: a Windows Security prompt about SolStream sat
             // in the middle of a streamed window and nothing reported it.
             //
             // Tried and reverted: counting a layered window as an occluder when
@@ -799,7 +792,7 @@ HMONITOR MonitorFromDeviceName(const std::string& device_name) {
 /// the refusal is silent — the call returns FALSE and nothing happens. The
 /// agent is a background process, so it is refused by default.
 ///
-/// That matters far more than it sounds. Sunshine injects keystrokes with
+/// That matters far more than it sounds. The host injects keystrokes with
 /// SendInput, which delivers them to whatever window has the foreground on this
 /// PC — not to the window we happen to be streaming. So a failed focus does not
 /// mean "the window looks inactive": it means every key the user types goes
@@ -2148,7 +2141,7 @@ void ReportOcclusion() {
 /// Say so when something on this PC takes the keyboard away from the window
 /// being streamed.
 ///
-/// Sunshine injects keystrokes into whatever holds the foreground *here*, not
+/// The host injects keystrokes into whatever holds the foreground *here*, not
 /// into the window the Mac is showing. So a window that quietly takes the
 /// foreground does not merely look wrong — it silently receives everything the
 /// user types at their Mac, while the stream carries on looking perfect and
@@ -2448,242 +2441,17 @@ void SetLockedGeometry(HWND window, const RECT& client) {
     LeaveCriticalSection(&g_lock_cs);
 }
 
-// ΓöÇΓöÇ Sunshine pairing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// -- Pairing, which no longer exists --------------------------------------
 //
-// Sunshine pairs by showing a PIN on the client and having a human type it into
-// Sunshine's web UI on the host. For a non-technical user that means a browser, a
-// self-signed-certificate warning, creating web UI credentials, and finding the
-// PIN page ΓÇö which is where most people give up.
+// Sunshine paired by showing a PIN on the client and having a human type it into
+// a web UI on the host, behind a self-signed certificate warning and a set of
+// credentials the user had to create first. Most of the code that used to be
+// here existed to spare them that: DPAPI-encrypted web credentials, an HTTP POST
+// to a local config API, and a careful note about exactly which CSRF check it
+// was allowed to skip.
 //
-// The agent already runs on the host, so it can do that step itself: the Mac
-// sends the PIN it is displaying and the agent POSTs it to Sunshine's own local
-// API. Reading confighttp.cpp, /api/pin needs HTTP Basic auth, and its CSRF check
-// is skipped outright for requests carrying neither Origin nor Referer ΓÇö those
-// cannot be browser-initiated, so a non-browser client needs no token.
-//
-// Sunshine stores only a salted hash of its web UI password, so the plaintext
-// cannot be recovered from disk. It is supplied once via
-// --set-sunshine-credentials and kept encrypted with DPAPI, which ties it to this
-// Windows user account: another account on the same machine cannot read it.
-
-std::wstring CredentialPath(bool create_directory) {
-    wchar_t buffer[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
-        return {};
-    }
-    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
-    if (create_directory) {
-        CreateDirectoryW(dir.c_str(), nullptr);
-    }
-    return dir + L"\\sunshine.cred";
-}
-
-bool StoreSunshineCredentials(const std::string& user, const std::string& password) {
-    const std::wstring path = CredentialPath(true);
-    if (path.empty()) {
-        return false;
-    }
-    std::string plain = user;
-    plain.push_back('\n');
-    plain += password;
-
-    DATA_BLOB in{static_cast<DWORD>(plain.size()), reinterpret_cast<BYTE*>(plain.data())};
-    DATA_BLOB out{};
-    if (!CryptProtectData(&in, L"SolStream Sunshine credentials", nullptr, nullptr, nullptr,
-                          CRYPTPROTECT_UI_FORBIDDEN, &out)) {
-        Log("[agent] CryptProtectData failed: %lu", GetLastError());
-        return false;
-    }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    bool ok = false;
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        ok = WriteFile(file, out.pbData, out.cbData, &written, nullptr) && written == out.cbData;
-        CloseHandle(file);
-    }
-    SecureZeroMemory(plain.data(), plain.size());
-    LocalFree(out.pbData);
-    return ok;
-}
-
-bool LoadSunshineCredentials(std::string& user, std::string& password) {
-    const std::wstring path = CredentialPath(false);
-    if (path.empty()) {
-        return false;
-    }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    LARGE_INTEGER size{};
-    std::vector<BYTE> encrypted;
-    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart < (1 << 20)) {
-        encrypted.resize(static_cast<size_t>(size.QuadPart));
-        DWORD read = 0;
-        if (!ReadFile(file, encrypted.data(), (DWORD) encrypted.size(), &read, nullptr)
-            || read != encrypted.size()) {
-            encrypted.clear();
-        }
-    }
-    CloseHandle(file);
-    if (encrypted.empty()) {
-        return false;
-    }
-
-    DATA_BLOB in{static_cast<DWORD>(encrypted.size()), encrypted.data()};
-    DATA_BLOB out{};
-    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr,
-                            CRYPTPROTECT_UI_FORBIDDEN, &out)) {
-        Log("[agent] CryptUnprotectData failed: %lu", GetLastError());
-        return false;
-    }
-    const std::string plain(reinterpret_cast<char*>(out.pbData), out.cbData);
-    SecureZeroMemory(out.pbData, out.cbData);
-    LocalFree(out.pbData);
-
-    const size_t split = plain.find('\n');
-    if (split == std::string::npos) {
-        return false;
-    }
-    user = plain.substr(0, split);
-    password = plain.substr(split + 1);
-    return !user.empty() && !password.empty();
-}
-
-std::string Base64(const std::string& raw) {
-    DWORD needed = 0;
-    if (!CryptBinaryToStringA(reinterpret_cast<const BYTE*>(raw.data()), (DWORD) raw.size(),
-                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &needed)) {
-        return {};
-    }
-    std::string out(needed, '\0');
-    if (!CryptBinaryToStringA(reinterpret_cast<const BYTE*>(raw.data()), (DWORD) raw.size(),
-                              CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out.data(), &needed)) {
-        return {};
-    }
-    out.resize(strlen(out.c_str()));
-    return out;
-}
-
-struct HttpResult {
-    bool sent = false;
-    DWORD status = 0;
-    std::string body;
-    std::string error;
-};
-
-/// POST to Sunshine's config API on loopback.
-HttpResult PostToSunshine(const wchar_t* path, const std::string& body,
-                          const std::string& user, const std::string& password,
-                          INTERNET_PORT port) {
-    HttpResult result;
-    HINTERNET session = WinHttpOpen(L"SolStreamAgent/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session) {
-        result.error = "WinHttpOpen failed";
-        return result;
-    }
-    HINTERNET connection = WinHttpConnect(session, L"127.0.0.1", port, 0);
-    HINTERNET request = connection
-        ? WinHttpOpenRequest(connection, L"POST", path, nullptr, WINHTTP_NO_REFERER,
-                             WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
-        : nullptr;
-    if (!request) {
-        result.error = "could not open a request to Sunshine";
-        if (connection) WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return result;
-    }
-
-    // Sunshine's web UI serves a self-signed certificate. Validation is waived
-    // only because this connection never leaves the loopback interface.
-    DWORD security = SECURITY_FLAG_IGNORE_UNKNOWN_CA | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
-                   | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
-    WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &security, sizeof(security));
-
-    // No Origin and no Referer, deliberately: that is what lets Sunshine skip its
-    // CSRF check for a non-browser client.
-    const std::string headers = "Content-Type: application/json\r\nAuthorization: Basic "
-                                + Base64(user + ":" + password) + "\r\n";
-    const std::wstring wide_headers = ToWide(headers);
-    WinHttpAddRequestHeaders(request, wide_headers.c_str(), (DWORD) -1L,
-                             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-
-    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                           const_cast<char*>(body.data()), (DWORD) body.size(),
-                           (DWORD) body.size(), 0)
-        && WinHttpReceiveResponse(request, nullptr)) {
-        result.sent = true;
-        DWORD status = 0;
-        DWORD length = sizeof(status);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX);
-        result.status = status;
-        for (;;) {
-            DWORD available = 0;
-            if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
-                break;
-            }
-            std::string chunk(available, '\0');
-            DWORD read = 0;
-            if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) {
-                break;
-            }
-            chunk.resize(read);
-            result.body += chunk;
-            if (result.body.size() > 64 * 1024) {
-                break;
-            }
-        }
-    } else {
-        result.error = "Sunshine did not answer on 127.0.0.1:" + std::to_string(port)
-                     + " (error " + std::to_string(GetLastError()) + ")";
-    }
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-    return result;
-}
-
-/// Hand a client's pairing PIN to Sunshine, so nobody has to open its web UI.
-std::string PairJson(const std::string& pin, const std::string& name, INTERNET_PORT port) {
-    // The supervised Sunshine first: SolStream generated its web credentials
-    // itself, so approving a PIN needs nothing from the user at all. Falling
-    // back to stored credentials covers the other case -- a Sunshine somebody
-    // installed and configured before SolStream existed.
-    std::string user, password;
-    if (!solstream::SupervisedCredentials(user, password)
-        && !LoadSunshineCredentials(user, password)) {
-        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"no-credentials\","
-               "\"message\":\"SolStream is not running its own Sunshine, and no "
-               "credentials are stored for the one that is.\"}";
-    }
-    const std::string body = "{\"pin\":\"" + JsonEscape(pin) + "\",\"name\":\""
-                           + JsonEscape(name) + "\"}";
-    const HttpResult reply = PostToSunshine(L"/api/pin", body, user, password, port);
-    SecureZeroMemory(password.data(), password.size());
-
-    if (!reply.sent) {
-        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"unreachable\",\"message\":\""
-               + JsonEscape(reply.error) + "\"}";
-    }
-    if (reply.status == 401) {
-        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"bad-credentials\","
-               "\"message\":\"Sunshine rejected the stored credentials.\"}";
-    }
-    // nvhttp::pin returns false when no client is actually waiting to pair, which
-    // still comes back as HTTP 200 ΓÇö so the body decides, not the status.
-    const bool ok = reply.status == 200 && reply.body.find("\"status\":true") != std::string::npos;
-    Log("[agent] pair pin -> HTTP %lu %s", reply.status, ok ? "accepted" : "rejected");
-    if (ok) {
-        return "{\"type\":\"paired\",\"ok\":true}";
-    }
-    return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"refused\",\"message\":\""
-           + JsonEscape(reply.body.substr(0, 200)) + "\"}";
-}
+// SolStream pairs by the user typing a token once, and the agent proves it with
+// an HMAC challenge. There is nothing left here.
 
 // ΓöÇΓöÇ Placement ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
@@ -2736,7 +2504,7 @@ std::string DisplaysJson(const std::vector<Display>& displays) {
     for (size_t i = 0; i < displays.size(); ++i) {
         const Display& display = displays[i];
         char buffer[1024];
-        // Which display Sunshine is actually encoding, said here rather than only
+        // Which display is actually being encoded, said here rather than only
         // in `status`. The Mac crops a rectangle out of whatever arrives, so if
         // it places windows on a different display every crop is taken from the
         // wrong pixels — and the result is not an error, it is a picture. Seen
@@ -2844,7 +2612,7 @@ std::string WindowStatusJson(uint64_t id) {
     // The crop is a rectangle on a shared display: anything covering the tile is
     // streamed as though it were part of the application, with nothing on the
     // Mac to say otherwise. It is not hypothetical — a Windows Firewall prompt
-    // about Sunshine appeared on the virtual display mid-test and sat over half
+    // about SolStream appeared on the virtual display mid-test and sat over half
     // the streamed window, looking for all the world like part of it.
     //
     // Computed from the same top-to-bottom enumeration the window list uses,
@@ -3050,23 +2818,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         return "{\"type\":\"pong\"}";
     }
 
-    // What the host application is doing with itself: its Sunshine, its capture
-    // display, and the ports both. Answered before authentication because it
+    // What the host application is doing with itself: its capture display and
+    // its media port. Answered before authentication because it
     // says nothing a port scan could not already establish, and because it is
     // what the Mac shows when it cannot get any further.
     if (command == "status") {
-        const solstream::SunshineState state = solstream::GetSunshineState();
-        std::string out = "{\"type\":\"status\"";
-        out += ",\"sunshine\":\"";
-        switch (state) {
-            case solstream::SunshineState::kRunning: out += "running"; break;
-            case solstream::SunshineState::kStarting: out += "starting"; break;
-            case solstream::SunshineState::kFailed: out += "failed"; break;
-            case solstream::SunshineState::kNotBundled: out += "missing"; break;
-            default: out += "stopped"; break;
-        }
-        out += "\",\"sunshineDetail\":\"" + JsonEscape(solstream::SunshineStatusText()) + "\"";
-        out += ",\"basePort\":" + std::to_string(g_sunshine_base);
+        std::string out = "{\"type\":\"status\",\"ok\":true";
+        out += ",\"agent\":\"listening\"";
+        out += ",\"clients\":" + std::to_string(g_clients_authenticated.load());
+#ifdef SOLSTREAM_MEDIA
+        out += ",\"streaming\":"
+             + std::string(solstream::media::MediaSession::Instance().Running()
+                           ? "true" : "false");
+        out += ",\"mediaPort\":" + std::to_string(solstream::kDefaultMediaPort);
+#else
+        out += ",\"streaming\":false";
+#endif
         out += ",\"captureDisplay\":\"" + JsonEscape(ToUtf8(g_capture_display)) + "\"";
         out += ",\"virtualDisplay\":"
              + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
@@ -3337,32 +3104,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         return buffer;
     }
 
+    // `pair` is gone with GameStream. A Mac that still sends it is running an
+    // older build, and telling it so beats a silent failure.
     if (command == "pair") {
-        std::string pin;
-        if (!FieldString(line, "pin", pin)) {
-            return "{\"type\":\"error\",\"message\":\"pair needs pin\"}";
-        }
-        std::string name;
-        FieldString(line, "name", name);
-        if (name.empty()) {
-            name = "SolStream client";
-        }
-        const std::string reply = PairJson(pin, name, g_sunshine_web_port);
-
-        // Put the code on screen here when it could not be approved for the
-        // user. The window has always been able to draw this card; nothing
-        // ever asked it to, so the one moment the host application exists for
-        // -- a Mac waiting on a code -- was the one moment it said nothing.
-        //
-        // The Mac shows the PIN too, but only the person at this PC can act on
-        // it, and they may not be the person holding the Mac.
-        if (reply.find("\"ok\":true") == std::string::npos) {
-            solstream::ShowPairingPin(ToWide(pin), ToWide(name));
-        } else {
-            solstream::ShowPairingPin(L"", L"");
-        }
-        return reply;
+        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"gone\""
+               ",\"message\":\"SolStream pairs with a token, not a PIN. "
+               "Update the Mac application.\"}";
     }
+
 
     if (command == "window") {
         long long id = 0;
@@ -3540,55 +3289,6 @@ bool SendLine(SOCKET client, const std::string& text) {
     return true;
 }
 
-/// When the running Sunshine process started, as a 64-bit tick count, or 0 if it
-/// is not running.
-///
-/// The Mac needs this to track whether the host is drawing its cursor.
-/// Sunshine's `display_cursor` is a process-global that starts true and can only
-/// be *flipped*, never read, so a client that remembers "I hid it" has no way to
-/// notice that Sunshine restarted and put it back. Keyed against this, a restart
-/// is a new instance and the belief resets by itself.
-unsigned long long SunshineInstanceId() {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        return 0;
-    }
-    unsigned long long instance = 0;
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    if (Process32FirstW(snapshot, &entry)) {
-        do {
-            if (_wcsicmp(entry.szExeFile, L"sunshine.exe") != 0) {
-                continue;
-            }
-            // The process id on its own already changes when Sunshine restarts,
-            // which is the whole question being asked. The creation time is
-            // added when it can be read, but Sunshine normally runs as a service
-            // under SYSTEM and this agent does not run elevated, so OpenProcess
-            // is usually denied — hence a pid-only answer has to be good enough
-            // rather than a failure.
-            instance = entry.th32ProcessID;
-            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                         entry.th32ProcessID);
-            if (process) {
-                FILETIME created{}, exited{}, kernel{}, user{};
-                if (GetProcessTimes(process, &created, &exited, &kernel, &user)) {
-                    ULARGE_INTEGER value{};
-                    value.LowPart = created.dwLowDateTime;
-                    value.HighPart = created.dwHighDateTime;
-                    // Mixed in rather than replacing the pid, so the answer is
-                    // still unique if the times are unavailable for one process
-                    // and not another.
-                    instance ^= value.QuadPart;
-                }
-                CloseHandle(process);
-            }
-            break;
-        } while (Process32NextW(snapshot, &entry));
-    }
-    CloseHandle(snapshot);
-    return instance;
-}
 
 // ── Cursor shape ─────────────────────────────────────────────────────────────
 //
@@ -3740,7 +3440,6 @@ void ServeClient(SOCKET client) {
     hello += std::to_string(kProtocolVersion);
     hello += ",\"host\":\"" + JsonEscape(hostname) + "\"";
     hello += ",\"needsAuth\":" + std::string(g_require_auth ? "true" : "false");
-    hello += ",\"sunshineInstance\":\"" + std::to_string(SunshineInstanceId()) + "\"";
     hello += ",\"challenge\":\"" + challenge + "\"";
     hello += "}";
     if (!SendLine(client, hello)) {
@@ -3866,50 +3565,6 @@ std::string ReadLineHidden() {
     return line;
 }
 
-/// One-time setup: remember Sunshine's web UI credentials so the agent can pair
-/// clients on the user's behalf.
-///
-/// Prompted rather than taken as an argument, because a password on a command line
-/// is visible to every process on the machine through the process list.
-int SetSunshineCredentials() {
-    std::fputs("Sunshine web UI username: ", stdout);
-    std::fflush(stdout);
-    std::string user;
-    int ch = 0;
-    while ((ch = std::fgetc(stdin)) != EOF && ch != '\n') {
-        if (ch != '\r') {
-            user.push_back(static_cast<char>(ch));
-        }
-    }
-    std::fputs("Sunshine web UI password: ", stdout);
-    std::fflush(stdout);
-    const std::string password = ReadLineHidden();
-
-    if (user.empty() || password.empty()) {
-        std::fputs("Nothing stored: both a username and a password are required.\n", stderr);
-        return 1;
-    }
-    if (!StoreSunshineCredentials(user, password)) {
-        std::fputs("Could not store the credentials.\n", stderr);
-        return 1;
-    }
-
-    // Prove they work now rather than failing later, mid-pairing. An empty PIN is
-    // rejected by Sunshine, but only after it has checked the credentials ΓÇö so a
-    // 401 distinguishes bad credentials from a bad PIN.
-    const HttpResult reply = PostToSunshine(L"/api/pin", "{\"pin\":\"\",\"name\":\"SolStream\"}",
-                                            user, password, g_sunshine_web_port);
-    if (!reply.sent) {
-        std::fprintf(stdout, "Stored, but Sunshine could not be reached: %s\n", reply.error.c_str());
-        return 0;
-    }
-    if (reply.status == 401) {
-        std::fputs("Stored, but Sunshine REJECTED them. Re-run with the right ones.\n", stderr);
-        return 1;
-    }
-    std::fputs("Stored and accepted by Sunshine. Pairing will no longer need the web UI.\n", stdout);
-    return 0;
-}
 
 /// Give back a console nobody asked for.
 ///
@@ -3964,7 +3619,6 @@ int wmain(int argc, wchar_t** argv) {
     // Loopback by default. This socket has no authentication yet, so the address
     // it binds is the only thing limiting who can drive it.
     std::string bind_address = kLoopback;
-    bool set_credentials = false;
     bool print_token = false;
     bool no_auth = false;
     bool install = false;
@@ -3975,24 +3629,13 @@ int wmain(int argc, wchar_t** argv) {
     // verification in this project is done over SSH, where there is no desktop
     // to put a window on.
     bool headless = false;
-    // --no-sunshine leaves an existing Sunshine alone, for a host that was set
-    // up before SolStream and wants to keep the one it has.
-    bool no_sunshine = false;
     bool install_driver = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--port" && i + 1 < argc) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
-        } else if (arg == L"--sunshine-port" && i + 1 < argc) {
-            // The BASE port, not the web one -- everything else is derived from
-            // it, on both sides of the connection.
-            g_sunshine_base = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
-            g_sunshine_web_port =
-                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kWebUi);
         } else if (arg == L"--headless") {
             headless = true;
-        } else if (arg == L"--no-sunshine") {
-            no_sunshine = true;
         } else if (arg == L"--install-display-driver") {
             install_driver = true;
         } else if (arg == L"--bind" && i + 1 < argc) {
@@ -4001,8 +3644,6 @@ int wmain(int argc, wchar_t** argv) {
             bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
             bind_address = "0.0.0.0";
-        } else if (arg == L"--set-sunshine-credentials") {
-            set_credentials = true;
         } else if (arg == L"--print-token") {
             print_token = true;
         } else if (arg == L"--no-auth") {
@@ -4021,9 +3662,6 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    if (set_credentials) {
-        return SetSunshineCredentials();
-    }
 
     // Installing is the executable's own job. It used to be a PowerShell script,
     // which made the answer to "how do I install this" involve an execution
@@ -4135,9 +3773,8 @@ int wmain(int argc, wchar_t** argv) {
 
     // Nothing was asked for, and this copy is not the installed one: somebody
     // has just downloaded the file and run it. That used to start the agent in
-    // place, find no Sunshine beside it, and report "No sunshine.exe found" —
-    // an error message as the entire first impression, with the actual install
-    // reachable only by knowing to type --install at a command line.
+    // place and report an error as the entire first impression, with the actual
+    // install reachable only by knowing to type --install at a command line.
     if (argc == 1 && !solstream::RunningInstalled()) {
         if (solstream::ShowHostWindow(solstream::WindowMode::Setup)) {
             return solstream::RunHostWindowLoop();
@@ -4290,7 +3927,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // ── The virtual display ──────────────────────────────────────────────────
     //
-    // Checked before Sunshine starts, because it decides what Sunshine captures.
+    // Checked before the media path starts, because it decides what is captured.
     // A machine without one can still stream — the real monitor is captured
     // instead — but the window cannot be sized past that monitor's resolution,
     // the crop shows anything dragged over it, and the mode cannot be matched to
@@ -4343,7 +3980,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Pick what Sunshine captures: the virtual display when there is one, so a
+    // Pick what is captured: the virtual display when there is one, so a
     // crop can never be a crop out of somebody's real screen.
     for (const Display& display : EnumerateDisplays()) {
         const std::string& adapter = display.adapter;
@@ -4367,31 +4004,6 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // ── Sunshine ─────────────────────────────────────────────────────────────
-    //
-    // Started by us, configured by us, on our own ports. A Sunshine the user
-    // installed themselves keeps its own configuration and its own ports and is
-    // never touched.
-    if (!no_sunshine) {
-        bool started = solstream::StartSunshine(g_sunshine_base, g_capture_display);
-        if (!started && solstream::RestartedForDisplay()) {
-            // The first start was only to read Sunshine's own display table.
-            // Now it knows which display it means, so say it properly.
-            Log("[agent] learned the capture display's id; restarting Sunshine");
-            started = solstream::StartSunshine(g_sunshine_base, g_capture_display);
-        }
-        if (started) {
-            Log("[agent] %s", solstream::SunshineStatusText().c_str());
-            Log("[agent] Sunshine ports: https %u, http %u, web %u, rtsp %u",
-                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kHttps),
-                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kHttp),
-                g_sunshine_web_port,
-                solstream::MapPort(g_sunshine_base, solstream::SunshinePort::kRtsp));
-        } else {
-            Log("[agent] %s", solstream::SunshineStatusText().c_str());
-        }
-    }
-
     for (const Display& display : EnumerateDisplays()) {
         Log("[agent]   display %s %ldx%ld at (%ld,%ld)%s",
             display.device_name.c_str(),
@@ -4401,11 +4013,11 @@ int wmain(int argc, wchar_t** argv) {
             display.primary ? " [primary]" : "");
     }
 
-    // From here, not from the first client. Starting Sunshine is itself what
-    // makes Windows ask whether it may accept connections, and that prompt
-    // arrives long before any Mac has connected — onto the capture display,
-    // which no monitor shows. A watcher that only runs while someone is
-    // streaming would never see the one dialog most worth carrying back.
+    // From here, not from the first client. Binding the agent's socket is
+    // itself what makes Windows ask whether it may accept connections, and that
+    // prompt arrives long before any Mac has connected — onto the capture
+    // display, which no monitor shows. A watcher that only runs while someone
+    // is streaming would never see the one dialog most worth carrying back.
     StartWatcher();
 
     // The accept loop moves off the main thread so the window can own it.
@@ -4424,10 +4036,9 @@ int wmain(int argc, wchar_t** argv) {
 
             // One Mac at a time, said out loud rather than by hanging.
             //
-            // Sunshine serves one session — it refuses a second /launch
-            // outright — so two Macs streaming from one PC is not something
-            // this can support however the socket is written. What it CAN do is
-            // say so.
+            // There is one capture, one encoder and one media socket, so two
+            // Macs streaming from one PC is not something this can support
+            // however the socket is written. What it CAN do is say so.
             //
             // Saying so requires accept() to keep running, which is why serving
             // moved onto its own thread. The first attempt at this put the
@@ -4448,10 +4059,6 @@ int wmain(int argc, wchar_t** argv) {
                 std::string busy = "{\"type\":\"busy\",\"message\":\"";
                 busy += JsonEscape(std::string(name) + " is already streaming to "
                                    "another Mac. Disconnect there first.");
-                busy += "\",\"sunshine\":\"";
-                busy += solstream::GetSunshineState() == solstream::SunshineState::kRunning
-                            ? "running" : "not running";
-                busy += "\",\"basePort\":" + std::to_string(g_sunshine_base);
                 busy += ",\"virtualDisplay\":"
                      + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
                 busy += "}";
@@ -4481,7 +4088,6 @@ int wmain(int argc, wchar_t** argv) {
                 UnlockAll();
                 // A PIN nobody is waiting on any more is worse than no PIN: it
                 // is a code on screen that does nothing, for a Mac that has gone.
-                solstream::ShowPairingPin(L"", L"");
                 g_clients_connected.fetch_sub(1);
                 Log("[agent] client disconnected");
             }).detach();
@@ -4526,23 +4132,24 @@ int wmain(int argc, wchar_t** argv) {
             status.agent_listening = true;
             status.connected_clients = g_clients_authenticated.load();
 
-            const solstream::SunshineState state = solstream::GetSunshineState();
-            status.sunshine_running = state == solstream::SunshineState::kRunning
-                                   || state == solstream::SunshineState::kStarting;
-            const std::string detail = solstream::SunshineStatusText();
-            status.sunshine_detail = ToWide(detail);
-
-            // Log every change, so a Sunshine that died and was brought back
-            // leaves a trail. The window shows the current state, but the
-            // question afterwards is always "did it restart, and when" — and
-            // the answer was nowhere before this.
-            static std::string last_detail;
-            if (detail != last_detail) {
-                last_detail = detail;
-                Log("[agent] sunshine: %s", detail.c_str());
+            // Ready to stream, not currently streaming. The two used to be one
+            // fact because a Sunshine that was not running was the only way
+            // this could fail; now the media path only exists while a Mac is
+            // connected, and a host with nobody connected is fine.
+#ifdef SOLSTREAM_MEDIA
+            status.streaming_ready = solstream::media::Capture::Supported();
+            status.streaming_detail =
+                solstream::media::MediaSession::Instance().Running()
+                    ? L"streaming" : L"ready";
+            if (!status.streaming_ready) {
+                status.streaming_detail =
+                    L"This PC's Windows is too old for the capture SolStream uses.";
             }
+#else
+            status.streaming_ready = false;
+            status.streaming_detail = L"This build has no media path.";
+#endif
 
-            status.web_ui_port = g_sunshine_web_port;
             status.virtual_display = solstream::HasVirtualDisplay();
             status.display_detail = status.virtual_display
                 ? (g_capture_display.empty() ? L"ready" : g_capture_display)
@@ -4572,9 +4179,8 @@ int wmain(int argc, wchar_t** argv) {
     const int code = solstream::RunHostWindowLoop();
     if (name_hook) { UnhookWinEvent(name_hook); }
     if (window_set_hook) { UnhookWinEvent(window_set_hook); }
-    // Closing the window takes the host down with it, Sunshine included. A
-    // Sunshine still holding the capture display after SolStream is gone is one
+    // Closing the window takes the host down with it. A capture still holding
+    // the display after SolStream is gone is one
     // nobody can see to stop.
-    solstream::StopSunshine();
     return code;
 }

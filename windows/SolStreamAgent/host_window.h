@@ -1,7 +1,7 @@
 // host_window.h — the one thing the user opens on the Windows PC.
 //
 // Everything this program does was previously reachable only from a command
-// line: print the token, set Sunshine's credentials, check which display is
+// line: print the token, check which display is
 // virtual, find out why a Mac cannot connect. That is a reasonable interface for
 // the person who wrote it and no interface at all for anybody else.
 //
@@ -21,13 +21,11 @@ struct HostStatus {
     std::wstring address;          ///< Where the Mac should look, or empty.
     std::wstring pairing_token;
     bool agent_listening = false;
-    bool sunshine_running = false;
+    bool streaming_ready = false;
     bool virtual_display = false;
-    std::wstring sunshine_detail;
+    std::wstring streaming_detail;
     std::wstring display_detail;
     int connected_clients = 0;
-    /// Sunshine's own pairing page, for the fallback card's button.
-    unsigned short web_ui_port = 0;
 };
 
 /// Which face the window shows.
@@ -51,15 +49,6 @@ bool ShowHostWindow(WindowMode mode = WindowMode::Host);
 
 /// Replace what the window displays. Safe to call from any thread.
 void UpdateHostStatus(const HostStatus& status);
-
-/// Show a pairing PIN that a Mac is waiting on, for the case where SolStream
-/// could not approve it itself. Pass an empty string to take it back down.
-///
-/// Normally never seen: the agent holds its own Sunshine's web credentials, so
-/// it approves the PIN without anybody typing anything. This is what happens
-/// when that fails — a Sunshine the user installed themselves, whose password
-/// this program does not know.
-void ShowPairingPin(const std::wstring& pin, const std::wstring& client_name);
 
 /// Pump the window's messages until it is closed. Returns the exit code.
 int RunHostWindowLoop();

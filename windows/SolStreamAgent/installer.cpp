@@ -75,8 +75,9 @@ std::string Narrow(const std::wstring& text) {
     return out;
 }
 
-/// Run a command and wait, returning its exit code. Used for netsh and
-/// schtasks, which are Windows' own tools rather than anything we ship.
+/// Run a command and wait, returning its exit code. Used for netsh, schtasks
+/// and taskkill, none of which have a usable API and all of which would flash a
+/// console window on a user's desktop if started the obvious way.
 DWORD RunHidden(const std::wstring& command) {
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -86,50 +87,14 @@ DWORD RunHidden(const std::wstring& command) {
     std::wstring mutable_command = command;
     if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        return 0xFFFFFFFF;
+        return (DWORD) -1;
     }
-    WaitForSingleObject(process.hProcess, 120000);
-    DWORD code = 0xFFFFFFFF;
+    WaitForSingleObject(process.hProcess, 60000);
+    DWORD code = (DWORD) -1;
     GetExitCodeProcess(process.hProcess, &code);
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return code;
-}
-
-bool CopyTree(const std::wstring& from, const std::wstring& to, std::string& error) {
-    if (!CreateDirectoryW(to.c_str(), nullptr)
-        && GetLastError() != ERROR_ALREADY_EXISTS) {
-        error = "Could not create " + Narrow(to);
-        return false;
-    }
-    WIN32_FIND_DATAW found{};
-    HANDLE search = FindFirstFileW((from + L"\\*").c_str(), &found);
-    if (search == INVALID_HANDLE_VALUE) {
-        error = "Could not read " + Narrow(from);
-        return false;
-    }
-    bool ok = true;
-    do {
-        const std::wstring name = found.cFileName;
-        if (name == L"." || name == L"..") {
-            continue;
-        }
-        const std::wstring source = from + L"\\" + name;
-        const std::wstring target = to + L"\\" + name;
-        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!CopyTree(source, target, error)) {
-                ok = false;
-                break;
-            }
-        } else if (!CopyFileW(source.c_str(), target.c_str(), FALSE)) {
-            error = "Could not copy " + Narrow(name) + " (error "
-                  + std::to_string(GetLastError()) + ")";
-            ok = false;
-            break;
-        }
-    } while (FindNextFileW(search, &found));
-    FindClose(search);
-    return ok;
 }
 
 void RemoveTree(const std::wstring& path) {
@@ -178,54 +143,6 @@ DWORD TreeSizeKb(const std::wstring& path) {
     return (DWORD) (bytes / 1024ull);
 }
 
-/// Write the embedded Sunshine archive out and unpack it into `destination`.
-///
-/// Only reached when the executable is travelling alone — a development tree has
-/// a real sunshine\ folder beside it and that is copied normally. Returns false
-/// with `error` untouched when there is no embedded archive, which is not a
-/// failure, just the other arrangement.
-bool ExtractBundledSunshine(const std::wstring& destination, std::string& error) {
-    HRSRC found = FindResourceW(nullptr, L"SUNSHINE_ARCHIVE", RT_RCDATA);
-    if (!found) {
-        return false;
-    }
-    HGLOBAL loaded = LoadResource(nullptr, found);
-    const void* bytes = loaded ? LockResource(loaded) : nullptr;
-    const DWORD size = SizeofResource(nullptr, found);
-    if (!bytes || size == 0) {
-        return false;
-    }
-
-    const std::wstring archive = TempDirectory() + L"solstream-sunshine.zip";
-    HANDLE file = CreateFileW(archive.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        error = "Could not write the bundled Sunshine archive to a temporary file.";
-        return false;
-    }
-    DWORD written = 0;
-    const bool wrote = WriteFile(file, bytes, size, &written, nullptr) && written == size;
-    CloseHandle(file);
-    if (!wrote) {
-        DeleteFileW(archive.c_str());
-        error = "Could not write the bundled Sunshine archive (out of disk?).";
-        return false;
-    }
-
-    SHCreateDirectoryExW(nullptr, destination.c_str(), nullptr);
-    // tar.exe has been in Windows since 10 1803 and reads zip through
-    // libarchive, so unpacking needs nothing shipped and no PowerShell.
-    const DWORD code = RunHidden(L"tar.exe -x -f \"" + archive + L"\" -C \""
-                                 + destination + L"\"");
-    DeleteFileW(archive.c_str());
-    if (code != 0) {
-        error = "Could not unpack the bundled Sunshine (tar returned "
-              + std::to_string((int) code) + ").";
-        return false;
-    }
-    InstallLog("unpacked the bundled Sunshine");
-    return true;
-}
 
 /// Stop anything already running out of the install directory, or the copy
 /// fails on a locked executable and leaves a half-installed folder.
@@ -242,8 +159,8 @@ void StopInstalled(const std::wstring& destination) {
     // same file with different PIDs, so the install killed the window that was
     // waiting to tell the user how it went. The user saw setup vanish.
     //
-    // A path test has neither problem, and it also catches the sunshine.exe that
-    // belongs to this install without touching a Sunshine the user set up
+    // A path test has neither problem, and it also catches any helper that
+    // belongs to this install without touching a program somebody else set up
     // themselves — which is none of our business and would be a rude surprise.
     const std::wstring mine = std::to_wstring(GetCurrentProcessId());
     RunHidden(L"powershell.exe -NoProfile -Command \""
@@ -265,8 +182,8 @@ void DeleteRule(const std::wstring& name) {
 /// — that prompt is raised per-executable, and on this project it once landed on
 /// a display with no monitor and blocked every click for days. Naming the ports
 /// as well is what keeps the rule honest: a program rule on its own opens every
-/// port that executable ever binds, and for Sunshine that includes its web
-/// configuration UI, which has no business being reachable from the network.
+/// port that executable ever binds, and an agent that later opens a socket for
+/// something else should not inherit a hole it was never granted.
 bool AddRule(const std::wstring& name, const std::wstring& program,
              const std::wstring& protocol, const std::wstring& ports) {
     DeleteRule(name);
@@ -280,17 +197,6 @@ bool AddRule(const std::wstring& name, const std::wstring& program,
         L" profile=private,public"
         L" description=\"SolStream remote application streaming\"";
     return RunHidden(command) == 0;
-}
-
-std::wstring PortList(std::initializer_list<int> offsets) {
-    std::wstring out;
-    for (int offset : offsets) {
-        if (!out.empty()) {
-            out += L",";
-        }
-        out += std::to_wstring(kDefaultSunshineBase + offset);
-    }
-    return out;
 }
 
 // ── Shortcuts ────────────────────────────────────────────────────────────────
@@ -688,69 +594,41 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
         error = "SolStream is already installed here.";
         return false;
     }
-    // Two shapes are legitimate. A single downloaded executable carries Sunshine
-    // inside it; a development tree has the folder sitting beside it. Anything
-    // else cannot stream and should say so now rather than after copying.
-    const bool beside = GetFileAttributesW((source + L"\\sunshine\\sunshine.exe").c_str())
-                        != INVALID_FILE_ATTRIBUTES;
-    const bool embedded = FindResourceW(nullptr, L"SUNSHINE_ARCHIVE", RT_RCDATA) != nullptr;
-    if (!beside && !embedded) {
-        error = "This copy of SolStream has no Sunshine with it — neither bundled "
-                "inside the executable nor in a sunshine\\ folder beside it — so it "
-                "cannot stream.";
-        return false;
-    }
-
+    // ONE FILE. There used to be two shapes to handle: a downloaded executable
+    // carrying 65 MB of Sunshine inside it as a resource, and a development
+    // tree with a sunshine\ folder beside it -- and an error message for the
+    // case where neither was true, because without Sunshine there was nothing
+    // to stream with. SolStream streams with itself now.
     InstallLog("installing from " + Narrow(source) + " to " + Narrow(destination));
     StopInstalled(destination);
 
-    if (beside) {
-        // A development tree: the folder is the package, so copy the folder.
-        if (!CopyTree(source, destination, error)) {
-            InstallLog("copy failed: " + error);
-            return false;
-        }
-    } else {
-        // A downloaded file, which lives wherever the browser put it — beside
-        // every other download the user has. Copying its DIRECTORY, which is
-        // what this used to do, would put all of that in Program Files. The one
-        // file is the package; Sunshine comes out of the resource.
-        if (!CreateDirectoryW(destination.c_str(), nullptr)
-            && GetLastError() != ERROR_ALREADY_EXISTS) {
-            error = "Could not create " + Narrow(destination);
-            InstallLog("copy failed: " + error);
-            return false;
-        }
-        if (!CopyFileW(ExePath().c_str(), (destination + L"\\SolStream.exe").c_str(),
-                       FALSE)) {
-            error = "Could not copy SolStream into " + Narrow(destination)
-                  + " (error " + std::to_string(GetLastError()) + ")";
-            InstallLog("copy failed: " + error);
-            return false;
-        }
-        if (!ExtractBundledSunshine(destination, error)) {
-            InstallLog("unpack failed: " + error);
-            return false;
-        }
+    if (!CreateDirectoryW(destination.c_str(), nullptr)
+        && GetLastError() != ERROR_ALREADY_EXISTS) {
+        error = "Could not create " + Narrow(destination);
+        InstallLog("copy failed: " + error);
+        return false;
+    }
+    // The executable, not its directory. Copying the DIRECTORY -- which this
+    // once did -- puts everything else in the user's Downloads folder into
+    // Program Files with it.
+    if (!CopyFileW(ExePath().c_str(), (destination + L"\\SolStream.exe").c_str(),
+                   FALSE)) {
+        error = "Could not copy SolStream into " + Narrow(destination)
+              + " (error " + std::to_string(GetLastError()) + ")";
+        InstallLog("copy failed: " + error);
+        return false;
     }
     InstallLog("copied");
 
-    // Sunshine creates this at startup whatever its configuration says, and under
-    // Program Files an ordinary user cannot -- it exits 0 before its logging is
-    // up, leaving an empty log and a host that says "Sunshine keeps stopping"
-    // with no reason. Made here, where there are rights to make it.
-    const std::wstring config = destination + L"\\sunshine\\config";
-    SHCreateDirectoryExW(nullptr, config.c_str(), nullptr);
-
+    // Two rules, both for one executable. There used to be six, covering three
+    // TCP and three UDP Sunshine ports derived from a base -- and a directory
+    // that had to be created by hand because Sunshine exited 0 before its
+    // logging was up if it could not write there.
     const std::wstring exe = destination + L"\\SolStream.exe";
-    const std::wstring sunshine = destination + L"\\sunshine\\sunshine.exe";
-    AddRule(L"SolStream - agent", exe, L"TCP", std::to_wstring(kDefaultAgentPort));
-    AddRule(L"SolStream - Sunshine TCP", sunshine, L"TCP",
-            PortList({(int) SunshinePort::kHttps, (int) SunshinePort::kHttp,
-                      (int) SunshinePort::kRtsp}));
-    AddRule(L"SolStream - Sunshine UDP", sunshine, L"UDP",
-            PortList({(int) SunshinePort::kVideo, (int) SunshinePort::kControl,
-                      (int) SunshinePort::kAudio}));
+    AddRule(L"SolStream - agent", exe, L"TCP", std::to_wstring(kDefaultPort));
+    AddRule(L"SolStream - media", exe, L"UDP",
+            std::to_wstring(kDefaultMediaPort) + L","
+            + std::to_wstring(kDiscoveryPort));
     InstallLog("firewall rules written");
 
     WriteShortcuts(destination, options);

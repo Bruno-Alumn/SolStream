@@ -8,41 +8,27 @@
 #
 # package-windows.ps1 - assemble the SolStream host application for Windows.
 #
-# Produces one folder that can be zipped or handed to an installer:
+# There is one file to assemble now.
 #
-#     SolStream\
-#       SolStream.exe            the host application
-#       sunshine\                Sunshine's own unmodified build
-#         sunshine.exe
-#         assets\                its shaders and web UI — it looks for these
-#                                relative to its own directory, so the whole
-#                                install goes in, not just the executable
-#       driver\                  an indirect display driver package, if you ship
-#         SolStreamDisplay.inf   one; the app offers to install it when the
-#                                machine has no virtual display
-#       licenses\
-#         Sunshine-LICENSE.txt   GPL-3.0, and where to get its source
+#     SolStreamSetup.exe    what a person downloads
 #
-# The layout is what FindSunshine (sunshine_host.cpp) looks for: `sunshine\
-# sunshine.exe` beside the executable wins over anything installed in Program
-# Files, so a machine that already has Sunshine keeps its own and SolStream uses
-# the copy it was tested against.
+# This script used to build a folder: the executable, 65 MB of unmodified
+# Sunshine with its assets and web UI, a display driver package, and a licenses\
+# directory carrying Sunshine's GPL-3.0 text and a NOTICE explaining where to
+# get its corresponding source. All of it was then zipped and linked into the
+# executable as a resource so that one file could unpack the rest into Program
+# Files.
 #
-# ── Licensing ────────────────────────────────────────────────────────────────
-#
-# Sunshine is GPL-3.0 and is shipped here as its own unmodified binary, run as a
-# child process over the network protocol any Moonlight client speaks. Nothing
-# links against it. Distributing it still carries the GPL's obligations: its
-# licence text goes in the package, and whoever ships this has to be able to
-# provide its corresponding source.
+# None of that exists any more. SolStream captures, encodes and sends the
+# picture itself, so there is no second program to ship, no GPL obligation to
+# carry, and no payload to embed. The driver is still optional and still
+# offered by the application, which downloads it itself when the user asks.
 #
 # Usage:
-#   .\package-windows.ps1 -SunshineDir "C:\Program Files\Sunshine" [-DriverDir <path>]
+#   .\package-windows.ps1
 
 param(
-    [string] $SunshineDir = "C:\Program Files\Sunshine",
-    [string] $DriverDir = "",
-    [string] $OutDir = "$PSScriptRoot\..\dist\SolStream",
+    [string] $OutDir = "$PSScriptRoot\..\dist",
     [string] $BuildDir = "$PSScriptRoot\..\build"
 )
 
@@ -50,158 +36,29 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== SolStream Windows package ==="
 
-# Step 1: build
 cmake -S "$PSScriptRoot\.." -B $BuildDir | Out-Null
 cmake --build $BuildDir --target SolStreamAgent --config Release
 # $ErrorActionPreference does not apply to a native command's exit code, so a
 # failed build carries straight on. It has already shipped one stale binary:
 # a running agent held SolStreamAgent.exe open, the link failed with LNK1104,
-# and the script packaged the PREVIOUS build -- which happened to be the one
-# without Sunshine embedded, so the setup program came out at 1 MB instead of
-# 26 and would have installed a host that could not stream. Check the code.
-if ($LASTEXITCODE -ne 0) {
-    throw ("the build failed ($LASTEXITCODE). If this is LNK1104, something is " +
-           "running the executable -- stop the agent and try again.")
-}
+# and the script packaged the PREVIOUS build.
+if ($LASTEXITCODE -ne 0) { throw "the build failed ($LASTEXITCODE)" }
 
 $exe = Join-Path $BuildDir "bin\release\SolStreamAgent.exe"
-if (-not (Test-Path $exe)) {
-    throw "Built executable not found at $exe"
-}
+if (-not (Test-Path $exe)) { throw "no executable at $exe" }
 
-# Step 2: lay the folder out fresh
-if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-New-Item -ItemType Directory -Force -Path "$OutDir\licenses" | Out-Null
 
-# Named for the product rather than for what it was called while it was only an
-# agent. FindSunshine resolves everything relative to this file's directory, so
-# the name is free.
-Copy-Item $exe (Join-Path $OutDir "SolStream.exe") -Force
-
-# Step 3: Sunshine, whole
-if (-not (Test-Path (Join-Path $SunshineDir "sunshine.exe"))) {
-    throw "No sunshine.exe in $SunshineDir — pass -SunshineDir"
-}
-Write-Host "--- copying Sunshine from $SunshineDir ---"
-robocopy $SunshineDir "$OutDir\sunshine" /E /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
-$global:LASTEXITCODE = 0
-
-# Its own config directory is never used — SolStream writes one per user under
-# LOCALAPPDATA — so drop anything the source install had, rather than shipping
-# somebody's paired clients and credentials to whoever installs this.
-#
-# Emptied, NOT deleted. Sunshine creates this directory at startup whatever its
-# configuration says, and under Program Files it cannot: it stops with
-# "Failed to apply config: cannot create directories: Permission denied" and
-# exits 0 before its own logging is up, so its log stays empty and the only
-# symptom is SolStream reporting "Sunshine keeps stopping". Deleting the folder
-# outright is what caused that -- the dev agent never showed it because it runs
-# the user's existing install, whose config directory is already there.
-$staleConfig = "$OutDir\sunshine\config"
-if (Test-Path $staleConfig) {
-    Remove-Item "$staleConfig\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "emptied the source install's config (it would have shipped its paired clients)"
-} else {
-    New-Item -ItemType Directory -Path $staleConfig -Force | Out-Null
-    Write-Host "created an empty config directory for Sunshine to find"
-}
-
-# Step 4: the display driver, if one is being shipped
-if ($DriverDir -ne "" -and (Test-Path $DriverDir)) {
-    robocopy $DriverDir "$OutDir\driver" /E /NFL /NDL /NJH /NJS /NP | Out-Null
-    $global:LASTEXITCODE = 0
-    Write-Host "--- bundled the display driver from $DriverDir ---"
-} else {
-    Write-Host "--- no display driver bundled; the app will say so and explain what to install ---"
-}
-
-# Step 5: licences
-# Loud, not silent. Sunshine is GPL-3.0 and distributing it obliges us to ship
-# its licence text; skipping quietly when the source install happens not to have
-# one produces a package that looks complete and is not distributable. Some
-# Sunshine installs genuinely do not carry the file, which is exactly how this
-# went unnoticed until a package was inspected.
-$sunshineLicense = Join-Path $SunshineDir "LICENSE"
-if (-not (Test-Path $sunshineLicense)) {
-    $sunshineLicense = Get-ChildItem $SunshineDir -Filter "LICENSE*" -Recurse -ErrorAction SilentlyContinue |
-                       Select-Object -First 1 -ExpandProperty FullName
-}
-if ($sunshineLicense -and (Test-Path $sunshineLicense)) {
-    Copy-Item $sunshineLicense "$OutDir\licenses\Sunshine-LICENSE.txt" -Force
-    Write-Host "  bundled Sunshine's licence text"
-} else {
-    Write-Warning ("No LICENSE file found under $SunshineDir, so this package does " +
-                   "NOT carry Sunshine's GPL-3.0 text. It is not fit to distribute " +
-                   "until you put the licence in $OutDir\licenses\Sunshine-LICENSE.txt. " +
-                   "Get it from https://github.com/LizardByte/Sunshine/blob/master/LICENSE")
-}
-@"
-SolStream ships Sunshine (https://github.com/LizardByte/Sunshine), which is
-licensed under the GNU General Public License v3.0.
-
-Sunshine is included here as its own unmodified binary. SolStream does not link
-against it and contains none of its code; it is started as a separate process
-and talked to over the network protocol any Moonlight client uses.
-
-The corresponding source for the included build is available from
-https://github.com/LizardByte/Sunshine at the tag matching sunshine\sunshine.exe
-(run it with --version), and from whoever supplied this package on request.
-"@ | Set-Content -Encoding UTF8 "$OutDir\licenses\Sunshine-NOTICE.txt"
-
-$size = (Get-ChildItem $OutDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
-Write-Host ""
-Write-Host ("=== Folder: {0} ({1:N0} MB) ===" -f $OutDir, $size)
-Get-ChildItem $OutDir | Select-Object -ExpandProperty Name
-
-# ── Step 6: the setup program ────────────────────────────────────────────────
-#
-# What a person actually downloads. Everything the folder holds except the
-# executable is zipped and linked into the executable as a resource, so one file
-# arrives and unpacks the rest into Program Files.
-#
 # Named SolStreamSetup.exe rather than SolStream.exe, because that is what it is
 # when it is downloaded: run from anywhere other than the install directory it
 # shows the setup screen, and what it copies into Program Files is itself, named
 # SolStream.exe. One binary, two names, no second project to keep in step.
-#
-# The folder above is kept because a development tree wants the loose layout,
-# and because this step is a rebuild: the resource has to exist before the
-# linker runs, so the exe is necessarily built twice.
-
-Write-Host ""
-Write-Host "--- setup program ---"
-$payload = Join-Path (Split-Path $OutDir -Parent) "solstream-payload.zip"
-if (Test-Path $payload) { Remove-Item $payload -Force }
-Compress-Archive -Path "$OutDir\sunshine", "$OutDir\licenses" -DestinationPath $payload
-Write-Host ("  payload: {0:N0} MB" -f ((Get-Item $payload).Length / 1MB))
-
-cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=$payload" | Out-Null
-cmake --build $BuildDir --target SolStreamAgent --config Release | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "the single-file rebuild failed ($LASTEXITCODE)" }
-if (-not (Test-Path $exe)) { throw "the single-file rebuild produced no executable" }
-
-# The whole point of this step is that Sunshine ends up INSIDE the executable,
-# and the only evidence of that is the size. An exe that came out the size of an
-# ordinary build is one that will report "no sunshine.exe found" on the first
-# machine it is installed on -- which is a bug report, not a build failure.
-$rebuilt = (Get-Item $exe).Length
-if ($rebuilt -lt (Get-Item $payload).Length) {
-    throw ("the rebuilt executable is {0:N0} bytes, smaller than the {1:N0}-byte " +
-           "payload it should contain -- the archive was not embedded") -f $rebuilt, (Get-Item $payload).Length
-}
-
-$single = Join-Path (Split-Path $OutDir -Parent) "SolStreamSetup.exe"
+$single = Join-Path $OutDir "SolStreamSetup.exe"
 Copy-Item $exe $single -Force
 
 # An earlier release of this script wrote SolStream.exe here. Leaving it beside
 # the new name would mean two downloads that differ only in which one is stale.
-$stale = Join-Path (Split-Path $OutDir -Parent) "SolStream.exe"
+$stale = Join-Path $OutDir "SolStream.exe"
 if (Test-Path $stale) { Remove-Item $stale -Force }
 
-# Leave the cache without the archive, or every later ordinary build silently
-# embeds whatever zip happened to be lying there.
-cmake -S "$PSScriptRoot\.." -B $BuildDir "-DSOLSTREAM_SUNSHINE_ZIP=" | Out-Null
-
-Write-Host ("=== Setup program: {0} ({1:N0} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))
+Write-Host ("=== Setup program: {0} ({1:N1} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))
