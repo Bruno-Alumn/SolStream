@@ -27,9 +27,12 @@ public final class MediaClient {
         public var datagramsRejected: UInt64 = 0
         public var bytesReceived: UInt64 = 0
         public var audioPackets: UInt64 = 0
-        /// Host capture clock to this picture being ready to decode, in
-        /// milliseconds. Only meaningful once `clockOffsetUs` has settled.
-        public var glassToDecodeMs: Double = 0
+        // There was a `glassToDecodeMs` here. It was declared, reported as zero
+        // for the life of every session, and nothing ever computed it: turning
+        // the host's capture clock into milliseconds on this side needs a clock
+        // offset that was never estimated. The host measures the same interval
+        // end to end -- "glass->wire last/min/mean" in its five-second line -- so
+        // a field that could only ever say nothing is worse than no field.
     }
 
     /// A complete coded picture, in Annex B, and whether it is a keyframe.
@@ -199,9 +202,19 @@ public final class MediaClient {
             return false
         }
 
+        // Under the lock, like every other write to it, and clearing `tornDown`
+        // with it. `tornDown` is what gates `stop()`, and a client restarted
+        // without clearing it was a session `stop()` returned from at its first
+        // line: socket open, timer firing every 10 ms, receive thread parked in
+        // `recv`, for the life of the process. Nothing does that today — every
+        // session builds a fresh MediaClient — but the invariant belongs here
+        // rather than in the knowledge of the callers.
+        stateLock.lock()
         running = true
+        tornDown = false
         startedAt = DispatchTime.now().uptimeNanoseconds
         lastHeardAt = startedAt
+        stateLock.unlock()
 
         let thread = Thread { [weak self] in self?.receiveLoop() }
         thread.name = "solstream.media.receive"
@@ -277,8 +290,10 @@ public final class MediaClient {
                 Log.error("[media] the receive thread did not stop within a "
                           + "second; closing its socket from a separate thread "
                           + "once it does")
+                sendLock.lock()
                 let stranded = fd
                 fd = -1
+                sendLock.unlock()
                 receiveThread = nil
                 let finished = receiveFinished
                 // A Thread rather than a global queue: this waits without a
@@ -295,9 +310,12 @@ public final class MediaClient {
             }
             receiveThread = nil
         }
-        if fd >= 0 {
-            close(fd)
-            fd = -1
+        sendLock.lock()
+        let toClose = fd
+        fd = -1
+        sendLock.unlock()
+        if toClose >= 0 {
+            close(toClose)
         }
     }
 
@@ -345,12 +363,24 @@ public final class MediaClient {
 
     // MARK: - Sending
 
+    /// Seal and send, with the descriptor held for the whole of it.
+    ///
+    /// `fd` used to be read outside this lock while `stop()` was free to close it
+    /// from another thread — and `stop()` genuinely does run elsewhere, because
+    /// `endedByItself` hands it to a global queue. So the main thread could read a
+    /// live descriptor, lose the race, and then `send()` into a number the kernel
+    /// had already handed back out to the next socket this process opened: the
+    /// agent channel reconnecting, or the next session's own. That is not an
+    /// error the caller sees, it is a datagram delivered somewhere else.
+    ///
+    /// `stop()` therefore sends its BYE before it takes this lock to clear `fd`,
+    /// and never while holding it — NSLock is not recursive.
     private func sendRaw(_ plaintext: Data) {
-        guard fd >= 0 else { return }
         sendLock.lock()
-        let datagram = SMTPacket.seal(plaintext, direction: toHost, sessionTag: sessionTag)
-        sendLock.unlock()
-        guard let datagram else { return }
+        defer { sendLock.unlock() }
+        guard fd >= 0 else { return }
+        guard let datagram = SMTPacket.seal(plaintext, direction: toHost,
+                                            sessionTag: sessionTag) else { return }
         _ = datagram.withUnsafeBytes { raw in
             Darwin.send(fd, raw.baseAddress, raw.count, 0)
         }
@@ -568,7 +598,21 @@ public final class MediaClient {
         case SMT.typePong:
             guard plaintext.count >= 9 else { return }
             let sent = SMTPacket.readBE([UInt8](plaintext)[1..<9])
-            let rtt = Double(nowMicros() &- sent) / 1000.0
+            let now = nowMicros()
+            // The echoed stamp is this Mac's own clock, so an honest pong is
+            // never from the future -- but `&-` is there because a host that
+            // echoes the wrong eight bytes would otherwise trap, and what it
+            // wraps to is around 1.8e13 milliseconds. The smoothing below has no
+            // way back from that: one bad sample sets the reported round trip to
+            // half a billion years and every later sample moves it 20% of the way
+            // towards the truth, so the figure stays useless for the whole
+            // session. Discarded rather than smoothed.
+            guard now >= sent else { return }
+            let rtt = Double(now - sent) / 1000.0
+            guard rtt < 10_000 else {
+                Log.debug("[media] ignoring a pong claiming a \(Int(rtt)) ms round trip")
+                return
+            }
             stateLock.lock()
             // A little smoothing, because one sample of a round trip on a
             // shared link says more about that instant than about the path.

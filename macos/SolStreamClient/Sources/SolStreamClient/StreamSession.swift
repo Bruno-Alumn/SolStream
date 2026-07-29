@@ -69,7 +69,21 @@ final class StreamSession {
         sinkLock.unlock()
     }
 
-    private(set) var audioFramesPlayed: UInt64 = 0
+    /// Guarded by `frameCountLock`, and read through `audioPacketsPlayed`.
+    ///
+    /// It was a plain `private(set)` incremented on MediaClient's receive thread
+    /// two hundred times a second and read by `stop()` on the main thread. A
+    /// 64-bit read racing a 64-bit write is undefined in the language whatever
+    /// arm64 does with the instruction, and the only consumer is one log line at
+    /// the end of the session — so the lock costs nothing and the race bought
+    /// nothing.
+    private var audioFramesPlayedStorage: UInt64 = 0
+
+    var audioFramesPlayed: UInt64 {
+        frameCountLock.lock()
+        defer { frameCountLock.unlock() }
+        return audioFramesPlayedStorage
+    }
 
     var onPhase: ((StreamPhase) -> Void)?
 
@@ -156,7 +170,9 @@ final class StreamSession {
             self.audioLock.unlock()
             guard let renderer else { return }
             renderer.playAudio(pcm)
-            self.audioFramesPlayed &+= 1
+            self.frameCountLock.lock()
+            self.audioFramesPlayedStorage &+= 1
+            self.frameCountLock.unlock()
         }
         media.onStats = { [weak self] stats in
             guard let self else { return }
@@ -282,7 +298,18 @@ final class StreamSession {
         }
     }
 
-    func stop(waitUntilDone: Bool = false) {
+    /// Tear the session down. Synchronous, always.
+    ///
+    /// This used to take a `waitUntilDone` flag, threaded through
+    /// `StreamWindow.stopStreaming` and passed as `true` by
+    /// `applicationWillTerminate` — the one place it matters, because the process
+    /// is about to exit and the host has to see the BYE or it stays busy for the
+    /// next client. The parameter was never read. What made that survivable is
+    /// that the teardown below is already synchronous: `media.stop()` sends the
+    /// BYE, shuts the socket down and waits up to a second for the receive thread
+    /// to leave. So the flag promised nothing that was not already true, which is
+    /// exactly why nobody noticed it did nothing. Removed rather than honoured.
+    func stop() {
         guard isRunning else { return }
         isRunning = false
         watchdog?.cancel()

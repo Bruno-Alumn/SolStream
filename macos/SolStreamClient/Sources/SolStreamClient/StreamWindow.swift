@@ -88,13 +88,15 @@ final class StreamWindow: NSObject {
         Log.info("[window] streaming from \(host)")
     }
 
-    /// `waitUntilDone` is kept for the terminating path, where the session has
-    /// to be quiet before anything its callbacks touch is released.
-    func stopStreaming(waitUntilDone: Bool = false) {
+    /// Synchronous: `StreamSession.stop` does not return until the media client
+    /// has sent its BYE and its receive thread has left the socket. The
+    /// terminating path depends on that, and used to ask for it through a
+    /// `waitUntilDone` flag nothing read — see `StreamSession.stop`.
+    func stopStreaming() {
         guard isStreaming else { return }
         isStreaming = false
         if let metalView { session.detach(metalView) }
-        session.stop(waitUntilDone: waitUntilDone)
+        session.stop()
         Log.info("[window] stopped streaming from \(host)")
     }
 
