@@ -107,6 +107,7 @@ and crops, which is what lets several windows share one encoder.
 | Loss, over Tailscale, video | 0 damaged pictures across every run so far |
 | Audio | 198 packets/second, matching the 5 ms packet rate exactly |
 | Input | lands within a pixel of where it was aimed |
-| Sustained frame rate | **unproven above 34 fps** — the test content could not be drawn faster |
+| Sustained frame rate | **49 fps at 3600×2338**, capture-bound; the encoder and transport kept up with all of it |
+| Swap-chain applications | WGC sees them, per-window and per-display alike — not black rectangles |
 | Behaviour under real loss | **unmeasured**; no recovery tier has been exercised |
 | Windows 10, AMD, Intel | **untested**; every figure here is one RTX 4070 SUPER on Windows 11 |

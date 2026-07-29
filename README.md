@@ -44,8 +44,9 @@ requirements.
                                               virtual display
 ```
 
-Measured against a real host, capture to the last byte on the wire: **6.7 ms at
-best, 9.7 ms on average** at 3600×2338.
+Measured against a real host at 3600×2338 — 8.4 megapixels, slightly more than
+4K — with full-screen GPU-drawn content: **49 fps sustained, 0 pictures lost**,
+capture to the last byte on the wire **6.4 ms at best, 20.6 ms on average**.
 
 ## Layout
 
