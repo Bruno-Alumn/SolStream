@@ -46,6 +46,25 @@ endif()
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
 set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
 
+# SMT/1's media path -- capture, encode, packetize, send, and the input coming
+# back. MSVC only: Windows.Graphics.Capture arrives through C++/WinRT and Media
+# Foundation through the Windows SDK, and mingw-w64 has neither. The cross build
+# is a development convenience; what ships is built on Windows, so the media
+# path is present in every binary anybody installs.
+if(MSVC)
+    set(SOLSTREAM_MEDIA_SOURCES
+        media/log.cpp
+        media/smt.cpp
+        media/capture.cpp
+        media/encoder.cpp
+        media/audio.cpp
+        media/input.cpp
+        media/session.cpp
+    )
+else()
+    set(SOLSTREAM_MEDIA_SOURCES "")
+endif()
+
 add_executable(SolStreamAgent
     main.cpp
     sunshine_host.cpp
@@ -53,6 +72,7 @@ add_executable(SolStreamAgent
     display_setup.cpp
     host_window.cpp
     installer.cpp
+    ${SOLSTREAM_MEDIA_SOURCES}
     ${SOLSTREAM_RESOURCES}
 )
 
@@ -82,6 +102,20 @@ target_compile_definitions(SolStreamAgent PRIVATE UNICODE _UNICODE
     SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
 
 if(MSVC)
+    target_compile_definitions(SolStreamAgent PRIVATE SOLSTREAM_MEDIA)
+    target_link_libraries(SolStreamAgent PRIVATE
+        # Capture, conversion and encode.
+        windowsapp d3d11 dxgi
+        mfplat mfuuid mf
+        # CODECAPI's property GUIDs live in strmiids, not in any mf library --
+        # leaving it out fails at link with unresolved CODECAPI_* symbols and
+        # says nothing about which header they came from.
+        strmiids
+        # timeBeginPeriod. Windows' default timer is 15.6 ms, so a pacer that
+        # sleeps without this runs at a third of the rate it thinks it does.
+        winmm
+    )
+
     # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
     # Without it MSVC reads them in the system code page and "token — the" is
     # rendered as "token a€" in the window.

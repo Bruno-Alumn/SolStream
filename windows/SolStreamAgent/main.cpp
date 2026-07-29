@@ -58,6 +58,15 @@
 #include "installer.h"
 #include "ports.h"
 #include "sunshine_host.h"
+
+// The media path is MSVC-only: Windows.Graphics.Capture and Media Foundation
+// both arrive through C++/WinRT and the Windows SDK, neither of which mingw
+// has. The cross-compiled build is a development convenience; what ships is
+// built on Windows.
+#ifdef SOLSTREAM_MEDIA
+#include "media/log.h"
+#include "media/session.h"
+#endif
 #include "vdd.h"
 
 namespace {
@@ -753,6 +762,34 @@ HWND WindowFromId(uint64_t id) {
 
 uint64_t IdFromWindow(HWND window) {
     return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(window));
+}
+
+/// The HMONITOR behind a `\\.\DISPLAYn` name.
+///
+/// The `displays` command names a display the way DXGI and the display settings
+/// do, and the capture path wants a monitor handle. A device restart renumbers
+/// these, which is a known trap on this machine -- so the lookup is done every
+/// time rather than cached.
+HMONITOR MonitorFromDeviceName(const std::string& device_name) {
+    struct Search {
+        std::wstring wanted;
+        HMONITOR found = nullptr;
+    } search;
+    search.wanted = ToWide(device_name);
+    EnumDisplayMonitors(nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
+            auto* state = reinterpret_cast<Search*>(param);
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (GetMonitorInfoW(monitor, &info)
+                && state->wanted == info.szDevice) {
+                state->found = monitor;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.found;
 }
 
 /// Actually give a window the keyboard focus, and say whether it worked.
@@ -3092,6 +3129,33 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     if (command == "media") {
         std::string op;
         FieldString(line, "op", op);
+#ifdef SOLSTREAM_MEDIA
+        if (op == "stop") {
+            solstream::media::MediaSession::Instance().Stop();
+            Log("[media] session stopped on request");
+            return "{\"type\":\"media\",\"ok\":true,\"op\":\"stop\"}";
+        }
+        if (op == "stats") {
+            return "{\"type\":\"media\",\"ok\":true,\"op\":\"stats\",\"stats\":"
+                   + solstream::media::MediaSession::Instance().StatsJson() + "}";
+        }
+        if (op == "retarget") {
+            long long id = 0;
+            std::string displayName;
+            FieldNumber(line, "window", id);
+            FieldString(line, "display", displayName);
+            HWND window = id ? WindowFromId(static_cast<uint64_t>(id)) : nullptr;
+            HMONITOR monitor = displayName.empty() ? nullptr
+                                                   : MonitorFromDeviceName(displayName);
+            if (!window && !monitor) {
+                return "{\"type\":\"media\",\"ok\":false,\"message\":\"no such target\"}";
+            }
+            const bool ok =
+                solstream::media::MediaSession::Instance().Retarget(window, monitor);
+            return std::string("{\"type\":\"media\",\"ok\":")
+                 + (ok ? "true" : "false") + ",\"op\":\"retarget\"}";
+        }
+#endif
         if (op != "open") {
             return "{\"type\":\"media\",\"ok\":false,\"message\":\"unknown op\"}";
         }
@@ -3139,13 +3203,53 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             hpubHex.push_back(hex[byte >> 4]);
             hpubHex.push_back(hex[byte & 0x0F]);
         }
-        Log("[media] session %llu opened; keys derived", hcount);
+        // Keys agreed. Now start the media path itself, if the client named
+        // something to capture. A client that only wants the keys -- the
+        // handshake test does -- gets them and nothing starts, which is what
+        // made step 4 measurable before step 6 existed.
+        std::string started = "false";
+        std::string startError;
+#ifdef SOLSTREAM_MEDIA
+        long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
+        std::string displayName;
+        FieldNumber(line, "window", targetId);
+        FieldString(line, "display", displayName);
+        FieldNumber(line, "fps", fps);
+        FieldNumber(line, "bitrate", bitrate);
+        FieldNumber(line, "audio", audio);
+        HWND targetWindow =
+            targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
+        HMONITOR targetMonitor =
+            displayName.empty() ? nullptr : MonitorFromDeviceName(displayName);
+        if (targetWindow || targetMonitor) {
+            solstream::media::MediaConfig config;
+            config.window = targetWindow;
+            config.monitor = targetMonitor;
+            config.fps = (UINT) (fps > 0 && fps <= 240 ? fps : 60);
+            config.bitrate = (UINT) (bitrate > 1000000 ? bitrate : 20000000);
+            config.audio = audio != 0;
+            config.port = solstream::kDefaultMediaPort;
+            started = solstream::media::MediaSession::Instance().Start(
+                          okm.data(), config, &startError)
+                          ? "true" : "false";
+        } else {
+            startError = "no window or display named";
+        }
+#else
+        startError = "this build has no media path";
+#endif
+        Log("[media] session %llu opened; keys derived; streaming %s%s%s",
+            hcount, started.c_str(), startError.empty() ? "" : " -- ",
+            startError.c_str());
         return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
                ",\"hpub\":\"" + hpubHex + "\""
                ",\"hnonce\":\"" + hnonceHex + "\""
                ",\"hcount\":\"" + std::to_string(hcount) + "\""
                ",\"hauth\":\"" + hauth + "\""
-               ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
+               ",\"streaming\":" + started
+               + (startError.empty() ? std::string()
+                                     : ",\"message\":\"" + JsonEscape(startError) + "\"")
+               + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
     }
 
     if (command == "displays") {
@@ -3850,6 +3954,12 @@ void ReleaseUnwantedConsole() {
 
 int wmain(int argc, wchar_t** argv) {
     ReleaseUnwantedConsole();
+#ifdef SOLSTREAM_MEDIA
+    // The media path logs through the agent's file rather than through a second
+    // one, and it learns where that is here rather than by declaring a function
+    // it has no way to reach.
+    solstream::media::SetLogger([](const char* line) { Log("%s", line); });
+#endif
     unsigned short port = kDefaultPort;
     // Loopback by default. This socket has no authentication yet, so the address
     // it binds is the only thing limiting who can drive it.
