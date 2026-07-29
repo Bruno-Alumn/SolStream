@@ -203,6 +203,15 @@ void MediaSession::Impl::WaitUntil(long long deadline) {
             (deadline - now) * 1000000 / g_frequency.QuadPart;
         if (remainingUs > 2000) {
             Sleep(1);
+        } else {
+            // The last two milliseconds are spun, because timeBeginPeriod(1) is
+            // as fine as Sleep gets and the pacing this exists for is measured
+            // in hundreds of microseconds per datagram. YieldProcessor is what
+            // keeps that from being a hot loop: it hints to the core that this
+            // thread is waiting, which hands the pipeline to the sibling
+            // hyperthread instead of starving it. Without it a session pegged a
+            // logical core for its whole length.
+            YieldProcessor();
         }
     }
 }
@@ -535,9 +544,20 @@ void MediaSession::Impl::SenderLoop() {
             lastReportBytes = bytesSent.load();
         }
 
+        // Measured from the session's own start until the client has said
+        // anything at all. The `heardAt != 0` guard used to skip the check
+        // entirely in that state, so a Mac that agreed a session and then never
+        // sent a datagram -- it died, its network went, its UDP was filtered --
+        // left the capture, the encoder, the sender and the receive threads
+        // running with a bound socket for the life of the agent. The one client
+        // slot stayed taken with it. The silence is the same silence whether or
+        // not a first packet ever arrived.
         const long long heardAt = lastHeardAt.load();
-        if (heardAt != 0 && MillisBetween(heardAt, now) > kSilenceTimeoutMs) {
-            Log("[media] the client has been silent for %d ms; ending the session",
+        const long long since = heardAt != 0 ? heardAt : startedAt;
+        if (MillisBetween(since, now) > kSilenceTimeoutMs) {
+            Log("[media] %s for %d ms; ending the session",
+                heardAt != 0 ? "the client has been silent"
+                             : "the client never sent a packet",
                 kSilenceTimeoutMs);
             running.store(false);
             break;
@@ -597,6 +617,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
 
 void MediaSession::Impl::ReceiveLoop() {
     unsigned char buffer[2048];
+    bool complained = false;
     for (;;) {
         if (!running.load()) { break; }
         sockaddr_in from{};
@@ -604,8 +625,28 @@ void MediaSession::Impl::ReceiveLoop() {
         const int n = recvfrom(socket, (char*) buffer, sizeof(buffer), 0,
                                (sockaddr*) &from, &fromLen);
         if (n <= 0) {
-            continue;   // the socket has a receive timeout so this loop can exit
+            // The expected case is the 200 ms receive timeout, which is what lets
+            // this loop notice `running` going false. Everything else has to be
+            // told apart from it: an error that does NOT block returns here
+            // immediately, and a bare `continue` then spins this thread at the
+            // speed of the system call. WSAECONNRESET is the one that actually
+            // happens -- Windows reports an ICMP port-unreachable on the next
+            // recvfrom of an unconnected UDP socket -- and a Mac that has gone
+            // is precisely when it arrives. One core at 100% for the fifteen
+            // seconds until the silence timeout fires, on a machine whose owner
+            // is not watching.
+            const int error = n < 0 ? WSAGetLastError() : 0;
+            if (error != 0 && error != WSAETIMEDOUT) {
+                if (!complained) {
+                    complained = true;
+                    Log("[media] recvfrom failed with %d; pacing the receive loop",
+                        error);
+                }
+                Sleep(5);
+            }
+            continue;
         }
+        complained = false;
         datagramsReceived.fetch_add(1);
         unsigned char* plaintext = nullptr;
         size_t plaintextLen = 0;
@@ -862,8 +903,15 @@ bool MediaSession::Retarget(HWND window, HMONITOR monitor) {
         std::lock_guard<std::mutex> guard(s.configLock);
         s.config.window = window;
         s.config.monitor = monitor;
-        s.config.width = 0;      // the new source decides the size
-        s.config.height = 0;
+        // The CANVAS SURVIVES A RETARGET. These two used to be zeroed here, with
+        // a note saying the new source decides the size -- and the new source is
+        // exactly the thing that must not. The Mac asks for a canvas because
+        // every crop it draws is expressed in it, and its decoder is set up for
+        // it; the first retarget silently dropped that and re-opened the encoder
+        // at whatever the new window happened to be, so the picture came back at
+        // the wrong size and every crop was taken from the wrong pixels. A
+        // retarget changes WHAT is captured, never how large the encoded frame
+        // is. A client that wants a different canvas opens a new session.
     }
     InputTarget target;
     target.window = window;
