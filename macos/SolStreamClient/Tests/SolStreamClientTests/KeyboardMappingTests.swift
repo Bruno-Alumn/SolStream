@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 @testable import InputCapture
-@testable import StreamConnection
+@testable import MediaSession
 
 /// Checks the keyboard translation: Command carries Windows Control, the
 /// Windows key is unreachable, and SolStream's own shortcuts stay on this Mac.
@@ -121,7 +121,7 @@ final class KeyboardMappingTests: XCTestCase {
 
     func testCommandReportsAsControl() {
         XCTAssertEqual(InputCapture.modifiers(from: [.command]).rawValue,
-                       InputProtocol.Modifiers.control.rawValue)
+                       SMTInput.Modifiers.control.rawValue)
     }
 
     /// `.meta` is the Windows key. Nothing may set it.
@@ -155,15 +155,16 @@ final class KeyboardMappingTests: XCTestCase {
             capture.attach(to: view)
             capture.enableCapture()
             capture.onInput = { [weak self] data in
-                // NV_INPUT_HEADER is 8 bytes: size, then the magic. The key code
-                // is little-endian at offset 9, the modifier byte at 11.
-                guard data.count >= 12 else { return }
+                // An SMT/1 event: kind, body length, then the body. A key event's
+                // body is a big-endian virtual key code, the up/down byte and the
+                // modifier bitmask. The sequence number is added by MediaClient,
+                // which is the only thing that knows what has been acknowledged --
+                // so it is not here.
                 let bytes = [UInt8](data)
-                let magic = UInt32(bytes[4]) | UInt32(bytes[5]) << 8
-                          | UInt32(bytes[6]) << 16 | UInt32(bytes[7]) << 24
-                self?.packets.append((code: UInt16(bytes[9]) | UInt16(bytes[10]) << 8,
-                                      pressed: magic == 3,
-                                      modifiers: bytes[11]))
+                guard bytes.count >= 6, bytes[0] == SMTInput.Kind.key.rawValue else { return }
+                self?.packets.append((code: UInt16(bytes[2]) << 8 | UInt16(bytes[3]),
+                                      pressed: bytes[4] != 0,
+                                      modifiers: bytes[5]))
             }
         }
 
@@ -201,7 +202,7 @@ final class KeyboardMappingTests: XCTestCase {
         XCTAssertEqual(wire.packets.map(\.code), [0xA2, 0x43, 0x43, 0xA2])
         XCTAssertEqual(wire.packets.map(\.pressed), [true, true, false, false])
         // The C carries the Control bit, and never the Windows-key bit.
-        XCTAssertEqual(wire.packets[1].modifiers, InputProtocol.Modifiers.control.rawValue)
+        XCTAssertEqual(wire.packets[1].modifiers, SMTInput.Modifiers.control.rawValue)
     }
 
     /// A ⌘ chord whose key-up macOS never delivers must not leave the host

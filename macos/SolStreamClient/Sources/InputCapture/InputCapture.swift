@@ -1,6 +1,6 @@
 import AppKit
 import Carbon
-import StreamConnection
+import MediaSession
 
 /// Turns local macOS keyboard and mouse events into GameStream input packets.
 ///
@@ -177,7 +177,7 @@ public final class InputCapture {
     /// moment the window resigns key, so the matching mouse-up is never seen and
     /// the host is left holding the button — which on a desktop means a
     /// rubber-band selection or a drag that follows the cursor around forever.
-    private var heldButtons: Set<InputProtocol.MouseButton> = []
+    private var heldButtons: Set<SMTInput.MouseButton> = []
 
     public init() {}
 
@@ -272,7 +272,7 @@ public final class InputCapture {
                 heldKeys.remove(windowsKey)
                 chordKeys.remove(windowsKey)
             }
-            onInput?(InputProtocol.key(code: windowsKey,
+            onInput?(SMTInput.key(code: windowsKey,
                                        pressed: pressed,
                                        modifiers: modifiers(from: event.modifierFlags)))
             // Everything that reached the host is consumed. The window is a
@@ -291,7 +291,7 @@ public final class InputCapture {
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
                !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
                 let isDown = (deviceFlags & key.deviceMask) != 0
-                onInput?(InputProtocol.key(code: key.windowsKeyCode,
+                onInput?(SMTInput.key(code: key.windowsKeyCode,
                                            pressed: isDown,
                                            modifiers: modifiers(from: flags)))
             }
@@ -318,7 +318,7 @@ public final class InputCapture {
     private func releaseChordKeys() {
         for code in chordKeys {
             heldKeys.remove(code)
-            onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
+            onInput?(SMTInput.key(code: code, pressed: false, modifiers: []))
         }
         chordKeys.removeAll()
     }
@@ -328,13 +328,13 @@ public final class InputCapture {
     /// released, so a single missed key-up types forever.
     private func releaseHeldInput() {
         for code in heldKeys {
-            onInput?(InputProtocol.key(code: code, pressed: false, modifiers: []))
+            onInput?(SMTInput.key(code: code, pressed: false, modifiers: []))
         }
         heldKeys.removeAll()
         chordKeys.removeAll()
 
         for button in heldButtons {
-            onInput?(InputProtocol.mouseButton(button, pressed: false))
+            onInput?(SMTInput.mouseButton(button, pressed: false))
         }
         heldButtons.removeAll()
 
@@ -343,7 +343,7 @@ public final class InputCapture {
         var released: Set<UInt16> = []
         for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             guard released.insert(key.windowsKeyCode).inserted else { continue }
-            onInput?(InputProtocol.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
+            onInput?(SMTInput.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
         }
         lastModifierFlags = []
         lastDeviceFlags = 0
@@ -355,15 +355,15 @@ public final class InputCapture {
     /// "Control is not down" while sending Control's key code would describe a
     /// keyboard nobody is holding. `.meta` is never set — that bit means the
     /// Windows key, which no key on this Mac can reach.
-    static func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
-        var result: InputProtocol.Modifiers = []
+    static func modifiers(from flags: NSEvent.ModifierFlags) -> SMTInput.Modifiers {
+        var result: SMTInput.Modifiers = []
         if flags.contains(.shift) { result.insert(.shift) }
         if flags.contains(.control) || flags.contains(.command) { result.insert(.control) }
         if flags.contains(.option) { result.insert(.alt) }
         return result
     }
 
-    private func modifiers(from flags: NSEvent.ModifierFlags) -> InputProtocol.Modifiers {
+    private func modifiers(from flags: NSEvent.ModifierFlags) -> SMTInput.Modifiers {
         Self.modifiers(from: flags)
     }
 
@@ -398,14 +398,14 @@ public final class InputCapture {
             guard sendPosition(for: event, in: view) else { return }
             if let button = button(for: event) {
                 heldButtons.insert(button)
-                onInput?(InputProtocol.mouseButton(button, pressed: true))
+                onInput?(SMTInput.mouseButton(button, pressed: true))
             }
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
             sendPosition(for: event, in: view)
             if let button = button(for: event) {
                 heldButtons.remove(button)
-                onInput?(InputProtocol.mouseButton(button, pressed: false))
+                onInput?(SMTInput.mouseButton(button, pressed: false))
             }
 
         case .scrollWheel:
@@ -418,8 +418,8 @@ public final class InputCapture {
             let unit: CGFloat = event.hasPreciseScrollingDeltas ? 12 : 120
             let vertical = Int((event.scrollingDeltaY * unit).rounded())
             let horizontal = Int((event.scrollingDeltaX * unit).rounded())
-            if vertical != 0 { onInput?(InputProtocol.scroll(amount: vertical)) }
-            if horizontal != 0 { onInput?(InputProtocol.horizontalScroll(amount: horizontal)) }
+            if vertical != 0 { onInput?(SMTInput.scroll(amount: vertical)) }
+            if horizontal != 0 { onInput?(SMTInput.horizontalScroll(amount: horizontal)) }
 
         default:
             break
@@ -466,7 +466,7 @@ public final class InputCapture {
         let y = Int(target.y.rounded())
 
         positionsSent += 1
-        onInput?(InputProtocol.mouseMoveAbsolute(x: x, y: y,
+        onInput?(SMTInput.mouseMoveAbsolute(x: x, y: y,
                                                  referenceWidth: Int(canvas.width),
                                                  referenceHeight: Int(canvas.height)))
         return true
@@ -540,7 +540,7 @@ public final class InputCapture {
                        y: min(max((fromTop - inset.y) / shown.height, 0), 1))
     }
 
-    private func button(for event: NSEvent) -> InputProtocol.MouseButton? {
+    private func button(for event: NSEvent) -> SMTInput.MouseButton? {
         switch event.type {
         case .leftMouseDown, .leftMouseUp: return .left
         case .rightMouseDown, .rightMouseUp: return .right

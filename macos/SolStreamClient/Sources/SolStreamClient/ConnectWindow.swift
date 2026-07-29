@@ -1,6 +1,7 @@
 import AppKit
 import DesignSystem
 import SolStreamLogging
+import MediaSession
 import StreamConnection
 
 /// "Which PC?"

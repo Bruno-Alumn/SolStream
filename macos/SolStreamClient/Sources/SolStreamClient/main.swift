@@ -1,6 +1,7 @@
 import Cocoa
 import AppKit
 import SolStreamLogging
+import MediaSession
 import StreamConnection
 
 /// SolStream macOS client entry point.
@@ -28,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// round the loop again.
     private var agentHostOverride: String?
     private var displayQuery: String?
-    private var baseConfig = StreamConnection.Config()
+    private var baseConfig = StreamConfig()
 
     /// `--host <ip>` connects immediately; `--test-screenshot` grabs the window
     /// and exits (used by the UI tests).
@@ -39,7 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        HostCursor.registerDefaults()   // before buildMenu, which reads the value
         buildMenu()
         Log.startSession(version: "v0.3")
 
@@ -56,29 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             testMode = true
         }
 
-        // --packet-size tunes the video payload per datagram, for links with a
-        // smaller MTU than the 1024 default assumes.
-        var config = StreamConnection.Config()
-        if let index = arguments.firstIndex(of: "--packet-size"),
+        var config = StreamConfig()
+        // --bitrate is the only stream knob left. The packet size is fixed by
+        // the MTU and the header, and there is no Sunshine port to point at.
+        if let index = arguments.firstIndex(of: "--bitrate"),
            index + 1 < arguments.count,
-           let size = Int(arguments[index + 1]) {
-            config.packetSize = size
-            Log.info("packet size overridden to \(size)")
-        }
-
-        // --sunshine-port points this client at a host whose Sunshine is not
-        // where SolStream puts its own. The common case is a machine somebody
-        // already had set up for Moonlight, still on the stock 47989.
-        if let index = arguments.firstIndex(of: "--sunshine-port"),
-           index + 1 < arguments.count,
-           let base = Int(arguments[index + 1]) {
-            config.ports = StreamPorts(base: base)
-            Log.info("[ports] talking to Sunshine on base \(base) "
-                     + "(https \(config.ports.https), rtsp \(config.ports.rtsp))")
-        } else {
-            Log.info("[ports] SolStream base \(config.ports.base) "
-                     + "(https \(config.ports.https), rtsp \(config.ports.rtsp), "
-                     + "agent \(StreamPorts.agent))")
+           let kbps = Int(arguments[index + 1]) {
+            config.bitrateKbps = kbps
+            Log.info("[stream] bitrate \(kbps) kbit/s")
         }
 
         let host = arguments.firstIndex(of: "--host").flatMap { index in
@@ -142,7 +127,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 desktop.height = Int((screen.frame.height * scale).rounded())
                 Log.info("[desktop] requesting \(desktop.width)x\(desktop.height) to match this Mac")
             }
-            startStreaming(host: host, config: desktop)
+            startStreaming(host: host, agentHost: agentHost ?? host,
+                           displayQuery: displayQuery, config: desktop)
         } else if let host, let launchQuery {
             startLaunching(host: host, agentHost: agentHost ?? host, matching: launchQuery)
         } else if let host, let appWindowQuery {
@@ -470,18 +456,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startStreaming(host: String, config: StreamConnection.Config = .init()) {
-        let streamWindow = StreamWindow(host: host, config: config)
-        streamWindow.onClose = { [weak self, weak streamWindow] in
-            guard let self else { return }
-            self.streamWindows.removeAll { $0 === streamWindow }
-            if self.streamWindows.isEmpty && !self.testMode {
-                self.showConnectWindow()
+    /// `--desktop`: the whole-screen mirror, kept for diagnosing the stream
+    /// itself rather than for daily use.
+    ///
+    /// It goes through the agent like everything else now. There is no path to
+    /// a picture that does not start with the agent agreeing a key, which is
+    /// the point: the media socket has no authentication of its own to fall
+    /// back on, by design.
+    private func startStreaming(host: String, agentHost: String,
+                                displayQuery: String?, config: StreamConfig = .init()) {
+        let agent = AgentConnection(host: agentHost)
+        self.agent = agent
+        agent.onState = { state in
+            if case .failed(let message) = state { Log.error("[desktop] \(message)") }
+        }
+        agent.onDisplays = { [weak self, weak agent] displays in
+            guard let self, let agent,
+                  let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
+                Log.error("[desktop] host reported no displays")
+                return
+            }
+            var sized = config
+            sized.width = capture.width
+            sized.height = capture.height
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let request = AgentConnection.MediaRequest(
+                    display: capture.name, fps: sized.frameRate,
+                    bitrate: sized.bitrateKbps * 1000, audio: sized.audio)
+                guard let media = await agent.openMediaSession(request), media.streaming else {
+                    Log.error("[desktop] \(host) would not start streaming")
+                    return
+                }
+                let session = StreamSession(host: host, config: sized, session: media)
+                self.session = session
+                let streamWindow = StreamWindow(host: host, config: sized, session: session)
+                streamWindow.onClose = { [weak self, weak streamWindow] in
+                    guard let self else { return }
+                    self.streamWindows.removeAll { $0 === streamWindow }
+                    self.session = nil
+                    if self.streamWindows.isEmpty && !self.testMode {
+                        self.showConnectWindow()
+                    }
+                }
+                self.streamWindows.append(streamWindow)
+                streamWindow.show()
+                streamWindow.startStreaming()
             }
         }
-        streamWindows.append(streamWindow)
-        streamWindow.show()
-        streamWindow.startStreaming()
+        agent.connect()
     }
 
     /// Stream one or more Windows applications, each in its own native window.
@@ -490,7 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// canvas has to match the capture display exactly: when it does, Sunshine's
     /// scale factor is 1.0 and every crop is pixel-exact rather than resampled.
     private func startSingleApp(host: String, agentHost: String, matching query: String,
-                                displayQuery: String?, config: StreamConnection.Config) {
+                                displayQuery: String?, config: StreamConfig) {
         let queries = query.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespaces)
         }.filter { !$0.isEmpty }
@@ -556,7 +579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// one native window per app over a single shared stream.
     private func openApps(host: String, agent: AgentConnection,
                           targets: [RemoteWindow], display: RemoteDisplay,
-                          config baseConfig: StreamConnection.Config) {
+                          config baseConfig: StreamConfig) {
         var config = baseConfig
         // The encode canvas matches the capture display, which makes Sunshine's
         // scale factor 1.0 and every crop pixel-exact. It is fixed for the whole
@@ -578,13 +601,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Self.reportIdealCanvas(display: display)
 
+        // The media session is agreed on the agent channel before any window is
+        // shown. There is no PIN, no certificate exchange and no RTSP: two
+        // programs that ship together and have already authenticated each other
+        // do not need introducing again, so the only thing that can fail here is
+        // the host declining to capture.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let request = AgentConnection.MediaRequest(
+                display: display.name,
+                fps: config.frameRate,
+                bitrate: config.bitrateKbps * 1000,
+                audio: config.audio)
+            guard let media = await agent.openMediaSession(request) else {
+                Log.error("[app] \(host) refused the media session")
+                return
+            }
+            guard media.streaming else {
+                Log.error("[app] \(host) agreed keys but did not start: "
+                          + (media.message ?? "no reason given"))
+                return
+            }
+            self.presentApps(host: host, agent: agent, targets: targets,
+                             display: display, config: config, media: media)
+        }
+    }
+
+    private func presentApps(host: String, agent: AgentConnection, targets: [RemoteWindow],
+                             display: RemoteDisplay, config: StreamConfig,
+                             media: AgentConnection.MediaSession) {
         // Only while something is actually streamed: syncing a clipboard with a
         // machine the user is not looking at would be surprising.
         let bridge = ClipboardBridge(agent: agent)
         clipboard = bridge
         bridge.start()
 
-        let session = StreamSession(host: host, config: config)
+        let session = StreamSession(host: host, config: config, session: media)
         self.session = session
         session.start()
 
@@ -691,11 +743,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appWindows.forEach { $0.reassertOnHost() }
         }
 
-        session.connection.onControlConnected = { [weak session, weak agent] in
-            guard let session else { return }
-            HostCursor.apply(to: session.connection, host: host,
-                             instance: agent?.sunshineInstance ?? "")
-        }
+        // No host-cursor toggle any more. The capture session is created with
+        // IsCursorCaptureEnabled(false), so the host's pointer is never in the
+        // picture at all -- and this Mac draws a real cursor from the shape the
+        // agent pushes. The Sunshine keyboard shortcut that used to flip it, and
+        // the belief tracking that went with it, are gone with the protocol.
 
         session.onPhase = { [weak self] phase in
             guard let self else { return }
@@ -706,8 +758,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appWindows.forEach { $0.setError("Stream failed", detail: message) }
             case .waitingForVideo:
                 self.appWindows.forEach { $0.setStatus("Waiting for video") }
-            case .awaitingPin(let pin):
-                self.brokerPairing(pin: pin, host: host, agent: agent)
             default:
                 break
             }
@@ -908,11 +958,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.reserve(hostMenu.addItem(withTitle: "Disconnect",
                                       action: #selector(disconnectHost), keyEquivalent: "d"))
         hostMenu.addItem(.separator())
-        let cursorItem = NSMenuItem(title: "Hide the PC's Cursor",
-                                    action: #selector(toggleHostCursor), keyEquivalent: "")
-        cursorItem.state = HostCursor.hidePreferred ? .on : .off
-        hostMenu.addItem(cursorItem)
-        hostMenu.addItem(.separator())
         hostMenu.addItem(withTitle: "Forget Paired Hosts…",
                          action: #selector(forgetHosts), keyEquivalent: "")
         hostMenuItem.submenu = hostMenu
@@ -989,18 +1034,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
     }
 
-    /// Two cursors, one of them a round trip behind, is what streaming looks
-    /// like by default. This turns the host's off.
-    @objc private func toggleHostCursor(_ sender: NSMenuItem) {
-        HostCursor.hidePreferred.toggle()
-        sender.state = HostCursor.hidePreferred ? .on : .off
-        // Apply straight away if something is streaming, rather than making the
-        // user reconnect to see the setting take effect.
-        if let session {
-            HostCursor.apply(to: session.connection, host: session.host,
-                             instance: agent?.sunshineInstance ?? "")
-        }
-    }
+    // "Hide the PC's Cursor" is gone. The capture session is created with
+    // IsCursorCaptureEnabled(false), so the host's pointer is never in the
+    // picture and this Mac draws a real one from the shape the agent pushes.
+    // There is nothing left for the menu item to toggle.
 
     @objc private func forgetHosts() {
         let alert = NSAlert()

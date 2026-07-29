@@ -3,6 +3,7 @@ import AppKit
 import SolStreamLogging
 import VideoDecoder
 import InputCapture
+import MediaSession
 import StreamConnection
 
 /// A window that renders one streamed host session.
@@ -12,13 +13,12 @@ import StreamConnection
 /// until the first frame arrives, at which point it gets out of the way.
 final class StreamWindow: NSObject {
     private let host: String
-    private let config: StreamConnection.Config
+    private let config: StreamConfig
 
     private(set) var window: NSWindow?
     private var metalView: MetalView?
-    private var videoDecoder: VideoDecoder?
     private var inputCapture: InputCapture?
-    private var streamConnection: StreamConnection?
+    private let session: StreamSession
 
     private var isStreaming = false
     /// Once frames are flowing, earlier phases must not put the overlay back.
@@ -42,9 +42,10 @@ final class StreamWindow: NSObject {
         }
     }
 
-    init(host: String, config: StreamConnection.Config = .init()) {
+    init(host: String, config: StreamConfig, session: StreamSession) {
         self.host = host
         self.config = config
+        self.session = session
         super.init()
         setupWindow()
     }
@@ -66,79 +67,33 @@ final class StreamWindow: NSObject {
         isStreaming = true
         hasReceivedVideo = false
 
-        metalView?.setStatus("Connecting to \(host)", detail: "Checking pairing…")
+        metalView?.setStatus("Connecting to \(host)", detail: "Opening the media session…")
+        if let metalView { session.attach(metalView) }
 
-        let decoder = VideoDecoder { [weak self] pixelBuffer in
-            self?.metalView?.displayFrame(pixelBuffer)
+        session.onPhase = { [weak self] phase in
+            DispatchQueue.main.async { self?.apply(phase: phase) }
         }
-        videoDecoder = decoder
-        // No AudioRenderer yet: Sunshine sends Opus over RTP and the renderer
-        // only accepts PCM, so starting it would just hold the output device
-        // open playing silence.
-
-        let connection = StreamConnection(
-            host: host,
-            config: config,
-            onVideoFrame: { [weak self] frame in
-                self?.videoDecoder?.decode(frame.annexB, isIDR: frame.isIDR)
-            },
-            onAudioData: { _ in
-                // Sunshine sends Opus in RTP; the renderer only takes PCM, so
-                // audio stays muted until an Opus decoder is wired up.
-            }
-        )
-
-        decoder.onKeyframeNeeded = { [weak connection] in
-            connection?.requestKeyframe()
-        }
-
-        connection.onPhase = { [weak self] phase in
-            self?.apply(phase: phase)
-        }
-        connection.onPointerStats = { [weak self] in
-            guard let self, let capture = self.inputCapture else { return (0, 0) }
+        session.setPointerStats { [weak self] in
+            guard let capture = self?.inputCapture else { return (0, 0) }
             return (capture.mouseMovedSeen, capture.positionsSent)
         }
-        connection.onStatus = { [weak self] message in
-            guard let self else { return }
-            // Same late-arrival race as the phase updates: once video is on
-            // screen, an older status must not put "Waiting for video" back in
-            // the title bar.
-            guard !self.hasReceivedVideo else { return }
-            self.window?.subtitle = message
+        inputCapture?.onInput = { [weak self] event in
+            self?.session.sendInput(event)
         }
-        connection.onHandshakeComplete = { success in
-            Log.info("[window] handshake \(success ? "complete" : "failed")")
-        }
-
-        // Route captured local input to the host.
-        inputCapture?.onInput = { [weak connection] packet in
-            connection?.sendInput(packet)
-        }
-
-        streamConnection = connection
         metalView?.onRetry = { [weak self] in
             self?.restart()
         }
-        connection.connect()
-
+        session.start()
         Log.info("[window] streaming from \(host)")
     }
 
-    /// `waitUntilDone` is required when the app is terminating — see
-    /// StreamConnection.disconnect(waitUntilDone:).
+    /// `waitUntilDone` is kept for the terminating path, where the session has
+    /// to be quiet before anything its callbacks touch is released.
     func stopStreaming(waitUntilDone: Bool = false) {
         guard isStreaming else { return }
         isStreaming = false
-
-        streamConnection?.disconnect(waitUntilDone: waitUntilDone)
-        // Drain and invalidate before dropping the reference: the VideoToolbox
-        // callback holds an unretained pointer to the decoder.
-        videoDecoder?.shutdown()
-
-        streamConnection = nil
-        videoDecoder = nil
-
+        if let metalView { session.detach(metalView) }
+        session.stop(waitUntilDone: waitUntilDone)
         Log.info("[window] stopped streaming from \(host)")
     }
 
@@ -147,24 +102,27 @@ final class StreamWindow: NSObject {
     func sendTestPointer(normalizedX: Double, normalizedY: Double) {
         guard let view = metalView else { return }
         let bounds = view.bounds
-        let packet = InputProtocol.mouseMoveAbsolute(
+        let event = SMTInput.mouseMoveAbsolute(
             x: Int(Double(bounds.width) * normalizedX),
             y: Int(Double(bounds.height) * normalizedY),
             referenceWidth: Int(bounds.width),
             referenceHeight: Int(bounds.height))
-        streamConnection?.sendInput(packet)
+        session.sendInput(event)
         Log.info("[input] test pointer -> \(normalizedX), \(normalizedY)")
     }
 
+    /// A StreamSession cannot be restarted in place — stop() releases the
+    /// decoder and start() does not build another — so recovery means a new
+    /// session, which is the caller's to make.
+    var onRetryRequested: (() -> Void)?
+
     private func restart() {
         stopStreaming()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.startStreaming()
-        }
+        onRetryRequested?()
     }
 
     /// Mirror the connection phase into the overlay.
-    private func apply(phase: StreamConnection.Phase) {
+    private func apply(phase: StreamPhase) {
         guard let metalView else { return }
 
         if case .streaming = phase {
@@ -179,18 +137,8 @@ final class StreamWindow: NSObject {
         switch phase {
         case .idle:
             metalView.setStatus("Idle", busy: false)
-        case .checkingPairing:
-            metalView.setStatus("Connecting to \(host)", detail: "Checking pairing…")
-        case .awaitingPin(let pin):
-            metalView.setStatus("Enter this PIN in Sunshine",
-                                detail: "Open https://\(host):47990 → PIN, then type the code above.",
-                                pin: pin)
-        case .pairing:
-            metalView.setStatus("Pairing with \(host)", detail: "Exchanging keys…")
-        case .launching:
-            metalView.setStatus("Starting the session", detail: "Asking \(host) to launch the app…")
-        case .handshaking(let step):
-            metalView.setStatus("Negotiating stream", detail: step)
+        case .opening:
+            metalView.setStatus("Connecting to \(host)", detail: "Agreeing a key…")
         case .waitingForVideo:
             metalView.setStatus("Waiting for video", detail: "The host is starting its encoder…")
         case .streaming:

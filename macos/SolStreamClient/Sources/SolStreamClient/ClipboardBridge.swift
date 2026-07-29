@@ -1,5 +1,6 @@
 import AppKit
 import SolStreamLogging
+import MediaSession
 import StreamConnection
 
 /// Keeps the Mac's clipboard and the host's in step, in both directions.

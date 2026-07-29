@@ -2,27 +2,30 @@ import Foundation
 import AppKit
 import SolStreamLogging
 import VideoDecoder
+import MediaSession
 import StreamConnection
 import AudioRenderer
 
-/// One Sunshine session, feeding any number of windows.
+/// One SMT/1 session, feeding any number of windows.
 ///
-/// This is what makes multiple application windows affordable. Sunshine serves
-/// a single stream of the whole capture display, and it refuses a second
-/// `/launch` outright ("An app is already running on this host"), so N windows
-/// cannot mean N streams. Instead there is one connection and one hardware
-/// decode, and every window blits a different sub-rectangle of the same decoded
-/// frame — so a second window costs a blit, not a decoder.
+/// This is what makes multiple application windows affordable. The host encodes
+/// one picture of the capture display, and every window blits a different
+/// sub-rectangle of the same decoded frame — so a second window costs a blit,
+/// not a decoder.
+///
+/// What changed underneath it: there is no Sunshine, no PIN, no certificate, no
+/// RTSP and no Reed-Solomon FEC. `AgentConnection.openMediaSession` agreed a key
+/// on the channel that had already authenticated both ends, and everything below
+/// is a UDP socket carrying AES-256-GCM.
 final class StreamSession {
     let host: String
 
     /// The full streamed canvas, in pixels. Windows express their crops in it.
     private(set) var canvasSize: CGSize
 
-    /// Implicitly unwrapped so the frame closure can capture self during init:
-    /// every stored property has a value (nil) by the time it is built.
-    private(set) var connectionRef: StreamConnection!
+    private let media: MediaClient
     private var decoder: VideoDecoder?
+
     /// Strong on purpose.
     ///
     /// This was an `NSHashTable.weakObjects()` so closed windows would drop out
@@ -37,18 +40,15 @@ final class StreamSession {
     private let sinkLock = NSLock()
 
     private var isRunning = false
-
-    private var audioDecoder: OpusDecoder?
     private var audioRenderer: AudioRenderer?
-    private var lastAudioSequence: UInt16?
+
     /// Supplied by the focused window so the stats line can report input.
     ///
     /// Private, and written only through `setPointerStats`, because the reader
     /// takes `sinkLock` and the writer used not to. A closure is two words — a
     /// function pointer and a context — and storing one retains the incoming
     /// context while releasing the outgoing one; a concurrent read can retain a
-    /// context that is being released to zero. Locking one side of that is worse
-    /// than locking neither, because it reads as though it were handled.
+    /// context that is being released to zero.
     private var pointerStats: (() -> (Int, Int))?
 
     func setPointerStats(_ block: (() -> (Int, Int))?) {
@@ -56,11 +56,10 @@ final class StreamSession {
         pointerStats = block
         sinkLock.unlock()
     }
-    private(set) var audioFramesDecoded: UInt64 = 0
-    private(set) var audioParityDropped: UInt64 = 0
-    private(set) var audioGaps: UInt64 = 0
 
-    var onPhase: ((StreamConnection.Phase) -> Void)?
+    private(set) var audioFramesPlayed: UInt64 = 0
+
+    var onPhase: ((StreamPhase) -> Void)?
 
     /// What the watchdog has to say about the picture.
     enum Liveness: Equatable {
@@ -83,6 +82,7 @@ final class StreamSession {
     private var stalledSince: Date?
     private var keyframeRequests = 0
     private var reportedLost = false
+    private var sawFirstFrame = false
 
     /// At 60fps a frame is due every 16ms, so a second of silence is not a
     /// hiccup. Long enough not to fire on a garbage-collection pause, short
@@ -93,11 +93,19 @@ final class StreamSession {
     /// connection and no amount of further asking will produce a picture.
     private static let maxKeyframeRequests = 5
 
-    var connection: StreamConnection { connectionRef }
+    private var counters = MediaCounters()
+    private let counterLock = NSLock()
 
-    init(host: String, config: StreamConnection.Config) {
+    var mediaCounters: MediaCounters {
+        counterLock.lock()
+        defer { counterLock.unlock() }
+        return counters
+    }
+
+    init(host: String, config: StreamConfig, session: AgentConnection.MediaSession) {
         self.host = host
         self.canvasSize = CGSize(width: config.width, height: config.height)
+        self.media = MediaClient(keys: session.keys, host: host, port: session.port)
 
         // One decoder, fanned out to every attached window. Each window carries
         // its own sourceRect, so they all read the same CVPixelBuffer and blit
@@ -116,18 +124,36 @@ final class StreamSession {
         }
         self.decoder = decoder
 
-        connectionRef = StreamConnection(
-            host: host,
-            config: config,
-            onVideoFrame: { [weak decoder] frame in
-                decoder?.decode(frame.annexB, isIDR: frame.isIDR)
-            },
-            onAudioData: { [weak self] datagram in
-                self?.handleAudio(datagram)
+        media.onVideo = { [weak self, weak decoder] annexB, isIdr in
+            decoder?.decode(annexB, isIDR: isIdr)
+            guard let self else { return }
+            if !self.sawFirstFrame {
+                self.sawFirstFrame = true
+                DispatchQueue.main.async { self.onPhase?(.streaming) }
             }
-        )
+        }
+        media.onAudio = { [weak self] pcm, _ in
+            guard let self, let renderer = self.audioRenderer else { return }
+            renderer.playAudio(pcm)
+            self.audioFramesPlayed &+= 1
+        }
+        media.onStats = { [weak self] stats in
+            guard let self else { return }
+            self.counterLock.lock()
+            self.counters.frames = stats.framesComplete
+            self.counters.dropped = stats.framesDamaged
+            self.counters.bytes = stats.bytesReceived
+            self.counters.audioFrames = stats.audioPackets
+            self.counters.latencyMs = stats.rttMs > 0 ? Int(stats.rttMs.rounded()) : nil
+            self.counterLock.unlock()
+        }
+        media.onEnded = { [weak self] in
+            DispatchQueue.main.async {
+                self?.onPhase?(.failed("The host stopped answering."))
+            }
+        }
         decoder.onKeyframeNeeded = { [weak self] in
-            self?.connectionRef.requestKeyframe()
+            self?.media.requestKeyframe()
         }
     }
 
@@ -138,28 +164,14 @@ final class StreamSession {
 
         // Started here rather than in init: the renderer holds the output device
         // open, and a session that is built but never run should not take it.
-        audioDecoder = OpusDecoder()
-        if audioDecoder != nil {
-            audioRenderer = AudioRenderer()
-        }
+        audioRenderer = AudioRenderer()
 
-        connection.onPhase = { [weak self] phase in
-            self?.onPhase?(phase)
+        onPhase?(.waitingForVideo)
+        guard media.start() else {
+            onPhase?(.failed("Could not open the media socket."))
+            isRunning = false
+            return
         }
-        connection.onAudioStats = { [weak self] in
-            (self?.audioFramesDecoded ?? 0, self?.audioParityDropped ?? 0)
-        }
-        // Pointer counters come from whichever window is capturing. Without this
-        // the stats line reported moved=0/sent=0 for the single-application path
-        // no matter how much the mouse moved — only the old whole-desktop window
-        // ever set it, which made input look broken when it was working.
-        connection.onPointerStats = { [weak self] in
-            guard let self else { return (0, 0) }
-            self.sinkLock.lock()
-            defer { self.sinkLock.unlock() }
-            return self.pointerStats?() ?? (0, 0)
-        }
-        connection.connect()
         startWatchdog()
         Log.info("[session] started for \(host), canvas \(Int(canvasSize.width))x\(Int(canvasSize.height))")
     }
@@ -198,9 +210,9 @@ final class StreamSession {
             return
         }
 
-        // Nothing has arrived yet at all. That is the connection phase's story
-        // to tell — it already shows "Waiting for video" — and a watchdog
-        // shouting over it would only be a second opinion on the same fact.
+        // Nothing has arrived yet at all. That is the phase's story to tell — it
+        // already shows "Waiting for video" — and a watchdog shouting over it
+        // would only be a second opinion on the same fact.
         guard delivered > 0 else { return }
 
         guard let since = stalledSince else {
@@ -214,7 +226,7 @@ final class StreamSession {
             keyframeRequests += 1
             Log.info("[watchdog] no frames for \(String(format: "%.1f", stalled))s; "
                      + "asking for a keyframe (\(keyframeRequests)/\(Self.maxKeyframeRequests))")
-            connectionRef.requestKeyframe()
+            media.requestKeyframe()
             report(.stalled(seconds: Int(stalled)))
         } else if !reportedLost {
             reportedLost = true
@@ -235,21 +247,11 @@ final class StreamSession {
         isRunning = false
         watchdog?.cancel()
         watchdog = nil
-        // Silence the media sockets and wait for any callback still running
-        // before releasing anything those callbacks touch. `handleAudio` runs on
-        // the audio queue roughly 200 times a second and dereferences
-        // `audioDecoder` and `audioRenderer` — and until this call existed,
-        // nothing waited for it: the default path only *scheduled* the teardown,
-        // so the sockets were still delivering at the moment those two were
-        // released. `OpusDecoder.deinit` disposes the AudioConverter and frees
-        // the PCM buffer that `decode()` writes into, so a disconnect during
-        // playback was a genuine use-after-free rather than a lost frame.
-        //
-        // The video path already had this property by a different route: the
-        // decode callback captures `[weak decoder]` and `shutdown()` drains
-        // VideoToolbox. Audio had no equivalent.
-        connection.quiesceMedia()
-        connection.disconnect(waitUntilDone: waitUntilDone)
+        // Silence the socket before releasing anything its callbacks touch. The
+        // audio callback runs on the receive thread roughly 200 times a second
+        // and dereferences `audioRenderer`; stopping the client first is what
+        // makes releasing it afterwards safe rather than probably safe.
+        media.stop()
         // Drain the decoder before dropping the sinks: its callback runs on a
         // VideoToolbox thread and is what hands frames to the views.
         decoder?.shutdown()
@@ -259,49 +261,21 @@ final class StreamSession {
         sinkLock.unlock()
         audioRenderer?.stop()
         audioRenderer = nil
-        audioDecoder = nil
-        Log.info("[session] stopped — audio: \(audioFramesDecoded) frames decoded, "
-                 + "\(audioParityDropped) parity shards dropped, \(audioGaps) gap(s)")
+        Log.info("[session] stopped — \(mediaCounters.frames) frames, "
+                 + "\(mediaCounters.dropped) damaged, \(audioFramesPlayed) audio packets")
     }
 
-    // MARK: - Audio
+    // MARK: - Input
 
-    /// Turn one audio datagram into sound.
-    ///
-    /// Sunshine sends Opus behind a 12-byte RTP header, and interleaves
-    /// Reed-Solomon parity shards into the same stream as separate packets with
-    /// their own type. Feeding a parity shard to the decoder produces noise, so
-    /// they are dropped: recovering a lost audio frame from parity is not worth
-    /// the machinery when the frames are 5ms long and a gap is inaudible.
-    ///
-    /// Audio is not encrypted here — the SDP asks only for SS_ENC_CONTROL_V2, so
-    /// Sunshine leaves audio in the clear.
-    private func handleAudio(_ datagram: Data) {
-        guard datagram.count > Self.rtpHeaderSize else { return }
-        let packetType = datagram[datagram.startIndex + 1] & 0x7F
-        guard packetType == Self.audioPacketType else {
-            if packetType == Self.audioFecPacketType { audioParityDropped &+= 1 }
-            return
-        }
-
-        let sequence = UInt16(datagram[datagram.startIndex + 2]) << 8
-                     | UInt16(datagram[datagram.startIndex + 3])
-        if let last = lastAudioSequence, sequence != last &+ 1 {
-            // A gap means the next frame does not continue the last one.
-            audioDecoder?.reset()
-            audioGaps &+= 1
-        }
-        lastAudioSequence = sequence
-
-        let opus = datagram.subdata(in: datagram.startIndex + Self.rtpHeaderSize ..< datagram.endIndex)
-        guard let pcm = audioDecoder?.decode(opus) else { return }
-        audioFramesDecoded &+= 1
-        audioRenderer?.playAudio(pcm)
+    /// One input event, as SMTInput built it. The sequence number, the
+    /// redundancy and the repeat timer are MediaClient's.
+    func sendInput(_ event: Data) {
+        media.sendInput(event)
     }
 
-    private static let rtpHeaderSize = 12
-    private static let audioPacketType: UInt8 = 97
-    private static let audioFecPacketType: UInt8 = 127
+    func requestKeyframe() {
+        media.requestKeyframe()
+    }
 
     // MARK: - Sinks
 

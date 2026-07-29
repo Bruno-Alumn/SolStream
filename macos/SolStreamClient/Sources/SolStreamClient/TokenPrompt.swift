@@ -1,6 +1,7 @@
 import AppKit
 import DesignSystem
 import SolStreamLogging
+import MediaSession
 import StreamConnection
 
 /// Asks for the host's pairing token.

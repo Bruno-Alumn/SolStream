@@ -3,6 +3,7 @@ import DesignSystem
 import SolStreamLogging
 import VideoDecoder
 import InputCapture
+import MediaSession
 import StreamConnection
 
 /// A native macOS window showing one Windows application.
@@ -95,7 +96,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             let elapsed = now.timeIntervalSince(self.lastSample)
             guard elapsed > 0.2 else { return }
 
-            let snapshot = self.session.connection.mediaCounters
+            let snapshot = self.session.mediaCounters
             let frames = snapshot.frames &- self.lastFrameCount
             let bytes = snapshot.bytes &- self.lastByteCount
             self.lastFrameCount = snapshot.frames
@@ -338,7 +339,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let capture = InputCapture()
         capture.attach(to: view)
         capture.onInput = { [weak self] packet in
-            self?.session.connection.sendInput(packet)
+            self?.session.sendInput(packet)
         }
         inputCapture = capture
 

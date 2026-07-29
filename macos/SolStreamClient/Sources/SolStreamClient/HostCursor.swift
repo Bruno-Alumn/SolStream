@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SolStreamLogging
+import MediaSession
 import StreamConnection
 
 /// Whether the host draws its own mouse cursor into the frames it sends.

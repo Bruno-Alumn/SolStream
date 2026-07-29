@@ -21,6 +21,7 @@ let package = Package(
                 "AudioRenderer",
                 "InputCapture",
                 "StreamConnection",
+                "MediaSession",
                 "SolStreamLogging",
                 "DesignSystem"
             ]
@@ -41,6 +42,20 @@ let package = Package(
             name: "SolStreamLogging",
             dependencies: [],
             path: "Sources/SolStreamLogging"
+        ),
+
+        // -- SMT/1, SolStream's own media transport --
+        //
+        // Everything the GameStream path used to do between the socket and the
+        // decoder: the AEAD, the replay window, video reassembly, input events
+        // and the feedback that asks for a keyframe. It depends on nothing but
+        // CryptoKit and the logger, which is what lets StreamConnection depend
+        // on IT rather than the other way round -- the media key schedule lives
+        // here and the agent channel borrows it.
+        .target(
+            name: "MediaSession",
+            dependencies: ["SolStreamLogging"],
+            path: "Sources/MediaSession"
         ),
 
         // -- Video decoder (VideoToolbox + CAMetalLayer) --
@@ -69,7 +84,7 @@ let package = Package(
         // -- Input capture (NSView local monitoring, no CGEventTap) --
         .target(
             name: "InputCapture",
-            dependencies: ["SolStreamLogging", "StreamConnection"],
+            dependencies: ["SolStreamLogging", "MediaSession"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),  // For HID keycode mapping
@@ -79,7 +94,7 @@ let package = Package(
         // -- Stream connection (SRTP, WS control, pairing) --  
         .target(
             name: "StreamConnection",
-            dependencies: ["SolStreamLogging", "CCommonCrypto", "CEnet"],
+            dependencies: ["SolStreamLogging", "MediaSession", "CCommonCrypto", "CEnet"],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
@@ -109,7 +124,8 @@ let package = Package(
         .testTarget(
             name: "SolStreamClientTests",
             dependencies: ["SolStreamClient", "SolStreamLogging",
-                           "StreamConnection", "VideoDecoder", "AudioRenderer"],
+                           "StreamConnection", "MediaSession",
+                           "VideoDecoder", "AudioRenderer"],
             linkerSettings: [
                 .linkedFramework("XCTest"),
             ]
