@@ -120,6 +120,24 @@ public final class AgentConnection {
     /// no request ids needed in the protocol.
     private var pending: [(Result<[String: Any], Error>) -> Void] = []
 
+    /// Set while the auth proof is on the wire and its reply has not come back.
+    ///
+    /// NOTHING ELSE MAY BE SENT IN THAT WINDOW. The host switches to reading
+    /// sealed records the moment it has written the reply, and this side switches
+    /// when it has read it — so a command sent in between goes out in the clear
+    /// and lands in a host that has already switched. It reads the JSON as a
+    /// sealed record, the tag fails, and it drops the connection, which is
+    /// exactly what it should do about bytes it cannot authenticate.
+    ///
+    /// A first connection never notices: there is nothing to say yet. A
+    /// RECONNECT walks straight into it, because `onReconnected` re-applies every
+    /// window's placement the instant the socket is ready — which is how a
+    /// reconnect loop that handshakes perfectly and then dies twenty
+    /// milliseconds later came to look like a crypto bug.
+    private var authInFlight = false
+    private var heldWhileAuthenticating: [(request: [String: Any],
+                                           completion: (Result<[String: Any], Error>) -> Void)] = []
+
     public private(set) var displays: [RemoteDisplay] = []
 
     /// Identifies the Sunshine process now running on the host, so a client can
@@ -232,6 +250,24 @@ public final class AgentConnection {
         guard connection == nil else { return }
         wantsConnection = true
         report(.connecting)
+
+        // THE CHANNEL BELONGS TO ONE CONNECTION AND MUST NOT OUTLIVE IT. Its
+        // keys come from a challenge and two ephemeral points that only that
+        // socket ever saw, so carrying one into the next connection means
+        // meeting a fresh cleartext `hello` with a key nobody used to write it.
+        //
+        // Clearing it in the `hello` handler — where this used to live — cannot
+        // work, because `drainLines` consults `channel` BEFORE it parses
+        // anything: a stale channel intercepts the very line whose handler would
+        // have cleared it, the record fails its tag, the connection drops, and
+        // every reconnect for the rest of the process's life fails the same way
+        // three milliseconds in. That is what turned one lost session into an
+        // app that could never reach the host again without being restarted.
+        channel = nil
+        pendingEphemeral = nil
+        buffer.removeAll()
+        authInFlight = false
+        heldWhileAuthenticating.removeAll()
 
         guard let port = NWEndpoint.Port(rawValue: port) else {
             report(.failed("bad port"))
@@ -466,10 +502,26 @@ public final class AgentConnection {
         }
         var payload = line
         payload.append(0x0A)
+        // Closed before the send, not after: the reply is what reopens it, and
+        // a reply cannot arrive before this line has gone out.
+        authInFlight = true
         connection.send(content: payload, completion: .contentProcessed { error in
             if let error { Log.error("[agent] could not send the auth proof: \(error)") }
         })
         return true
+    }
+
+    /// Send everything that was held while the proof was in flight, now that the
+    /// framing has settled — sealed if the channel came up, in the clear if it
+    /// did not. Both ends agree on which by this point, which is the whole
+    /// reason for waiting.
+    private func releaseHeldRequests() {
+        authInFlight = false
+        let held = heldWhileAuthenticating
+        heldWhileAuthenticating.removeAll()
+        for item in held {
+            send(item.request, completion: item.completion)
+        }
     }
 
     static func hex(_ data: Data) -> String {
@@ -937,6 +989,12 @@ public final class AgentConnection {
                 completion(.failure(AgentError.disconnected))
                 return
             }
+            // Held, not dropped and not sent: see `authInFlight`. The wait is
+            // one round trip on a socket that is already open.
+            if self.authInFlight {
+                self.heldWhileAuthenticating.append((request, completion))
+                return
+            }
             guard let body = try? JSONSerialization.data(withJSONObject: request) else {
                 completion(.failure(AgentError.badRequest))
                 return
@@ -1175,6 +1233,8 @@ public final class AgentConnection {
                 Self.forgetToken(for: host)
                 report(.needsToken(host: host, rejected: true))
             }
+            // Whichever way it went, the framing is now settled on both ends.
+            releaseHeldRequests()
             return
         case "cursor":
             // Unsolicited, like hello: the host pushes it when the Windows
@@ -1238,8 +1298,17 @@ public final class AgentConnection {
     private func failPending(_ error: Error) {
         let waiting = pending
         pending.removeAll()
+        // Held requests never reached the socket, so nothing will ever answer
+        // them. Leaving them queued would hand them to the NEXT connection,
+        // where they would consume reply slots that belong to its own traffic.
+        let held = heldWhileAuthenticating
+        heldWhileAuthenticating.removeAll()
+        authInFlight = false
         for completion in waiting {
             completion(.failure(error))
+        }
+        for item in held {
+            item.completion(.failure(error))
         }
     }
 
