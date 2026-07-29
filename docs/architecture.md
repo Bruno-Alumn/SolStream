@@ -43,10 +43,18 @@ The token never crosses the wire, and there is no v1 fallback — keeping one wo
 mean anyone who answered on 47630 first was handed the token in cleartext, and
 the token is the root of every media key.
 
-**The channel itself is still plaintext.** It carries window titles, application
-names, the display layout and the entire clipboard. The auth-v2 handshake already
-produces key material that could encrypt it; that it does not yet is the largest
-outstanding gap in this design.
+**The channel is encrypted from the auth reply onwards**, with keys derived from
+the same challenge, nonce and token that just proved possession — so it costs no
+extra round trip. Framing switches at that exact message: newline-delimited JSON
+before it, four-byte-length-prefixed AES-256-GCM records after. Both ends
+negotiate it in the greeting, because a mismatch is not a degraded channel but a
+socket where each end reads the other's bytes as the wrong thing.
+
+It is **not forward secret**: there is no ephemeral key, so an attacker who later
+learns the token can decrypt a recorded session. The media path does better —
+it mixes in an ECDH secret discarded when the session ends — and doing the same
+here means a Diffie-Hellman before the channel is encrypted. What this removes is
+passive disclosure to anyone on the path, which was true of every session at once.
 
 ## The media path — UDP 47631
 

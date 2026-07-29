@@ -64,6 +64,7 @@
 // built on Windows.
 #ifdef SOLSTREAM_MEDIA
 #include "media/capture.h"
+#include "media/channel.h"
 #include "media/log.h"
 #include "media/session.h"
 #endif
@@ -1643,6 +1644,12 @@ volatile LONG g_push_authorised = 0;
 CRITICAL_SECTION g_send_cs;
 bool SendLine(SOCKET client, const std::string& text);
 
+#ifdef SOLSTREAM_MEDIA
+/// The agent channel's own encryption, keyed by what auth v2 already agreed.
+/// Guarded by g_send_cs on the way out; the receive side is single-threaded.
+solstream::media::Channel g_channel;
+#endif
+
 struct WindowLock {
     HWND window = nullptr;
     RECT desired{};           // client area, in virtual-desktop coordinates
@@ -2802,7 +2809,7 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
 }
 
 std::string HandleCommand(const std::string& line, bool& authenticated,
-                          const std::string& challenge) {
+                          const std::string& challenge, std::string& channel_cnonce) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
@@ -2851,6 +2858,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                     g_clients_authenticated.fetch_add(1);
                 }
                 authenticated = true;
+                // The same challenge and nonce that just proved the token can
+                // key the channel, so asking for that costs no extra round
+                // trip. Reported back rather than acted on here: the reply
+                // itself has to go out in the clear, and only then does the
+                // encryption start.
+                long long wants = 0;
+                if (FieldNumber(line, "channelCrypto", wants) && wants != 0) {
+                    channel_cnonce = cnonce;
+                }
                 // Said out loud. Which of the two auth paths a client took is
                 // the first question when one of them misbehaves, and until now
                 // a successful authentication left no trace at all -- only a
@@ -3272,12 +3288,33 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 // cannot recover from -- it has no request ids to resynchronise against, so it
 // drops the connection. `g_send_cs` is declared with the push channel, above.
 bool SendLine(SOCKET client, const std::string& text) {
-    std::string payload = text;
-    payload += '\n';
     EnterCriticalSection(&g_send_cs);
     struct Unlock {
         ~Unlock() { LeaveCriticalSection(&g_send_cs); }
     } unlock;
+
+    std::string payload;
+#ifdef SOLSTREAM_MEDIA
+    if (g_channel.encrypted) {
+        // Sealed and length-prefixed. The newline framing below is not merely
+        // unnecessary here, it is unusable: ciphertext contains 0x0A as often
+        // as any other byte.
+        std::vector<unsigned char> record;
+        if (!solstream::media::SealMessage(g_channel, text, record)) {
+            Log("[agent] could not seal a %zu-byte message; dropping the client",
+                text.size());
+            return false;
+        }
+        payload.assign((const char*) record.data(), record.size());
+    } else {
+        payload = text;
+        payload += '\n';
+    }
+#else
+    payload = text;
+    payload += '\n';
+#endif
+
     size_t sent = 0;
     while (sent < payload.size()) {
         const int n = send(client, payload.data() + sent, (int) (payload.size() - sent), 0);
@@ -3441,6 +3478,13 @@ void ServeClient(SOCKET client) {
     hello += ",\"host\":\"" + JsonEscape(hostname) + "\"";
     hello += ",\"needsAuth\":" + std::string(g_require_auth ? "true" : "false");
     hello += ",\"challenge\":\"" + challenge + "\"";
+#ifdef SOLSTREAM_MEDIA
+    // Advertised rather than assumed. A client that does not understand it goes
+    // on speaking newline-JSON, and a host that does not offer it never has a
+    // client try: a mismatch here is not a degraded channel, it is a socket
+    // where each end is reading the other's bytes as the wrong thing entirely.
+    hello += ",\"channelCrypto\":1";
+#endif
     hello += "}";
     if (!SendLine(client, hello)) {
         return;
@@ -3467,6 +3511,13 @@ void ServeClient(SOCKET client) {
             return;
         }
     }
+
+#ifdef SOLSTREAM_MEDIA
+    // Every connection starts in the clear and negotiates again. A channel left
+    // encrypted from the last client would meet the next one's plaintext hello
+    // with a key it has never heard of.
+    g_channel.Reset();
+#endif
 
     std::string buffer;
     char chunk[4096];
@@ -3495,10 +3546,34 @@ void ServeClient(SOCKET client) {
             discarding = false;
         }
 
-        size_t newline;
-        while ((newline = buffer.find('\n')) != std::string::npos) {
-            std::string line = buffer.substr(0, newline);
-            buffer.erase(0, newline + 1);
+        // Two framings, and which one is in force changes exactly once per
+        // connection: newline-delimited until the auth reply has gone out,
+        // length-prefixed records after it. Reading one as the other produces
+        // garbage rather than an error, which is why the switch happens on the
+        // send side first and is never negotiated twice.
+        for (;;) {
+            std::string line;
+#ifdef SOLSTREAM_MEDIA
+            if (g_channel.encrypted) {
+                bool fatal = false;
+                if (!solstream::media::OpenMessage(g_channel, buffer, line, fatal)) {
+                    if (fatal) {
+                        Log("[agent] a record on the encrypted channel did not "
+                            "authenticate; dropping the client");
+                        return;
+                    }
+                    break;   // more bytes needed
+                }
+            } else
+#endif
+            {
+                const size_t newline = buffer.find('\n');
+                if (newline == std::string::npos) {
+                    break;
+                }
+                line = buffer.substr(0, newline);
+                buffer.erase(0, newline + 1);
+            }
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
@@ -3506,9 +3581,24 @@ void ServeClient(SOCKET client) {
                 continue;
             }
             const bool was_authenticated = authenticated;
-            if (!SendLine(client, HandleCommand(line, authenticated, challenge))) {
+            std::string channel_cnonce;
+            if (!SendLine(client, HandleCommand(line, authenticated, challenge,
+                                                channel_cnonce))) {
                 return;
             }
+#ifdef SOLSTREAM_MEDIA
+            // AFTER the reply, never before: the client is still reading lines
+            // until it has read the one that says the proof was accepted.
+            if (!channel_cnonce.empty() && !g_channel.encrypted) {
+                if (solstream::media::DeriveChannelKeys(g_channel, g_token, challenge,
+                                                        channel_cnonce)) {
+                    g_channel.encrypted = true;
+                    Log("[agent] the channel is encrypted from here");
+                } else {
+                    Log("[agent] could not derive channel keys; staying in the clear");
+                }
+            }
+#endif
             // Authenticating completes the greeting: the display list is part of
             // the hello sequence, withheld until now, and the Mac waits for it
             // before doing anything else.

@@ -338,3 +338,74 @@ final class SMTInputTests: XCTestCase {
         XCTAssertEqual([UInt8](down), [SMTInput.Kind.scrollV.rawValue, 2, 0xFF, 0x88])
     }
 }
+
+/// The agent channel's own encryption. Its failure mode is the reason these
+/// exist: a framing that is wrong produces garbage rather than an error, and a
+/// crypto that is wrong produces a connection that drops for no stated reason.
+final class ChannelCryptoTests: XCTestCase {
+
+    private func pair() -> (ChannelCrypto, ChannelCrypto)? {
+        // Both ends derive from the same three values, and the two directions
+        // are deliberately NOT symmetric -- so one object standing in for both
+        // would pass a test that a real pair fails.
+        guard let a = ChannelCrypto(token: "00112233445566778899aabbccddeeff",
+                                    challenge: String(repeating: "ab", count: 32),
+                                    clientNonce: String(repeating: "cd", count: 32)),
+              let b = ChannelCrypto(token: "00112233445566778899aabbccddeeff",
+                                    challenge: String(repeating: "ab", count: 32),
+                                    clientNonce: String(repeating: "cd", count: 32))
+        else { return nil }
+        return (a, b)
+    }
+
+    func testARecordSealedForTheHostDoesNotOpenAsOneFromIt() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        var record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
+        // This is the client's own record, which only the HOST can open. Feeding
+        // it back to the client must fail: one key for both directions would let
+        // a datagram be replayed into the direction it came from.
+        XCTAssertThrowsError(try client.open(from: &record))
+    }
+
+    func testAPartialRecordIsNotAnError() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        let record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
+        // Waiting for the rest of a record is the normal case on a stream
+        // socket, and must be distinguishable from a record that is wrong.
+        var buffer = Data(record.prefix(record.count - 1))
+        XCTAssertNil(try client.open(from: &buffer))
+        XCTAssertEqual(buffer.count, record.count - 1, "nothing may be consumed yet")
+    }
+
+    func testTamperingWithTheCiphertextIsFatal() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        var record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
+        record[record.count - 1] ^= 0x01
+        var buffer = record
+        XCTAssertThrowsError(try client.open(from: &buffer))
+    }
+
+    func testAnAbsurdLengthIsRejectedRatherThanAllocated() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        // Four bytes of 0xFF is a four-gigabyte record. A length is the one
+        // field an attacker controls before any authentication happens.
+        var buffer = Data([0xFF, 0xFF, 0xFF, 0xFF]) + Data(repeating: 0, count: 32)
+        XCTAssertThrowsError(try client.open(from: &buffer))
+    }
+
+    func testAMessageLargerThanTheCapIsRefused() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        let huge = Data(repeating: 0x41, count: ChannelCrypto.maxMessage + 1)
+        XCTAssertThrowsError(try client.seal(huge))
+    }
+
+    /// The clipboard is allowed 256 KB, and a two-byte length prefix would have
+    /// capped a record at 64 KB — dropping the connection on a large paste, in
+    /// the encrypted path only.
+    func testAClipboardSizedMessageFits() throws {
+        let (client, _) = try XCTUnwrap(pair())
+        let clipboard = Data(repeating: 0x42, count: 256 * 1024)
+        let record = try client.seal(clipboard)
+        XCTAssertEqual(record.count, 4 + clipboard.count + SMT.overhead)
+    }
+}

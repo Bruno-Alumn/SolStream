@@ -41,6 +41,7 @@ if(MSVC)
     set(SOLSTREAM_MEDIA_SOURCES
         media/log.cpp
         media/smt.cpp
+        media/channel.cpp
         media/capture.cpp
         media/encoder.cpp
         media/audio.cpp

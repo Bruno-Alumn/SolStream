@@ -149,6 +149,15 @@ public final class AgentConnection {
     /// is no second handshake and no second secret.
     private var authChallenge: String?
     private var authClientNonce: Data?
+    /// Whether the host offered to encrypt the channel, and the keys once it is.
+    ///
+    /// Negotiated rather than assumed. A mismatch here is not a degraded
+    /// channel: it is a socket where each end reads the other's bytes as the
+    /// wrong thing entirely, so both halves have to agree before either switches.
+    private var hostOffersChannelCrypto = false
+    private var channel: ChannelCrypto?
+    /// Built when the proof is sent, promoted when the host says it was good.
+    private var pendingChannel: ChannelCrypto?
 
     private static func tokenKey(for host: String) -> String {
         "SolStream.agentToken.\(host)"
@@ -432,11 +441,23 @@ public final class AgentConnection {
         // that authenticates is also the one that agrees the keys.
         self.authClientNonce = clientNonce
 
-        guard let line = try? JSONSerialization.data(withJSONObject: [
+        var request: [String: Any] = [
             "cmd": "auth",
             "proof": Self.hex(Data(proof)),
             "cnonce": Self.hex(clientNonce),
-        ]) else { return false }
+        ]
+        // The same challenge and nonce that prove the token can key the channel,
+        // so asking costs no extra round trip. Armed but not switched on: the
+        // reply to this request still arrives in the clear, and only what
+        // follows it is sealed.
+        if hostOffersChannelCrypto {
+            request["channelCrypto"] = 1
+            pendingChannel = ChannelCrypto(token: token, challenge: challenge,
+                                           clientNonce: Self.hex(clientNonce))
+        }
+        guard let line = try? JSONSerialization.data(withJSONObject: request) else {
+            return false
+        }
         var payload = line
         payload.append(0x0A)
         connection.send(content: payload, completion: .contentProcessed { error in
@@ -910,11 +931,24 @@ public final class AgentConnection {
                 completion(.failure(AgentError.disconnected))
                 return
             }
-            guard var line = try? JSONSerialization.data(withJSONObject: request) else {
+            guard let body = try? JSONSerialization.data(withJSONObject: request) else {
                 completion(.failure(AgentError.badRequest))
                 return
             }
-            line.append(0x0A)  // the agent splits on newlines
+            var line: Data
+            if let channel = self.channel {
+                // Sealed and length-prefixed. Newline framing is not merely
+                // unnecessary past this point, it is unusable: ciphertext
+                // contains 0x0A as often as any other byte.
+                guard let record = try? channel.seal(body) else {
+                    completion(.failure(AgentError.badRequest))
+                    return
+                }
+                line = record
+            } else {
+                line = body
+                line.append(0x0A)  // the agent splits on newlines
+            }
 
             self.pending.append(completion)
             connection.send(content: line, completion: .contentProcessed { error in
@@ -953,9 +987,26 @@ public final class AgentConnection {
     }
 
     private func drainLines() {
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = buffer[buffer.startIndex..<newline]
-            buffer.removeSubrange(buffer.startIndex...newline)
+        // Two framings, and which is in force changes exactly once per
+        // connection: newline-delimited until the auth reply has arrived,
+        // length-prefixed sealed records after it.
+        while true {
+            var line = Data()
+            if let channel = self.channel {
+                do {
+                    guard let opened = try channel.open(from: &buffer) else { return }
+                    line = opened
+                } catch {
+                    Log.error("[agent] a record on the encrypted channel did not "
+                              + "authenticate — dropping the connection")
+                    dropConnection(AgentError.protocolDesync)
+                    return
+                }
+            } else {
+                guard let newline = buffer.firstIndex(of: 0x0A) else { break }
+                line = Data(buffer[buffer.startIndex..<newline])
+                buffer.removeSubrange(buffer.startIndex...newline)
+            }
             if line.isEmpty { continue }
             guard let message = try? JSONSerialization.jsonObject(with: Data(line))
                     as? [String: Any] else {
@@ -1014,6 +1065,9 @@ public final class AgentConnection {
             // Before any branch below needs it: a token supplied later by the
             // user authenticates against the challenge from THIS greeting.
             authChallenge = message["challenge"] as? String
+            hostOffersChannelCrypto = (message["channelCrypto"] as? Int ?? 0) != 0
+            channel = nil
+            pendingChannel = nil
             Log.info("[agent] host \(host), protocol v\(version)")
             report(.connected(host: host))
             // The greeting says whether a token is wanted. Answering it here,
@@ -1070,7 +1124,16 @@ public final class AgentConnection {
         case "auth":
             if message["ok"] as? Bool == true {
                 if let token { Self.rememberToken(token, for: host) }
-                Log.info("[agent] token accepted")
+                // This reply is the last thing that arrives in the clear. The
+                // host seals everything after it, so the switch happens here and
+                // not a message earlier or later.
+                if let armed = pendingChannel {
+                    channel = armed
+                    pendingChannel = nil
+                    Log.info("[agent] token accepted; the channel is encrypted from here")
+                } else {
+                    Log.info("[agent] token accepted")
+                }
             } else {
                 Log.error("[agent] token rejected")
                 Self.forgetToken(for: host)
