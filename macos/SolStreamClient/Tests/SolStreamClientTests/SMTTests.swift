@@ -427,6 +427,39 @@ final class ChannelCryptoTests: XCTestCase {
         XCTAssertThrowsError(try client.seal(huge))
     }
 
+    /// A record the host seals and then does not send costs it the connection.
+    ///
+    /// This is the exact shape of the bug that ended a paired session: a SECOND
+    /// Mac connected, the host refused it with a `busy` line, and the refusal
+    /// was sealed with the FIRST Mac's keys — advancing its counter — before
+    /// being written down the second Mac's socket. The first Mac never saw that
+    /// record, so everything after it was one counter ahead of what it expected.
+    ///
+    /// The strictness is deliberate and worth keeping: TCP delivers in order and
+    /// exactly once, so the next counter is known rather than guessed, and a
+    /// channel that shrugged at a gap would let an attacker silence a message at
+    /// a time. The fix therefore belongs on the host, which must not seal
+    /// anything it is not about to deliver.
+    func testASkippedRecordIsFatalRatherThanTolerated() throws {
+        let client = try channel()
+        _ = try client.sealAsHost(Data("{\"type\":\"busy\"}".utf8))  // sent elsewhere
+        var delivered = try client.sealAsHost(Data("{\"type\":\"window\"}".utf8))
+        XCTAssertThrowsError(try client.open(from: &delivered))
+    }
+
+    /// And the companion, so the test above is known to be failing on the gap
+    /// rather than on anything else about a host-sealed record.
+    func testConsecutiveRecordsOpenInOrder() throws {
+        let client = try channel()
+        let first = Data("{\"type\":\"hello\"}".utf8)
+        let second = Data("{\"type\":\"window\"}".utf8)
+        var stream = try client.sealAsHost(first)
+        stream += try client.sealAsHost(second)
+        XCTAssertEqual(try client.open(from: &stream), first)
+        XCTAssertEqual(try client.open(from: &stream), second)
+        XCTAssertTrue(stream.isEmpty)
+    }
+
     /// The clipboard is allowed 256 KB, and a two-byte length prefix would have
     /// capped a record at 64 KB — dropping the connection on a large paste, in
     /// the encrypted path only.

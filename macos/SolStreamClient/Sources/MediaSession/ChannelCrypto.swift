@@ -111,8 +111,20 @@ public final class ChannelCrypto {
 
     /// Seal one message into a length-prefixed record.
     public func seal(_ message: Data) throws -> Data {
+        try seal(message, using: toHost)
+    }
+
+    /// The record the HOST would write, for tests that need to play that side.
+    /// There is no host implementation in Swift, and a second hand-written copy
+    /// of this framing in the test file would be a copy that could agree with
+    /// itself while disagreeing with the agent.
+    func sealAsHost(_ message: Data) throws -> Data {
+        try seal(message, using: fromHost)
+    }
+
+    private func seal(_ message: Data, using direction: SMTDirection) throws -> Data {
         guard message.count <= Self.maxMessage else { throw Failure.tooLarge }
-        guard let sealed = SMTPacket.seal(message, direction: toHost,
+        guard let sealed = SMTPacket.seal(message, direction: direction,
                                           sessionTag: sessionTag) else {
             throw Failure.tooLarge
         }

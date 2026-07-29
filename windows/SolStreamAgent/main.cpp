@@ -1651,6 +1651,18 @@ solstream::media::Channel g_channel;
 /// Derived while answering the auth request, promoted once that answer -- the
 /// last message that crosses in the clear -- has actually gone out.
 solstream::media::Channel g_pending_channel;
+/// WHICH SOCKET THOSE KEYS BELONG TO. The channel is a global and the sockets
+/// are not, and that difference cost a paired Mac its session: a SECOND Mac
+/// knocking while one was connected was refused with a `busy` line, and
+/// SendLine sealed that line with the FIRST Mac's keys before writing it down
+/// the second Mac's socket. The record the first Mac was owed never arrived,
+/// its counter was one behind from then on, and the next real message failed
+/// its tag -- so an unrelated third party could end a working session just by
+/// connecting. The second Mac could not read the refusal either, since it was
+/// encrypted to keys it had never seen. Binding the keys to their socket makes
+/// both impossible: anything addressed elsewhere goes out in the clear, which
+/// is what a client that has negotiated nothing is expecting to read.
+SOCKET g_channel_socket = INVALID_SOCKET;
 #endif
 
 struct WindowLock {
@@ -3332,7 +3344,7 @@ bool SendLine(SOCKET client, const std::string& text) {
 
     std::string payload;
 #ifdef SOLSTREAM_MEDIA
-    if (g_channel.encrypted) {
+    if (g_channel.encrypted && client == g_channel_socket) {
         // Sealed and length-prefixed. The newline framing below is not merely
         // unnecessary here, it is unusable: ciphertext contains 0x0A as often
         // as any other byte.
@@ -3496,6 +3508,21 @@ void ServeClient(SOCKET client) {
     BOOL keepalive = TRUE;
     setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, (const char*) &keepalive, sizeof(keepalive));
 
+#ifdef SOLSTREAM_MEDIA
+    // BEFORE the greeting, not after it. Every connection starts in the clear
+    // and negotiates again, and a channel left encrypted by the last client
+    // would seal THIS client's plaintext hello with keys it has never heard of
+    // -- binary where it is reading newline-JSON, on the very first line. This
+    // reset used to sit below the send, where it could not prevent that. Winsock
+    // also reuses SOCKET values freely, so clearing the binding here is what
+    // stops a recycled handle from inheriting the last connection's keys.
+    EnterCriticalSection(&g_send_cs);
+    g_channel.Reset();
+    g_pending_channel.Reset();
+    g_channel_socket = INVALID_SOCKET;
+    LeaveCriticalSection(&g_send_cs);
+#endif
+
     // Greet with the protocol version and the display list, so the Mac can pick
     // its capture display without a round trip.
     char hostname[256] = {};
@@ -3548,14 +3575,6 @@ void ServeClient(SOCKET client) {
             return;
         }
     }
-
-#ifdef SOLSTREAM_MEDIA
-    // Every connection starts in the clear and negotiates again. A channel left
-    // encrypted from the last client would meet the next one's plaintext hello
-    // with a key it has never heard of.
-    g_channel.Reset();
-    g_pending_channel.Reset();
-#endif
 
     std::string buffer;
     char chunk[4096];
@@ -3628,8 +3647,11 @@ void ServeClient(SOCKET client) {
             // AFTER the reply, never before: the client is still reading lines
             // until it has read the one that says the proof was accepted.
             if (!channel_cnonce.empty() && !g_channel.encrypted) {
+                EnterCriticalSection(&g_send_cs);
                 g_channel.Adopt(g_pending_channel);
                 g_channel.encrypted = true;
+                g_channel_socket = client;
+                LeaveCriticalSection(&g_send_cs);
                 Log("[agent] the channel is encrypted from here, "
                     "with an ephemeral key");
             }
@@ -4264,6 +4286,18 @@ int wmain(int argc, wchar_t** argv) {
                 // Loopback needs no token, so it is authorised from the start.
                 StartCursorWatcher(client, !g_require_auth);
                 ServeClient(client);
+#ifdef SOLSTREAM_MEDIA
+                // Destroy the session keys with the session. The point of the
+                // ephemeral half is that it stops existing when the connection
+                // does; holding the derived keys until the NEXT client happens
+                // to connect keeps a recorded session decryptable for exactly
+                // as long as nobody reconnects.
+                EnterCriticalSection(&g_send_cs);
+                g_channel.Reset();
+                g_pending_channel.Reset();
+                g_channel_socket = INVALID_SOCKET;
+                LeaveCriticalSection(&g_send_cs);
+#endif
                 // Stopped before the socket closes: the watcher writes to it.
                 StopCursorWatcher();
                 closesocket(client);
