@@ -43,6 +43,12 @@ constexpr unsigned short kDefaultSunshineBase = 47600;
 /// collided the day Sunshine claimed one more offset.
 constexpr unsigned short kDefaultAgentPort = 47630;
 
+/// SMT/1's media socket, one past the agent's. Deliberately adjacent: the two
+/// are opened together, fail together, and are explained to a user together, so
+/// a firewall rule that names one and not the other is a mistake somebody can
+/// see rather than one they have to look up.
+constexpr unsigned short kDefaultMediaPort = 47631;
+
 /// Sunshine's port offsets, straight from its own headers.
 enum class SunshinePort {
     kHttps = -5,   ///< nvhttp.h  PORT_HTTPS

@@ -1245,6 +1245,11 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
 
 std::string g_token;
 bool g_require_auth = true;
+/// Bumped and persisted on every media session. It is in the key-schedule
+/// transcript so that two sessions cannot derive the same keys even on a machine
+/// whose RNG is repeating itself after an image restore -- the one failure that
+/// would otherwise be silent and total.
+unsigned long long g_media_count = 0;
 
 std::wstring TokenPath() {
     wchar_t buffer[MAX_PATH] = {};
@@ -1399,6 +1404,169 @@ bool ProofMatches(const std::string& challengeHex, const std::string& cnonceHex,
         difference |= (unsigned char) (expected[i] ^ proof[i]);
     }
     return difference == 0;
+}
+
+// ── SMT/1 key schedule ───────────────────────────────────────────────────────
+//
+// Pinned by the frozen cross-language vector in spike/smt-vectors: if any of
+// this drifts, that vector stops matching and says so before a socket is
+// involved. See docs/transport-smt1.md for why each input is there.
+
+std::vector<unsigned char> Sha256(const std::vector<unsigned char>& data) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                                    nullptr, 0))) {
+        return {};
+    }
+    std::vector<unsigned char> out(32);
+    const bool ok = BCRYPT_SUCCESS(BCryptHash(algorithm, nullptr, 0, (PUCHAR) data.data(),
+                                              (ULONG) data.size(), out.data(), 32));
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return ok ? out : std::vector<unsigned char>{};
+}
+
+/// RFC 5869. Extract is one HMAC; expand is the T(n) chain. Written out rather
+/// than using BCRYPT_HKDF_ALGORITHM because when two languages disagree, an
+/// extract and an expand you can read are far easier to bisect than one opaque
+/// call -- and they did have to be bisected once already.
+std::vector<unsigned char> HkdfExpand(const std::vector<unsigned char>& prk,
+                                      const std::vector<unsigned char>& info,
+                                      size_t length) {
+    std::vector<unsigned char> out, previous;
+    unsigned char counter = 1;
+    while (out.size() < length) {
+        std::vector<unsigned char> input = previous;
+        input.insert(input.end(), info.begin(), info.end());
+        input.push_back(counter++);
+        previous = HmacSha256(prk, input);
+        if (previous.empty()) {
+            return {};
+        }
+        out.insert(out.end(), previous.begin(), previous.end());
+    }
+    out.resize(length);
+    return out;
+}
+
+/// A fresh P-256 key pair. `publicPoint` comes back as 0x04||X||Y, 65 bytes --
+/// the uncompressed form the wire carries, which is BCrypt's blob with its
+/// 8-byte header swapped for the 0x04 tag.
+BCRYPT_KEY_HANDLE NewEcdhKeyPair(std::vector<unsigned char>& publicPoint) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDH_P256_ALGORITHM,
+                                                    nullptr, 0))) {
+        return nullptr;
+    }
+    BCRYPT_KEY_HANDLE key = nullptr;
+    bool ok = BCRYPT_SUCCESS(BCryptGenerateKeyPair(algorithm, &key, 256, 0))
+              && BCRYPT_SUCCESS(BCryptFinalizeKeyPair(key, 0));
+    if (ok) {
+        ULONG size = 0;
+        ok = BCRYPT_SUCCESS(BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB, nullptr,
+                                            0, &size, 0));
+        std::vector<unsigned char> blob(size);
+        ok = ok && BCRYPT_SUCCESS(BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB,
+                                                  blob.data(), size, &size, 0));
+        if (ok && size >= sizeof(BCRYPT_ECCKEY_BLOB) + 64) {
+            publicPoint.assign(1, 0x04);
+            publicPoint.insert(publicPoint.end(),
+                               blob.begin() + sizeof(BCRYPT_ECCKEY_BLOB),
+                               blob.begin() + sizeof(BCRYPT_ECCKEY_BLOB) + 64);
+        } else {
+            ok = false;
+        }
+    }
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (!ok && key) {
+        BCryptDestroyKey(key);
+        return nullptr;
+    }
+    return key;
+}
+
+/// The ECDH shared secret as the x-coordinate, BIG-endian.
+///
+/// *** BCRYPT_KDF_RAW_SECRET RETURNS IT LITTLE-ENDIAN. *** CryptoKit, and every
+/// specification, means big-endian, and the same BCrypt API is inconsistent with
+/// itself -- BCRYPT_ECCKEY_BLOB's X, Y and d are all big-endian. Without this
+/// reverse the two ends derive different keys, every packet fails its tag, and
+/// nothing says why. Measured, not assumed: spike/smt-vectors prints both.
+std::vector<unsigned char> EcdhSecret(BCRYPT_KEY_HANDLE mine,
+                                      const std::vector<unsigned char>& peerPoint) {
+    if (peerPoint.size() != 65 || peerPoint[0] != 0x04) {
+        return {};
+    }
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDH_P256_ALGORITHM,
+                                                    nullptr, 0))) {
+        return {};
+    }
+    std::vector<unsigned char> blob(sizeof(BCRYPT_ECCKEY_BLOB) + 64);
+    auto* header = (BCRYPT_ECCKEY_BLOB*) blob.data();
+    header->dwMagic = BCRYPT_ECDH_PUBLIC_P256_MAGIC;
+    header->cbKey = 32;
+    memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB), peerPoint.data() + 1, 64);
+
+    BCRYPT_KEY_HANDLE peer = nullptr;
+    std::vector<unsigned char> secret;
+    if (BCRYPT_SUCCESS(BCryptImportKeyPair(algorithm, nullptr, BCRYPT_ECCPUBLIC_BLOB,
+                                           &peer, blob.data(), (ULONG) blob.size(), 0))) {
+        BCRYPT_SECRET_HANDLE agreed = nullptr;
+        if (BCRYPT_SUCCESS(BCryptSecretAgreement(mine, peer, &agreed, 0))) {
+            ULONG size = 0;
+            if (BCRYPT_SUCCESS(BCryptDeriveKey(agreed, BCRYPT_KDF_RAW_SECRET, nullptr,
+                                               nullptr, 0, &size, 0))) {
+                secret.resize(size);
+                if (!BCRYPT_SUCCESS(BCryptDeriveKey(agreed, BCRYPT_KDF_RAW_SECRET,
+                                                    nullptr, secret.data(), size,
+                                                    &size, 0))) {
+                    secret.clear();
+                }
+            }
+            BCryptDestroySecret(agreed);
+        }
+        BCryptDestroyKey(peer);
+    }
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    std::reverse(secret.begin(), secret.end());   // <- the whole comment above
+    return secret;
+}
+
+/// 108 bytes: two directional keys, two nonce fixed fields, a session id and the
+/// two authentication tags each side uses to prove it derived the same thing.
+std::vector<unsigned char> DeriveMediaKeys(const std::vector<unsigned char>& cpub,
+                                           const std::vector<unsigned char>& hpub,
+                                           const std::vector<unsigned char>& cnonce,
+                                           const std::vector<unsigned char>& hnonce,
+                                           unsigned long long hcount,
+                                           const std::vector<unsigned char>& secret,
+                                           unsigned short epoch) {
+    std::vector<unsigned char> transcript;
+    static const char kLabel[] = "SMT/1";
+    transcript.insert(transcript.end(), kLabel, kLabel + 5);
+    transcript.insert(transcript.end(), cpub.begin(), cpub.end());
+    transcript.insert(transcript.end(), hpub.begin(), hpub.end());
+    transcript.insert(transcript.end(), cnonce.begin(), cnonce.end());
+    transcript.insert(transcript.end(), hnonce.begin(), hnonce.end());
+    for (int i = 7; i >= 0; --i) {
+        transcript.push_back((unsigned char) ((hcount >> (8 * i)) & 0xFF));
+    }
+    const std::vector<unsigned char> hash = Sha256(transcript);
+
+    // The token joins the INPUT KEY MATERIAL, not just the transcript: that is
+    // what makes a token stolen later useless against a session already gone.
+    std::vector<unsigned char> ikm = secret;
+    const std::vector<unsigned char> tokenBytes = FromHex(g_token);
+    ikm.insert(ikm.end(), tokenBytes.begin(), tokenBytes.end());
+    const std::vector<unsigned char> prk = HmacSha256(hash, ikm);
+
+    std::vector<unsigned char> info;
+    static const char kKeyLabel[] = "SMT/1 keys v1";
+    info.insert(info.end(), kKeyLabel, kKeyLabel + 13);
+    info.push_back((unsigned char) (epoch >> 8));
+    info.push_back((unsigned char) (epoch & 0xFF));
+    info.insert(info.end(), hash.begin(), hash.end());
+    return HkdfExpand(prk, info, 108);
 }
 
 bool TokenMatches(const std::string& supplied) {
@@ -2914,6 +3082,70 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 
     if (g_require_auth && !authenticated) {
         return "{\"type\":\"error\",\"message\":\"unauthenticated\",\"needsAuth\":true}";
+    }
+
+    // ── Media session ────────────────────────────────────────────────────────
+    //
+    // What replaces GameStream's setup entirely: no HTTP pairing, no HTTPS
+    // /launch, no seven RTSP round trips. Two programs that have already
+    // authenticated each other agree an ephemeral key and start sending.
+    if (command == "media") {
+        std::string op;
+        FieldString(line, "op", op);
+        if (op != "open") {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"unknown op\"}";
+        }
+        std::string cpubHex, cnonceHex;
+        FieldString(line, "cpub", cpubHex);
+        FieldString(line, "cnonce", cnonceHex);
+        const std::vector<unsigned char> cpub = FromHex(cpubHex);
+        const std::vector<unsigned char> cnonce = FromHex(cnonceHex);
+        if (cpub.size() != 65 || cpub[0] != 0x04 || cnonce.size() != 32) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"bad key material\"}";
+        }
+
+        std::vector<unsigned char> hpub;
+        BCRYPT_KEY_HANDLE keyPair = NewEcdhKeyPair(hpub);
+        if (!keyPair) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"no key pair\"}";
+        }
+        const std::vector<unsigned char> secret = EcdhSecret(keyPair, cpub);
+        BCryptDestroyKey(keyPair);
+        if (secret.size() != 32) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"agreement failed\"}";
+        }
+
+        const std::string hnonceHex = RandomHex(32);
+        const std::vector<unsigned char> hnonce = FromHex(hnonceHex);
+        const unsigned long long hcount = ++g_media_count;
+        const std::vector<unsigned char> okm =
+            DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0);
+        if (okm.size() != 108) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"derivation failed\"}";
+        }
+
+        // hostAuth, bytes 80..92. The Mac derives the same 108 bytes and checks
+        // this: if it matches, both ends hold the same keys, and that is worth
+        // knowing HERE rather than discovering it as every packet failing its
+        // tag with nothing to say why.
+        static const char* hex = "0123456789abcdef";
+        std::string hauth;
+        for (size_t i = 80; i < 92; ++i) {
+            hauth.push_back(hex[okm[i] >> 4]);
+            hauth.push_back(hex[okm[i] & 0x0F]);
+        }
+        std::string hpubHex;
+        for (unsigned char byte : hpub) {
+            hpubHex.push_back(hex[byte >> 4]);
+            hpubHex.push_back(hex[byte & 0x0F]);
+        }
+        Log("[media] session %llu opened; keys derived", hcount);
+        return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
+               ",\"hpub\":\"" + hpubHex + "\""
+               ",\"hnonce\":\"" + hnonceHex + "\""
+               ",\"hcount\":\"" + std::to_string(hcount) + "\""
+               ",\"hauth\":\"" + hauth + "\""
+               ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
     }
 
     if (command == "displays") {
