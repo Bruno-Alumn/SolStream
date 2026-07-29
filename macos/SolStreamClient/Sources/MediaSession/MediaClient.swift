@@ -67,6 +67,9 @@ public final class MediaClient {
     private var lastCompleteFrame: UInt32 = 0
     private var startedAt = DispatchTime.now().uptimeNanoseconds
     private var lastHeardAt: UInt64 = 0
+    /// When the reassembler was last given a chance to retire a picture that
+    /// will never complete. Receive-thread only, so it needs no lock.
+    private var lastTickAt: UInt64 = 0
 
     // Input: sequence numbers, the unacknowledged tail, and the repeat timer.
     private var nextSeq: UInt32 = 1
@@ -399,7 +402,20 @@ public final class MediaClient {
                 // A timeout, which is the only quiet moment there is: retire
                 // assemblies that will never complete.
                 reassembler.tick()
+                lastTickAt = DispatchTime.now().uptimeNanoseconds
                 continue
+            }
+            // AND WHILE PACKETS ARE ARRIVING, which is when it matters. The
+            // idle path above only runs after 200 ms of complete silence, and a
+            // stream that is losing fragments is not silent -- so a picture
+            // missing one fragment was never retired, never reported damaged,
+            // and never prompted the keyframe that would have recovered it.
+            // Its 512 KB assembly buffer stayed in `building` for the life of
+            // the session, one per lost fragment, and the picture the user was
+            // looking at simply stopped moving.
+            if Self.millis(since: lastTickAt) >= 25 {
+                reassembler.tick()
+                lastTickAt = DispatchTime.now().uptimeNanoseconds
             }
             let datagram = Data(buffer[0..<n])
             stateLock.lock()
