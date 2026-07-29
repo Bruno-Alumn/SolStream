@@ -424,10 +424,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Dismiss the picker and stream one window.
+    /// Stream one window, keeping the picker up until there is one to look at.
+    ///
+    /// The picker used to be closed and released on this line, before anything
+    /// at all was known about the session. Everything downstream of here gives
+    /// up by logging and returning — no display to capture, a host that refuses
+    /// the media session, a host that agrees keys and then does not start — and
+    /// each of those left the screen with no picker, no window and not one word
+    /// about why. It is closed in `presentApps` now, at the point a window is
+    /// about to appear, and each of those three failures puts its reason back on
+    /// the picker the person is still looking at.
     private func attach(_ window: RemoteWindow, host: String, agent: AgentConnection) {
-        picker?.close()
-        picker = nil
+        picker?.showBusy("Opening \(window.title) on \(host)…")
         start(host: host, agent: agent, targets: [window])
     }
 
@@ -450,6 +458,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
         guard let capture = Self.selectDisplay(from: agent.displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
+            picker?.clearBusy()
+            picker?.showFailure("\(host) did not offer a display to capture.")
             return
         }
         Log.info("[app] capture display \(capture.name) "
@@ -514,6 +524,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error("[desktop] host reported no displays")
                 return
             }
+            // Once only, from here on. This closure is not a notification that
+            // the displays changed, it is the entry point to the whole open
+            // flow — and the host greets every connection with `displays`
+            // unprompted, including the one it sends after a reconnect. Left
+            // installed it opened a second media session and a second window
+            // over the top of the first, every time the agent channel came
+            // back. Cleared after the guard rather than before it, so a push
+            // that carried no usable display still leaves a way in.
+            agent.onDisplays = nil
             var sized = config
             sized.width = capture.width
             sized.height = capture.height
@@ -585,6 +604,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error("[app] host reported no displays")
                 return
             }
+            // Once only, from here on — see the same line in `startStreaming`.
+            // The host greets every connection with `displays` unprompted, this
+            // closure is the entry point to the whole open flow, and leaving it
+            // installed meant a reconnect ran the flow again: another media
+            // session, another window per application, over the top of the ones
+            // already there. Cleared after the guard rather than before it, so a
+            // push that carried no usable display still leaves a way in.
+            agent.onDisplays = nil
             Log.info("[app] capture display \(capture.name) "
                      + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                      + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
@@ -659,11 +686,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 audio: config.audio)
             guard let media = await agent.openMediaSession(request) else {
                 Log.error("[app] \(host) refused the media session")
+                self.picker?.clearBusy()
+                self.picker?.showFailure("\(host) refused to start streaming.")
                 return
             }
             guard media.streaming else {
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
+                self.picker?.clearBusy()
+                self.picker?.showFailure("\(host) agreed to stream and then did not: "
+                                         + (media.message ?? "it gave no reason"))
                 return
             }
             self.presentApps(host: host, agent: agent, targets: targets,
@@ -674,6 +706,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentApps(host: String, agent: AgentConnection, targets: [RemoteWindow],
                              display: RemoteDisplay, config: StreamConfig,
                              media: AgentConnection.MediaSession) {
+        // The host has agreed to stream and windows are about to be shown, so
+        // the picker has done its job. It was kept open all the way through the
+        // negotiation so that a refusal had somewhere to be said; see `attach`.
+        picker?.close()
+        picker = nil
+
         // Only while something is actually streamed: syncing a clipboard with a
         // machine the user is not looking at would be surprising.
         let bridge = ClipboardBridge(agent: agent)
@@ -682,7 +720,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let session = StreamSession(host: host, config: config, session: media)
         self.session = session
-        session.start()
 
         let tiles = Self.tileLayout(count: targets.count, on: display)
 
@@ -824,6 +861,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 break
             }
         }
+
+        // STARTED LAST, AND THAT IS THE POINT. `start()` calls `onPhase`
+        // synchronously — `.waitingForVideo`, and `.failed` when the socket
+        // will not open at all — so starting it up where the session is built,
+        // before this handler exists and before there is a window to put a
+        // message in, threw both away. The one failure the user most needs to
+        // hear about was the one that vanished: the windows stayed on
+        // "Connecting to <host>" for ever, with the reason only in the log.
+        //
+        // Nothing above this line needs the socket. The host does not send a
+        // byte until the client's first packet reaches it — that ping is what
+        // gets through the NAT — so the only cost of starting here is the few
+        // milliseconds spent building the windows.
+        session.start()
     }
 
     /// Get the host to approve its own pairing PIN.

@@ -670,6 +670,9 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     // GeForce overlay is the usual one) sit above everything and would
     // otherwise report constant false occlusion.
     const bool visible = IsWindowVisible(window) && !IsIconic(window) && CanPaintOver(window);
+    // Whether THIS window ended up in `above`, which the occlusion pass below
+    // needs to know and cannot assume — see the note there.
+    bool self_in_above = false;
     int cloaked = 0;
     if (visible
         && !(SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
@@ -679,6 +682,7 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
             wchar_t occluder_title[128] = {};
             GetWindowTextW(window, occluder_title, 128);
             state->above.emplace_back(frame, ToUtf8(occluder_title));
+            self_in_above = true;
         }
     }
 
@@ -704,11 +708,20 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     info.class_name = ToUtf8(class_name);
 
     // Everything already in `above` was enumerated earlier, i.e. is higher in
-    // the Z-order. The last entry is this window itself. Report whichever
-    // covers the most of the tile ΓÇö the first one found is not necessarily the
-    // one a user would blame.
+    // the Z-order. Report whichever covers the most of the tile ΓÇö the first one
+    // found is not necessarily the one a user would blame.
+    //
+    // The last entry is this window itself ONLY when the block at the top of
+    // this function appended it, and that block has a test the reported list
+    // does not: CanPaintOver. A window that fails it ΓÇö any window built on
+    // UpdateLayeredWindow, which is a great many of them ΓÇö is still a user
+    // window and still gets here, with nothing of its own in `above`. Skipping
+    // the last entry unconditionally therefore skipped a real occluder, and it
+    // skipped the nearest one, which is the one most likely to be over the tile.
+    const size_t occluders =
+        self_in_above ? state->above.size() - 1 : state->above.size();
     long long worst = 0;
-    for (size_t i = 0; i + 1 < state->above.size(); ++i) {
+    for (size_t i = 0; i < occluders; ++i) {
         const RECT& other = state->above[i].first;
         if (!Intersects(other, info.client)) {
             continue;
@@ -1282,6 +1295,13 @@ bool g_require_auth = true;
 /// transcript so that two sessions cannot derive the same keys even on a machine
 /// whose RNG is repeating itself after an image restore -- the one failure that
 /// would otherwise be silent and total.
+///
+/// "Persisted" was the load-bearing half of that sentence and nothing did it:
+/// the counter lived only in this variable, so it restarted at zero with the
+/// process. An image restore takes the agent down with it, which is precisely
+/// the case the counter exists for -- restore the same image twice, get the same
+/// RNG stream, and the first media session of each run derived identical keys.
+/// It is now read at startup and written on every bump, beside the token.
 unsigned long long g_media_count = 0;
 
 std::wstring TokenPath() {
@@ -1346,6 +1366,68 @@ std::string LoadOrCreateToken() {
         CloseHandle(file);
     }
     return fresh;
+}
+
+/// Where the media session counter lives. Beside the token, because it is the
+/// same kind of thing: state this machine must remember across restarts for the
+/// key schedule to mean anything.
+std::wstring MediaCountPath() {
+    wchar_t buffer[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
+        return {};
+    }
+    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\media.count";
+}
+
+/// The counter as it stood when this machine last opened a media session.
+///
+/// A missing or unreadable file reads as zero, which is where an agent that has
+/// never streamed starts anyway. That is the honest answer rather than a safe
+/// one -- if the file cannot be read the counter repeats, exactly as it did
+/// before this existed -- but it is not a reason to refuse to stream.
+unsigned long long LoadMediaCount() {
+    const std::wstring path = MediaCountPath();
+    if (path.empty()) {
+        return 0;
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    char buffer[32] = {};
+    DWORD read = 0;
+    const bool ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0;
+    CloseHandle(file);
+    if (!ok) {
+        return 0;
+    }
+    return std::strtoull(buffer, nullptr, 10);
+}
+
+/// Written before the keys derived from it are used, not after: a crash between
+/// deriving and writing must leave the counter ahead of what was used, never
+/// behind it. Ahead costs a skipped number; behind hands the next session the
+/// same transcript.
+void SaveMediaCount(unsigned long long count) {
+    const std::wstring path = MediaCountPath();
+    if (path.empty()) {
+        return;
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    char text[32] = {};
+    const int written = std::snprintf(text, sizeof(text), "%llu", count);
+    if (written > 0) {
+        DWORD put = 0;
+        WriteFile(file, text, (DWORD) written, &put, nullptr);
+    }
+    CloseHandle(file);
 }
 
 /// Constant-time compare, so a wrong token cannot be found a character at a time
@@ -2333,11 +2415,22 @@ DWORD WINAPI WatcherProc(LPVOID) {
             // is about to stop existing. Re-checking is cheap; holding the lock
             // across the calls above is not, because they block on another
             // process's message pump.
+            //
+            // The rectangle is re-read here as well as the tenancy, and for the
+            // same reason. A `place` arriving in that gap calls SetLockedGeometry
+            // -- it does not touch `generation`, because the tenancy has not
+            // changed -- so the copy taken at the top of the loop is now the OLD
+            // position, and placing it would drag the window straight back off
+            // the tile the Mac has just moved it to. The Mac would then re-issue
+            // the same `place`, and the two would fight at 120ms.
             bool still_ours = false;
             EnterCriticalSection(&g_lock_cs);
             still_ours = g_locks[i].active && g_locks[i].geometry_locked
                       && g_locks[i].window == window
                       && g_locks[i].generation == generation;
+            if (still_ours) {
+                desired = g_locks[i].desired;
+            }
             LeaveCriticalSection(&g_lock_cs);
             if (!still_ours) {
                 continue;
@@ -2451,6 +2544,21 @@ void UnlockWindow(HWND window) {
     LeaveCriticalSection(&g_lock_cs);
     if (!found || !IsWindow(window)) {
         return;
+    }
+    // The same guard SlotWindowGone applies, and for the same reason: WindowLock
+    // carries a pid precisely because IsWindow can come back true for a handle
+    // Windows has since recycled onto somebody else's window. This path did not
+    // apply it, so a window that quit and had its handle reused got a dead
+    // application's saved style, topmost bit and WINDOWPLACEMENT written over
+    // it -- an unrelated program losing its resize border and jumping to the
+    // last tile of a session it was never part of. Doing nothing is the right
+    // answer: the window this slot described no longer exists to restore.
+    if (saved.pid != 0) {
+        DWORD owner = 0;
+        GetWindowThreadProcessId(window, &owner);
+        if (owner != saved.pid) {
+            return;
+        }
     }
 
     SetWindowLongPtrW(window, GWL_STYLE, saved.saved_style);
@@ -3064,6 +3172,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         const std::string hnonceHex = RandomHex(32);
         const std::vector<unsigned char> hnonce = FromHex(hnonceHex);
         const unsigned long long hcount = ++g_media_count;
+        SaveMediaCount(hcount);
         const std::vector<unsigned char> okm =
             DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0);
         if (okm.size() != 108) {
@@ -3329,9 +3438,23 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // Claim a slot even when this window is not geometry-locked, so that
         // whatever happens to the session ΓÇö a clean disconnect or a Mac that
         // simply vanishes ΓÇö the window is known to be owed a trip back down.
+        //
+        // And refuse the command when there is no slot to be had. ClaimSlot
+        // returns -1 once all kMaxLocks are taken, and that return used to be
+        // dropped on the floor: the ninth window was pinned into the always-on-
+        // top band with nothing recording that it had been, so neither
+        // UnlockAll on disconnect nor `topmost off` could put it back. The
+        // window stayed above everything the user did next, with no visible
+        // cause, until the application was restarted. Better to do nothing and
+        // say so.
         EnterCriticalSection(&g_lock_cs);
-        ClaimSlot(window);
+        const int slot = ClaimSlot(window);
         LeaveCriticalSection(&g_lock_cs);
+        if (slot < 0) {
+            Log("[agent] refused topmost: all %d window slots are taken", kMaxLocks);
+            return "{\"type\":\"error\",\"message\":\"too many windows are being "
+                   "managed; close one on the Mac first\"}";
+        }
         // And start watching from here rather than from `lock`. This is the
         // first thing the Mac says about a window it intends to stream, and the
         // watcher is what notices the window being closed ΓÇö an application that
@@ -3366,9 +3489,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             // looks wrong, but the user's keystrokes are going somewhere else.
             char title[128] = {0};
             GetWindowTextA(window, title, sizeof(title) - 1);
-            std::printf("[focus] could not take the foreground for \"%s\";"
-                        " keystrokes will go to whatever holds it\n", title);
-            std::fflush(stdout);
+            // Through Log, not printf. An installed host has had its stdout
+            // reopened on NUL by ReleaseUnwantedConsole, so this line -- the
+            // only trace of a session where the picture is right and the typing
+            // goes somewhere else -- was written to nowhere on every machine
+            // that was not a development box.
+            Log("[focus] could not take the foreground for \"%s\";"
+                " keystrokes will go to whatever holds it", title);
         }
 
         char buffer[128];
@@ -3548,13 +3675,34 @@ void StopCursorWatcher() {
     InterlockedExchange(&g_push_authorised, 0);
 }
 
+/// A session that has proved the token may go this long without saying anything.
+///
+/// Without a receive timeout at all, a peer that vanishes without a FIN (sleep,
+/// VPN drop, cable pull) leaves this blocked in recv forever, and because the
+/// accept loop is single-client the agent never serves anyone again.
+constexpr DWORD kIdleTimeoutMs = 30000;
+
+/// And this long before it has proved anything.
+///
+/// A socket that has authenticated nothing is not owed a session's patience: it
+/// is holding the one slot, and for as long as it does the paired Mac is turned
+/// away. Thirty seconds of that, on repeat, is a denial of service that costs
+/// the attacker one connect() and nothing else.
+///
+/// Not "a few seconds", though, because the legitimate pre-auth state is a
+/// person reading the pairing token off the Windows screen and typing it into a
+/// sheet on the Mac -- the connection stays open across all of it. What keeps
+/// that socket alive is the Mac's ten-second heartbeat, so anything at or below
+/// ten seconds here would drop somebody in the middle of typing.
+constexpr DWORD kPreAuthTimeoutMs = 15000;
+
 void ServeClient(SOCKET client) {
-    // Without a receive timeout a peer that vanishes without a FIN (sleep, VPN
-    // drop, cable pull) leaves this blocked in recv forever, and because the
-    // accept loop is single-client the agent never serves anyone again.
-    DWORD timeout_ms = 30000;
+    // Raised to kIdleTimeoutMs the moment the client authenticates, below.
+    DWORD timeout_ms = g_require_auth ? kPreAuthTimeoutMs : kIdleTimeoutMs;
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*) &timeout_ms, sizeof(timeout_ms));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*) &timeout_ms, sizeof(timeout_ms));
+    const DWORD send_timeout_ms = kIdleTimeoutMs;
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*) &send_timeout_ms,
+               sizeof(send_timeout_ms));
     BOOL keepalive = TRUE;
     setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, (const char*) &keepalive, sizeof(keepalive));
 
@@ -3635,7 +3783,9 @@ void ServeClient(SOCKET client) {
     for (;;) {
         const int n = recv(client, chunk, sizeof(chunk), 0);
         if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
-            Log("[agent] client idle for 30s, dropping");
+            Log("[agent] client idle for %lus%s, dropping",
+                (unsigned long) (timeout_ms / 1000),
+                authenticated ? "" : " without authenticating");
             return;
         }
         if (n <= 0) {
@@ -3710,6 +3860,13 @@ void ServeClient(SOCKET client) {
             // the hello sequence, withheld until now, and the Mac waits for it
             // before doing anything else.
             if (!was_authenticated && authenticated) {
+                // A session may now be quiet for as long as a session may: the
+                // Mac polls nothing while it sits in the application picker,
+                // and the short pre-auth budget above exists to bound a socket
+                // that has proved nothing, not to hurry one that has.
+                timeout_ms = kIdleTimeoutMs;
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           (const char*) &timeout_ms, sizeof(timeout_ms));
                 InterlockedExchange(&g_push_authorised, 1);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
@@ -3725,6 +3882,22 @@ void ServeClient(SOCKET client) {
         // watching. The Mac has no reconnect, so the picture stays live while
         // every window command silently stops working.
         if (buffer.size() > kMaxLineBytes) {
+#ifdef SOLSTREAM_MEDIA
+            // Newline framing only. Everything above -- clearing the buffer,
+            // then resynchronising on the next '\n' -- describes a line, and on
+            // the encrypted channel there are no lines: there is a length
+            // prefix and a sealed record, and 0x0A occurs in ciphertext as
+            // often as any other byte. Run here it threw away half of a record,
+            // then treated an arbitrary byte inside the next one as a frame
+            // boundary, after which every record failed its tag for a reason
+            // nothing could report. A record that cannot be framed cannot be
+            // recovered from, so drop the connection instead.
+            if (g_channel.encrypted) {
+                Log("[agent] a record on the encrypted channel passed %zu bytes "
+                    "without framing; dropping the client", kMaxLineBytes);
+                return;
+            }
+#endif
             Log("[agent] request over %zu bytes, skipping it", kMaxLineBytes);
             buffer.clear();
             discarding = true;
@@ -3916,6 +4089,19 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    // Without this every coordinate we read or write is silently rescaled by
+    // Windows' DPI virtualisation, and windows land in the wrong place on any
+    // display that is not at 100%.
+    //
+    // Here, before any of the branches below, rather than down on the agent
+    // path where it used to sit. The setup window and the uninstall
+    // confirmation are created and returned from above that line, so both of
+    // them ran DPI-unaware — which made the whole per-monitor path in
+    // host_window.cpp dead code for the two windows a new user sees first, and
+    // left them bitmap-stretched and blurry on exactly the high-DPI laptop
+    // panels where it matters. Setting process DPI awareness has to happen
+    // before the first window exists; it cannot be corrected afterwards.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // Installing is the executable's own job. It used to be a PowerShell script,
     // which made the answer to "how do I install this" involve an execution
@@ -4093,10 +4279,10 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 
-    // Without this every coordinate we read or write is silently rescaled by
-    // Windows' DPI virtualisation, and windows land in the wrong place on any
-    // display that is not at 100%.
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // Where the media key schedule's replay counter left off last time this
+    // machine ran. Read once here rather than per session; the write happens at
+    // each bump, in the media handshake.
+    g_media_count = LoadMediaCount();
 
     InitializeCriticalSection(&g_lock_cs);
     InitializeCriticalSection(&g_send_cs);
@@ -4307,7 +4493,18 @@ int wmain(int argc, wchar_t** argv) {
             // The refusal carries the same fields as `status`, so a second Mac
             // can still tell whether the host is healthy — and so can anyone
             // diagnosing it, which is how this was noticed at all.
-            if (g_clients_connected.load() > 0) {
+            //
+            // Keyed on clients that have PROVED the token, not on open sockets.
+            // g_clients_connected counts an accepted socket from the moment it
+            // is accepted and nothing frees it early, so anything that opened
+            // this port and then said nothing — a port scanner, a monitoring
+            // probe, anyone at all — was enough to have the paired Mac told that
+            // this PC was "already streaming to another Mac". The Mac treats
+            // `busy` as final and does not come back, so one connect() locked
+            // the pairing out for the whole idle timeout, and a repeated one
+            // locked it out indefinitely. A genuine second Mac has proved the
+            // token; that is what this now asks.
+            if (g_clients_authenticated.load() > 0) {
                 char name[256] = {};
                 DWORD name_size = sizeof(name);
                 GetComputerNameA(name, &name_size);
@@ -4320,6 +4517,26 @@ int wmain(int argc, wchar_t** argv) {
                 busy += "}";
                 Log("[agent] refused a second client: one is already connected");
                 SendLine(client, busy);
+                closesocket(client);
+                continue;
+            }
+
+            // Somebody holds the socket but has proved nothing: a Mac waiting on
+            // the token prompt, or a stranger sitting on the port. There is
+            // still exactly one of everything below this line — one push
+            // channel, one cursor watcher, one encrypted channel — so this
+            // connection cannot be served beside that one either.
+            //
+            // Closed without a word rather than refused with `busy`, and the
+            // difference is the whole point: an unexplained close is what the
+            // Mac's reconnect backoff is for, so it comes back in a couple of
+            // seconds, by which time the shorter pre-auth timeout in ServeClient
+            // will have freed the slot if nothing was ever going to authenticate
+            // on it. Saying `busy` here would be saying something untrue —
+            // nobody is streaming — to a client that would believe it for good.
+            if (g_clients_connected.load() > 0) {
+                Log("[agent] closed a client on arrival: the socket is held by "
+                    "one that has not authenticated yet");
                 closesocket(client);
                 continue;
             }

@@ -322,6 +322,17 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     // MARK: - Actions
 
     @objc private func openTapped() {
+        // One open at a time, and the check has to be here rather than on the
+        // button. `showBusy` disables the Open button, which is exactly right
+        // for the button — but this method is also the table's `doubleAction`
+        // and what the search field calls on Return, and neither of those asks
+        // the button whether it is enabled. Double-clicking a row that was
+        // already starting therefore ran the whole flow a second time: a second
+        // media session negotiated over the top of the first, and a second
+        // window for the same application. `busyRow` is what `showBusy` sets and
+        // what the selection handler already derives enablement from, so gating
+        // on it here covers all three routes with the state that already exists.
+        guard busyRow == nil else { return }
         let index = tableView.selectedRow
         guard index >= 0, index < rows.count else { return }
         onChoose(rows[index].choice)

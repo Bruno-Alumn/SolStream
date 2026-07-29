@@ -4,6 +4,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <sddl.h>
 
 #include <cstdio>
 #include <string>
@@ -27,6 +28,55 @@ std::wstring TempDirectory() {
     return temp;
 }
 
+/// Where the two halves of an install leave things for each other. Ends in a
+/// backslash, like TempDirectory does.
+///
+/// The result file and the log used to live under GetTempPathW, and %TEMP% is
+/// per-account. UAC is allowed to elevate to a DIFFERENT account -- that is what
+/// happens whenever a standard user types an administrator's name and password
+/// at the prompt rather than clicking Yes -- and when it does, the elevated half
+/// wrote its answer into the administrator's %TEMP% while the window waiting for
+/// it looked in the user's own, found nothing, and told somebody whose install
+/// had just succeeded "The install did not run." The log had the same split: the
+/// setup screen prints the path of the user's copy, which is the one that does
+/// NOT contain the lines explaining what went wrong.
+///
+/// ProgramData is the machine-wide equivalent and is the same path for every
+/// account. The DACL has to be spelled out because the one this folder inherits
+/// gives ordinary users read and execute only: the waiting window could then
+/// read the administrator's result file but not delete it, so the next run would
+/// pick up the last run's answer, and the unelevated half of an uninstall could
+/// not append to the log at all. Users get read, write and delete here, which is
+/// all a transient result file and a log are worth. A folder that already exists
+/// is left alone, ACL included.
+std::wstring SharedDirectory() {
+    wchar_t root[MAX_PATH] = {0};
+    if (GetEnvironmentVariableW(L"ProgramData", root, MAX_PATH) == 0) {
+        wcscpy_s(root, MAX_PATH, L"C:\\ProgramData");
+    }
+    const std::wstring directory = std::wstring(root) + L"\\SolStream";
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength = sizeof(attributes);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFWSD;;;BU)",
+            SDDL_REVISION_1, &descriptor, nullptr)) {
+        attributes.lpSecurityDescriptor = descriptor;
+    }
+    const BOOL made = CreateDirectoryW(directory.c_str(),
+                                       descriptor != nullptr ? &attributes : nullptr);
+    const DWORD made_error = GetLastError();
+    if (descriptor != nullptr) {
+        LocalFree(descriptor);
+    }
+    if (!made && made_error != ERROR_ALREADY_EXISTS) {
+        // Nowhere machine-wide to write. %TEMP% at least exists, and a log only
+        // one of the two accounts can see beats no log.
+        return TempDirectory();
+    }
+    return directory + L"\\";
+}
+
 /// Installing writes a log, because installing is the one thing that happens on
 /// a machine nobody is watching, before there is any window to report into, and
 /// under an elevated relaunch whose console vanishes the moment it returns. A
@@ -34,7 +84,12 @@ std::wstring TempDirectory() {
 /// start; this is the file to ask for.
 void InstallLog(const std::string& line) {
     const std::wstring path = InstallLogPath();
-    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+    // Shared for writing as well as reading: there is one log for the whole
+    // machine now, and the setup window and the elevated half it launched are
+    // both appending to it. Without this the second one to arrive is refused and
+    // its line -- which is the one saying what went wrong -- is simply lost.
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return;
@@ -196,12 +251,20 @@ void StopInstalled(const std::wstring& destination) {
     // belongs to this install without touching a program somebody else set up
     // themselves — which is none of our business and would be a rude surprise.
     const std::wstring mine = std::to_wstring(GetCurrentProcessId());
-    RunHidden(L"powershell.exe -NoProfile -Command \""
-              L"Get-CimInstance Win32_Process | Where-Object { "
-              L"$_.ProcessId -ne " + mine + L" -and $_.ExecutablePath -and "
-              L"$_.ExecutablePath.StartsWith('" + destination + L"\\', "
-              L"[System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "
-              L"Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"");
+    const DWORD code =
+        RunHidden(L"powershell.exe -NoProfile -Command \""
+                  L"Get-CimInstance Win32_Process | Where-Object { "
+                  L"$_.ProcessId -ne " + mine + L" -and $_.ExecutablePath -and "
+                  L"$_.ExecutablePath.StartsWith('" + destination + L"\\', "
+                  L"[System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "
+                  L"Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"");
+    if (code != 0) {
+        // Whatever was running is still running, so the copy that follows is
+        // about to fail on a locked file and say only that it could not copy.
+        // This is the line that explains which of the two things went wrong.
+        InstallLog("could not look for a running copy in the install directory "
+                   "(powershell returned " + std::to_string((int) code) + ")");
+    }
     Sleep(1500);
 }
 
@@ -224,13 +287,24 @@ void DeleteRulesForProgram(const std::wstring& directory) {
     // Windows also creates its own allow rules, named after the executable, when
     // a program first listens and someone clicks Allow. Those are ours to remove
     // too -- nobody else will, and they outlive the file they name.
-    RunHidden(L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
-              L"$dir = '" + directory + L"'; "
-              L"Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { "
-              L"  $r = $_; "
-              L"  $app = ($r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program; "
-              L"  if ($app -and $app -like ($dir + '*')) { "
-              L"    Remove-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue } }\"");
+    const DWORD code =
+        RunHidden(L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
+                  L"$dir = '" + directory + L"'; "
+                  L"Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { "
+                  L"  $r = $_; "
+                  L"  $app = ($r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program; "
+                  L"  if ($app -and $app -like ($dir + '*')) { "
+                  L"    Remove-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue } }\"");
+    if (code != 0) {
+        // The sweep is the only thing that finds rules this build does not know
+        // the names of, so if it did not run, inbound ports are left open for an
+        // executable that is about to be deleted. The uninstall carries on --
+        // there is nothing better to do -- but it does not get to be silent.
+        InstallLog("could not sweep the firewall rules pointing into the install "
+                   "directory (powershell returned " + std::to_string((int) code)
+                   + "); any rule left behind can be removed in Windows Defender "
+                     "Firewall");
+    }
 }
 
 /// One rule, naming both the program and the ports it may use.
@@ -309,6 +383,24 @@ std::wstring DesktopShortcutPath() {
     return folder.empty() ? std::wstring() : folder + L"\\" + kShortcutName;
 }
 
+/// Delete a shortcut, and say so when it will not go.
+///
+/// Not finding one is the ordinary case: it was never written, or somebody
+/// removed it themselves. A refusal is not ordinary, and it leaves a shortcut
+/// pointing at an executable that is no longer there -- which is the sort of
+/// thing reported as "it did not uninstall properly", with nothing to go on.
+void RemoveShortcutFile(const std::wstring& path) {
+    if (DeleteFileW(path.c_str())) {
+        return;
+    }
+    const DWORD code = GetLastError();
+    if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
+        return;
+    }
+    InstallLog("could not remove " + Narrow(path) + " (error "
+               + std::to_string((int) code) + ")");
+}
+
 void WriteShortcuts(const std::wstring& destination, const InstallOptions& options) {
     const std::wstring exe = destination + L"\\SolStream.exe";
     const std::wstring description = L"Stream one Windows application to your Mac";
@@ -320,23 +412,30 @@ void WriteShortcuts(const std::wstring& destination, const InstallOptions& optio
     const bool started_com = SUCCEEDED(com);
 
     const std::wstring start_menu = StartMenuShortcutPath();
-    if (options.start_menu_shortcut && !start_menu.empty()) {
+    if (start_menu.empty()) {
+        // Windows would not name the all-users Start Menu, so there is nothing to
+        // write and nothing to remove. This used to fall through both branches
+        // without a word, which meant a ticked box and no shortcut and no reason.
+        InstallLog("could not find the all-users start menu folder");
+    } else if (options.start_menu_shortcut) {
         InstallLog(CreateShortcut(start_menu, exe, description)
                        ? "start menu shortcut written"
                        : "could not write the start menu shortcut");
-    } else if (!start_menu.empty()) {
+    } else {
         // Not asked for this time. Removing any earlier one keeps the ticks on
         // the setup screen honest across a reinstall.
-        DeleteFileW(start_menu.c_str());
+        RemoveShortcutFile(start_menu);
     }
 
     const std::wstring desktop = DesktopShortcutPath();
-    if (options.desktop_shortcut && !desktop.empty()) {
+    if (desktop.empty()) {
+        InstallLog("could not find the all-users desktop folder");
+    } else if (options.desktop_shortcut) {
         InstallLog(CreateShortcut(desktop, exe, description)
                        ? "desktop shortcut written"
                        : "could not write the desktop shortcut");
-    } else if (!desktop.empty()) {
-        DeleteFileW(desktop.c_str());
+    } else {
+        RemoveShortcutFile(desktop);
     }
 
     if (started_com) {
@@ -347,11 +446,11 @@ void WriteShortcuts(const std::wstring& destination, const InstallOptions& optio
 void RemoveShortcuts() {
     const std::wstring start_menu = StartMenuShortcutPath();
     if (!start_menu.empty()) {
-        DeleteFileW(start_menu.c_str());
+        RemoveShortcutFile(start_menu);
     }
     const std::wstring desktop = DesktopShortcutPath();
     if (!desktop.empty()) {
-        DeleteFileW(desktop.c_str());
+        RemoveShortcutFile(desktop);
     }
 }
 
@@ -371,9 +470,15 @@ void SetRegDword(HKEY key, const wchar_t* name, DWORD value) {
 /// a folder in Program Files that nothing offers to take away.
 void RegisterUninstallEntry(const std::wstring& destination) {
     HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0,
-                        KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
-        InstallLog("could not register in Add/Remove Programs");
+    const LSTATUS opened = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0,
+                                           nullptr, 0, KEY_WRITE, nullptr, &key,
+                                           nullptr);
+    if (opened != ERROR_SUCCESS) {
+        // With the code: this is the difference between "no rights" and "the
+        // hive would not take it", and the log is all anybody has to tell them
+        // apart afterwards.
+        InstallLog("could not register in Add/Remove Programs (error "
+                   + std::to_string((int) opened) + ")");
         return;
     }
     const std::wstring exe = destination + L"\\SolStream.exe";
@@ -395,7 +500,15 @@ void RegisterUninstallEntry(const std::wstring& destination) {
 }
 
 void RemoveUninstallEntry() {
-    RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, KEY_WOW64_64KEY, 0);
+    const LSTATUS status =
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, KEY_WOW64_64KEY, 0);
+    // ERROR_FILE_NOT_FOUND means there was no entry, which is the answer we
+    // wanted. Anything else leaves SolStream listed in Settings > Apps with
+    // nothing behind it, and an Uninstall button that will never work again.
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
+        InstallLog("could not remove the Add/Remove Programs entry (error "
+                   + std::to_string((int) status) + ")");
+    }
 }
 
 /// The task is registered from XML rather than from schtasks' own switches.
@@ -481,13 +594,16 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
 }
 
 std::wstring ResultPath() {
-    return TempDirectory() + L"solstream-install-result.txt";
+    // Shared, not per-account: see SharedDirectory. The whole point of this file
+    // is that it is written by one process and read by another, and those two
+    // are not always the same user.
+    return SharedDirectory() + L"solstream-install-result.txt";
 }
 
 }  // namespace
 
 std::wstring InstallLogPath() {
-    return TempDirectory() + L"solstream-install.log";
+    return SharedDirectory() + L"solstream-install.log";
 }
 
 std::wstring OptionArguments(const InstallOptions& options) {
@@ -516,9 +632,20 @@ void WriteInstallResult(bool ok, const std::string& error) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
+        const DWORD code = GetLastError();
+        // The window on the other side of this file is about to say "The install
+        // did not run", which will be untrue. Nothing here can stop that, but the
+        // log can at least say the install did run and the postbox was locked.
+        InstallLog("could not write " + Narrow(path) + " (error "
+                   + std::to_string((int) code)
+                   + "), so the waiting window will report no result");
         return;
     }
-    const std::string text = ok ? "OK" : ("ERR " + error);
+    // "OK" alone is a clean install. "OK " with something after it is an install
+    // that stands, with a warning attached -- a firewall rule netsh refused, or a
+    // logon task that would not register. Failures keep the ERR form.
+    const std::string text = ok ? (error.empty() ? "OK" : "OK " + error)
+                                : ("ERR " + error);
     DWORD written = 0;
     WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr);
     CloseHandle(file);
@@ -541,6 +668,11 @@ bool ReadInstallResult(std::string& error) {
     DeleteFileW(path.c_str());
     const std::string text(buffer, read);
     if (text.rfind("OK", 0) == 0) {
+        // Anything after the OK is a warning from an install that otherwise
+        // worked, so it comes back in `error` with a true return. Callers that
+        // only look at the return value are unaffected: on a clean install this
+        // is empty.
+        error = text.size() > 3 ? text.substr(3) : std::string();
         return true;
     }
     error = text.size() > 4 ? text.substr(4) : "The install failed.";
@@ -581,6 +713,9 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
                     ? "Windows' permission prompt was dismissed, so nothing was "
                       "changed."
                     : "Could not restart SolStream with administrator rights.";
+        // An uninstall started from Add/Remove Programs has no console and, with
+        // --quiet, no window either, so this is the only place the reason exists.
+        InstallLog("could not elevate: " + error);
         return false;
     }
     if (execute.hProcess) {
@@ -598,7 +733,11 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     // without taking the uninstall with it.
     DeleteFileW(copy.c_str());
     if (!CopyFileW(ExePath().c_str(), copy.c_str(), FALSE)) {
+        const DWORD code = GetLastError();
         error = "Could not make a temporary copy to uninstall from.";
+        // The line above says the uninstall stepped out. Without this one the log
+        // stops there and says nothing about why it never came back.
+        InstallLog(error + " (error " + std::to_string((int) code) + ")");
         return false;
     }
     SHELLEXECUTEINFOW execute{};
@@ -610,6 +749,7 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
         error = "Could not start the uninstaller.";
+        InstallLog(error);
         return false;
     }
     if (execute.hProcess) {
@@ -643,12 +783,17 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     InstallLog("install requested");
     if (!IsElevated()) {
         error = "Installing needs administrator rights.";
+        // The caller shows this, but the log is what somebody reads afterwards
+        // and "install requested" followed by nothing at all is the dead end
+        // this file exists to avoid.
+        InstallLog("refused: " + error);
         return false;
     }
     const std::wstring source = DirectoryOf(ExePath());
     const std::wstring destination = InstallDirectory();
     if (RunningInstalled()) {
         error = "SolStream is already installed here.";
+        InstallLog("refused: " + error);
         return false;
     }
     // ONE FILE. There used to be two shapes to handle: a downloaded executable
@@ -677,33 +822,96 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     }
     InstallLog("copied");
 
+    // What went wrong without going wrong enough to undo the install. An install
+    // that is missing a firewall rule or a logon task is one somebody can finish
+    // by hand or by running setup again; a half-copied Program Files is not, so
+    // only the steps above this line return false. Anything collected here comes
+    // back through `error` with a true return, which is how it reaches the setup
+    // window: the elevated half has no other way to say "it worked, but".
+    //
+    // One clause per thing that did not happen, with no preamble on any of them:
+    // both can fire at once, and the sentence they go into is written below.
+    std::string warning;
+
     // Two rules, both for one executable. There used to be six, covering three
     // TCP and three UDP Sunshine ports derived from a base -- and a directory
     // that had to be created by hand because Sunshine exited 0 before its
     // logging was up if it could not write there.
     const std::wstring exe = destination + L"\\SolStream.exe";
-    AddRule(L"SolStream - agent", exe, L"TCP", std::to_wstring(kDefaultPort));
-    AddRule(L"SolStream - media", exe, L"UDP",
-            std::to_wstring(kDefaultMediaPort) + L","
-            + std::to_wstring(kDiscoveryPort));
-    InstallLog("firewall rules written");
+    // Both answers, and both looked at. These two calls used to have their
+    // results thrown away and "firewall rules written" logged either way, so a
+    // netsh that refused produced an install nothing could connect to and not
+    // one word anywhere saying why -- not in the window, not in the log.
+    const bool agent_rule =
+        AddRule(L"SolStream - agent", exe, L"TCP", std::to_wstring(kDefaultPort));
+    const bool media_rule =
+        AddRule(L"SolStream - media", exe, L"UDP",
+                std::to_wstring(kDefaultMediaPort) + L","
+                + std::to_wstring(kDiscoveryPort));
+    if (agent_rule && media_rule) {
+        InstallLog("firewall rules written");
+    } else {
+        const std::string which =
+            agent_rule ? "the rule for its media and discovery ports"
+                       : (media_rule ? "the rule for its agent port"
+                                     : "either of its rules");
+        InstallLog("firewall: netsh would not add " + which);
+        warning = "Windows Firewall would not accept " + which
+                + ", so your Mac may not be able to reach this PC.";
+    }
 
     WriteShortcuts(destination, options);
     RegisterUninstallEntry(destination);
 
     if (options.start_at_logon) {
-        if (!RegisterLogonTask(destination, error)) {
-            InstallLog("task failed: " + error);
-            return false;
+        // A failure here used to return false out of an install that had already
+        // copied the executable, opened the ports, written the shortcuts and
+        // registered itself in Add/Remove Programs -- so the user was told the
+        // install had failed when the only missing piece was the part that
+        // starts SolStream for them, which they can do from the shortcut. It is
+        // a warning for the same reason the firewall one is: what is left is a
+        // working install, and saying otherwise invites somebody to "fix" it by
+        // installing again over the top.
+        std::string task_error;
+        if (!RegisterLogonTask(destination, task_error)) {
+            // schtasks' own words, with its exit code in them, go to the log.
+            // The window gets the consequence, which is the part the person
+            // reading it can do anything about.
+            InstallLog("task failed: " + task_error);
+            if (!warning.empty()) {
+                warning += " ";
+            }
+            warning += "Windows would not register its logon task, so it will not"
+                       " start by itself when you log in.";
+        } else {
+            InstallLog("logon task registered");
+            const DWORD started =
+                RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
+            // Not worth a warning: the task exists, so the next logon starts it
+            // whatever happened here. Worth a line, because "installed but not
+            // running" is otherwise a mystery to whoever reads this log.
+            InstallLog(started == 0
+                           ? "logon task started"
+                           : "logon task registered, but starting it now returned "
+                                 + std::to_string((int) started));
         }
-        InstallLog("logon task registered");
-        RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
     } else {
         // Asked not to. Clear any task an earlier install left, or the tick on
         // the setup screen is describing something that is not true.
         RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
         InstallLog("logon task not wanted");
     }
+    if (!warning.empty()) {
+        // The install did happen, and that has to be the first thing said --
+        // once, at the front, so a message carrying both clauses does not say it
+        // twice and does not read like a failure.
+        warning = "SolStream is installed, but " + warning
+                + " You can still open it from the Start menu, and running setup"
+                  " again usually puts this right.";
+    }
+    // Empty unless something above filled it. `error` on a true return is a
+    // warning, never a failure.
+    error = warning;
     return true;
 }
 
@@ -711,12 +919,23 @@ bool UninstallSelf(std::string& error) {
     InstallLog("uninstall requested");
     if (!IsElevated()) {
         error = "Removing SolStream needs administrator rights.";
+        InstallLog("refused: " + error);
         return false;
     }
     const std::wstring destination = InstallDirectory();
     RunHidden(L"schtasks.exe /end /tn \"" + std::wstring(kTaskName) + L"\"");
     RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
-    InstallLog("logon task removed");
+    // /delete answers non-zero both for "there was no such task", which is the
+    // answer this wanted, and for "it is there and it would not go", which is a
+    // Windows that goes on trying to start a deleted SolStream.exe at every
+    // logon. Asking whether the task is still there is what tells the two apart,
+    // and this line used to claim the removal either way.
+    if (RunHidden(L"schtasks.exe /query /tn \"" + std::wstring(kTaskName) + L"\"") == 0) {
+        InstallLog("the logon task is still registered — remove \"SolStream Host\""
+                   " in Task Scheduler");
+    } else {
+        InstallLog("logon task removed");
+    }
     StopInstalled(destination);
     InstallLog("stopped what was running from the install directory");
     // By program first, which catches every rule whatever it is called --
@@ -738,7 +957,11 @@ bool UninstallSelf(std::string& error) {
     DeleteRule(L"SolStream (SolStream.exe, UDP)");
     DeleteRule(L"SolStream (sunshine.exe, TCP)");
     DeleteRule(L"SolStream (sunshine.exe, UDP)");
-    InstallLog("firewall rules removed");
+    // Asked for, not necessarily done: netsh answers non-zero for a rule that was
+    // never there, so the names above cannot tell "gone" from "was never here"
+    // and this line must not claim more than it knows. The sweep by program path
+    // is the one that matters, and it says so itself when it fails.
+    InstallLog("asked Windows Firewall to remove every rule this install writes");
     RemoveShortcuts();
     RemoveUninstallEntry();
     InstallLog("shortcuts and the Add/Remove Programs entry removed");
@@ -746,6 +969,7 @@ bool UninstallSelf(std::string& error) {
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
         error = "Removed what it could, but " + Narrow(destination)
               + " is still there — something in it was in use.";
+        InstallLog("uninstall incomplete: " + error);
         return false;
     }
     InstallLog("uninstalled");

@@ -40,7 +40,15 @@ final class StreamSession {
     private let sinkLock = NSLock()
 
     private var isRunning = false
+    /// Guarded by `audioLock`. The audio callback runs on MediaClient's receive
+    /// thread and the main thread stores over this in `start()` and `stop()`,
+    /// and a strong stored property is not a word: loading one retains, storing
+    /// one releases the value that was there. A reader racing the store in
+    /// `stop()` can retain a renderer whose count is already on its way to zero
+    /// and then play into freed memory. The same hazard `pointerStats` below
+    /// describes, on the object with a live CoreAudio unit inside it.
     private var audioRenderer: AudioRenderer?
+    private let audioLock = NSLock()
 
     /// Supplied by the focused window so the stats line can report input.
     ///
@@ -133,7 +141,15 @@ final class StreamSession {
             }
         }
         media.onAudio = { [weak self] pcm, _ in
-            guard let self, let renderer = self.audioRenderer else { return }
+            guard let self else { return }
+            // Copied out under the lock and played outside it: the copy is what
+            // keeps the renderer alive for the length of the call, and holding
+            // a lock across playAudio would put the receive thread and the main
+            // thread's stop() in each other's way two hundred times a second.
+            self.audioLock.lock()
+            let renderer = self.audioRenderer
+            self.audioLock.unlock()
+            guard let renderer else { return }
             renderer.playAudio(pcm)
             self.audioFramesPlayed &+= 1
         }
@@ -164,7 +180,9 @@ final class StreamSession {
 
         // Started here rather than in init: the renderer holds the output device
         // open, and a session that is built but never run should not take it.
+        audioLock.lock()
         audioRenderer = AudioRenderer()
+        audioLock.unlock()
 
         onPhase?(.waitingForVideo)
         guard media.start() else {
@@ -259,8 +277,11 @@ final class StreamSession {
         sinkLock.lock()
         sinks.removeAll()
         sinkLock.unlock()
-        audioRenderer?.stop()
+        audioLock.lock()
+        let renderer = audioRenderer
         audioRenderer = nil
+        audioLock.unlock()
+        renderer?.stop()
         // The pointer numbers were collected all along and never once read, so
         // "my clicks stopped working" left no trace on this side at all — the
         // whole diagnosis had to come from the host. `dropped` being large is

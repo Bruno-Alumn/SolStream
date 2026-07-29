@@ -65,6 +65,17 @@ struct EncoderCallback : public IMFAsyncCallback {
     struct Encoder::Impl* owner = nullptr;
     std::atomic<ULONG> refs{1};
 
+    /// Held for the whole of Invoke, and taken by Close before it releases a
+    /// single one of the interfaces Invoke uses.
+    ///
+    /// It lives here rather than on Impl because Impl is the thing that goes
+    /// away. A callback that had already read `owner` and was about to lock a
+    /// mutex inside Impl would be locking storage that Close had finished with
+    /// and ~Encoder had destroyed. This object is reference counted and the
+    /// work queue holds a reference for the duration of the call, so the mutex
+    /// is still there to be taken however late the callback runs.
+    std::mutex gate;
+
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
         if (riid == IID_IUnknown || riid == __uuidof(IMFAsyncCallback)) {
             *out = static_cast<IMFAsyncCallback*>(this);
@@ -156,14 +167,26 @@ struct Encoder::Impl {
     bool ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
                       IMFMediaBuffer** out);
     bool Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight, int slot);
-    void FeedLocked();
+    /// True only when the MFT took the frame. The caller owns a need-input
+    /// credit and must not spend it on a false.
+    bool FeedLocked();
     void Drain();
     void Emit(LONGLONG pictureTime, bool isIdr);
 };
 
 HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
+    // This runs on an MF work-queue thread while another thread may be inside
+    // Encoder::Close. Testing `running` once at the top was not enough to stop
+    // it: the test passes, Close then releases the event generator, the MFT and
+    // the ICodecAPI and ~Encoder destroys Impl, and this thread carries on into
+    // Drain and Emit through pointers to freed objects. That window is open on
+    // every media stop and every retarget, and when it lands it presents as a
+    // crash during shutdown rather than as a race. Close cannot get past this
+    // lock until the body below has finished, and by the time it can, `owner`
+    // is null, so a callback arriving late does nothing at all.
+    std::lock_guard<std::mutex> gateGuard(gate);
     Encoder::Impl* self = owner;
-    if (!self || !self->running.load()) {
+    if (!self || !self->running.load() || !self->events || !self->mft) {
         return S_OK;
     }
     IMFMediaEvent* event = nullptr;
@@ -176,9 +199,12 @@ HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
 
     if (type == METransformNeedInput) {
         std::lock_guard<std::mutex> guard(self->lock);
-        if (self->havePending) {
-            self->FeedLocked();
-        } else {
+        // The credit this event carries is only spent if a frame actually went
+        // in. FeedLocked can fail to wrap the texture, to make a sample, or to
+        // have ProcessInput accept it; before, all three swallowed the credit,
+        // nothing ever asked for input again and the encoder stopped for good
+        // after one bad frame. Handing it back costs a frame, not the stream.
+        if (!self->havePending || !self->FeedLocked()) {
             ++self->needInput;
         }
     } else if (type == METransformHaveOutput) {
@@ -418,8 +444,8 @@ bool Encoder::Impl::ReadBackNv12(int slot, IMFMediaBuffer** out) {
 
 // ── Submitting and draining ──────────────────────────────────────────────────
 
-void Encoder::Impl::FeedLocked() {
-    if (!havePending) { return; }
+bool Encoder::Impl::FeedLocked() {
+    if (!havePending) { return false; }
     havePending = false;
 
     const uint32_t frameId = nextFrameId++;
@@ -432,7 +458,7 @@ void Encoder::Impl::FeedLocked() {
         // the frame never touches the CPU.
         if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[pendingSlot],
                                              0, FALSE, &buffer))) {
-            return;
+            return false;
         }
         IMF2DBuffer* two = nullptr;
         if (SUCCEEDED(buffer->QueryInterface(__uuidof(IMF2DBuffer), (void**) &two))) {
@@ -446,21 +472,21 @@ void Encoder::Impl::FeedLocked() {
         // No video engine at all: the captured BGRA comes back to the CPU and
         // the colour conversion happens here.
         if (!ConvertOnCpu(pendingBgra, pendingSrcWidth, pendingSrcHeight, &buffer)) {
-            return;
+            return false;
         }
     } else {
         // The software encoder is not D3D-aware, so the NV12 has to come back
         // across the bus. This is exactly the copy the hardware path exists to
         // avoid, and it is why this mode is a fallback rather than an option.
         if (!ReadBackNv12(pendingSlot, &buffer)) {
-            return;
+            return false;
         }
     }
 
     IMFSample* sample = nullptr;
     if (FAILED(MFCreateSample(&sample))) {
         Release(buffer);
-        return;
+        return false;
     }
     sample->AddBuffer(buffer);
     // ONE INTEGER TICK PER FRAME, so the timestamp divides back exactly.
@@ -481,10 +507,19 @@ void Encoder::Impl::FeedLocked() {
         if (codec) { codec->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &on); }
     }
 
-    mft->ProcessInput(0, sample, 0);
-    submitted.fetch_add(1);
+    // ProcessInput can refuse -- MF_E_NOTACCEPTING when the credit was stale,
+    // or an outright failure. Its HRESULT was dropped and the frame counted as
+    // submitted either way, so the pictures/submitted pair in the five-second
+    // log counted frames the MFT never took and the ratio looked like dropped
+    // output rather than input that never went in.
+    const HRESULT fed = mft->ProcessInput(0, sample, 0);
     Release(sample);
     Release(buffer);
+    if (FAILED(fed)) {
+        return false;
+    }
+    submitted.fetch_add(1);
+    return true;
 }
 
 void Encoder::Impl::Drain() {
@@ -564,9 +599,33 @@ void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
     const uint32_t frameId = (uint32_t) (pictureTime / ticksPerFrame);
     Meta& m = meta[frameId % kMetaRing];
 
-    if (isIdr && !sequenceHeader.empty()
-        && !StartsWithSps(picture.data(), picture.size())) {
-        picture.insert(picture.begin(), sequenceHeader.begin(), sequenceHeader.end());
+    if (isIdr && !StartsWithSps(picture.data(), picture.size())) {
+        if (sequenceHeader.empty() && mft) {
+            // Open read MF_MT_MPEG_SEQUENCE_HEADER before NOTIFY_BEGIN_STREAMING,
+            // and some drivers do not fill it in until they have encoded
+            // something. When that happened the header stayed empty for the
+            // whole session and every IDR went out with no SPS and no PPS in
+            // front of it -- which nothing here reports, because the encoder is
+            // happy and it is the receiver that cannot decode. Ask again now
+            // that a picture exists. Only on an IDR the encoder did not inline
+            // the parameter sets into, so this is a handful of calls in a
+            // session rather than one per frame, and it stops asking the moment
+            // an answer arrives.
+            IMFMediaType* current = nullptr;
+            if (SUCCEEDED(mft->GetOutputCurrentType(0, &current)) && current) {
+                UINT32 length = 0;
+                if (SUCCEEDED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &length))
+                    && length > 0) {
+                    sequenceHeader.resize(length);
+                    current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, sequenceHeader.data(),
+                                     length, &length);
+                }
+                current->Release();
+            }
+        }
+        if (!sequenceHeader.empty()) {
+            picture.insert(picture.begin(), sequenceHeader.begin(), sequenceHeader.end());
+        }
     }
 
     if (m.emitted) {
@@ -593,7 +652,16 @@ void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
 // ── Lifetime ─────────────────────────────────────────────────────────────────
 
 Encoder::Encoder() : impl_(std::make_unique<Impl>()) {}
-Encoder::~Encoder() { Close(); }
+Encoder::~Encoder() {
+    Close();
+    // Drop the sink while there is still a live object to drop it from. Close
+    // has just made sure no callback is inside Emit, so this is the point at
+    // which whatever the caller captured -- a session, a queue, a lock -- can be
+    // destroyed without something being part-way through calling it. It is not
+    // done in Close because Open calls Close, and clearing it there would throw
+    // away a sink attached before Open.
+    impl_->sink = nullptr;
+}
 
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                    UINT bitrateBps) {
@@ -769,8 +837,9 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
 
     // The sequence header is only populated once the type is committed, and on
-    // some drivers only after streaming starts -- so it is read here and
-    // re-read on the first IDR if it was not ready.
+    // some drivers only after streaming starts -- so it is read here, and Emit
+    // reads it again on the first IDR that arrives without one if this comes
+    // back empty.
     {
         IMFMediaType* current = nullptr;
         if (SUCCEEDED(s.mft->GetOutputCurrentType(0, &current)) && current) {
@@ -804,17 +873,32 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
 void Encoder::Close() {
     Impl& s = *impl_;
     s.running.store(false);
+    // Detach the callback FIRST, and block here until any Invoke that got past
+    // its `running` test has left. Everything below this point releases
+    // something that Invoke dereferences, so it cannot start until the callback
+    // is provably out.
+    //
+    // The gate is taken and dropped before the drain rather than held across
+    // it. MFT_MESSAGE_COMMAND_DRAIN makes the MFT emit more events, and holding
+    // the lock the callback needs while deliberately provoking the callback is
+    // the one arrangement here that could deadlock. Ordered this way the drain
+    // runs with no callback in flight and no callback able to start: `owner` is
+    // already null, so whatever it provokes returns immediately. The tail of
+    // the encode is thrown away, which is what a stop is.
+    if (s.callback) {
+        {
+            std::lock_guard<std::mutex> guard(s.callback->gate);
+            s.callback->owner = nullptr;
+        }
+        s.callback->Release();
+        s.callback = nullptr;
+    }
     if (s.mft) {
         s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         s.mft->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
         s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
     }
     Release(s.events);
-    if (s.callback) {
-        s.callback->owner = nullptr;
-        s.callback->Release();
-        s.callback = nullptr;
-    }
     Release(s.codec);
     Release(s.mft);
     Release(s.manager);
@@ -835,6 +919,13 @@ void Encoder::Close() {
     Release(s.device);
     s.sequenceHeader.clear();
     s.sourceWidth = s.sourceHeight = 0;
+    // The need-input credits belonged to the transform that has just gone, and
+    // the pending frame points at a texture released above. Carrying either
+    // into a later Open on the same Encoder would feed a transform that never
+    // asked -- and now that a refused ProcessInput hands the credit back
+    // instead of swallowing it, that stale credit would be retried for ever.
+    s.needInput = 0;
+    s.havePending = false;
 }
 
 bool Encoder::Running() const { return impl_->running.load(); }
@@ -876,9 +967,12 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
         s.Drain();
         return true;
     }
-    if (s.needInput > 0) {
+    if (s.needInput > 0 && s.FeedLocked()) {
+        // Spent only on a frame the MFT took. Decrementing first and feeding
+        // afterwards threw the credit away whenever the feed failed, and the
+        // encoder then waited for a METransformNeedInput that had already been
+        // delivered and consumed.
         --s.needInput;
-        s.FeedLocked();
     }
     return true;
 }

@@ -130,15 +130,29 @@ public final class AgentConnection {
     /// exactly what it should do about bytes it cannot authenticate.
     ///
     /// A first connection never notices: there is nothing to say yet. A
-    /// RECONNECT walks straight into it, because `onReconnected` re-applies every
-    /// window's placement the instant the socket is ready — which is how a
-    /// reconnect loop that handshakes perfectly and then dies twenty
-    /// milliseconds later came to look like a crypto bug.
+    /// RECONNECT is what walked into it, because `onReconnected` re-applies
+    /// every window's placement — which is how a reconnect loop that handshakes
+    /// perfectly and then dies twenty milliseconds later came to look like a
+    /// crypto bug. `onReconnected` no longer fires the instant the socket is
+    /// ready; it waits for the auth reply, so what it sends now arrives after
+    /// this window rather than into it. The hold still earns its keep: the
+    /// heartbeat runs on a timer, and anyone already holding this connection can
+    /// ask it something while the proof is on the wire.
     private var authInFlight = false
     private var heldWhileAuthenticating: [(request: [String: Any],
                                            completion: (Result<[String: Any], Error>) -> Void)] = []
 
     public private(set) var displays: [RemoteDisplay] = []
+
+    /// Whether the display list the host volunteers is still to come.
+    ///
+    /// The agent sends exactly one unprompted `displays` per connection, as the
+    /// last part of the greeting: straight after `hello` for a host that wants
+    /// no token, straight after the auth reply for one that does. Every
+    /// `displays` message after that one is the answer to a `displays` request,
+    /// and this flag is what tells them apart — the two are byte-for-byte
+    /// identical on the wire.
+    private var greetingDisplaysPending = false
 
     /// Identifies the Sunshine process now running on the host, so a client can
     /// tell a restart from a continuation. Empty if Sunshine is not running.
@@ -206,12 +220,49 @@ public final class AgentConnection {
     public func supplyToken(_ token: String) {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        self.token = trimmed
-        if !authenticate(with: trimmed) {
-            Log.error("[agent] \(host) offered no auth challenge; refusing to send the token")
-            report(.failed("\(host) is running an older version of SolStream, or "
-                           + "something is impersonating it. Update SolStream on that PC."))
-            dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+        // On `queue`, because everything below it belongs to `queue`. This
+        // writes `token`, `authInFlight`, `pendingEphemeral`, `pendingChallenge`
+        // and `pendingClientNonce` and pushes the auth proof at `connection`,
+        // and it is called from the token sheet on the main thread — so it ran
+        // against the receive callback, which reads and writes every one of
+        // them. What that can produce is a proof interleaved with a record
+        // `send` was in the middle of writing, or `authInFlight` set after the
+        // reply that clears it has already been handled, which leaves every
+        // later request held for the life of the connection.
+        queue.async { [weak self] in
+            guard let self else { return }
+            // A token that is not hexadecimal cannot be a SolStream token: the
+            // host makes 16 random bytes and prints them as hex, and the proof
+            // is an HMAC keyed with those bytes. `authenticate` returns false
+            // for that exactly as it does for a greeting that carried no
+            // challenge, and treating the two alike meant a mistyped or
+            // half-pasted token was announced as host impersonation and then
+            // cleared `wantsConnection`, so there was no way back short of
+            // restarting the app. Ask again instead — the socket is untouched
+            // and the challenge from the greeting is still good.
+            guard Self.bytes(fromHex: trimmed) != nil else {
+                Log.error("[agent] the token typed for \(self.host) is not hexadecimal; "
+                          + "asking again rather than dropping the connection")
+                self.report(.needsToken(host: self.host, rejected: true))
+                return
+            }
+            self.token = trimmed
+            // The other failure that is not the host's fault: the socket went
+            // while the sheet was open. `authenticate` says false to that too,
+            // and calling it impersonation would be just as wrong. Whatever
+            // closed the socket has already reported itself; a reconnect, if one
+            // is coming, meets the greeting with this token now to hand.
+            guard self.connection != nil else {
+                Log.error("[agent] the connection to \(self.host) closed before the "
+                          + "token could be used")
+                return
+            }
+            if !self.authenticate(with: trimmed) {
+                Log.error("[agent] \(self.host) offered no auth challenge; refusing to send the token")
+                self.report(.failed("\(self.host) is running an older version of SolStream, or "
+                                    + "something is impersonating it. Update SolStream on that PC."))
+                self.dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+            }
         }
     }
 
@@ -246,6 +297,25 @@ public final class AgentConnection {
     /// socket drops, so somebody has to say it all again.
     public var onReconnected: (() -> Void)?
 
+    /// Set when a reconnected socket becomes ready, cleared when the handshake
+    /// that follows has finished and `onReconnected` has been called.
+    private var reconnectedNeedsAnnouncing = false
+
+    /// Say the connection is carrying commands again, once.
+    ///
+    /// Deliberately not at `.ready`. Everything `onReconnected` does is a
+    /// command, and at `.ready` not one byte has been read: no greeting, no
+    /// challenge, nothing sent to prove the token, so `authInFlight` is still
+    /// false and the hold that exists for precisely this cannot hold anything.
+    /// The re-placement of every window went out ahead of the proof and came
+    /// back "unauthenticated", so a reconnect handshook perfectly and left every
+    /// window where it was.
+    private func announceReconnection() {
+        guard reconnectedNeedsAnnouncing else { return }
+        reconnectedNeedsAnnouncing = false
+        DispatchQueue.main.async { [weak self] in self?.onReconnected?() }
+    }
+
     public func connect() {
         guard connection == nil else { return }
         wantsConnection = true
@@ -268,6 +338,10 @@ public final class AgentConnection {
         buffer.removeAll()
         authInFlight = false
         heldWhileAuthenticating.removeAll()
+        // A fresh socket gets a fresh greeting, and the greeting's display list
+        // with it.
+        greetingDisplaysPending = true
+        reconnectedNeedsAnnouncing = false
 
         guard let port = NWEndpoint.Port(rawValue: port) else {
             report(.failed("bad port"))
@@ -297,7 +371,11 @@ public final class AgentConnection {
                 self.receive()
                 self.startHeartbeat()
                 if reconnected {
-                    DispatchQueue.main.async { [weak self] in self?.onReconnected?() }
+                    // Noted, not announced: TCP being up is not the same as the
+                    // connection being able to carry a command. See
+                    // `announceReconnection`, which is called once the host has
+                    // said who it is and taken our proof.
+                    self.reconnectedNeedsAnnouncing = true
                 }
             case .failed(let error):
                 Log.error("[agent] connection failed: \(error)")
@@ -821,6 +899,13 @@ public final class AgentConnection {
             guard case .success(let message) = result,
                   message["ok"] as? Bool == true,
                   let width = message["w"] as? Int, let height = message["h"] as? Int,
+                  // Before the multiply below, not after it. `*` traps on
+                  // overflow, and both of these come off the wire: a host
+                  // answering with w = h = 2^32 does not produce a wrong icon,
+                  // it kills the whole client on the spot. The agent extracts
+                  // icons at 64 pixels square, so anything past a few hundred
+                  // is not an icon whatever else it is.
+                  width > 0, height > 0, width <= 1024, height <= 1024,
                   let base64 = message["bgra"] as? String,
                   let bytes = Data(base64Encoded: base64),
                   bytes.count == width * height * 4 else {
@@ -1150,6 +1235,11 @@ public final class AgentConnection {
             // Version 2 exactly. A host offering something else stays in the
             // clear rather than having both ends read each other's bytes as the
             // wrong thing entirely.
+            //
+            // This greeting is cleartext and unauthenticated, so what it says
+            // here settles nothing on its own — see the check on the auth reply,
+            // which refuses to carry on unencrypted with a host this Mac holds a
+            // token for, however the negotiation went.
             hostOffersChannelCrypto = (message["channelCrypto"] as? Int ?? 0) == 2
             channel = nil
             pendingEphemeral = nil
@@ -1204,10 +1294,17 @@ public final class AgentConnection {
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+            } else {
+                // Nothing to prove in either direction, so the greeting is the
+                // whole handshake and the connection can carry commands from
+                // here. This is where a reconnect to a host that wants no token
+                // gets its windows put back.
+                announceReconnection()
             }
             return
         case "auth":
-            if message["ok"] as? Bool == true {
+            let accepted = message["ok"] as? Bool == true
+            if accepted {
                 if let token { Self.rememberToken(token, for: host) }
                 // This reply is the last thing that arrives in the clear, and
                 // it carries the host's half of the exchange. The switch happens
@@ -1241,11 +1338,39 @@ public final class AgentConnection {
                              + "here, with an ephemeral key")
                 } else if pendingEphemeral != nil {
                     Log.error("[agent] \(host) accepted the token but would not "
-                              + "agree channel keys; staying in the clear")
+                              + "agree channel keys")
                 } else {
                     Log.info("[agent] token accepted")
                 }
                 pendingEphemeral = nil
+                // Whether this connection is encrypted at all was decided by a
+                // field in the cleartext, unauthenticated `hello`, and nothing
+                // after it confirms the answer. So anything sitting between the
+                // two machines can delete `channelCrypto` from the greeting —
+                // or `hpub` from this reply — and both ends fall back to
+                // plaintext on their own, each of them satisfied. Nothing looks
+                // wrong afterwards: the session works, and the window titles,
+                // the application list and every clipboard transfer cross in
+                // the clear.
+                //
+                // A Mac holding a token for this host knows the real agent on
+                // it asks for one, and every agent that asks for one also
+                // offers the channel. So an unencrypted channel at this point
+                // is either a build old enough to need updating or somebody in
+                // the middle, and there is no way to tell those apart — which
+                // makes stopping the right answer to both. Not reconnecting,
+                // for the same reason as the impersonation check above: coming
+                // straight back gets the same stripped greeting from the same
+                // stranger.
+                if channel == nil, token != nil {
+                    Log.error("[agent] \(host) took the token but the channel is not "
+                              + "encrypted — refusing to carry on in the clear")
+                    report(.failed("\(host) would not encrypt the connection. Update "
+                                   + "SolStream on that PC; if it is already up to "
+                                   + "date, something may be impersonating it."))
+                    dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+                    return
+                }
             } else {
                 Log.error("[agent] token rejected")
                 Self.forgetToken(for: host)
@@ -1253,6 +1378,11 @@ public final class AgentConnection {
             }
             // Whichever way it went, the framing is now settled on both ends.
             releaseHeldRequests()
+            // Only a connection that got this far can carry a command, which is
+            // exactly what a reconnect's window re-placement is made of. A
+            // refused token leaves us waiting for another one instead, so there
+            // is nothing to announce yet.
+            if accepted { announceReconnection() }
             return
         case "cursor":
             // Unsolicited, like hello: the host pushes it when the Windows
@@ -1294,7 +1424,22 @@ public final class AgentConnection {
             // pending slot with — whoever cares re-asks for the list.
             DispatchQueue.main.async { [weak self] in self?.onWindowsChanged?() }
             return
-        case "displays" where pending.isEmpty:
+        case "displays" where greetingDisplaysPending:
+            // Told from a reply by WHERE IT SITS IN THE CONNECTION, because the
+            // two are identical on the wire and the host sends the unprompted
+            // one exactly once, to finish the greeting.
+            //
+            // What used to stand here was "treat it as a push if nothing is
+            // pending", and that is wrong the moment anything is in flight when
+            // the greeting's list lands. `releaseHeldRequests` arranges
+            // precisely that: it re-sends everything held during the handshake
+            // from inside the same receive that is about to read the push, so
+            // the push is handed to one of them as its answer. `pending` is a
+            // FIFO and the protocol has no request ids, so from that point on
+            // every reply goes to the caller before it, for the life of the
+            // connection — a window's dimensions arriving as the answer to a
+            // clipboard read, and so on down the queue.
+            greetingDisplaysPending = false
             displays = Self.parseDisplays(message)
             Log.info("[agent] \(displays.count) display(s): "
                      + displays.map { "\($0.name) \($0.width)x\($0.height)" }.joined(separator: ", "))

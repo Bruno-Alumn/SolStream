@@ -224,6 +224,19 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// firewall prompt did precisely that during testing: half the streamed
     /// window became a dialog about Sunshine, with nothing on this end to say it
     /// was not the application's own.
+    ///
+    /// Said in the title bar rather than on the status overlay, and that is the
+    /// whole reason this works at all. The overlay is for a window with no
+    /// picture in it: `MetalView.present()` hides it on every frame it draws,
+    /// unconditionally. Being covered on the host is the opposite situation —
+    /// the covering window is inside the captured rectangle, so frames go on
+    /// arriving at sixty a second for the entire time the warning is true — and
+    /// the warning was therefore wiped about sixteen milliseconds after it was
+    /// put up, every time, on a window that was still busily drawing. Nobody
+    /// ever saw one. The subtitle is not touched by the video path and stays
+    /// until this method takes it down, which is what a condition that persists
+    /// needs; it is also where the host's own `occluded` push already says the
+    /// same thing, so the two routes no longer contradict each other.
     private func reportOcclusion(_ status: RemoteWindowStatus) {
         guard !isClosing, status.isOccluded != wasOccluded else { return }
         wasOccluded = status.isOccluded
@@ -231,12 +244,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
             let culprit = status.occludedBy.flatMap { $0.isEmpty ? nil : $0 }
             Log.info("[window] something on the host is covering this window"
                      + (culprit.map { ": \($0)" } ?? ""))
-            setStatus("Something on the PC is covering this window",
-                      detail: culprit.map { "\($0) is on top of it. Move or close it there." }
-                          ?? "Move or close whatever is on top of it.")
+            // The host does not always know what is on top — an unnamed window,
+            // or one belonging to a process it cannot open — and "covered by
+            // something" is still worth saying when the name is missing.
+            setOccludedBy(culprit ?? "Something")
         } else {
             Log.info("[window] the host window is clear again")
-            hideStatus()
+            setOccludedBy(nil)
         }
     }
 

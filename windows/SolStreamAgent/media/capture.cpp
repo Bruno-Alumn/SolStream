@@ -47,6 +47,9 @@ struct Capture::Impl {
     UINT width = 0, height = 0;
 
     std::mutex lock;
+    /// Held by OnFrame for the whole of its body, and taken by Stop. See Stop
+    /// for what goes wrong without it. It is always taken BEFORE `lock`.
+    std::mutex callback;
     std::condition_variable arrived;
     uint64_t serial = 0;
     long long capturedAt = 0;
@@ -118,6 +121,15 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
 }
 
 void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
+    // Taken for the whole body, including the device work below, so that Stop
+    // can wait for an invocation that is already running instead of freeing the
+    // device underneath it. `running` is read under the same mutex Stop clears
+    // it under, so an arrival that gets in after Stop touches neither the device
+    // nor the retained texture.
+    std::lock_guard<std::mutex> alive(callback);
+    if (!running) {
+        return;
+    }
     auto frame = sender.TryGetNextFrame();
     if (!frame) {
         return;
@@ -215,7 +227,17 @@ void Capture::Stop() {
     if (!impl_ || !impl_->running) {
         return;
     }
-    impl_->running = false;
+    // The frame pool is created free-threaded, so OnFrame runs on a thread-pool
+    // thread that this one knows nothing about, and revoke() only unhooks the
+    // handler -- it does not wait for an invocation that has already started.
+    // Clearing `running` under the mutex OnFrame holds for its whole body is
+    // what waits: without it Stop went straight on to close the pool, and the
+    // destructor that calls Stop then freed the device, the context and the
+    // retained texture out from under a CopyResource still in progress.
+    {
+        std::lock_guard<std::mutex> alive(impl_->callback);
+        impl_->running = false;
+    }
     impl_->frameArrived.revoke();
     try {
         if (impl_->session) { impl_->session.Close(); }

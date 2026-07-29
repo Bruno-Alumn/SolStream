@@ -55,8 +55,17 @@ public final class MediaClient {
     /// another thread: it is written by whichever of the three threads notices
     /// the session ending first.
     private var running = false
+    /// Whether the teardown below has already been performed. Guarded by
+    /// `stateLock`, and separate from `running` on purpose: `running` is cleared
+    /// by whichever thread notices the session ending, and `stop()` used to take
+    /// that as "somebody else has cleaned up" when nobody had.
+    private var tornDown = false
     private let sendLock = NSLock()
     private let stateLock = NSLock()
+    /// Held for the whole of `stop()`, so a caller that arrives while the
+    /// session is tearing itself down waits for it rather than being told the
+    /// socket is closed while the receive thread is still inside it.
+    private let teardownLock = NSLock()
     /// Signalled by the receive thread as it leaves, so `stop()` can be sure
     /// nothing is inside the socket before the descriptor is closed.
     private let receiveFinished = DispatchSemaphore(value: 0)
@@ -111,11 +120,53 @@ public final class MediaClient {
     // MARK: - Lifetime
 
     public func start() -> Bool {
+        // Resolve the name. This used to be `inet_pton`, which accepts a dotted
+        // quad and nothing else, so connecting to a host by name never produced
+        // a single frame -- and did it silently, because the agent channel gets
+        // there first and it uses Network.framework, which resolves names
+        // perfectly well. Everything looked connected: the channel was up, the
+        // host agreed a key and started capturing, and the only symptom was a
+        // window that stayed on "Waiting for video" for ever.
+        //
+        // IPv4 only, deliberately. The socket below is AF_INET, the packet path
+        // is a `sockaddr_in` throughout and the host's own sender is IPv4, so an
+        // AAAA answer is of no use here -- better to say so than to connect to
+        // an address nothing will ever send from.
+        //
+        // getaddrinfo blocks, and start() is called on the main thread. That is
+        // survivable because the agent channel has already reached this same
+        // host by this same name moments ago, so the answer is one the resolver
+        // has just been given rather than one it has to go and find.
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_DGRAM,
+                             ai_protocol: IPPROTO_UDP, ai_addrlen: 0, ai_canonname: nil,
+                             ai_addr: nil, ai_next: nil)
+        var resolved: UnsafeMutablePointer<addrinfo>?
+        // The service is the port as a number, so the resolver fills in
+        // `sin_port` as well and there is nothing left to set by hand.
+        let resolution = getaddrinfo(host, String(port), &hints, &resolved)
+        guard resolution == 0, let first = resolved else {
+            Log.error("[media] cannot resolve \(host): "
+                      + String(cString: gai_strerror(resolution)))
+            return false
+        }
+        defer { freeaddrinfo(resolved) }
+
         var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = port.bigEndian
-        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
-            Log.error("[media] \(host) is not an address this build can use")
+        var haveAddress = false
+        var candidate: UnsafeMutablePointer<addrinfo>? = first
+        while let entry = candidate, !haveAddress {
+            if entry.pointee.ai_family == AF_INET, let raw = entry.pointee.ai_addr,
+               entry.pointee.ai_addrlen >= socklen_t(MemoryLayout<sockaddr_in>.size) {
+                address = raw.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                    $0.pointee
+                }
+                haveAddress = true
+            }
+            candidate = entry.pointee.ai_next
+        }
+        guard haveAddress else {
+            Log.error("[media] \(host) resolved, but to no IPv4 address; "
+                      + "this transport cannot use the result")
             return false
         }
 
@@ -178,9 +229,19 @@ public final class MediaClient {
     /// So: stop the clock, make sure no timer handler is still in flight, then
     /// `shutdown` — which wakes `recv` WITHOUT freeing the number — then wait
     /// for the receive thread to actually leave, and only then close.
+    ///
+    /// The gate at the top is `tornDown`, not `running`. It was `running`, and
+    /// that quietly turned this whole function into a no-op for the two ways a
+    /// session ends by itself -- a BYE from the host, and the silence watchdog
+    /// -- because both clear `running` where they stand. The socket, the timer
+    /// and the receive thread survived every such session for the life of the
+    /// process. See `endedByItself` below.
     public func stop() {
+        teardownLock.lock()
+        defer { teardownLock.unlock() }
         stateLock.lock()
-        guard running else { stateLock.unlock(); return }
+        guard !tornDown else { stateLock.unlock(); return }
+        tornDown = true
         running = false
         stateLock.unlock()
 
@@ -211,6 +272,36 @@ public final class MediaClient {
         if fd >= 0 {
             close(fd)
             fd = -1
+        }
+    }
+
+    /// The session ended without anybody here asking: the host said BYE, or the
+    /// watchdog gave up on a host that had gone quiet.
+    ///
+    /// Both paths used to set `running = false` and call `onEnded`, and that was
+    /// all. `stop()` arriving afterwards found `running` already false and
+    /// returned at its first line, so the socket stayed open, the 10 ms timer
+    /// kept firing into it and the receive thread kept sitting in `recv` — one
+    /// set of each, per session, until the app quit.
+    ///
+    /// Neither caller can do the teardown where it stands. The watchdog runs on
+    /// `timerQueue` and `stop()` does `timerQueue.sync {}`, which from that
+    /// queue is an immediate self-deadlock; the BYE is handled on the receive
+    /// thread, and `stop()` waits for that thread to leave `recv`, which it
+    /// cannot do while it is standing inside `stop()`. So `running` is cleared
+    /// here — that is what gets both of them to unwind — and the teardown goes
+    /// somewhere neither of them is. `onEnded` fires after it, so by the time
+    /// anyone hears the session ended, it has actually finished ending.
+    private func endedByItself() {
+        stateLock.lock()
+        guard running else { stateLock.unlock(); return }
+        running = false
+        stateLock.unlock()
+        // Strong on purpose: this client has to outlive its own teardown, and
+        // nothing else is holding it up while the callback runs.
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.stop()
+            self.onEnded?()
         }
     }
 
@@ -350,10 +441,7 @@ public final class MediaClient {
             let silentMs = Self.millis(since: heardAt)
             if silentMs > 5000 {
                 Log.error("[media] the host has been silent for 5 s")
-                self.stateLock.lock()
-                self.running = false
-                self.stateLock.unlock()
-                self.onEnded?()
+                self.endedByItself()
             }
             if ticks % 5 == 0 {
                 self.stateLock.lock()
@@ -469,10 +557,7 @@ public final class MediaClient {
             stateLock.unlock()
         case SMT.typeBye:
             Log.info("[media] the host ended the session")
-            stateLock.lock()
-            running = false
-            stateLock.unlock()
-            onEnded?()
+            endedByItself()
         default:
             break
         }

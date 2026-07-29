@@ -42,6 +42,13 @@ public final class VideoDecoder {
     private let lock = NSLock()
     private var isShutDown = false
 
+    /// A failure the decompression output callback saw, waiting to be dealt
+    /// with by the next `decode()`. Guarded by `failureLock` — which exists
+    /// precisely so that the callback never touches `lock`; see
+    /// `noteAsyncDecodeFailure`.
+    private let failureLock = NSLock()
+    private var pendingAsyncFailure: OSStatus = noErr
+
     /// Called when the decoder needs a keyframe (no parameter sets yet).
     public var onKeyframeNeeded: (() -> Void)?
 
@@ -75,6 +82,19 @@ public final class VideoDecoder {
         lock.lock()
         defer { lock.unlock() }
         guard !isShutDown else { return }
+
+        // Anything the output callback failed on since the last frame. It is
+        // handled here, on the thread that owns the session, rather than there:
+        // see `noteAsyncDecodeFailure`. The session may be dropped by this, in
+        // which case the `session == nil` test further down rebuilds it from
+        // this frame's parameter sets.
+        failureLock.lock()
+        let asyncFailure = pendingAsyncFailure
+        pendingAsyncFailure = noErr
+        failureLock.unlock()
+        if asyncFailure != noErr {
+            noteDecodeFailure(asyncFailure)
+        }
 
         let nalUnits = Self.splitAnnexB(annexB)
         guard !nalUnits.isEmpty else { return }
@@ -193,6 +213,32 @@ public final class VideoDecoder {
         return units
     }
 
+    /// Put a failure the output callback saw where the next `decode()` will
+    /// find it, and do nothing else there.
+    ///
+    /// The callback used to take `lock` and call `noteDecodeFailure` directly,
+    /// and that could hang the thread that submitted the frame against itself.
+    /// `_EnableAsynchronousDecompression` is permission, not a promise:
+    /// VideoToolbox is free to run the output callback on the caller's own
+    /// thread from inside `VTDecompressionSessionDecodeFrame`, and
+    /// `VTDecompressionSessionWaitForAsynchronousFrames` drains outstanding
+    /// callbacks on the calling thread by design. Both of those are called with
+    /// `lock` held, and `lock` is an `NSLock` — not recursive — so the callback
+    /// would wait for a lock its own thread already owned. On the decode path
+    /// that is the media queue stopping dead; on the shutdown path it is the
+    /// main thread, and the app never quits.
+    ///
+    /// Recording the status and leaving is enough. `decode()` picks it up on
+    /// the next frame — 16 ms later at 60fps — and does the logging and the
+    /// session rebuild on the thread that owns the session, which is where
+    /// invalidating a session VideoToolbox is currently standing inside of
+    /// belongs anyway.
+    private func noteAsyncDecodeFailure(_ status: OSStatus) {
+        failureLock.lock()
+        pendingAsyncFailure = status
+        failureLock.unlock()
+    }
+
     /// Deal with a decode failure, rebuilding the session for the errors Apple
     /// documents as recoverable only that way.
     ///
@@ -276,9 +322,7 @@ public final class VideoDecoder {
                 // Asynchronous failures were logged and nothing more, so a
                 // session that malfunctioned only on this path stayed wedged.
                 if status != noErr {
-                    decoder.lock.lock()
-                    decoder.noteDecodeFailure(status)
-                    decoder.lock.unlock()
+                    decoder.noteAsyncDecodeFailure(status)
                 }
                 return
             }
