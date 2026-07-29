@@ -897,6 +897,13 @@ void LayoutAndPaintSetup(HWND window) {
     }
 
     const HRESULT hr = g_target->EndDraw();
+    if (FAILED(hr)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            media::Log("[window] EndDraw failed (0x%08lX) on the setup screen", hr);
+        }
+    }
     if (hr == D2DERR_RECREATE_TARGET) {
         DiscardTarget();
         return;
@@ -906,7 +913,26 @@ void LayoutAndPaintSetup(HWND window) {
 
 void LayoutAndPaint(HWND window) {
     if (!EnsureTarget(window)) {
+        // Once. A paint that fails fails sixty times a second, and a log that
+        // says so sixty times a second is a log nobody reads.
+        static bool said = false;
+        if (!said) {
+            said = true;
+            media::Log("[window] no render target, so nothing is painted");
+        }
         return;
+    }
+    {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            const D2D1_SIZE_F reported = g_target->GetSize();
+            RECT client{};
+            GetClientRect(window, &client);
+            media::Log("[window] painting: target %.0fx%.0f DIPs, client %ldx%ld px, "
+                       "dpi %.0f", reported.width, reported.height,
+                       client.right - client.left, client.bottom - client.top, g_dpi);
+        }
     }
 
     HostStatus status;
@@ -1086,6 +1112,24 @@ void LayoutAndPaint(HWND window) {
         y += metric::kFieldH + space::kLg;
     }
     const float content_bottom = y;
+
+    // PRESENT IT. Without this the whole frame is drawn into a batch that is
+    // never submitted, so the window shows nothing at all -- white, with only
+    // its real child controls visible, and not one Direct2D call failing to say
+    // so. It was lost when the pairing-PIN card was removed: the cut ran from
+    // the card through to the comment below, and this sat between them.
+    const HRESULT hr = g_target->EndDraw();
+    if (FAILED(hr)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            media::Log("[window] EndDraw failed (0x%08lX)", hr);
+        }
+    }
+    if (hr == D2DERR_RECREATE_TARGET) {
+        DiscardTarget();
+        return;
+    }
 
     // After EndDraw, never during it: resizing invalidates the render target
     // this function is holding.
