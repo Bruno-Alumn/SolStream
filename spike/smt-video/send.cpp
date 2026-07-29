@@ -66,6 +66,10 @@ int main(int argc, char** argv) {
     const unsigned short port = argc > 1 ? (unsigned short) std::atoi(argv[1]) : 47631;
     const int frameCount = argc > 2 ? std::atoi(argv[2]) : 300;
     const int fps = argc > 3 ? std::atoi(argv[3]) : 60;
+    // The rate the pacer meters to, in Mbit/s. A real host measures this; here
+    // it is given, because what is being tested is whether metering to a rate
+    // fixes keyframe loss, not whether the rate can be estimated.
+    const double rateMbit = argc > 4 ? std::atof(argv[4]) : 25.0;
 
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -139,6 +143,17 @@ int main(int argc, char** argv) {
         }
     };
     const long long ticksPerFrame = frequency.QuadPart / (fps > 0 ? fps : 60);
+    const double ticksPerByte = (double) frequency.QuadPart / (rateMbit * 1e6 / 8.0);
+
+    // ONE ABSOLUTE SCHEDULE, never a per-frame relative deadline.
+    //
+    // The previous version captured a fresh QueryPerformanceCounter at the top of
+    // each frame and waited a period from there, so every frame's overhead was
+    // added to the next one's start. Three hundred frames of that turned a 5 s
+    // run into 9.3 s -- a "60 fps" sender actually running at 32, with every
+    // throughput figure it printed correspondingly wrong. Anchoring to `started`
+    // makes drift impossible rather than small.
+    long long nextSlot = started.QuadPart;
 
     unsigned long long datagrams = 0, bytes = 0;
     smt::Bytes frame;
@@ -154,18 +169,22 @@ int main(int argc, char** argv) {
         const uint32_t captureUs =
             (uint32_t) ((now.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart);
 
-        // PACE WITHIN THE FRAME. Sending a frame's fragments back to back and
-        // then sleeping is what loses keyframes: a 240 KB IDR is 168 datagrams,
-        // and blasting them takes about 2 ms, which is 950 Mbit/s instantaneous
-        // however modest the average is. Measured, not theorised -- with no
-        // pacing, frames 1, 61, 121, 181 and 241 arrived incomplete on every run
-        // and every P-frame arrived perfectly. Spreading each frame across its
-        // own period costs nothing in latency, because the last fragment leaves
-        // at the same moment either way.
-        LARGE_INTEGER frameStart{};
-        QueryPerformanceCounter(&frameStart);
-        const size_t fragments = (size + kPayload - 1) / kPayload;
-        size_t fragment = 0;
+        // METER TO A RATE, WITH NO FRAME-PERIOD CAP.
+        //
+        // Spreading each frame across its OWN period was the first attempt and it
+        // changed nothing: a 240 KB IDR given the same 16.7 ms as a 40 KB P-frame
+        // still bursts at six times the average rate, and 3.4% of it was lost on
+        // every run -- frames 1, 61, 121, 181 and 241, never a P-frame.
+        //
+        // A frame may not start before its capture time, but it may finish after
+        // its period. That is the whole difference: 240 KB cannot cross a 25
+        // Mbit/s path in 16.7 ms whatever the schedule says, and pretending
+        // otherwise is what produces the burst.
+        const long long frameDeadline =
+            started.QuadPart + (long long) (f - 1) * ticksPerFrame;
+        if (nextSlot < frameDeadline) {
+            nextSlot = frameDeadline;
+        }
 
         for (size_t offset = 0; offset < size; offset += kPayload) {
             const size_t chunk = size - offset < kPayload ? size - offset : kPayload;
@@ -186,18 +205,16 @@ int main(int argc, char** argv) {
             payload.insert(payload.end(), frame.begin() + offset,
                            frame.begin() + offset + chunk);
 
-            waitUntil(frameStart.QuadPart
-                      + (long long) ((double) fragment / (double) fragments
-                                     * (double) ticksPerFrame));
-            ++fragment;
-
             const smt::Bytes datagram = smt::Seal(outbound, sessTag, payload);
+            waitUntil(nextSlot);
             sendto(sock, (const char*) datagram.data(), (int) datagram.size(), 0,
                    (sockaddr*) &peer, peerLen);
+            // The wire cost of THIS datagram, including the IPv4 and UDP headers
+            // the path also has to carry.
+            nextSlot += (long long) ((double) (datagram.size() + 28) * ticksPerByte);
             ++datagrams;
             bytes += datagram.size();
         }
-        waitUntil(frameStart.QuadPart + ticksPerFrame);
     }
     timeEndPeriod(1);
 
