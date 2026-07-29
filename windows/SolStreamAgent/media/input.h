@@ -66,6 +66,18 @@ public:
     /// button down forever.
     void ReleaseAll();
 
+    /// Forget the sequence numbers. MUST be called when a session starts.
+    ///
+    /// THE CLIENT'S SEQUENCE RESTARTS AT 1 FOR EVERY SESSION and this window
+    /// did not, so from the second session onwards the host saw sequence 1 while
+    /// it was holding a highest of a thousand-something, called every event a
+    /// duplicate of something it had already applied, and threw the lot away.
+    /// The first session after the agent started worked perfectly; every session
+    /// after it had no mouse and no scroll wheel at all, while the video, the
+    /// keyboard and resizing the window all went on working — so it read as
+    /// anything but input, and nothing in any log said a word about it.
+    void Reset();
+
 private:
     bool ApplyOne(unsigned char kind, const unsigned char* body, size_t length);
     bool ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) const;

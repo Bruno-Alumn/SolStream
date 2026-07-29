@@ -384,7 +384,8 @@ void MediaSession::Impl::SenderLoop() {
             Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
-                " | audio %llu sent, %llu silent | rx %llu, rejected %llu",
+                " | audio %llu sent, %llu silent | input %llu applied, %llu dup,"
+                " ack %u | rx %llu, rejected %llu",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
                     ? (double) (bytesSent.load() - lastReportBytes) * 8.0 / elapsed / 1e6
@@ -401,6 +402,14 @@ void MediaSession::Impl::SenderLoop() {
                 (unsigned long long) idrRequests.load(),
                 (unsigned long long) audio.Packets(),
                 (unsigned long long) audio.Silent(),
+                // Whether input ARRIVED, which nothing here said before. When
+                // clicks stop landing there are only two possibilities -- the
+                // Mac is not sending them, or the host is not applying them --
+                // and without these three numbers the log is equally consistent
+                // with both. It cost an afternoon to find that out.
+                (unsigned long long) input.Applied(),
+                (unsigned long long) input.Duplicates(),
+                input.Acknowledged(),
                 (unsigned long long) datagramsReceived.load(),
                 (unsigned long long) rejected.load());
             lastReport = now;
@@ -574,6 +583,9 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     InputTarget target;
     target.window = config.window;
     target.monitor = config.monitor;
+    // Before the target, and unconditionally: the injector outlives the session
+    // it belongs to, and its dedupe window is only meaningful within one.
+    s.input.Reset();
     s.input.SetTarget(target);
 
     s.startedAt = Now();

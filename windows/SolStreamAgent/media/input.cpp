@@ -272,6 +272,15 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     return acked_;
 }
 
+void InputInjector::Reset() {
+    started_ = false;
+    highest_ = 0;
+    acked_ = 0;
+    applied_ = 0;
+    duplicates_ = 0;
+    std::memset(seen_, 0, sizeof(seen_));
+}
+
 void InputInjector::ReleaseAll() {
     for (int i = 0; i < keysDownCount_; ++i) {
         INPUT up{};
