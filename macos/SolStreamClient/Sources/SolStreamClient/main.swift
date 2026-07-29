@@ -550,10 +550,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[app] capture display \(capture.name) "
                      + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                      + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
-            // Sunshine encodes exactly one display, chosen by its own config. If
-            // that is not the display we are placing windows on, every crop is
-            // taken from the wrong pixels — so say plainly what it must be set to.
-            Log.info("[app] Sunshine's output_name must resolve to \(capture.name)")
+            // The host encodes exactly this display, because the media session
+            // names it. There is no separate configuration that could disagree
+            // with where the windows are being placed -- which is what the line
+            // that used to be here existed to warn about.
 
             agent.windows { [weak self] windows in
                 guard let self else { return }
@@ -581,12 +581,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           targets: [RemoteWindow], display: RemoteDisplay,
                           config baseConfig: StreamConfig) {
         var config = baseConfig
-        // The encode canvas matches the capture display, which makes Sunshine's
-        // scale factor 1.0 and every crop pixel-exact. It is fixed for the whole
-        // session: `mode=` is negotiated at /launch and ANNOUNCE, so changing it
-        // later would mean tearing the session down and reconnecting. Resizing a
-        // window therefore resizes the WINDOW within a fixed canvas — no display
-        // mode change, no reconnect, no black frame.
+        // The encode canvas matches the capture display, which makes the scale
+        // factor 1.0 and every crop pixel-exact. Fixed for the session: the
+        // encoder's output type is set once, so changing it means a new encoder
+        // and a new parameter set. Resizing a window therefore resizes the
+        // WINDOW within a fixed canvas — no mode change, no reconnect, no black
+        // frame.
         // Clamped to NVENC's H.264 maximum. Above it the handshake succeeds and no
         // frame ever arrives, with the reason only in Sunshine's own log — and a
         // 16" MacBook Pro at More Space asks for 4112x2658, so this is reachable

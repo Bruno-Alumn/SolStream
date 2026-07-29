@@ -4119,6 +4119,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::string busy = "{\"type\":\"busy\",\"message\":\"";
                 busy += JsonEscape(std::string(name) + " is already streaming to "
                                    "another Mac. Disconnect there first.");
+                busy += "\"";
                 busy += ",\"virtualDisplay\":"
                      + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
                 busy += "}";
