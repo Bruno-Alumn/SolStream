@@ -176,6 +176,30 @@ void DeleteRule(const std::wstring& name) {
     RunHidden(L"netsh.exe advfirewall firewall delete rule name=\"" + name + L"\"");
 }
 
+/// Delete every firewall rule this project has ever created, by the program it
+/// points at rather than by name.
+///
+/// Removing them by name needs the uninstaller to know every name any past build
+/// used, and it did not: it deleted "SolStream - agent" and a handful of
+/// Sunshine-era ones, while the build that wrote it had already renamed the
+/// second rule to "SolStream - media" and added others. So an uninstall left
+/// inbound UDP open for an executable that no longer existed -- exactly what the
+/// name list was there to prevent, quietly failing at it. Matching on the
+/// program path cannot go stale the same way: whatever the rule is called, if it
+/// points into the install directory it goes.
+void DeleteRulesForProgram(const std::wstring& directory) {
+    // Windows also creates its own allow rules, named after the executable, when
+    // a program first listens and someone clicks Allow. Those are ours to remove
+    // too -- nobody else will, and they outlive the file they name.
+    RunHidden(L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
+              L"$dir = '" + directory + L"'; "
+              L"Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { "
+              L"  $r = $_; "
+              L"  $app = ($r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program; "
+              L"  if ($app -and $app -like ($dir + '*')) { "
+              L"    Remove-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue } }\"");
+}
+
 /// One rule, naming both the program and the ports it may use.
 ///
 /// Naming the program is what stops Windows asking the user whether to allow it
@@ -662,11 +686,21 @@ bool UninstallSelf(std::string& error) {
     InstallLog("logon task removed");
     StopInstalled(destination);
     InstallLog("stopped what was running from the install directory");
+    // By program first, which catches every rule whatever it is called --
+    // including the ones Windows writes itself when someone clicks Allow.
+    DeleteRulesForProgram(destination);
+    // Then by name, for the Sunshine-era rules that point at an executable this
+    // build no longer installs and so cannot be found by path.
     DeleteRule(L"SolStream - agent");
+    DeleteRule(L"SolStream - media");
+    DeleteRule(L"SolStream - Stream Media");
+    DeleteRule(L"SolStream - Agent (program)");
     DeleteRule(L"SolStream - Sunshine TCP");
     DeleteRule(L"SolStream - Sunshine UDP");
-    // Older installs named their rules differently; leaving those behind would
-    // quietly keep ports open for an executable that no longer exists.
+    DeleteRule(L"SolStream - Sunshine HTTP");
+    DeleteRule(L"SolStream - Sunshine HTTPS");
+    DeleteRule(L"SolStream - Sunshine RTSP");
+    DeleteRule(L"SolStream - Sunshine Web UI");
     DeleteRule(L"SolStream (SolStream.exe, TCP)");
     DeleteRule(L"SolStream (SolStream.exe, UDP)");
     DeleteRule(L"SolStream (sunshine.exe, TCP)");
