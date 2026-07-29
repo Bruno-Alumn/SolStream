@@ -764,7 +764,9 @@ uint64_t IdFromWindow(HWND window) {
 /// do, and the capture path wants a monitor handle. A device restart renumbers
 /// these, which is a known trap on this machine -- so the lookup is done every
 /// time rather than cached.
-HMONITOR MonitorFromDeviceName(const std::string& device_name) {
+/// `maybe_unused`: both callers are inside SOLSTREAM_MEDIA, so a build without
+/// it warns about a function that is not dead, merely not needed there.
+[[maybe_unused]] HMONITOR MonitorFromDeviceName(const std::string& device_name) {
     struct Search {
         std::wstring wanted;
         HMONITOR found = nullptr;
@@ -2855,8 +2857,13 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
     return true;
 }
 
+/// - Parameter channel_cnonce: set to the client's nonce when a v2 auth agreed
+///   channel keys, which tells the caller to switch framing once its reply has
+///   gone out. `maybe_unused` because the only thing that writes it is compiled
+///   out without SOLSTREAM_MEDIA, and a warning there is noise rather than news.
 std::string HandleCommand(const std::string& line, bool& authenticated,
-                          const std::string& challenge, std::string& channel_cnonce) {
+                          const std::string& challenge,
+                          [[maybe_unused]] std::string& channel_cnonce) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
@@ -2912,6 +2919,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 // non-zero": a client that speaks a version this host does not
                 // must stay in the clear rather than have both ends read each
                 // other's bytes as the wrong thing.
+#ifdef SOLSTREAM_MEDIA
+                // Guarded, because everything it reaches for is: both
+                // `DeriveChannelKeys` and `g_pending_channel` are declared
+                // inside SOLSTREAM_MEDIA, and this block was written without a
+                // guard of its own. That made the no-media configuration stop
+                // compiling -- and with it the mingw cross-build, which is the
+                // only way to compile-check this file without the Windows
+                // machine. It failed with "'DeriveChannelKeys' is not a member
+                // of 'solstream::media'", which reads like a missing include
+                // rather than a missing guard.
                 long long wants = 0;
                 std::string cpubHex;
                 if (FieldNumber(line, "channelCrypto", wants) && wants == 2
@@ -2948,6 +2965,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                     }
                     Log("[agent] could not agree channel keys; staying in the clear");
                 }
+#endif  // SOLSTREAM_MEDIA
                 // Said out loud. Which of the two auth paths a client took is
                 // the first question when one of them misbehaves, and until now
                 // a successful authentication left no trace at all -- only a
