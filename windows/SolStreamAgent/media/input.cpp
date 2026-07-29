@@ -36,26 +36,37 @@ bool IsExtended(unsigned short vk) {
 }  // namespace
 
 void InputInjector::SetTarget(const InputTarget& target) {
+    std::lock_guard<std::mutex> guard(targetLock_);
     target_ = target;
 }
 
 bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) const {
+    // A copy, taken and released before anything below calls into Windows.
+    // Retarget writes the target from the agent's command thread while this runs
+    // on the receive thread, and DwmGetWindowAttribute on a window whose process
+    // is not answering can take a long time -- so holding the lock across it
+    // would stall the retarget that is trying to point somewhere else.
+    InputTarget target;
+    {
+        std::lock_guard<std::mutex> guard(targetLock_);
+        target = target_;
+    }
     RECT area{};
-    if (target_.window && IsWindow(target_.window)) {
+    if (target.window && IsWindow(target.window)) {
         // The DWM frame bounds, not GetWindowRect. GetWindowRect includes the
         // invisible resize border Windows 10 and 11 put around a window, so
         // every coordinate derived from it is a few pixels off in both axes --
         // which reads as a calibration bug rather than as the wrong rectangle.
-        if (FAILED(DwmGetWindowAttribute(target_.window, DWMWA_EXTENDED_FRAME_BOUNDS,
+        if (FAILED(DwmGetWindowAttribute(target.window, DWMWA_EXTENDED_FRAME_BOUNDS,
                                          &area, sizeof(area)))) {
-            if (!GetWindowRect(target_.window, &area)) {
+            if (!GetWindowRect(target.window, &area)) {
                 return false;
             }
         }
-    } else if (target_.monitor) {
+    } else if (target.monitor) {
         MONITORINFO info{};
         info.cbSize = sizeof(info);
-        if (!GetMonitorInfoW(target_.monitor, &info)) {
+        if (!GetMonitorInfoW(target.monitor, &info)) {
             return false;
         }
         area = info.rcMonitor;
@@ -130,9 +141,17 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                     // the HOST -- which may be something the user walked away
                     // from. Raising it on a press is the least surprising place
                     // to do it.
-                    if (target_.window && IsWindow(target_.window)
-                        && GetForegroundWindow() != target_.window) {
-                        SetForegroundWindow(target_.window);
+                    //
+                    // Through a copy, as everywhere else the target is read: the
+                    // command thread can be retargeting this session while the
+                    // receive thread is in here.
+                    HWND raise = nullptr;
+                    {
+                        std::lock_guard<std::mutex> guard(targetLock_);
+                        raise = target_.window;
+                    }
+                    if (raise && IsWindow(raise) && GetForegroundWindow() != raise) {
+                        SetForegroundWindow(raise);
                     }
                 } else {
                     buttonsDown_ &= (unsigned char) ~(1u << (button - 1));
@@ -197,7 +216,7 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
 
 uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     if (length < 4 || plaintext[0] != 0x30) {
-        return acked_;
+        return acked_.load();
     }
     const int count = plaintext[1];
     size_t at = 4;
@@ -214,7 +233,32 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
         // Deduplicate. The client repeats deliberately -- a lost key-up is a key
         // that stays down -- so a repeat is the normal case and must be cheap
         // and silent, not a warning.
-        bool duplicate = false;
+        //
+        // The window is only ASKED here. It used to be written here as well,
+        // before the event had been applied, so an event with a body too short
+        // for its kind, or one whose SendInput was rejected, was recorded as
+        // seen and then acknowledged like any other. The Mac deletes an
+        // acknowledged event: it keeps a tail of 32 and stops repeating 300 ms
+        // after the last new event, so the event was gone from both machines and
+        // a key-up lost that way left the key down with nothing to release it.
+        // Recording now happens below, once ApplyOne has said it worked.
+        if (started_ && seq <= highest_) {
+            const uint32_t behind = highest_ - seq;
+            if (behind >= 1024 || ((seen_[behind / 64] >> (behind % 64)) & 1)) {
+                duplicates_.fetch_add(1);
+                continue;
+            }
+        }
+
+        if (!ApplyOne(kind, body, bodyLen)) {
+            // Left out of the window deliberately. An unrecorded sequence is one
+            // the acknowledgement will not cover, so the client keeps repeating
+            // it and the next copy gets another attempt -- which is the whole
+            // point of numbering events in the first place.
+            continue;
+        }
+        applied_.fetch_add(1);
+
         if (!started_) {
             started_ = true;
             highest_ = seq;
@@ -238,46 +282,47 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
             seen_[0] |= 1;
         } else {
             const uint32_t behind = highest_ - seq;
-            if (behind >= 1024) {
-                duplicate = true;
-            } else if ((seen_[behind / 64] >> (behind % 64)) & 1) {
-                duplicate = true;
-            } else {
-                seen_[behind / 64] |= 1ull << (behind % 64);
-            }
-        }
-        if (duplicate) {
-            ++duplicates_;
-            continue;
-        }
-
-        if (ApplyOne(kind, body, bodyLen)) {
-            ++applied_;
+            seen_[behind / 64] |= 1ull << (behind % 64);
         }
     }
 
     // The acknowledgement is the highest CONTIGUOUS sequence: the client stops
     // repeating an event only when the host says it has everything up to it,
     // and a gap has to hold that line or the missing event is never repeated.
-    uint32_t contiguous = highest_;
-    for (uint32_t behind = 1; behind < 1024 && behind < highest_; ++behind) {
-        if (!((seen_[behind / 64] >> (behind % 64)) & 1)) {
-            // seq (highest_ - behind) never arrived, so everything at or above
-            // it is unacknowledged however much of it landed.
-            contiguous = highest_ - behind - 1;
-            break;
-        }
+    //
+    // Counted UP FROM WHAT WAS LAST ACKNOWLEDGED, which starts at zero, rather
+    // than down from the highest sequence seen. Counting down made the top of
+    // the window into evidence about everything beneath it, and there is none:
+    // a session whose first datagram to survive the network carried seq 3
+    // answered "I have everything up to 1" about an event that had never reached
+    // this machine, and the Mac then deleted it. Counting up can only ever step
+    // over a sequence this injector has applied itself, so every number it
+    // reports is one it has actually earned -- and the same rule holds the line
+    // when a long blackout slides the window past a gap: `behind` runs off the
+    // end of the window, the ack stops there and stays there.
+    //
+    // A stuck acknowledgement costs repetition, which is cheap -- the client
+    // resends at most eight events every 10 ms, and every one of them is still
+    // applied here exactly once. A wrong one costs an event that both ends have
+    // forgotten and neither applied, which for a key-up means a key held down
+    // until the session ends.
+    uint32_t acked = acked_.load();
+    while (started_ && acked < highest_) {
+        const uint32_t behind = highest_ - (acked + 1);
+        if (behind >= 1024) { break; }
+        if (!((seen_[behind / 64] >> (behind % 64)) & 1)) { break; }
+        ++acked;
     }
-    acked_ = contiguous;
-    return acked_;
+    acked_.store(acked);
+    return acked;
 }
 
 void InputInjector::Reset() {
     started_ = false;
     highest_ = 0;
-    acked_ = 0;
-    applied_ = 0;
-    duplicates_ = 0;
+    acked_.store(0);
+    applied_.store(0);
+    duplicates_.store(0);
     std::memset(seen_, 0, sizeof(seen_));
 }
 

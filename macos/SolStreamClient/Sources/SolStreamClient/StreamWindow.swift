@@ -194,6 +194,15 @@ final class StreamWindow: NSObject {
 
 extension StreamWindow: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        // ORDER MATTERS, and this window never got the order the application
+        // windows were given. `disableCapture` is what releases everything the
+        // hand was still holding when the window closed — a modifier, a key, a
+        // mouse button pressed on the title bar — and each of those releases is
+        // an input packet that goes out over the media socket. Stopping the
+        // stream first, which is what happened here, closed that socket while
+        // the releases were still to be sent, so they went nowhere and the host
+        // was left holding a key with nothing left alive to let go of it.
+        inputCapture?.disableCapture()
         stopStreaming()
         onClose?()
     }

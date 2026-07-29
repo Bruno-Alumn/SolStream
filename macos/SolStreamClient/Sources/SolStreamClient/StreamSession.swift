@@ -49,6 +49,10 @@ final class StreamSession {
     /// describes, on the object with a live CoreAudio unit inside it.
     private var audioRenderer: AudioRenderer?
     private let audioLock = NSLock()
+    /// Whether the host was asked for its speakers at all. Kept from the config
+    /// because `start()` is where the renderer is built, and building one for a
+    /// session that asked for no audio takes the output device to play nothing.
+    private let wantsAudio: Bool
 
     /// Supplied by the focused window so the stats line can report input.
     ///
@@ -113,6 +117,7 @@ final class StreamSession {
     init(host: String, config: StreamConfig, session: AgentConnection.MediaSession) {
         self.host = host
         self.canvasSize = CGSize(width: config.width, height: config.height)
+        self.wantsAudio = config.audio
         self.media = MediaClient(keys: session.keys, host: host, port: session.port)
 
         // One decoder, fanned out to every attached window. Each window carries
@@ -180,14 +185,31 @@ final class StreamSession {
 
         // Started here rather than in init: the renderer holds the output device
         // open, and a session that is built but never run should not take it.
-        audioLock.lock()
-        audioRenderer = AudioRenderer()
-        audioLock.unlock()
+        //
+        // And only when audio was asked for. `config.audio` false means the
+        // host is sending none, so the renderer that was built anyway opened the
+        // default output device, kept a CoreAudio unit running and had nothing
+        // whatever to play through it for the length of the session.
+        if wantsAudio {
+            audioLock.lock()
+            audioRenderer = AudioRenderer()
+            audioLock.unlock()
+        }
 
         onPhase?(.waitingForVideo)
         guard media.start() else {
             onPhase?(.failed("Could not open the media socket."))
             isRunning = false
+            // Hand the output device back here, because nothing else ever will.
+            // `stop()` returns immediately while `isRunning` is false — which it
+            // is again by the line above — so the teardown down there never runs
+            // for a session that failed to start, and the renderer sat on the
+            // device until the whole session was released.
+            audioLock.lock()
+            let renderer = audioRenderer
+            audioRenderer = nil
+            audioLock.unlock()
+            renderer?.stop()
             return
         }
         startWatchdog()

@@ -439,6 +439,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         start(host: host, agent: agent, targets: [window])
     }
 
+    /// NVENC's H.264 maximum, and now a number both ends have to agree on.
+    ///
+    /// Above it the handshake succeeds and no frame ever arrives, with the
+    /// reason only in the host's own log — and a 16" MacBook Pro at More Space
+    /// asks for 4112x2658, so this is reachable with ordinary hardware rather
+    /// than a pathological setup. Every request the Mac sends is clamped to it
+    /// per axis, and the host clamps to the same figure, so the two arrive at
+    /// the same canvas rather than at two that merely resemble each other.
+    private static let encoderLimit = 4096
+
     /// The canvas this Mac wants the host to render at.
     ///
     /// Its screen in points times the backing scale factor: that is exactly how
@@ -449,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func desiredCanvas() -> CGSize? {
         guard let screen = NSScreen.main else { return nil }
         let scale = screen.backingScaleFactor
-        let limit: CGFloat = 4096
+        let limit = CGFloat(encoderLimit)
         return CGSize(width: min((screen.frame.width * scale).rounded(), limit),
                       height: min((screen.frame.height * scale).rounded(), limit))
     }
@@ -534,13 +544,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // that carried no usable display still leaves a way in.
             agent.onDisplays = nil
             var sized = config
-            sized.width = capture.width
-            sized.height = capture.height
+            // Clamped, and then the clamped figures are what the host is asked
+            // for. Both ends clamp per axis to the same number, so what this
+            // window is shaped for and what the encoder produces are the same
+            // rectangle rather than two that differ on one side.
+            sized.width = min(capture.width, Self.encoderLimit)
+            sized.height = min(capture.height, Self.encoderLimit)
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let request = AgentConnection.MediaRequest(
+                var request = AgentConnection.MediaRequest(
                     display: capture.name, fps: sized.frameRate,
                     bitrate: sized.bitrateKbps * 1000, audio: sized.audio)
+                request.width = sized.width
+                request.height = sized.height
                 guard let media = await agent.openMediaSession(request), media.streaming else {
                     Log.error("[desktop] \(host) would not start streaming")
                     return
@@ -552,6 +568,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard let self else { return }
                     self.streamWindows.removeAll { $0 === streamWindow }
                     self.session = nil
+                    // End the media session by asking, exactly as the application
+                    // path does — this line was only ever on that path. The UDP
+                    // BYE that `stop()` has just sent sets `running = false` on
+                    // the host and nothing else: its capture, encoder, sender and
+                    // receive threads, its socket and its keys all survive until
+                    // somebody starts another session, so closing the mirror left
+                    // the host busy with a stream nobody was watching.
+                    agent.closeMediaSession()
                     if self.streamWindows.isEmpty && !self.testMode {
                         self.showConnectWindow()
                     }
@@ -646,11 +670,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.connect()
     }
 
+    /// Get permission before streaming a real monitor, because the crop the user
+    /// is shown is not the boundary of what leaves the host.
+    ///
+    /// Returns true when the session may go ahead: always on a virtual display,
+    /// and on a real one only if the person at this Mac said so having been told
+    /// what it means. `isVirtual` is the right test rather than `isCaptured` —
+    /// `isCaptured` says the host is encoding this display, which is true in
+    /// exactly the case being warned about; what makes a display safe to encode
+    /// whole is that no ordinary window can be on it.
+    ///
+    /// Not a silent downgrade to something safer, either. Refusing outright
+    /// would make SolStream useless on every PC without the display driver, and
+    /// quietly streaming a different display would mean the crops come out of
+    /// the wrong pixels — so the choice is put to the person whose desktop it is.
+    private func confirmWholeDisplayCapture(host: String, display: RemoteDisplay,
+                                            targets: [RemoteWindow]) -> Bool {
+        guard !display.isVirtual else { return true }
+
+        let names = targets.map { $0.title }.joined(separator: ", ")
+        Log.error("[app] \(display.name) [\(display.adapter)] is a real monitor, not a "
+                  + "virtual display. The stream carries the whole of it, so everything "
+                  + "on that monitor is sent and not just \(names).")
+
+        // The test paths never see the alert, and must not: they drive the app
+        // from the command line and photograph it on a timer, and `runModal`
+        // stops that timer ever firing — the run would hang rather than fail.
+        // The log line above is the whole of the warning there.
+        guard !testMode else { return true }
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Streaming this would send the whole of \(display.name)"
+        alert.informativeText = """
+            \(host) has no virtual display for SolStream to put \(names) on, so it will \
+            capture that whole monitor and show you a piece of the picture. Everything \
+            else on the monitor is captured with it — every other window, and anything \
+            that opens there while you are connected — and all of it crosses the network.
+
+            Installing the virtual display driver on \(host) is what makes streaming one \
+            application send one application.
+            """
+        // "Don't Stream" first, so it is the default and Return is the safe
+        // answer to a question about somebody's desktop.
+        alert.addButton(withTitle: "Don't Stream")
+        alert.addButton(withTitle: "Stream the Whole Monitor")
+        let proceed = alert.runModal() == .alertSecondButtonReturn
+        Log.info("[app] whole-monitor capture was \(proceed ? "accepted" : "refused")")
+        return proceed
+    }
+
     /// Lay the chosen windows out side by side on the capture display, then open
     /// one native window per app over a single shared stream.
     private func openApps(host: String, agent: AgentConnection,
                           targets: [RemoteWindow], display: RemoteDisplay,
                           config baseConfig: StreamConfig) {
+        // What is really being sent, said before any of it is sent.
+        //
+        // "Stream one application" is not a capture boundary. The host encodes
+        // ONE DISPLAY and each window below shows a crop of the decoded frame,
+        // so every pixel of that display is encoded, encrypted and put on the
+        // wire whatever the crops happen to show. On the virtual display that
+        // costs nobody anything, because nothing else is ever on it — which is
+        // the whole reason the virtual display exists. On a real monitor it
+        // means the entire desktop of the person sitting at that PC crosses the
+        // network while this application's own interface says one application is
+        // being streamed. The host falls back to a real monitor by itself
+        // whenever the virtual display driver is missing or stopped, and says so
+        // only in its own log, on the machine nobody is looking at.
+        guard confirmWholeDisplayCapture(host: host, display: display, targets: targets) else {
+            picker?.clearBusy()
+            picker?.showFailure("Nothing was streamed. \(display.name) on \(host) is a real "
+                                + "monitor, so everything on it would have been sent, not "
+                                + "just \(targets.count == 1 ? "this window" : "these windows").")
+            return
+        }
+
         var config = baseConfig
         // The encode canvas matches the capture display, which makes the scale
         // factor 1.0 and every crop pixel-exact. Fixed for the session: the
@@ -658,13 +753,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and a new parameter set. Resizing a window therefore resizes the
         // WINDOW within a fixed canvas — no mode change, no reconnect, no black
         // frame.
-        // Clamped to NVENC's H.264 maximum. Above it the handshake succeeds and no
-        // frame ever arrives, with the reason only in Sunshine's own log — and a
-        // 16" MacBook Pro at More Space asks for 4112x2658, so this is reachable
-        // with ordinary hardware rather than a pathological setup.
-        let encoderLimit = 4096
-        config.width = min(display.width, encoderLimit)
-        config.height = min(display.height, encoderLimit)
+        // Clamped to NVENC's H.264 maximum; see `encoderLimit`. The clamp is
+        // also sent now, where before it stayed on this Mac and the host went on
+        // encoding the raw source size.
+        config.width = min(display.width, Self.encoderLimit)
+        config.height = min(display.height, Self.encoderLimit)
         if config.width != display.width || config.height != display.height {
             Log.info("[canvas] capture display is \(display.width)x\(display.height); "
                      + "clamped to \(config.width)x\(config.height) for the encoder")
@@ -679,11 +772,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the host declining to capture.
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let request = AgentConnection.MediaRequest(
+            var request = AgentConnection.MediaRequest(
                 display: display.name,
                 fps: config.frameRate,
                 bitrate: config.bitrateKbps * 1000,
                 audio: config.audio)
+            // The canvas, said out loud. The clamp above was computed here and
+            // then kept here: the host encoded whatever size the source happened
+            // to be, so a capture display past the encoder's limit negotiated
+            // perfectly, reported itself as streaming, and produced no video at
+            // all. It is also the size every crop below is expressed in, so the
+            // two must be the same number and not merely usually equal.
+            request.width = config.width
+            request.height = config.height
             guard let media = await agent.openMediaSession(request) else {
                 Log.error("[app] \(host) refused the media session")
                 self.picker?.clearBusy()

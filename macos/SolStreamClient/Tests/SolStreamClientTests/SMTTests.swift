@@ -278,14 +278,50 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertTrue(damaged.isEmpty)
     }
 
-    func testAPictureLargerThanTheBufferIsReportedRatherThanCrashing() {
+    /// The buffer grows now, so "larger than the buffer" is no longer a
+    /// condition — 512 KB was a starting size, not a limit, and a picture past
+    /// it used to be dropped for ever. What is still a refusal is a picture
+    /// larger than the ceiling the offset field can address at all.
+    func testAPictureLargerThanTheCeilingIsReportedRatherThanCrashing() {
         let reassembler = VideoReassembler()
         var damaged: [UInt32] = []
         reassembler.onDamaged = { damaged.append($0) }
-        reassembler.ingest(fragment(frameId: 6, offset: 524_000,
+        reassembler.ingest(fragment(frameId: 6, offset: 16_777_000,
                                     payload: Data(repeating: 2, count: 1432),
                                     start: false, end: true))
         XCTAssertEqual(damaged, [6])
+    }
+
+    /// Completion must mean every byte is present, not that as many bytes as
+    /// the picture is long have arrived. A duplicated fragment used to inflate
+    /// the running total past the picture's length while a hole was still open,
+    /// and the picture went to the decoder with zeroes where the missing
+    /// fragment belonged — which decodes as a corrupt frame, not as an error.
+    func testAnOverlappingFragmentDoesNotCompleteAPictureWithAHole() {
+        let reassembler = VideoReassembler()
+        var pictures: [VideoReassembler.Picture] = []
+        reassembler.onPicture = { pictures.append($0) }
+
+        let whole = Data((0..<2000).map { UInt8(($0 * 11) % 251) })
+        reassembler.ingest(fragment(frameId: 11, offset: 0,
+                                    payload: whole.prefix(1000),
+                                    start: true, end: false))
+        // The same fragment again. Summing lengths would call the picture
+        // complete here even though 1000..1500 has never arrived.
+        reassembler.ingest(fragment(frameId: 11, offset: 0,
+                                    payload: whole.prefix(1000),
+                                    start: true, end: false))
+        reassembler.ingest(fragment(frameId: 11, offset: 1500,
+                                    payload: whole.dropFirst(1500),
+                                    start: false, end: true))
+        XCTAssertTrue(pictures.isEmpty,
+                      "1000 to 1500 never arrived; a repeat must not stand in for it")
+
+        reassembler.ingest(fragment(frameId: 11, offset: 1000,
+                                    payload: whole.dropFirst(1000).prefix(500),
+                                    start: false, end: false))
+        XCTAssertEqual(pictures.count, 1)
+        XCTAssertEqual(pictures.first?.bytes, whole)
     }
 }
 

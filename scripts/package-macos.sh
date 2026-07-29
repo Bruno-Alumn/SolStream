@@ -23,6 +23,30 @@ BUILD_DIR=".build/release"
 DMG_NAME="${PRODUCT_NAME}.dmg"
 DMG_DIR=".build/dmg"
 
+# The version, read from the one line that decides it rather than typed here as
+# well. It used to be typed in both places and they had drifted: the bundle said
+# 0.2.0 while the application it contained logged v0.3 at startup, so the Get
+# Info panel and the log a user sends back with a bug report disagreed about
+# which build they were looking at — and the log is the one that gets believed,
+# because it comes from the running program.
+#
+# main.swift wins because that string is what reaches a user's log. Reading it
+# here is what stops the two drifting again. An empty read is a hard failure
+# rather than a default, since a bundle stamped with the wrong version is worth
+# less than no bundle at all: fix the line, or fix this, before packaging.
+VERSION_SOURCE="Sources/SolStreamClient/main.swift"
+VERSION=$(sed -n '/Log\.startSession(version:/ {
+    s/.*version: "v\{0,1\}\([0-9][0-9.]*\)".*/\1/p
+    q
+}' "$VERSION_SOURCE")
+if [ -z "$VERSION" ]; then
+    echo "ERROR: could not read the version from $VERSION_SOURCE."
+    echo "       It is the Log.startSession(version: \"vX.Y\") call in"
+    echo "       applicationDidFinishLaunching; if that line has changed shape,"
+    echo "       this script has to be taught the new one."
+    exit 1
+fi
+
 # Parse flags
 DEV_BUILD=false
 DO_NOTARIZE=false
@@ -34,6 +58,7 @@ for arg in "$@"; do
 done
 
 echo "=== SolStream macOS Package ==="
+echo "Version: $VERSION"
 echo "Dev build: $DEV_BUILD"
 echo "Notarize: $DO_NOTARIZE"
 
@@ -46,6 +71,16 @@ swift build --configuration release
 # under the product's name -- which is not the bundle's name, so it is renamed
 # on the way in to match CFBundleExecutable below.
 APP_PATH="$BUILD_DIR/$PRODUCT_NAME.app"
+# Removed first, so what ships is exactly what this run assembled. Everything
+# below writes three files — the executable, the icon and Info.plist — and
+# overwrites each of them, but it removes nothing, so anything an earlier build
+# left in the bundle and this one does not produce simply stayed: a resource
+# since deleted from the tree, a helper from a layout that no longer exists.
+# codesign --force re-seals whatever it finds rather than deciding what belongs,
+# so a leftover is signed, notarised and copied into the DMG exactly as though
+# somebody had meant to put it there. Rebuilding the bundle from nothing is the
+# only step that can tell the difference.
+rm -rf "$APP_PATH"
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 # Unconditionally, not just when the .app is missing: guarding this on the
@@ -94,10 +129,13 @@ if true; then
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
     <string>AppIcon</string>
+    <!-- Both come from the Log.startSession(version:) line in main.swift, read
+         by this script, so the version in Get Info and the version in the log
+         cannot disagree about which build somebody is running. -->
     <key>CFBundleVersion</key>
-    <string>0.2.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>$VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -106,32 +144,6 @@ if true; then
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>SolStream needs microphone access for audio streaming.</string>
-    <!--
-      App Transport Security has to allow cleartext, and this is not a corner
-      being cut.
-
-      GameStream pairing is plain HTTP by protocol design: /pair on the base
-      port is the unauthenticated half of the handshake, and it exists to
-      establish the client certificate that everything afterwards is
-      authenticated with. There is no TLS to require there, because the point of
-      the exchange is to agree on the identity TLS would have checked.
-
-      Everything that carries anything then runs over mTLS on the https port
-      with the host's public key pinned by SolStream itself (ServerTrust) --
-      which is a stronger check than ATS performs, since it is pinned per host
-      and port rather than trusted from a CA list.
-
-      Without this the packaged application cannot pair at all. It fails only on
-      a FIRST connection to a host, so a build with the pin already stored looks
-      perfectly healthy and every new user hits it: "The resource could not be
-      loaded because the App Transport Security policy requires the use of a
-      secure connection".
-    -->
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <true/>
-    </dict>
     <!--
       Local Network access, which macOS gates per application.
 
@@ -144,19 +156,22 @@ if true; then
       This did not show up for a long time because a bare binary run from a
       terminal inherits the terminal's own grant. Only the packaged application
       has an identity of its own to be denied.
+
+      It is the only networking key here, and the two that used to sit beside it
+      have gone because nothing in the application reaches the code they govern.
+      NSAppTransportSecurity applied to URLSession and WebKit, and existed for
+      GameStream's plain-HTTP /pair step; there is no HTTP request left anywhere
+      in the client, and the sockets that remain are NWConnection and BSD
+      sockets, which ATS does not police in either direction. NSBonjourServices
+      declared _nvstream._tcp for an NWBrowser that has been deleted: discovery
+      is now one UDP datagram broadcast to port 47629 and a host answering it,
+      with no mDNS responder on either side (AgentChannel/HostBrowser.swift).
+      Declaring a service type nothing browses for, and relaxing a policy nothing
+      is subject to, both read as "this application talks plain HTTP to a
+      Bonjour service" to anybody auditing the bundle, which it does not.
     -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>SolStream connects to your Windows PC on your local network or VPN to stream applications from it.</string>
-    <!--
-      And the service the host advertises itself with, so the connect window can
-      find PCs without anybody typing an address. Bonjour browsing is denied
-      unless the service type is declared here — silently, again: the browser
-      simply reports nothing and the list stays empty.
-    -->
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_nvstream._tcp</string>
-    </array>
 </dict>
 </plist>
 EOF

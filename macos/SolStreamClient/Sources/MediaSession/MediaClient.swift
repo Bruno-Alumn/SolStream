@@ -258,13 +258,39 @@ public final class MediaClient {
             shutdown(fd, SHUT_RDWR)
         }
         // Bounded: the loop's own receive timeout is 200 ms, so a second is
-        // several chances to notice. Giving up and leaking one descriptor is
-        // better than hanging the main thread on a socket that will not wake.
+        // several chances to notice.
+        //
+        // Missing that deadline used to mean abandoning the descriptor for the
+        // life of the process -- a leak per session, taken deliberately because
+        // hanging the main thread on a socket that will not wake is worse, and
+        // closing it under a thread that is still inside `recv` hands the
+        // number straight back out to the next socket this process opens.
+        //
+        // Neither is necessary. The descriptor goes to a thread of its own that
+        // does the waiting the caller could not afford, and closes it whenever
+        // the receive thread finally leaves. `fd` is cleared first, so nothing
+        // here sends into it in the meantime, and the closure holds only the
+        // number and the semaphore -- not `self` -- so this client is free to
+        // be deallocated while that thread is still waiting.
         if receiveThread != nil {
             if receiveFinished.wait(timeout: .now() + 1.0) == .timedOut {
-                Log.error("[media] the receive thread did not stop; "
-                          + "leaving its socket open rather than pulling it")
+                Log.error("[media] the receive thread did not stop within a "
+                          + "second; closing its socket from a separate thread "
+                          + "once it does")
+                let stranded = fd
+                fd = -1
                 receiveThread = nil
+                let finished = receiveFinished
+                // A Thread rather than a global queue: this waits without a
+                // deadline, and a libdispatch worker blocked indefinitely is
+                // one taken out of a pool the rest of the app shares.
+                let closer = Thread {
+                    finished.wait()
+                    if stranded >= 0 { close(stranded) }
+                }
+                closer.name = "solstream.media.close"
+                closer.qualityOfService = .utility
+                closer.start()
                 return
             }
             receiveThread = nil
@@ -476,8 +502,8 @@ public final class MediaClient {
     private func receiveLoop() {
         // Signalled however this returns, including the early exits below:
         // `stop()` waits on it before closing the socket, and a path that
-        // forgot to signal would stall it for a second and then leak the
-        // descriptor.
+        // forgot to signal would stall it for a second and then strand the
+        // descriptor on a closer thread that never gets to close it.
         defer { receiveFinished.signal() }
         var buffer = [UInt8](repeating: 0, count: 2048)
         // The descriptor is read once, here. `stop()` does not close it until

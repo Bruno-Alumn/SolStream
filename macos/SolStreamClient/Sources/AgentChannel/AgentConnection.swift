@@ -114,7 +114,37 @@ public final class AgentConnection {
     private let port: UInt16
     private let queue = DispatchQueue(label: "com.solstream.agent")
 
-    private var connection: NWConnection?
+    /// Guards the few things below that the rest of the app reads from wherever
+    /// it happens to be standing — the display list, the Sunshine instance, and
+    /// the flag `isConnected` answers from. Everything else in this class
+    /// belongs to `queue` and is only ever touched there.
+    ///
+    /// A lock rather than a `queue.sync`, because every writer is already
+    /// standing on `queue` when it writes: a `sync` onto the queue you are
+    /// running on deadlocks on the spot.
+    private let stateLock = NSLock()
+
+    private var storedConnection: NWConnection?
+    /// The socket, which belongs to `queue` like everything around it.
+    ///
+    /// Computed only so that `connectionIsUp` cannot drift away from it. Five
+    /// places assign to `connection` — `openConnection`, the failure branch of
+    /// the state handler, `disconnect`, the receive completion and
+    /// `dropConnection` — and a mirror that has to be updated by hand at each
+    /// of them is a mirror that will eventually be wrong at one of them.
+    private var connection: NWConnection? {
+        get { storedConnection }
+        set {
+            storedConnection = newValue
+            stateLock.lock()
+            connectionIsUp = newValue != nil
+            stateLock.unlock()
+        }
+    }
+    /// Exactly `connection != nil`, kept as a Bool so that reading it from
+    /// another thread does not mean touching the NWConnection reference itself.
+    /// Guarded by `stateLock`.
+    private var connectionIsUp = false
     private var buffer = Data()
     /// Replies arrive in request order, so a FIFO of continuations is enough —
     /// no request ids needed in the protocol.
@@ -142,7 +172,28 @@ public final class AgentConnection {
     private var heldWhileAuthenticating: [(request: [String: Any],
                                            completion: (Result<[String: Any], Error>) -> Void)] = []
 
-    public private(set) var displays: [RemoteDisplay] = []
+    private var storedDisplays: [RemoteDisplay] = []
+
+    /// The host's displays, as of the last list it sent.
+    ///
+    /// Guarded, and not merely against a stale read. This is written on `queue`
+    /// and read from the main thread, and an Array of structs is a pointer to a
+    /// heap buffer with a reference count on it — so a read that races the write
+    /// is two threads moving the same count and one of them possibly reading a
+    /// buffer the other has just released. That is a crash, not an out-of-date
+    /// answer, and it happens no more often than the host changing its displays
+    /// at the moment the picker draws.
+    public var displays: [RemoteDisplay] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return storedDisplays
+    }
+
+    private func setDisplays(_ value: [RemoteDisplay]) {
+        stateLock.lock()
+        storedDisplays = value
+        stateLock.unlock()
+    }
 
     /// Whether the display list the host volunteers is still to come.
     ///
@@ -154,9 +205,19 @@ public final class AgentConnection {
     /// identical on the wire.
     private var greetingDisplaysPending = false
 
+    private var storedSunshineInstance = ""
+
     /// Identifies the Sunshine process now running on the host, so a client can
     /// tell a restart from a continuation. Empty if Sunshine is not running.
-    public private(set) var sunshineInstance: String = ""
+    ///
+    /// Guarded for the same reason as `displays`: a String is a heap buffer with
+    /// a reference count too, and the greeting that sets it arrives on `queue`
+    /// while whoever is interested reads it from the main thread.
+    public var sunshineInstance: String {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return storedSunshineInstance
+    }
 
     public var onState: ((State) -> Void)?
     public var onDisplays: (([RemoteDisplay]) -> Void)?
@@ -317,6 +378,19 @@ public final class AgentConnection {
     }
 
     public func connect() {
+        // On `queue`, like `disconnect()` and `supplyToken()`, because
+        // everything `openConnection` touches belongs to `queue`: `connection`,
+        // `buffer`, `channel`, `authInFlight`, `heldWhileAuthenticating` and
+        // the rest of the handshake state are all read and written by the
+        // receive callback. This is called from the picker and from the stream
+        // windows on the main thread, and a reconnect that is already in flight
+        // runs the receive callback at the same moment — so the check for an
+        // existing connection, the clearing of the buffer and the assignment of
+        // the new socket all ran against it.
+        queue.async { [weak self] in self?.openConnection() }
+    }
+
+    private func openConnection() {
         guard connection == nil else { return }
         wantsConnection = true
         report(.connecting)
@@ -456,7 +530,9 @@ public final class AgentConnection {
             guard let self else { return }
             self.reconnectPending = false
             guard self.wantsConnection, self.connection == nil else { return }
-            self.connect()
+            // Straight to the body: this is already on `queue`, and going
+            // through `connect()` would only queue another hop behind it.
+            self.openConnection()
         }
     }
 
@@ -488,7 +564,17 @@ public final class AgentConnection {
     /// Not "wants to be connected": `wantsConnection` stays true through the
     /// whole reconnect backoff, and a caller that asks a question during it gets
     /// an immediate failure rather than an answer.
-    public var isConnected: Bool { connection != nil }
+    ///
+    /// This reads the Bool the `connection` setter maintains rather than the
+    /// NWConnection reference. It used to read the reference, from the main
+    /// thread, while `queue` was free to be replacing it — and a reference is
+    /// not loaded and stored atomically, so what that risks is retaining a
+    /// pointer mid-assignment rather than getting a slightly stale answer.
+    public var isConnected: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connectionIsUp
+    }
 
     /// Drop every push callback, without touching the socket.
     ///
@@ -658,14 +744,27 @@ public final class AgentConnection {
         public var fps: Int = 60
         public var bitrate: Int = 20_000_000
         public var audio: Bool = true
+        /// The encode canvas this Mac wants, in host pixels.
+        ///
+        /// Left nil, the host encodes the source at whatever size it is, which
+        /// is the only thing it could do before these existed. Set, it clamps
+        /// them to what its encoder will take and encodes at that instead — so a
+        /// window smaller than the display it sits on costs the bitrate of the
+        /// window rather than of the whole desktop, and a 6K display does not
+        /// arrive as pixels the Mac only ever throws away.
+        public var width: Int?
+        public var height: Int?
 
         public init(display: String? = nil, window: UInt64? = nil,
-                    fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true) {
+                    fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true,
+                    width: Int? = nil, height: Int? = nil) {
             self.display = display
             self.window = window
             self.fps = fps
             self.bitrate = bitrate
             self.audio = audio
+            self.width = width
+            self.height = height
         }
     }
 
@@ -708,7 +807,23 @@ public final class AgentConnection {
                                       "fps": request.fps, "bitrate": request.bitrate,
                                       "audio": request.audio ? 1 : 0]
         if let display = request.display { message["display"] = display }
+        // The window id goes out as a JSON number, because the agent reads it
+        // with FieldNumber, which wants digits straight after the colon: a
+        // quoted id is not found at all, and what the host does then is capture
+        // whatever display was named instead — a whole desktop where a window
+        // was asked for, with nothing anywhere saying so. A UInt64 bridges to an
+        // NSNumber that JSONSerialization writes in decimal, and an HWND is a
+        // user-mode pointer well inside what fits, so nothing here rounds.
+        //
+        // Worth stating because this line has never run: every caller so far has
+        // named a display and cropped a window out of it on the Mac, so the
+        // field existed on both sides with nothing ever putting a value in it.
         if let window = request.window { message["window"] = window }
+        // Absent means "host decides", which is what every earlier build did by
+        // having nothing to send. Only sent when set, so a host that predates
+        // these fields sees the same open command it always saw.
+        if let width = request.width { message["width"] = width }
+        if let height = request.height { message["height"] = height }
 
         let reply: [String: Any]
         do {
@@ -755,7 +870,19 @@ public final class AgentConnection {
         }
         let streaming = reply["streaming"] as? Bool ?? false
         let message2 = reply["message"] as? String
-        let port = UInt16(reply["hport"] as? Int ?? 47631)
+        // `UInt16(...)` traps on anything that does not fit, and this number
+        // comes off the wire: a host answering with 70000, or with -1, would
+        // not produce a failed session, it would kill the client where it
+        // stands. Only a host that has already authenticated can get this far,
+        // so this is a buggy peer rather than an attacker — but a buggy peer
+        // should not be able to take the app down either. Anything unusable
+        // falls back to the port the host would have named anyway.
+        let claimed = reply["hport"] as? Int ?? Int(StreamPorts.defaultMedia)
+        let port = UInt16(exactly: claimed) ?? StreamPorts.defaultMedia
+        if Int(port) != claimed {
+            Log.error("[media] \(host) named \(claimed) as its media port, which is not a "
+                      + "port number; trying \(port) instead")
+        }
         Log.info("[media] session \(hcount) open, keys agree (sid \(keys.sessionTag)), "
                  + "host \(streaming ? "is streaming" : "is NOT streaming: \(message2 ?? "?")")")
         return MediaSession(keys: keys, port: port, streaming: streaming, message: message2)
@@ -769,7 +896,7 @@ public final class AgentConnection {
                 return
             }
             let displays = Self.parseDisplays(message)
-            self?.displays = displays
+            self?.setDisplays(displays)
             completion?(displays)
         }
     }
@@ -1228,7 +1355,9 @@ public final class AgentConnection {
         case "hello":
             let host = message["host"] as? String ?? self.host
             let version = message["version"] as? Int ?? 0
-            sunshineInstance = message["sunshineInstance"] as? String ?? ""
+            stateLock.lock()
+            storedSunshineInstance = message["sunshineInstance"] as? String ?? ""
+            stateLock.unlock()
             // Before any branch below needs it: a token supplied later by the
             // user authenticates against the challenge from THIS greeting.
             authChallenge = message["challenge"] as? String
@@ -1440,10 +1569,10 @@ public final class AgentConnection {
             // connection — a window's dimensions arriving as the answer to a
             // clipboard read, and so on down the queue.
             greetingDisplaysPending = false
-            displays = Self.parseDisplays(message)
-            Log.info("[agent] \(displays.count) display(s): "
-                     + displays.map { "\($0.name) \($0.width)x\($0.height)" }.joined(separator: ", "))
-            let snapshot = displays
+            let snapshot = Self.parseDisplays(message)
+            setDisplays(snapshot)
+            Log.info("[agent] \(snapshot.count) display(s): "
+                     + snapshot.map { "\($0.name) \($0.width)x\($0.height)" }.joined(separator: ", "))
             DispatchQueue.main.async { [weak self] in self?.onDisplays?(snapshot) }
             return
         default:

@@ -116,7 +116,13 @@ struct MediaSession::Impl {
     std::deque<Picture> queue;
 
     long long startedAt = 0;
-    long long lastHeardAt = 0;
+    /// Written by the receive thread on every datagram that authenticates and
+    /// read by the sender thread on every pass of its loop, so it is atomic
+    /// rather than a plain long long. The two threads disagreeing by one
+    /// datagram about when the client was last heard from costs nothing; a
+    /// non-atomic 64-bit value written and read at once is undefined behaviour
+    /// whatever the hardware happens to do with it.
+    std::atomic<long long> lastHeardAt{0};
     long long lastIdrAt = 0;
     long long nextSlot = 0;
     double ticksPerByte = 0;
@@ -139,6 +145,25 @@ struct MediaSession::Impl {
     std::atomic<bool> retargetWanted{false};
     std::mutex configLock;
 
+    // How the capture thread tells Start whether the session really opened.
+    //
+    // Everything that can go wrong with the PICTURE goes wrong on that thread --
+    // the window vanishing between the pick and the capture, WGC refusing the
+    // item, no hardware encoder on the machine -- and all of it used to happen
+    // after Start had returned true, so it reached the log and nothing else.
+    // Start waits for this, with a bound, and the agent answers
+    // "streaming: false" with a reason instead of "streaming: true" followed by
+    // silence and a black window on the Mac.
+    //
+    // Only the FIRST pass reports. A later pass exists because the client
+    // retargeted, by which time Start returned long ago and a failure ends the
+    // session rather than answers a question.
+    std::mutex openLock;
+    std::condition_variable openReported;
+    bool opened = false;
+    std::string openError;   ///< empty means the capture and the encoder are up
+
+    void ReportOpened(std::string error);
     void CaptureLoop();
     void RunCapture();
     void SenderLoop();
@@ -239,6 +264,16 @@ void MediaSession::Impl::SendPicture(const Picture& picture) {
 
 // ── Threads ──────────────────────────────────────────────────────────────────
 
+void MediaSession::Impl::ReportOpened(std::string error) {
+    {
+        std::lock_guard<std::mutex> guard(openLock);
+        if (opened) { return; }
+        opened = true;
+        openError = std::move(error);
+    }
+    openReported.notify_all();
+}
+
 void MediaSession::Impl::CaptureLoop() {
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -258,9 +293,26 @@ void MediaSession::Impl::CaptureLoop() {
         }
     }
     running.store(false);
+    // Whatever happened, Start is not left waiting for its bounded timeout. The
+    // only way to reach here without a pass having reported is Stop arriving
+    // while the first one was still opening.
+    ReportOpened("the session was stopped before the capture opened");
 }
 
 void MediaSession::Impl::RunCapture() {
+    // One copy of the target, taken once, used for the whole pass. Retarget
+    // rewrites `config` from the agent's command thread, and this thread was
+    // reading its fields one at a time without the lock that Retarget takes --
+    // a data race in the language's terms, and in practice a pass that could
+    // open a capture on the old window and then size the encoder for the new
+    // one. A pass cannot change its source halfway through in any case: the
+    // capture item, the encode size and the frame period are all settled when it
+    // opens, and a retarget is served by ending the pass and going round again.
+    MediaConfig active;
+    {
+        std::lock_guard<std::mutex> guard(configLock);
+        active = config;
+    }
     {
         std::lock_guard<std::mutex> guard(mediaLock);
         capture = std::make_shared<Capture>();
@@ -285,13 +337,15 @@ void MediaSession::Impl::RunCapture() {
         }
     } teardown{this};
 
-    if (config.window) {
-        if (!capture->StartWindow(config.window)) {
-            Log("[media] capture of window %p failed", (void*) config.window);
+    if (active.window) {
+        if (!capture->StartWindow(active.window)) {
+            Log("[media] capture of window %p failed", (void*) active.window);
+            ReportOpened("the window could not be captured");
             return;
         }
-    } else if (!capture->StartMonitor(config.monitor)) {
-        Log("[media] capture of monitor %p failed", (void*) config.monitor);
+    } else if (!capture->StartMonitor(active.monitor)) {
+        Log("[media] capture of monitor %p failed", (void*) active.monitor);
+        ReportOpened("the display could not be captured");
         return;
     }
 
@@ -303,20 +357,29 @@ void MediaSession::Impl::RunCapture() {
     }
     if (!frame.width || !running.load()) {
         Log("[media] nothing was ever captured");
+        ReportOpened("nothing was ever captured from that source");
         return;
     }
 
-    const UINT encodeWidth = config.width ? config.width : frame.width;
-    const UINT encodeHeight = config.height ? config.height : frame.height;
-    if (!encoder->Open(capture->Device(), encodeWidth, encodeHeight, config.fps,
-                      config.bitrate)) {
+    const UINT encodeWidth = active.width ? active.width : frame.width;
+    const UINT encodeHeight = active.height ? active.height : frame.height;
+    if (!encoder->Open(capture->Device(), encodeWidth, encodeHeight, active.fps,
+                      active.bitrate)) {
         Log("[media] the hardware encoder would not open at %ux%u",
             encodeWidth, encodeHeight);
+        ReportOpened("the hardware encoder would not open at "
+                     + std::to_string(encodeWidth) + "x"
+                     + std::to_string(encodeHeight));
         return;
     }
     Log("[media] capturing %ux%u, encoding %ux%u at %u fps, %u kbit/s",
         frame.width, frame.height, encoder->Width(), encoder->Height(),
-        config.fps, config.bitrate / 1000);
+        active.fps, active.bitrate / 1000);
+    // The source and the encoder are up, which is the point Start has been
+    // waiting for. Everything above this line can fail, and until this call
+    // existed all of it failed into the log and nowhere else: Start had already
+    // returned true and the agent had already told the Mac it was streaming.
+    ReportOpened(std::string());
 
     encoder->OnPicture([this](const CodedPicture& coded) {
         Picture picture;
@@ -358,7 +421,7 @@ void MediaSession::Impl::RunCapture() {
     // The heartbeat that makes a still window streamable. WGC delivers nothing
     // while nothing changes, so without this the last frame's damage is never
     // repaired and a client joining a static screen waits forever.
-    const int idleMs = 1000 / (int) (config.fps ? config.fps : 60);
+    const int idleMs = 1000 / (int) (active.fps ? active.fps : 60);
     long long lastEncodedAt = Now();
     while (running.load() && !retargetWanted.load()) {
         Frame current{};
@@ -472,7 +535,8 @@ void MediaSession::Impl::SenderLoop() {
             lastReportBytes = bytesSent.load();
         }
 
-        if (lastHeardAt != 0 && MillisBetween(lastHeardAt, now) > kSilenceTimeoutMs) {
+        const long long heardAt = lastHeardAt.load();
+        if (heardAt != 0 && MillisBetween(heardAt, now) > kSilenceTimeoutMs) {
             Log("[media] the client has been silent for %d ms; ending the session",
                 kSilenceTimeoutMs);
             running.store(false);
@@ -565,7 +629,7 @@ void MediaSession::Impl::ReceiveLoop() {
                 Log("[media] client at %s:%u", who, ntohs(from.sin_port));
             }
         }
-        lastHeardAt = Now();
+        lastHeardAt.store(Now());
         HandlePlaintext(plaintext, plaintextLen);
     }
 }
@@ -666,7 +730,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.input.SetTarget(target);
 
     s.startedAt = Now();
-    s.lastHeardAt = 0;
+    s.lastHeardAt.store(0);
     s.lastIdrAt = 0;
     s.nextSlot = s.startedAt;
     // Pace at twice the encoder's target. Metering at exactly the bitrate makes
@@ -678,6 +742,12 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.datagramsSent = 0; s.bytesSent = 0;
     s.picturesSent = 0; s.picturesDropped = 0;
     s.datagramsReceived = 0; s.rejected = 0; s.idrRequests = 0;
+
+    {
+        std::lock_guard<std::mutex> guard(s.openLock);
+        s.opened = false;
+        s.openError.clear();
+    }
 
     s.running.store(true);
     s.receiveThread = std::thread([&s] { s.ReceiveLoop(); });
@@ -700,6 +770,52 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
                 s.SendSealed(packet, 16 + length);
             }, [&s] { return s.running.load(); });
         });
+    }
+
+    // Wait for the capture thread to say whether the source and the encoder
+    // actually opened. Without this the answer on the agent channel was decided
+    // before anything had been tried: a window that had just closed, a WGC item
+    // that would not start, a machine with no hardware encoder -- all of them
+    // returned "streaming: true" and then sent not one datagram, and the Mac sat
+    // on a black window with nothing to explain it.
+    //
+    // Bounded, because the wait is on the agent's command thread and the thing
+    // being waited for talks to a graphics driver. The bound has to clear the
+    // slowest honest path, which is RunCapture's wait for a first frame: 100
+    // tries of 50 ms is five seconds before it gives up, and the encoder opens
+    // after that. Eight seconds leaves room for both and is still well inside
+    // the agent's own 30-second idle timeout, so a wedged driver costs a slow
+    // answer rather than a dropped channel.
+    constexpr int kOpenWaitMs = 8000;
+    std::string failure;
+    bool answered = false;
+    {
+        std::unique_lock<std::mutex> guard(s.openLock);
+        answered = s.openReported.wait_for(guard, std::chrono::milliseconds(kOpenWaitMs),
+                                           [&s] { return s.opened; });
+        if (answered) { failure = s.openError; }
+    }
+    if (answered && !failure.empty()) {
+        // Tear the whole session down rather than leave a socket bound and four
+        // threads running for a session that will never carry a picture. The
+        // capture thread has already returned from its pass, so this joins
+        // immediately.
+        Stop();
+        if (error) { *error = failure; }
+        return false;
+    }
+    if (!answered) {
+        // Deliberately not a failure. Nothing has gone wrong that anyone can
+        // point at; the capture is simply still opening, and it may well open a
+        // moment from now. Tearing down a session that is about to work would be
+        // the worse mistake, so the session runs and the Mac is told why the
+        // answer is not a confident one.
+        Log("[media] the capture had not opened after %d ms; letting it carry on",
+            kOpenWaitMs);
+        if (error) {
+            *error = "the capture had not opened after "
+                     + std::to_string(kOpenWaitMs / 1000) + " s";
+        }
     }
 
     Log("[media] session started on UDP %u", config.port);

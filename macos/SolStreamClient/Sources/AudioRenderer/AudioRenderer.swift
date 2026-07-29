@@ -66,6 +66,18 @@ public final class AudioRenderer {
 
     // MARK: - Private
 
+    /// Build the output unit, and only claim to be running once it really is.
+    ///
+    /// Every call in here returns an OSStatus and every one of them used to be
+    /// thrown away, with `isRunning` set at the end no matter what happened. A
+    /// unit that never initialised or never started then went on accepting
+    /// packets into the ring buffer, and the ring buffer's only reader is a
+    /// render callback CoreAudio was never going to call — so the failure
+    /// presented as audio that is simply silent, with a buffer that fills and
+    /// trims itself forever and not one line anywhere saying why. Each step now
+    /// stops at the first failure and names it with its status code, because
+    /// that number is the only thing that distinguishes "no output device" from
+    /// "format refused" after the fact.
     private func setupAudio() {
         // Describe the audio unit.
         var componentDesc = AudioComponentDescription(
@@ -82,9 +94,9 @@ public final class AudioRenderer {
         }
 
         var unit: AudioUnit?
-        AudioComponentInstanceNew(component, &unit)
-        guard let audioUnit = unit else {
-            Log.error("Failed to create audio unit instance")
+        let instanceStatus = AudioComponentInstanceNew(component, &unit)
+        guard instanceStatus == noErr, let audioUnit = unit else {
+            Log.error("[audio] AudioComponentInstanceNew failed: \(instanceStatus)")
             return
         }
         self.audioUnit = audioUnit
@@ -104,7 +116,7 @@ public final class AudioRenderer {
             mReserved: 0
         )
 
-        AudioUnitSetProperty(
+        let formatStatus = AudioUnitSetProperty(
             audioUnit,
             kAudioUnitProperty_StreamFormat,
             kAudioUnitScope_Input,
@@ -112,6 +124,10 @@ public final class AudioRenderer {
             &streamFormat,
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
+        guard formatStatus == noErr else {
+            Log.error("[audio] the output unit refused 48 kHz 16-bit stereo: \(formatStatus)")
+            return
+        }
 
         // Set the render callback.
         var callbackStruct = AURenderCallbackStruct(
@@ -119,7 +135,7 @@ public final class AudioRenderer {
             inputProcRefCon: Unmanaged.passUnretained(self).toOpaque()
         )
 
-        AudioUnitSetProperty(
+        let callbackStatus = AudioUnitSetProperty(
             audioUnit,
             kAudioUnitProperty_SetRenderCallback,
             kAudioUnitScope_Global,
@@ -127,11 +143,28 @@ public final class AudioRenderer {
             &callbackStruct,
             UInt32(MemoryLayout<AURenderCallbackStruct>.size)
         )
+        guard callbackStatus == noErr else {
+            Log.error("[audio] could not install the render callback: \(callbackStatus)")
+            return
+        }
 
         // Initialize and start.
-        AudioUnitInitialize(audioUnit)
-        AudioOutputUnitStart(audioUnit)
+        let initStatus = AudioUnitInitialize(audioUnit)
+        guard initStatus == noErr else {
+            Log.error("[audio] AudioUnitInitialize failed: \(initStatus)")
+            return
+        }
+
+        let startStatus = AudioOutputUnitStart(audioUnit)
+        guard startStatus == noErr else {
+            Log.error("[audio] AudioOutputUnitStart failed: \(startStatus)")
+            return
+        }
+
+        // Only now: `playAudio` gates on this, and everything it lets through
+        // goes to a buffer the render callback is the sole reader of.
         isRunning = true
+        Log.info("[audio] output unit running at 48 kHz, 16-bit stereo")
     }
 }
 

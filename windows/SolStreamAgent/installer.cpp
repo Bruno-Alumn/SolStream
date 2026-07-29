@@ -5,6 +5,8 @@
 #include <shellapi.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <aclapi.h>
+#include <bcrypt.h>
 
 #include <cstdio>
 #include <string>
@@ -20,12 +22,210 @@ constexpr wchar_t kUninstallKey[] =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SolStream";
 constexpr wchar_t kShortcutName[] = L"SolStream.lnk";
 
+/// The two things the elevated half cannot work out for itself, so the
+/// unelevated half tells it: who is at the keyboard, and what to call the file it
+/// leaves its answer in. Both are appended on the way to the UAC prompt --
+/// --invoking-user by OptionArguments, --result-token by RelaunchElevated -- and
+/// read back off the elevated process's own command line.
+constexpr wchar_t kInvokingUserSwitch[] = L"--invoking-user";
+constexpr wchar_t kResultTokenSwitch[] = L"--result-token";
+
+/// Who may do what in C:\ProgramData\SolStream. SYSTEM and Administrators own the
+/// place; ordinary users get read, write and delete, which is all a transient
+/// result file and a log are worth. Why it has to be written out rather than
+/// inherited is in SharedDirectory.
+constexpr wchar_t kSharedDacl[] =
+    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFWSD;;;BU)";
+
+/// The value following `name` on THIS process's own command line, or empty.
+///
+/// Its own command line rather than the argv the program was started with: the
+/// two places that need these values -- the name of the result file, and the
+/// account the logon task belongs to -- sit at the bottom of call chains that
+/// were never handed argv, and threading it down to them would mean changing
+/// every signature in between and the header they are declared in.
+std::wstring SwitchValue(const wchar_t* name) {
+    int count = 0;
+    wchar_t** args = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (args == nullptr) {
+        return {};
+    }
+    std::wstring value;
+    for (int i = 1; i + 1 < count; ++i) {
+        if (std::wstring(args[i]) == name) {
+            value = args[i + 1];
+            break;
+        }
+    }
+    LocalFree(args);
+    return value;
+}
+
+/// This process's own user, as a SID string.
+///
+/// A SID rather than a name because a name means nothing without the domain it
+/// belongs to, and guessing that domain is exactly the mistake this file used to
+/// make -- it pasted the computer name in front of whatever GetUserNameW said.
+std::wstring CurrentUserSid() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return {};
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::wstring out;
+    if (size != 0) {
+        std::vector<unsigned char> buffer(size);
+        wchar_t* text = nullptr;
+        if (GetTokenInformation(token, TokenUser, buffer.data(), size, &size)
+            && ConvertSidToStringSidW(((TOKEN_USER*) buffer.data())->User.Sid, &text)
+            && text != nullptr) {
+            out = text;
+            LocalFree(text);
+        }
+    }
+    CloseHandle(token);
+    return out;
+}
+
 std::wstring TempDirectory() {
     wchar_t temp[MAX_PATH] = {0};
     if (GetTempPathW(MAX_PATH, temp) == 0) {
         return L"C:\\Windows\\Temp\\";
     }
     return temp;
+}
+
+/// Is this SID one of the two accounts allowed to own C:\ProgramData\SolStream?
+///
+/// Ownership rather than permissions is the test that matters. An owner can
+/// rewrite a DACL whenever it likes, so a directory owned by an ordinary user is
+/// one that user controls no matter how sensible its permissions look at the
+/// moment we read them.
+bool SidIsAdminOrSystem(PSID sid) {
+    if (sid == nullptr || !IsValidSid(sid)) {
+        return false;
+    }
+    const WELL_KNOWN_SID_TYPE allowed[] = {WinBuiltinAdministratorsSid,
+                                           WinLocalSystemSid};
+    for (WELL_KNOWN_SID_TYPE type : allowed) {
+        BYTE known[SECURITY_MAX_SID_SIZE] = {0};
+        DWORD size = sizeof(known);
+        if (CreateWellKnownSid(type, nullptr, known, &size) && EqualSid(sid, known)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Put an existing C:\ProgramData\SolStream beyond the reach of the account that
+/// happens to have made it, or say that it cannot be done.
+///
+/// The awkward part is that BOTH halves of an install go through here, and the
+/// unelevated one usually gets there first: the setup window prints the log path
+/// on its failure screen and writes lines like "could not elevate" long before
+/// any administrator is involved, so on a clean machine this folder is normally
+/// created by, and therefore owned by, an ordinary user. Refusing anything not
+/// already owned by Administrators would refuse the ordinary case. So the
+/// elevated half REPAIRS instead: it takes ownership and rewrites the DACL, and
+/// only gives up if it cannot. From then on both halves find it owned by
+/// Administrators and leave it alone.
+///
+/// The unelevated half does not get a veto on ownership. It cannot repair
+/// anything, and if it disagreed with the elevated half about which directory is
+/// in use the two of them would go back to leaving the result file and the log in
+/// different places -- which is the bug this whole directory exists to fix. It
+/// writes there with its own privileges and nobody else's, so an odd owner costs
+/// it nothing. A junction is refused for both, because following one lands
+/// somewhere neither half meant to write.
+///
+/// One handle, opened once with FILE_FLAG_OPEN_REPARSE_POINT so a junction is
+/// examined rather than followed, and every test and every change made through
+/// that handle. Testing a path and then acting on the same path is two lookups
+/// with a gap in between, and the gap is the thing being defended against.
+///
+/// Nothing in here logs. InstallLog asks for this directory, so a line written
+/// from inside this call would come straight back round for another.
+bool SecureExistingShared(const std::wstring& directory) {
+    // Whether this process is expected to be able to put the folder right, which
+    // is not the same question as whether the open below happens to succeed: an
+    // elevated process denied WRITE_DAC by a hostile ACL must refuse, not carry
+    // on as though it were the unelevated half.
+    const bool elevated = IsElevated();
+    const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    const DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE handle = CreateFileW(
+        directory.c_str(),
+        READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC | WRITE_OWNER, share,
+        nullptr, OPEN_EXISTING, flags, nullptr);
+    const bool repairing = handle != INVALID_HANDLE_VALUE;
+    if (!repairing) {
+        if (elevated) {
+            return false;
+        }
+        handle = CreateFileW(directory.c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
+                             share, nullptr, OPEN_EXISTING, flags, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+    }
+
+    bool ok = false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileInformationByHandle(handle, &info)
+        && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+        && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        PSID owner = nullptr;
+        if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                            &owner, nullptr, nullptr, nullptr, &descriptor)
+            == ERROR_SUCCESS) {
+            ok = SidIsAdminOrSystem(owner);
+            LocalFree(descriptor);
+        }
+        if (!ok && elevated) {
+            // Setting the owner to the Administrators group needs no privilege
+            // beyond WRITE_OWNER on the handle: an elevated token carries that
+            // group marked as its default owner, which is why everything else an
+            // administrator creates ends up owned by it too.
+            BYTE admins[SECURITY_MAX_SID_SIZE] = {0};
+            DWORD size = sizeof(admins);
+            ok = CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admins,
+                                    &size)
+                 && SetSecurityInfo(handle, SE_FILE_OBJECT,
+                                    OWNER_SECURITY_INFORMATION, admins, nullptr,
+                                    nullptr, nullptr) == ERROR_SUCCESS;
+        } else if (!ok) {
+            ok = true;  // unelevated, as above
+        }
+    }
+
+    if (ok && repairing) {
+        // Protected, so that whatever the previous owner set is replaced rather
+        // than merged with. In practice only the elevated half gets this far:
+        // the ACL being written deliberately withholds WRITE_DAC and WRITE_OWNER
+        // from ordinary users, so their open above asked for more than they have
+        // and dropped back to the read-only one. Best effort even so — the owner
+        // has already been settled by this point, and an owner is the thing that
+        // decides who may rewrite an ACL tomorrow.
+        PSECURITY_DESCRIPTOR wanted = nullptr;
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                kSharedDacl, SDDL_REVISION_1, &wanted, nullptr)) {
+            BOOL present = FALSE;
+            BOOL defaulted = FALSE;
+            PACL dacl = nullptr;
+            if (GetSecurityDescriptorDacl(wanted, &present, &dacl, &defaulted)
+                && present) {
+                SetSecurityInfo(handle, SE_FILE_OBJECT,
+                                DACL_SECURITY_INFORMATION
+                                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                                nullptr, nullptr, dacl, nullptr);
+            }
+            LocalFree(wanted);
+        }
+    }
+    CloseHandle(handle);
+    return ok;
 }
 
 /// Where the two halves of an install leave things for each other. Ends in a
@@ -46,9 +246,18 @@ std::wstring TempDirectory() {
 /// gives ordinary users read and execute only: the waiting window could then
 /// read the administrator's result file but not delete it, so the next run would
 /// pick up the last run's answer, and the unelevated half of an uninstall could
-/// not append to the log at all. Users get read, write and delete here, which is
-/// all a transient result file and a log are worth. A folder that already exists
-/// is left alone, ACL included.
+/// not append to the log at all.
+///
+/// The DACL used to be applied only on the call that CREATED the folder, and a
+/// folder that already existed was taken exactly as it was found. That is the
+/// wrong way round. ProgramData's own permissions let any user create a
+/// subdirectory in it, and nothing reserves this name until SolStream is first
+/// installed, so a standard user could make C:\ProgramData\SolStream first -- as
+/// its owner, with whatever ACL they liked, or as a junction pointing somewhere
+/// else entirely -- and then simply wait: the elevated half would write its
+/// result file and its log through a directory that user controlled.
+/// SecureExistingShared is the answer, and it runs on every path that did not
+/// just create the folder outright.
 std::wstring SharedDirectory() {
     wchar_t root[MAX_PATH] = {0};
     if (GetEnvironmentVariableW(L"ProgramData", root, MAX_PATH) == 0) {
@@ -59,8 +268,7 @@ std::wstring SharedDirectory() {
     attributes.nLength = sizeof(attributes);
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFWSD;;;BU)",
-            SDDL_REVISION_1, &descriptor, nullptr)) {
+            kSharedDacl, SDDL_REVISION_1, &descriptor, nullptr)) {
         attributes.lpSecurityDescriptor = descriptor;
     }
     const BOOL made = CreateDirectoryW(directory.c_str(),
@@ -72,6 +280,12 @@ std::wstring SharedDirectory() {
     if (!made && made_error != ERROR_ALREADY_EXISTS) {
         // Nowhere machine-wide to write. %TEMP% at least exists, and a log only
         // one of the two accounts can see beats no log.
+        return TempDirectory();
+    }
+    if (!made && !SecureExistingShared(directory)) {
+        // It is there and it is not ours. %TEMP% for the same reason as above,
+        // and this time also because it is the one directory nobody else can
+        // have got to first.
         return TempDirectory();
     }
     return directory + L"\\";
@@ -166,6 +380,20 @@ std::wstring QualifySystemCommand(const std::wstring& command) {
     return qualified;
 }
 
+/// The two answers RunHidden gives that are NOT exit codes.
+///
+/// A process that has not finished has no exit code, and GetExitCodeProcess says
+/// so by handing back STILL_ACTIVE — 259. RunHidden used to return that number
+/// unexamined after its wait expired, so the callers below printed it as though
+/// the command had run and answered 259: an install that was in fact still
+/// sitting at a password prompt reported "schtasks returned 259" and the number
+/// meant nothing to anybody who looked it up. So the two cases that produce no
+/// exit code get their own values — ones none of netsh, schtasks or powershell
+/// answers with — and RunOutcome turns them into words instead. Every caller
+/// that prints a number goes through it, which is what keeps them apart.
+constexpr DWORD kRunFailed = 0xFFFFFFFFu;
+constexpr DWORD kRunTimedOut = 0xFFFFFFFEu;
+
 DWORD RunHidden(const std::wstring& command) {
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -175,14 +403,39 @@ DWORD RunHidden(const std::wstring& command) {
     std::wstring mutable_command = QualifySystemCommand(command);
     if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        return (DWORD) -1;
+        return kRunFailed;
     }
-    WaitForSingleObject(process.hProcess, 60000);
-    DWORD code = (DWORD) -1;
-    GetExitCodeProcess(process.hProcess, &code);
+    DWORD code = kRunFailed;
+    if (WaitForSingleObject(process.hProcess, 60000) == WAIT_OBJECT_0) {
+        GetExitCodeProcess(process.hProcess, &code);
+    } else {
+        // Sixty seconds, and it is still going. The child is killed rather than
+        // left to it, deliberately. Everything started from here changes the
+        // machine — schtasks registering a task, netsh writing a firewall rule,
+        // powershell stopping processes — and it is hidden, has no window and
+        // has nobody waiting on it once this returns, so an orphan carries on
+        // rearranging things behind a setup screen that has already told the
+        // user how the install went. Nothing it has done so far is undone by
+        // this: each of these commands hands the actual change to a service and
+        // killing the client end cannot leave that service half way through one.
+        TerminateProcess(process.hProcess, 1);
+        code = kRunTimedOut;
+    }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return code;
+}
+
+/// How a RunHidden answer reads in a sentence. "returned 1" only when there
+/// really was an exit code to return.
+std::string RunOutcome(DWORD code) {
+    if (code == kRunTimedOut) {
+        return "was still running after 60 seconds and was stopped";
+    }
+    if (code == kRunFailed) {
+        return "would not start";
+    }
+    return "returned " + std::to_string((int) code);
 }
 
 void RemoveTree(const std::wstring& path) {
@@ -263,7 +516,7 @@ void StopInstalled(const std::wstring& destination) {
         // about to fail on a locked file and say only that it could not copy.
         // This is the line that explains which of the two things went wrong.
         InstallLog("could not look for a running copy in the install directory "
-                   "(powershell returned " + std::to_string((int) code) + ")");
+                   "(powershell " + RunOutcome(code) + ")");
     }
     Sleep(1500);
 }
@@ -301,7 +554,7 @@ void DeleteRulesForProgram(const std::wstring& directory) {
         // executable that is about to be deleted. The uninstall carries on --
         // there is nothing better to do -- but it does not get to be silent.
         InstallLog("could not sweep the firewall rules pointing into the install "
-                   "directory (powershell returned " + std::to_string((int) code)
+                   "directory (powershell " + RunOutcome(code)
                    + "); any rule left behind can be removed in Windows Defender "
                      "Firewall");
     }
@@ -511,6 +764,58 @@ void RemoveUninstallEntry() {
     }
 }
 
+/// The account the logon task belongs to: whoever is sitting at this PC.
+///
+/// This was GetUserNameW, under a comment saying it picked the console user. It
+/// did not, and the case where the two differ is the ordinary one on a managed
+/// machine. UAC is allowed to elevate to a DIFFERENT account — that is what
+/// happens whenever a standard user, who cannot elevate at all on their own, has
+/// somebody type an administrator's name and password at the prompt for them —
+/// and from inside the elevated half GetUserNameW then answers with that
+/// administrator. So the task that starts SolStream at logon was registered
+/// against the wrong person: it would start when the administrator logged on,
+/// into a session with no Mac waiting for it, and never for the user who asked.
+///
+/// The unelevated half cannot get this wrong, because it IS the person at the
+/// keyboard, so it puts its own SID on the command line it elevates with (see
+/// OptionArguments) and this reads it back. A SID rather than a name because a
+/// name is ambiguous without the domain it came from, and the old code guessed
+/// that domain by pasting the computer name in front — which is simply untrue
+/// for a domain account. ConvertStringSidToSidW also refuses anything that is
+/// not a SID, which is worth having when the result is pasted into XML.
+///
+/// GetUserNameW remains the fallback, for the case where no SID was passed:
+/// SolStream.exe --install typed at an already-elevated prompt, where the
+/// account running the install is the only candidate there is. It is still the
+/// wrong answer for a setup window that was itself started with "Run as
+/// administrator" under a second account, because then there is no unelevated
+/// half of SolStream anywhere to have been asked.
+std::wstring LogonTaskAccount() {
+    const std::wstring passed = SwitchValue(kInvokingUserSwitch);
+    PSID sid = nullptr;
+    if (!passed.empty() && ConvertStringSidToSidW(passed.c_str(), &sid)) {
+        wchar_t name[256] = {0};
+        DWORD name_size = 256;
+        wchar_t domain[256] = {0};
+        DWORD domain_size = 256;
+        SID_NAME_USE kind = SidTypeUnknown;
+        const bool named = LookupAccountSidW(nullptr, sid, name, &name_size, domain,
+                                             &domain_size, &kind) != 0;
+        LocalFree(sid);
+        if (named) {
+            return domain[0] != L'\0' ? std::wstring(domain) + L"\\" + name
+                                      : std::wstring(name);
+        }
+    }
+    wchar_t user[256] = {0};
+    DWORD user_size = 256;
+    GetUserNameW(user, &user_size);
+    wchar_t machine[256] = {0};
+    DWORD machine_size = 256;
+    GetComputerNameW(machine, &machine_size);
+    return std::wstring(machine) + L"\\" + user;
+}
+
 /// The task is registered from XML rather than from schtasks' own switches.
 ///
 /// schtasks /tr takes the whole command as one string and splits it on spaces,
@@ -521,16 +826,10 @@ void RemoveUninstallEntry() {
 bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
     const std::wstring xml_path = TempDirectory() + L"solstream-task.xml";
 
-    // Whoever is at the console, not whoever ran the installer: an administrator
+    // Whoever asked for the install, not whoever approved it: an administrator
     // setting this up for somebody else must not register a task that runs as
-    // themselves.
-    wchar_t user[256] = {0};
-    DWORD user_size = 256;
-    GetUserNameW(user, &user_size);
-    wchar_t machine[256] = {0};
-    DWORD machine_size = 256;
-    GetComputerNameW(machine, &machine_size);
-    const std::wstring account = std::wstring(machine) + L"\\" + user;
+    // themselves. How the difference is worked out is in LogonTaskAccount.
+    const std::wstring account = LogonTaskAccount();
 
     const std::wstring xml =
         L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
@@ -541,8 +840,10 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
         // The account belongs here rather than on schtasks' /ru switch. With /ru
         // and no /rp, schtasks asks for a password on a console nobody is
         // watching and simply never returns — it sat there for the full two
-        // minute timeout and reported 259, STILL_ACTIVE. Declared in the XML
-        // alongside InteractiveToken, no password is wanted at all.
+        // minute timeout and reported 259, STILL_ACTIVE, which is the number
+        // RunHidden no longer hands back as though it were an exit code.
+        // Declared in the XML alongside InteractiveToken, no password is wanted
+        // at all.
         L"    <UserId>" + account + L"</UserId>\r\n"
         // Interactive and least-privilege. A process in session 0 sees a phantom
         // 1024x768 desktop and no windows at all, so it could neither show its
@@ -586,18 +887,98 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
     const DWORD code = RunHidden(command);
     DeleteFileW(xml_path.c_str());
     if (code != 0) {
-        error = "Could not register the logon task (schtasks returned "
-              + std::to_string((int) code) + ").";
+        error = "Could not register the logon task (schtasks " + RunOutcome(code)
+              + ").";
         return false;
     }
     return true;
+}
+
+/// The name of this run's result file, chosen by the process that is going to
+/// read it. Empty when there is not one.
+///
+/// The file was called solstream-install-result.txt, always, in a directory every
+/// account can write to — and it has to be writable by everybody, because the
+/// unelevated half deletes the file after reading it. A name that is the same on
+/// every machine and every run is a name anybody logged in can occupy before the
+/// elevated half gets there, and what the setup window then reads back is a file
+/// somebody else made, or a hard link aimed at a file the elevated half had no
+/// intention of writing to. Locking the directory down does not fix that on its
+/// own; taking the shared name away does.
+///
+/// The reader is always the process that raised the UAC prompt, so the name is
+/// generated in RelaunchElevated and remembered in this variable. The elevated
+/// half — and the temporary copy an uninstall steps out to, which is two
+/// processes further on — find it on their own command line instead.
+std::wstring g_result_token;
+
+std::wstring ResultToken() {
+    if (!g_result_token.empty()) {
+        return g_result_token;
+    }
+    const std::wstring passed = SwitchValue(kResultTokenSwitch);
+    // Only what this program puts there: thirty-two hex characters. This string
+    // becomes part of a path, and anything else on that switch arrived from
+    // somewhere with no business naming a file in ProgramData.
+    if (passed.size() != 32
+        || passed.find_first_not_of(L"0123456789abcdef") != std::wstring::npos) {
+        return {};
+    }
+    return passed;
 }
 
 std::wstring ResultPath() {
     // Shared, not per-account: see SharedDirectory. The whole point of this file
     // is that it is written by one process and read by another, and those two
     // are not always the same user.
-    return SharedDirectory() + L"solstream-install-result.txt";
+    const std::wstring token = ResultToken();
+    // No token means nobody is waiting for this: SolStream.exe --install or
+    // --uninstall --quiet run from an elevated console, where the answer is the
+    // process's own exit code and this file is only ever written. It still has to
+    // be written somewhere, and one fixed name that overwrites itself is tidier
+    // there than a new file per run that nothing ever deletes.
+    return SharedDirectory() + L"solstream-install-result"
+         + (token.empty() ? std::wstring() : L"-" + token) + L".txt";
+}
+
+/// A new per-run name, and the leftovers of any run that never had its answer
+/// read swept up on the way past.
+///
+/// The fixed name overwrote itself; per-run names do not, and the one path that
+/// asks for an install and then exits without reading the result — SolStream.exe
+/// --install typed at an unelevated prompt — would otherwise leave one small file
+/// in ProgramData every time. Swept by the unelevated half as it starts a run,
+/// which is the account the DACL grants delete rights to.
+std::wstring NewResultToken() {
+    const std::wstring shared = SharedDirectory();
+    WIN32_FIND_DATAW found{};
+    HANDLE search =
+        FindFirstFileW((shared + L"solstream-install-result-*.txt").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                DeleteFileW((shared + found.cFileName).c_str());
+            }
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+
+    unsigned char bytes[16] = {0};
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        // Nothing unguessable to be had, so the fixed name it is — see
+        // ResultPath. Better a predictable postbox than no postbox and a setup
+        // window told the install never ran.
+        return {};
+    }
+    static const wchar_t* hex = L"0123456789abcdef";
+    std::wstring out;
+    out.reserve(sizeof(bytes) * 2);
+    for (unsigned char byte : bytes) {
+        out.push_back(hex[byte >> 4]);
+        out.push_back(hex[byte & 0x0F]);
+    }
+    return out;
 }
 
 }  // namespace
@@ -613,6 +994,15 @@ std::wstring OptionArguments(const InstallOptions& options) {
     if (!options.desktop_shortcut) { out += L" --no-desktop-shortcut"; }
     if (!options.start_menu_shortcut) { out += L" --no-start-menu"; }
     if (!options.start_at_logon) { out += L" --no-logon"; }
+    // Who is asking. This is only ever built on the way to the UAC prompt, by
+    // the half that has not been elevated, so the account this process runs as
+    // is the person at the keyboard — which is exactly what the elevated half
+    // can no longer work out for itself once somebody else's administrator
+    // credentials have been typed at that prompt. See LogonTaskAccount.
+    const std::wstring sid = CurrentUserSid();
+    if (!sid.empty()) {
+        out += L" " + std::wstring(kInvokingUserSwitch) + L" " + sid;
+    }
     return out;
 }
 
@@ -629,7 +1019,15 @@ InstallOptions OptionsFromArguments(int argc, wchar_t** argv) {
 
 void WriteInstallResult(bool ok, const std::string& error) {
     const std::wstring path = ResultPath();
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    // Delete first, then CREATE_NEW rather than CREATE_ALWAYS: what is written
+    // here has to land in a file this process made, not in whatever happens to
+    // be sitting at that path. CREATE_ALWAYS would happily truncate and write
+    // through somebody else's file — or through a hard link they had aimed
+    // somewhere else — and this process is the elevated one. With a per-run name
+    // there should be nothing there at all; this is what makes that true rather
+    // than likely.
+    DeleteFileW(path.c_str());
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         const DWORD code = GetLastError();
@@ -694,12 +1092,22 @@ bool IsElevated() {
 
 bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
     const std::wstring exe = ExePath();
+    // The name of the postbox is settled here, in the process that is going to
+    // read it, rather than agreed in advance by both halves — see ResultToken.
+    // Here because this is the one place every elevated relaunch passes through,
+    // installs and uninstalls alike, and the callers pass their arguments in as
+    // fixed strings that have no room for it.
+    std::wstring parameters = arguments;
+    g_result_token = NewResultToken();
+    if (!g_result_token.empty()) {
+        parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + g_result_token;
+    }
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS;
     execute.lpVerb = L"runas";
     execute.lpFile = exe.c_str();
-    execute.lpParameters = arguments.c_str();
+    execute.lpParameters = parameters.c_str();
     // Hidden, because the elevated half has no window worth showing: it is the
     // same binary running its install path, and the window the user is looking
     // at is the one that asked for it.
@@ -740,12 +1148,23 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
         InstallLog(error + " (error " + std::to_string((int) code) + ")");
         return false;
     }
+    // The temporary copy is the process that actually does the uninstall, so it
+    // is the one that writes the result — and the window waiting for that result
+    // is two processes back, looking for a name it chose. Carry the name across.
+    // Without it the copy writes to the fixed name, the window finds nothing
+    // where it is looking, and a completed uninstall is reported as one that
+    // never ran.
+    std::wstring parameters = arguments;
+    const std::wstring token = ResultToken();
+    if (!token.empty()) {
+        parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + token;
+    }
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS;
     execute.lpVerb = L"open";
     execute.lpFile = copy.c_str();
-    execute.lpParameters = arguments.c_str();
+    execute.lpParameters = parameters.c_str();
     execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
         error = "Could not start the uninstaller.";
@@ -892,8 +1311,8 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
             // running" is otherwise a mystery to whoever reads this log.
             InstallLog(started == 0
                            ? "logon task started"
-                           : "logon task registered, but starting it now returned "
-                                 + std::to_string((int) started));
+                           : "logon task registered, but starting it now "
+                                 + RunOutcome(started));
         }
     } else {
         // Asked not to. Clear any task an earlier install left, or the tick on
@@ -930,9 +1349,18 @@ bool UninstallSelf(std::string& error) {
     // Windows that goes on trying to start a deleted SolStream.exe at every
     // logon. Asking whether the task is still there is what tells the two apart,
     // and this line used to claim the removal either way.
-    if (RunHidden(L"schtasks.exe /query /tn \"" + std::wstring(kTaskName) + L"\"") == 0) {
+    const DWORD queried =
+        RunHidden(L"schtasks.exe /query /tn \"" + std::wstring(kTaskName) + L"\"");
+    if (queried == 0) {
         InstallLog("the logon task is still registered — remove \"SolStream Host\""
                    " in Task Scheduler");
+    } else if (queried == kRunTimedOut || queried == kRunFailed) {
+        // A query that never answered is not a "no". Non-zero happens to be what
+        // both look like, which is how "logon task removed" would be claimed on
+        // the strength of nothing having come back at all.
+        InstallLog("could not tell whether the logon task is still registered "
+                   "(schtasks " + RunOutcome(queried) + ") — check \"SolStream "
+                   "Host\" in Task Scheduler");
     } else {
         InstallLog("logon task removed");
     }

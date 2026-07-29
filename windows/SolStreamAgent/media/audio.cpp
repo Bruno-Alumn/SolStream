@@ -74,42 +74,71 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
     }
 }
 
-/// Linear resampling to 48 kHz, with the fractional read position carried
-/// across calls.
+/// Resampling to 48 kHz by area averaging, with the part-finished output sample
+/// carried across calls.
 ///
-/// Linear interpolation is not a good resampler in general. It is an adequate
-/// one here: the common cases are 48 kHz (ratio 1, so it copies) and 96 kHz
-/// (ratio 2, so every output sample is the mean of two inputs, which is a
-/// two-tap decimation filter). Anything better would mean the Media Foundation
-/// resampler MFT and a second pipeline to keep alive for a case that has not
-/// been observed.
+/// Every output sample covers `ratio` input frames and is their mean: at 96 kHz
+/// the mean of two, at 192 kHz the mean of four, and at 48 kHz the ratio is 1 so
+/// each input frame passes through unchanged. Where a boundary falls inside an
+/// input frame -- 44.1 kHz, or any rate that is not a whole multiple of 48 kHz --
+/// that frame is split between the two output samples it straddles in
+/// proportion, so no input is dropped and none is counted twice.
+///
+/// This was linear interpolation, with a comment saying that at ratio 2 it took
+/// the mean of two inputs and so acted as a two-tap decimation filter. It did
+/// not. The read position advanced by exactly 2.0 each time, so the
+/// interpolation fraction was always zero and every second input frame was
+/// handed out untouched: nearest-sample decimation, with nothing at all between
+/// a 96 kHz mix and a 24 kHz Nyquist to keep content above it from folding back
+/// into the audible band. Nobody noticed because a desktop mix has almost no
+/// energy up there, which is exactly the sort of wrong that survives.
+///
+/// A boxcar mean of N is a poor anti-alias filter. It is a real one, which is
+/// the difference that matters here. Anything better would mean the Media
+/// Foundation resampler MFT and a second pipeline to keep alive for a case that
+/// has not been observed.
 struct Resampler {
-    double position = 0.0;
-    float lastLeft = 0.0f, lastRight = 0.0f;
-    bool primed = false;
+    /// The output sample being built: the input it has covered so far, each
+    /// frame weighted by how much of it belongs to this sample, and how wide
+    /// that coverage has become. Both are carried between calls because a WASAPI
+    /// buffer boundary falls wherever it likes, and an output sample that
+    /// straddles one must not be emitted twice or cut short.
+    double sumLeft = 0.0, sumRight = 0.0;
+    double filled = 0.0;
 
     void Run(const std::vector<float>& in, double ratio, std::vector<float>& out) {
         const size_t frames = in.size() / 2;
-        if (frames == 0) { return; }
-        if (!primed) {
-            lastLeft = in[0];
-            lastRight = in[1];
-            primed = true;
+        // The ratio comes from the endpoint's declared sample rate. Written as
+        // `!(ratio > 0.0)` so a rate of zero, or a NaN out of a broken driver,
+        // leaves rather than spins in the loop below asking for a bucket that
+        // can never fill.
+        if (frames == 0 || !(ratio > 0.0)) { return; }
+        for (size_t i = 0; i < frames; ++i) {
+            const double left = in[i * 2];
+            const double right = in[i * 2 + 1];
+            // One whole input frame, given out in pieces to however many output
+            // samples it spans: one, two where a boundary falls inside it, and
+            // more than that only when the endpoint runs below 48 kHz.
+            double remaining = 1.0;
+            while (remaining > 0.0) {
+                const double wanted = ratio - filled;
+                const double take = wanted < remaining ? wanted : remaining;
+                sumLeft += left * take;
+                sumRight += right * take;
+                filled += take;
+                remaining -= take;
+                // Finished to within rounding counts as finished. Without the
+                // epsilon a bucket that lands a hair short of `ratio` would drag
+                // a sliver of the next input frame in behind it, for no audible
+                // gain and one more trip round this loop every time.
+                if (filled + 1e-12 >= ratio) {
+                    out.push_back((float) (sumLeft / filled));
+                    out.push_back((float) (sumRight / filled));
+                    sumLeft = sumRight = 0.0;
+                    filled = 0.0;
+                }
+            }
         }
-        while (position < (double) frames) {
-            const long long index = (long long) position;
-            const double fraction = position - (double) index;
-            const float leftA = index == 0 ? lastLeft : in[(size_t) (index - 1) * 2];
-            const float rightA = index == 0 ? lastRight : in[(size_t) (index - 1) * 2 + 1];
-            const float leftB = in[(size_t) index * 2];
-            const float rightB = in[(size_t) index * 2 + 1];
-            out.push_back(leftA + (leftB - leftA) * (float) fraction);
-            out.push_back(rightA + (rightB - rightA) * (float) fraction);
-            position += ratio;
-        }
-        lastLeft = in[(frames - 1) * 2];
-        lastRight = in[(frames - 1) * 2 + 1];
-        position -= (double) frames;
     }
 };
 
@@ -201,7 +230,7 @@ void AudioCapture::Run(Sink sink, std::function<bool()> keepGoing) {
                 // Nothing is playing. Sending digital silence would cost 1.5
                 // Mbit/s to transmit nothing; the Mac plays silence when its
                 // queue runs dry, which is the same result for no bytes.
-                ++silent_;
+                silent_.fetch_add(1);
             } else if (frames > 0) {
                 Convert(format, data, frames, converted);
                 resampler.Run(converted, ratio, pending);

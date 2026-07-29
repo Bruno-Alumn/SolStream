@@ -15,6 +15,17 @@ import AgentChannel
 /// exactly like the user having copied something — so a naive version ping-pongs
 /// the same string between the two machines forever. Every write records what was
 /// written, and an observed change matching the last thing we wrote is ignored.
+///
+/// One thing it deliberately does not carry, in either direction: a clipboard
+/// that has become empty. The agent reports the host's clipboard as text, and a
+/// clipboard holding an image — or a file, or anything else that is not text —
+/// is reported as text that is empty, because the protocol has no way to say
+/// "there is something here, it is simply not text". Copying that emptiness
+/// across would therefore wipe the Mac's clipboard every time somebody copied a
+/// picture on the PC, taking with it whatever they had copied a moment before.
+/// So an empty value is left alone at both ends, and clearing one clipboard does
+/// not clear the other. Distinguishing "empty" from "not text" needs a signal
+/// the agent does not send yet.
 final class ClipboardBridge {
     private let agent: AgentConnection
     private let pasteboard = NSPasteboard.general
@@ -61,6 +72,12 @@ final class ClipboardBridge {
         if pasteboard.changeCount != lastLocalChangeCount {
             lastLocalChangeCount = pasteboard.changeCount
             let local = pasteboard.string(forType: .string)
+            // Nothing to send is not the same as nothing to say, and neither is
+            // sent: a Mac clipboard holding an image has no string on it at all
+            // and `local` is nil, while one the user has emptied has a string of
+            // no length. Sending the second would clear the host's clipboard, and
+            // the host cannot tell that apart from the first — see the note on
+            // the class, and the matching guard on the remote side below.
             if let local, !local.isEmpty, local != lastSyncedText {
                 lastSyncedText = local
                 inFlight = true
@@ -83,6 +100,9 @@ final class ClipboardBridge {
                 self.inFlight = false
                 guard let remote else { return }
                 self.lastRemoteSequence = remote.sequence
+                // Empty text is not an empty clipboard — it is also how an image
+                // on the host arrives. See the note on the class: this is why the
+                // Mac's clipboard is left alone rather than cleared.
                 guard !remote.isUnchanged, !remote.text.isEmpty,
                       remote.text != self.lastSyncedText else { return }
 

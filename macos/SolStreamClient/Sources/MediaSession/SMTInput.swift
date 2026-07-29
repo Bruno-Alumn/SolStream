@@ -46,10 +46,28 @@ public enum SMTInput {
         public static let meta = Modifiers(rawValue: 0x08)
     }
 
+    /// One event, as `[kind, bodyLength] + body`.
+    ///
+    /// THE DECLARED LENGTH AND THE APPENDED LENGTH MUST BE THE SAME NUMBER.
+    /// This used to write `min(body.count, 255)` and then append the whole
+    /// body, and a body over 255 bytes was not a truncated event, it was the
+    /// end of input for the session: the host advances its parser by exactly
+    /// the declared length, so it lands inside the body, reads four of those
+    /// bytes as the next event's sequence number, and that garbage number
+    /// becomes `highest_`. Every real event after it is then more than 1024
+    /// behind the dedupe window and discarded as a duplicate, silently, for as
+    /// long as the session lasts.
+    ///
+    /// Refusing is the only answer that keeps the invariant true without
+    /// inventing bytes or dropping some of them unannounced. Nothing below can
+    /// reach it -- the fixed-shape builders are four bytes at most and `text`
+    /// splits before it gets here -- so this is here to stop a future builder
+    /// reintroducing the fault, not to handle a case that occurs.
     static func event(_ kind: Kind, _ body: Data) -> Data {
+        guard body.count <= 255 else { return Data() }
         var out = Data(capacity: body.count + 2)
         out.append(kind.rawValue)
-        out.append(UInt8(min(body.count, 255)))
+        out.append(UInt8(body.count))
         out.append(body)
         return out
     }
@@ -99,9 +117,32 @@ public enum SMTInput {
     }
 
     /// Characters no keycode can express, as UTF-16 code units.
-    public static func text(_ string: String) -> Data {
+    ///
+    /// Several events rather than one, because the length byte above stops at
+    /// 255 and a paste of any length would otherwise walk straight past it.
+    /// Each element is one event for `MediaClient.sendInput`, so each gets its
+    /// own sequence number and its own acknowledgement; the host injects code
+    /// units in the order the events arrive and is indifferent to where a run
+    /// of text was divided.
+    ///
+    /// The split is by SCALAR, not by byte. A cut on an odd byte would hand the
+    /// host half a code unit, and a cut between the two halves of a surrogate
+    /// pair would turn one emoji into two lone surrogates -- both of which the
+    /// host would inject as garbage rather than reject. 254 bytes, which is 127
+    /// code units, is the most the length byte can describe without the last
+    /// one being cut in half.
+    public static func text(_ string: String) -> [Data] {
+        var events: [Data] = []
         var body = Data()
-        for unit in string.utf16 { body.append(be16(unit)) }
-        return event(.text, body)
+        for scalar in string.unicodeScalars {
+            let units = Array(String(scalar).utf16)
+            if !body.isEmpty && body.count + units.count * 2 > 254 {
+                events.append(event(.text, body))
+                body = Data()
+            }
+            for unit in units { body.append(be16(unit)) }
+        }
+        if !body.isEmpty { events.append(event(.text, body)) }
+        return events
     }
 }

@@ -85,6 +85,9 @@ public final class InputCapture {
         0x62: 0x76, 0x64: 0x77, 0x65: 0x78, 0x6D: 0x79, 0x67: 0x7A, 0x6F: 0x7B,
     ]
 
+    /// Key codes already reported by `noteUnmapped`, so a held key says it once.
+    private var reportedUnmappedKeys: Set<UInt16> = []
+
     /// Modifier keys need their own left/right virtual key codes, and each one
     /// maps to the flag whose transition announces it.
     struct ModifierKey {
@@ -268,7 +271,10 @@ public final class InputCapture {
             guard !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
-            guard let windowsKey = keyCodeMap[event.keyCode] else { return false }
+            guard let windowsKey = keyCodeMap[event.keyCode] else {
+                noteUnmapped(event.keyCode)
+                return false
+            }
             let pressed = event.type == .keyDown
             if pressed {
                 heldKeys.insert(windowsKey)
@@ -317,6 +323,24 @@ public final class InputCapture {
         default:
             return false
         }
+    }
+
+    /// Say, once per key code, that a key was dropped instead of sent.
+    ///
+    /// `keyCodeMap` is a US layout and nothing more: no numpad, nothing from F13
+    /// upwards, and not the extra key an ISO keyboard carries beside the left
+    /// shift. Anything missing from it is handed back to AppKit and never
+    /// reaches the host, and from the user's side of the picture that is
+    /// indistinguishable from the streamed application ignoring the key — a
+    /// dead key, with nothing in any log to say so. This does not map anything;
+    /// it only turns a silent drop into a line naming the macOS key code, which
+    /// is the one fact needed to add it. Once per code, because a key held down
+    /// repeats and the report is worth no more the hundredth time.
+    private func noteUnmapped(_ keyCode: UInt16) {
+        guard reportedUnmappedKeys.insert(keyCode).inserted else { return }
+        let hex = String(keyCode, radix: 16, uppercase: true)
+        Log.warning("[input] macOS key code 0x\(hex) is not in the US-layout key map,"
+                    + " so it was not sent to the host")
     }
 
     /// Let go of anything pressed during a ⌘ chord, now that ⌘ itself is up.
@@ -467,6 +491,17 @@ public final class InputCapture {
             }
 
         case .scrollWheel:
+            // Position first, and only scroll at all if that position landed
+            // inside the picture — exactly as for a button, and for the same
+            // reason. The monitor is application-wide, so it also sees the wheel
+            // turned over the title bar, the quality pill and the status
+            // overlay, and every one of those used to scroll the streamed
+            // application instead of doing nothing. Sending the position first
+            // matters here beyond the check: the host injects the wheel with
+            // SendInput, and Windows delivers a wheel event to whatever window
+            // is under the cursor, so the pointer has to be where the wheel was
+            // turned before the wheel arrives.
+            guard sendPosition(for: event, in: view) else { return }
             // Windows counts a wheel click as 120 units, and macOS reports the
             // two kinds of scroll in different units: a trackpad gives points,
             // a wheel mouse gives lines, one line per detent. Sending both at

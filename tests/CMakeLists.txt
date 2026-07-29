@@ -1,31 +1,24 @@
-include(FetchContent)
-
-if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    set(BUILD_GMOCK ON CACHE BOOL "" FORCE)
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-endif()
-
-FetchContent_Declare(
-    googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
-    URL_HASH SHA256=f179ec217f9b3b3f3c6e8b02d3e7eda997b49e4ce26d6b235c9053bec9c0bf9f
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-
-FetchContent_MakeAvailable(googletest)
-
-include(GoogleTest)
-
-# Helper: register a test executable with project defaults
-function(add_solstream_test name)
-    add_executable(${name} ${ARGN})
-    target_link_libraries(${name} PRIVATE GTest::gtest_main GTest::gmock)
-    target_compile_features(${name} PRIVATE cxx_std_20)
-    solstream_setup_target(${name})
-    gtest_discover_tests(${name}
-        DISCOVERY_TIMEOUT 60
-        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<LOWER_CASE:$<CONFIG>>"
-        PROPERTIES TIMEOUT 60
-    )
-endfunction()
+# There are no C++ tests, and this directory no longer pretends there are.
+#
+# It used to fetch GoogleTest — a 30 MB archive downloaded and built at configure
+# time — and define an add_solstream_test() helper on top of it. Nothing ever
+# called the helper, no test executable was ever declared, and so the dependency
+# was fetched and compiled for a suite of exactly zero tests. An unused
+# dependency that nothing links is worse than no scaffolding at all: it costs
+# every configure, it has to be kept in step with the toolchain, and it makes the
+# tree look as though a C++ suite exists to be run.
+#
+# The tests that do exist are the Swift ones in
+# macos/SolStreamClient/Tests/SolStreamClientTests, run with `swift test`. The
+# Windows side is verified by running it, which docs/architecture.md is honest
+# about under "What is measured, and what is not".
+#
+# This file stays behind as a comment rather than being deleted because the
+# top-level CMakeLists.txt still does add_subdirectory(tests) inside
+# if(BUILD_TESTING), and CMake fails outright on a directory with no
+# CMakeLists.txt in it. BUILD_TESTING becomes ON by default the moment
+# include(CTest) runs, so deleting this file would break a plain
+# `cmake -S . -B build` on a fresh clone.
+#
+# If C++ tests are written, fetch the framework here at that point, for the
+# targets that will actually link it.

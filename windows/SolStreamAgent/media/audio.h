@@ -46,14 +46,17 @@ public:
     void Stop();
 
     uint64_t Packets() const { return packets_.load(); }
-    uint64_t Silent() const { return silent_; }
+    uint64_t Silent() const { return silent_.load(); }
     bool Started() const { return started_.load(); }
 
 private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};
     std::atomic<uint64_t> packets_{0};
-    uint64_t silent_ = 0;
+    /// Atomic for the same reason as `packets_`, which it sits next to in the
+    /// same log line: the audio thread counts silent buffers while the sender
+    /// thread reads the count out for its five-second report.
+    std::atomic<uint64_t> silent_{0};
 };
 
 }  // namespace solstream::media

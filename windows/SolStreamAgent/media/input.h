@@ -28,7 +28,9 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 
 namespace solstream::media {
 
@@ -55,11 +57,24 @@ public:
     /// Apply one datagram's worth of events. Returns the highest contiguous
     /// sequence number applied so far, which is what the host echoes back so the
     /// client can stop repeating.
+    ///
+    /// Contiguous means from sequence 1, which is where every session starts, so
+    /// this stays at zero until sequence 1 has actually been applied and only
+    /// ever advances one applied sequence at a time. Anything else would tell
+    /// the client that events this host never saw are safe to forget, and the
+    /// client obliges: it keeps a tail of 32 and stops repeating 300 ms after
+    /// the last new event, so a button-up acknowledged in error is a button
+    /// held down here with nothing left anywhere to raise it.
     uint32_t Apply(const unsigned char* plaintext, size_t length);
 
-    uint32_t Acknowledged() const { return acked_; }
-    uint64_t Applied() const { return applied_; }
-    uint64_t Duplicates() const { return duplicates_; }
+    /// All three are read by the sender thread -- ten times a second for the
+    /// acknowledgement it puts in the host-stat packet, once every five seconds
+    /// for the log line -- while the receive thread is writing them. Plain
+    /// integers here would be a data race in the language's terms, not merely a
+    /// number that may be a datagram out of date.
+    uint32_t Acknowledged() const { return acked_.load(); }
+    uint64_t Applied() const { return applied_.load(); }
+    uint64_t Duplicates() const { return duplicates_.load(); }
 
     /// Release everything currently held. Called when the session ends, because
     /// a client that disappears mid-drag otherwise leaves the host's mouse
@@ -82,14 +97,22 @@ private:
     bool ApplyOne(unsigned char kind, const unsigned char* body, size_t length);
     bool ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) const;
 
+    /// Retarget rewrites the target from the agent's command thread while the
+    /// receive thread is turning coordinates into screen pixels with it. Two
+    /// pointers written and read without a lock is a race whatever the hardware
+    /// does with them, so every reader takes a copy under this and then lets go
+    /// before it calls into Windows.
+    mutable std::mutex targetLock_;
     InputTarget target_;
-    uint32_t acked_ = 0;
-    uint64_t applied_ = 0;
-    uint64_t duplicates_ = 0;
+
+    std::atomic<uint32_t> acked_{0};
+    std::atomic<uint64_t> applied_{0};
+    std::atomic<uint64_t> duplicates_{0};
 
     /// A 1024-slot window of sequence numbers already applied, the same shape as
     /// the replay window a layer below and for the same reason: repeats must be
-    /// free, and an event must never be applied twice.
+    /// free, and an event must never be applied twice. Only the receive thread
+    /// touches these; Reset runs with that thread joined.
     uint64_t seen_[16] = {};
     uint32_t highest_ = 0;
     bool started_ = false;

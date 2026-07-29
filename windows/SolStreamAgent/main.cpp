@@ -2969,9 +2969,12 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
 ///   channel keys, which tells the caller to switch framing once its reply has
 ///   gone out. `maybe_unused` because the only thing that writes it is compiled
 ///   out without SOLSTREAM_MEDIA, and a warning there is noise rather than news.
+/// - Parameter auth_failures: counts refused proofs on this connection, so the
+///   caller can stop serving one that is only ever going to guess.
 std::string HandleCommand(const std::string& line, bool& authenticated,
                           const std::string& challenge,
-                          [[maybe_unused]] std::string& channel_cnonce) {
+                          [[maybe_unused]] std::string& channel_cnonce,
+                          int& auth_failures) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
@@ -3081,8 +3084,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 Log("[agent] client authenticated with a v2 proof");
                 return "{\"type\":\"auth\",\"ok\":true}";
             }
-            Sleep(1000);
-            Log("[agent] rejected a bad auth proof");
+            ++auth_failures;
+            Log("[agent] rejected a bad auth proof (%d on this connection)",
+                auth_failures);
             return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
         }
 
@@ -3099,11 +3103,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             Log("[agent] client authenticated with a legacy plaintext token");
             return "{\"type\":\"auth\",\"ok\":true}";
         }
-        // Deliberately slow: this is the only guess-and-check surface here, and
-        // the agent serves one client at a time, so a delay costs a legitimate
-        // client nothing and costs an attacker everything.
-        Sleep(1000);
-        Log("[agent] rejected a bad token");
+        // Counted rather than slept off. This is the only guess-and-check
+        // surface here, and it used to answer a wrong token a second late on the
+        // grounds that the delay cost an attacker everything and a legitimate
+        // client nothing. Both were false: the agent serves one client at a
+        // time, so the second was a second in which the paired Mac could not be
+        // served, which is the attacker's goal and not his cost. See
+        // kMaxAuthFailures.
+        ++auth_failures;
+        Log("[agent] rejected a bad token (%d refusal%s on this connection)",
+            auth_failures, auth_failures == 1 ? "" : "s");
         return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
     }
 
@@ -3202,12 +3211,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         std::string startError;
 #ifdef SOLSTREAM_MEDIA
         long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
+        // Zero means "host decides", which is what an absent field leaves behind.
+        long long width = 0, height = 0;
         std::string displayName;
         FieldNumber(line, "window", targetId);
         FieldString(line, "display", displayName);
         FieldNumber(line, "fps", fps);
         FieldNumber(line, "bitrate", bitrate);
         FieldNumber(line, "audio", audio);
+        FieldNumber(line, "width", width);
+        FieldNumber(line, "height", height);
         HWND targetWindow =
             targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
         HMONITOR targetMonitor =
@@ -3217,9 +3230,33 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             config.window = targetWindow;
             config.monitor = targetMonitor;
             config.fps = (UINT) (fps > 0 && fps <= 240 ? fps : 60);
-            config.bitrate = (UINT) (bitrate > 1000000 ? bitrate : 20000000);
+            // An upper bound as well as a lower one. This arrives as a long long
+            // and was only ever checked for being too small, so a client asking
+            // for five billion bit/s had it wrapped into a UINT -- 705 Mbit/s,
+            // a number nobody chose -- and the sender then paced at twice that,
+            // which is line rate on any link this runs over. Out of range falls
+            // back to the default rather than clamping, because a bitrate that
+            // far out is a client bug, not a preference worth honouring.
+            config.bitrate =
+                (UINT) (bitrate > 1000000 && bitrate <= 500000000 ? bitrate : 20000000);
+            // The Mac asks for a canvas so that its crops are pixel-exact
+            // against the capture display; when it asks for nothing, the first
+            // captured frame decides, exactly as before. Clamped here as well as
+            // on the Mac because a number off the wire is a number off the wire:
+            // above 4096 the H.264 encoders this runs on open and then never
+            // produce a frame, which looks from the Mac like a session that
+            // agreed to stream and went silent.
+            config.width = (UINT) (width > 0 ? (width > 4096 ? 4096 : width) : 0);
+            config.height = (UINT) (height > 0 ? (height > 4096 ? 4096 : height) : 0);
             config.audio = audio != 0;
             config.port = solstream::kDefaultMediaPort;
+            // Start does not return until the capture and the encoder have both
+            // opened or one of them has failed, so `streaming` below is what
+            // happened rather than what was intended. It used to be the latter:
+            // capture and encode are set up on the capture thread, this returned
+            // as soon as that thread existed, and a WGC or encoder failure
+            // arrived seconds later in the host's log only -- the Mac had
+            // already closed its picker and sat on "Waiting for video" for ever.
             started = solstream::media::MediaSession::Instance().Start(
                           okm.data(), config, &startError)
                           ? "true" : "false";
@@ -3696,10 +3733,55 @@ constexpr DWORD kIdleTimeoutMs = 30000;
 /// ten seconds here would drop somebody in the middle of typing.
 constexpr DWORD kPreAuthTimeoutMs = 15000;
 
+/// And this long in total, however busy it is.
+///
+/// The timeout above bounds nothing on its own, which is the trap this closes.
+/// SO_RCVTIMEO is applied per recv() call, so every byte that arrives starts
+/// those fifteen seconds again: anyone who can open this port can hold the
+/// agent's only client slot for as long as they like by writing one byte every
+/// fourteen seconds, and never authenticating. While they hold it the accept
+/// loop closes the paired Mac on arrival without a word, so the symptom is a
+/// Mac that reconnects, is dropped, backs off and reconnects, for ever.
+///
+/// This clock starts when the socket is accepted and nothing resets it.
+///
+/// Two minutes rather than the fifteen seconds above, because the one thing
+/// that legitimately keeps a connection here unproved is a person reading a
+/// 32-character pairing token off the PC's screen and typing it into a sheet on
+/// the Mac. There is no clipboard between the two machines until they are
+/// paired, so that is half a minute of careful typing for most people, and the
+/// Mac cannot hold its place across a drop: it re-asks from scratch, on a second
+/// sheet over the first, with whatever was typed into the first one buried under
+/// it. A budget short enough to inconvenience a squatter is therefore short
+/// enough to make pairing impossible, and a squatter who is disconnected simply
+/// reconnects — what this is worth is that the hold is now finite and logged,
+/// not that it is prevented.
+constexpr ULONGLONG kPreAuthDeadlineMs = 120000;
+
+/// How many rejected proofs one connection may make before it is dropped.
+///
+/// A wrong token used to cost the guesser a one-second Sleep and nothing else,
+/// and the comment beside it said that cost the attacker everything and a
+/// legitimate client nothing. Both halves were wrong once the connection itself
+/// became the prize: that Sleep runs on the serving thread, which is the only
+/// thread there is, so it kept the slot shut for a second per guess and the
+/// legitimate client — locked out for the duration — was the one paying. The
+/// limit replaces it. Guessing 16 random bytes is not a real attack in any case;
+/// what needed bounding was the guessing being free to go on for ever on one
+/// socket.
+///
+/// Three, not one, because a person who mistypes a token should be told so and
+/// allowed another go on the same connection, and the Mac re-asks in place when
+/// a proof comes back refused.
+constexpr int kMaxAuthFailures = 3;
+
 void ServeClient(SOCKET client) {
     // Raised to kIdleTimeoutMs the moment the client authenticates, below.
     DWORD timeout_ms = g_require_auth ? kPreAuthTimeoutMs : kIdleTimeoutMs;
     setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*) &timeout_ms, sizeof(timeout_ms));
+    // Before the greeting, so nothing this connection does can shorten what it
+    // is measured against.
+    const ULONGLONG accepted_at = GetTickCount64();
     const DWORD send_timeout_ms = kIdleTimeoutMs;
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*) &send_timeout_ms,
                sizeof(send_timeout_ms));
@@ -3776,6 +3858,10 @@ void ServeClient(SOCKET client) {
 
     std::string buffer;
     char chunk[4096];
+    // Per connection, deliberately: a fresh socket is a fresh three guesses, and
+    // the point is not to make guessing hard — the token is 16 random bytes —
+    // but to stop one socket guessing for ever while holding the slot.
+    int auth_failures = 0;
     // Set once a line has outgrown the cap, and cleared at the newline that ends
     // it. The rest of an oversized line has not arrived yet ΓÇö it comes in later
     // recv() chunks ΓÇö so this cannot be a one-off scan of what is in hand.
@@ -3789,6 +3875,16 @@ void ServeClient(SOCKET client) {
             return;
         }
         if (n <= 0) {
+            return;
+        }
+        // Here, on every wakeup, and before a single byte of what arrived is
+        // looked at. Anywhere further down and some framing state ducks it: the
+        // oversized-line discard below leaves the loop early, so a client that
+        // sends an endless line and no newline would never reach a check placed
+        // after it -- which is exactly the shape of the traffic this bounds.
+        if (!authenticated && GetTickCount64() - accepted_at >= kPreAuthDeadlineMs) {
+            Log("[agent] client held the socket for %llus without authenticating, "
+                "dropping", (unsigned long long) (kPreAuthDeadlineMs / 1000));
             return;
         }
         buffer.append(chunk, static_cast<size_t>(n));
@@ -3840,7 +3936,7 @@ void ServeClient(SOCKET client) {
             const bool was_authenticated = authenticated;
             std::string channel_cnonce;
             if (!SendLine(client, HandleCommand(line, authenticated, challenge,
-                                                channel_cnonce))) {
+                                                channel_cnonce, auth_failures))) {
                 return;
             }
 #ifdef SOLSTREAM_MEDIA
@@ -3871,6 +3967,13 @@ void ServeClient(SOCKET client) {
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
                 }
+            }
+            // After the reply, never before it: a client whose last guess was
+            // wrong has to be told so, or the Mac shows a token sheet that never
+            // says the token was refused and the person retypes the same thing.
+            if (!authenticated && auth_failures >= kMaxAuthFailures) {
+                Log("[agent] dropping a client after %d refused proofs", auth_failures);
+                return;
             }
         }
 
@@ -4530,9 +4633,12 @@ int wmain(int argc, wchar_t** argv) {
             // Closed without a word rather than refused with `busy`, and the
             // difference is the whole point: an unexplained close is what the
             // Mac's reconnect backoff is for, so it comes back in a couple of
-            // seconds, by which time the shorter pre-auth timeout in ServeClient
-            // will have freed the slot if nothing was ever going to authenticate
-            // on it. Saying `busy` here would be saying something untrue —
+            // seconds and goes on coming back. What it comes back to is a slot
+            // the pre-auth timeout in ServeClient frees when the holder falls
+            // quiet, and kPreAuthDeadlineMs frees even when the holder does not
+            // — before that deadline existed, a holder that kept talking without
+            // ever authenticating kept this client out indefinitely. Saying
+            // `busy` here would be saying something untrue —
             // nobody is streaming — to a client that would believe it for good.
             if (g_clients_connected.load() > 0) {
                 Log("[agent] closed a client on arrival: the socket is held by "

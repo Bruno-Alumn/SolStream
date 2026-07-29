@@ -25,10 +25,11 @@
     {
       "name": "windows-msvc-debug",
       "displayName": "Windows MSVC x64 Debug",
+      "description": "Testing is off because there is no C++ suite: see tests/CMakeLists.txt. The tests are the Swift ones under macos/SolStreamClient/Tests, run with swift test.",
       "inherits": "windows-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "BUILD_TESTING": "ON"
+        "BUILD_TESTING": "OFF"
       }
     },
     {
@@ -51,19 +52,6 @@
       "name": "windows-msvc-release",
       "configurePreset": "windows-msvc-release",
       "configuration": "Release"
-    }
-  ],
-  "testPresets": [
-    {
-      "name": "windows-msvc-debug",
-      "configurePreset": "windows-msvc-debug",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
-      "execution": {
-        "noTestsAction": "error"
-      }
     }
   ]
 }

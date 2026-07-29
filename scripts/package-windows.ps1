@@ -21,8 +21,25 @@
 #
 # None of that exists any more. SolStream captures, encodes and sends the
 # picture itself, so there is no second program to ship, no GPL obligation to
-# carry, and no payload to embed. The driver is still optional and still
-# offered by the application, which downloads it itself when the user asks.
+# carry, and no payload to embed.
+#
+# THE DISPLAY DRIVER IS NOT SHIPPED AND IS NOT DOWNLOADED. This is worth saying
+# plainly because the line that used to sit here said the application "downloads
+# it itself when the user asks", and there is no code anywhere in SolStream that
+# fetches a driver, or anything else, from the internet. What
+# InstallBundledDriver in vdd.cpp actually does
+# is run pnputil on driver\SolStreamDisplay.inf sitting beside the executable —
+# a file this script does not produce — and when it is absent, which is always
+# for a packaged build, the "Install driver" button explains that no driver is
+# bundled and points the user at the Virtual Display Driver to install by hand.
+# So a packaged SolStream streams a real monitor until somebody installs an
+# indirect display driver themselves.
+#
+# NOTHING HERE SIGNS THE EXECUTABLE, and there is no CI: this script is run by
+# hand on a Windows machine. An unsigned download means SmartScreen's "Windows
+# protected your PC" and an Unknown publisher prompt at the UAC dialog. See
+# installer/README.md, which records the gap rather than pretending it is
+# closed.
 #
 # Usage:
 #   .\package-windows.ps1
@@ -36,7 +53,18 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "=== SolStream Windows package ==="
 
-cmake -S "$PSScriptRoot\.." -B $BuildDir | Out-Null
+# BUILD_TESTING=OFF because this is a packaging run and there is no C++ suite to
+# build: left to its default, include(CTest) turns it ON and the configure walks
+# into tests/, which is where a fetched test framework used to be downloaded and
+# compiled before anything a user downloads was built.
+cmake -S "$PSScriptRoot\.." -B $BuildDir -DBUILD_TESTING=OFF | Out-Null
+# Checked for the same reason the build below is, and it is the easier of the two
+# to miss: `| Out-Null` swallows the configure's output, so a configure that
+# failed leaves this script looking like it printed nothing rather than like it
+# went wrong. Carrying on means building whatever the previous configure left in
+# $BuildDir and packaging the result as though it were this one.
+if ($LASTEXITCODE -ne 0) { throw "cmake could not configure the build ($LASTEXITCODE)" }
+
 cmake --build $BuildDir --target SolStreamAgent --config Release
 # $ErrorActionPreference does not apply to a native command's exit code, so a
 # failed build carries straight on. It has already shipped one stale binary:
