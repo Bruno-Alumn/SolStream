@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import MediaSession
+import SolStreamLogging
 
 /// Turns local macOS keyboard and mouse events into GameStream input packets.
 ///
@@ -191,8 +192,16 @@ public final class InputCapture {
     }
 
     /// Enable capture. Called when the window becomes key.
+    ///
+    /// Deliberately does NOT require the view to be in a window yet. It used to,
+    /// and that was a second way to lose the pointer for good: `becomeKey` can
+    /// arrive while the view is still being put into its window, and since the
+    /// window is already key nothing calls this again — so capture never starts,
+    /// silently, for the whole life of that window. The monitors are app-local
+    /// and every handler already guards on `targetView`, so there is nothing
+    /// here that a window is needed for.
     public func enableCapture() {
-        guard !isCapturing, targetView?.window != nil else { return }
+        guard !isCapturing else { return }
         isCapturing = true
         installMonitors()
     }
@@ -369,16 +378,65 @@ public final class InputCapture {
 
     // MARK: - Mouse
 
-    /// Set while the macOS window frame is being dragged.
+    /// A hint that the macOS window frame is being dragged.
     ///
-    /// Pointer input is suspended for the duration: the user is resizing the
-    /// window, not working in the application, and the pointer sitting on the
-    /// host window's own edge while both sides are being resized makes the host
-    /// start a resize of its own on top of ours.
+    /// Pointer input pauses for the duration: the user is resizing the window,
+    /// not working in the application, and the pointer sitting on the host
+    /// window's own edge while both sides are being resized makes the host start
+    /// a resize of its own on top of ours.
+    ///
+    /// A HINT, AND NOT THE ANSWER ON ITS OWN. This used to be the whole gate,
+    /// set from `windowWillStartLiveResize` and cleared from
+    /// `windowDidEndLiveResize` — and AppKit does not guarantee that pair. A drag
+    /// interrupted by the window being closed, by the frame being set from the
+    /// host mid-drag, or by anything else that ends the resize session another
+    /// way leaves the flag set, and then the pointer is dead for the rest of the
+    /// window's life. Every symptom of that is "I can resize the window but I
+    /// cannot click or scroll in it", with the video still perfect and not one
+    /// line in any log to say why. `inLiveResize` is the same fact asked of
+    /// AppKit instead of remembered, so it cannot get stuck.
     public var isSuspended = false
 
+    /// Pointer events dropped because a resize was in progress. Reported with
+    /// the rest of the input counters, so a pause that never ended is visible
+    /// rather than deduced.
+    public private(set) var droppedWhileResizing: UInt64 = 0
+
+    /// Emit one absolute pointer position from a unit point inside the picture,
+    /// through the same crop, guard and canvas mapping a real mouse move uses.
+    ///
+    /// For `--test-input`. Only the whole-desktop mirror could be driven before
+    /// this, and that is not the path anyone uses — so the application-window
+    /// path, which is every real session, had never once had its pointer proven
+    /// end to end.
+    @discardableResult
+    public func sendUnitPosition(x: Double, y: Double) -> Bool {
+        guard let source = sourceRect, let canvas = canvasSize,
+              canvas.width > 0, canvas.height > 0 else { return false }
+        let target = Self.canvasPoint(unit: CGPoint(x: x, y: y), source: source,
+                                      edgeGuard: edgeGuard)
+        positionsSent += 1
+        onInput?(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
+                                            y: Int(target.y.rounded()),
+                                            referenceWidth: Int(canvas.width),
+                                            referenceHeight: Int(canvas.height)))
+        return true
+    }
+
     private func handleMouseEvent(_ event: NSEvent) {
-        guard isCapturing, !isSuspended, let view = targetView else { return }
+        guard isCapturing, let view = targetView else { return }
+        if isSuspended || view.inLiveResize || (view.window?.inLiveResize ?? false) {
+            droppedWhileResizing &+= 1
+            // The flag alone is not trusted: if nothing is actually being
+            // dragged, whatever set it has gone away without clearing it.
+            if isSuspended && !view.inLiveResize && !(view.window?.inLiveResize ?? false) {
+                isSuspended = false
+                Log.info("[input] the resize pause outlived the resize; resuming"
+                         + " (\(droppedWhileResizing) pointer events dropped)")
+            } else {
+                return
+            }
+        }
 
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:

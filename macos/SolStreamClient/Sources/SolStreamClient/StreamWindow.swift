@@ -74,8 +74,9 @@ final class StreamWindow: NSObject {
             DispatchQueue.main.async { self?.apply(phase: phase) }
         }
         session.setPointerStats { [weak self] in
-            guard let capture = self?.inputCapture else { return (0, 0) }
-            return (capture.mouseMovedSeen, capture.positionsSent)
+            guard let capture = self?.inputCapture else { return (0, 0, 0) }
+            return (capture.mouseMovedSeen, capture.positionsSent,
+                    capture.droppedWhileResizing)
         }
         inputCapture?.onInput = { [weak self] event in
             self?.session.sendInput(event)

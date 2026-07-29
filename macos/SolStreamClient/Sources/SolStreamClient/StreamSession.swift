@@ -49,9 +49,9 @@ final class StreamSession {
     /// function pointer and a context — and storing one retains the incoming
     /// context while releasing the outgoing one; a concurrent read can retain a
     /// context that is being released to zero.
-    private var pointerStats: (() -> (Int, Int))?
+    private var pointerStats: (() -> (Int, Int, UInt64))?
 
-    func setPointerStats(_ block: (() -> (Int, Int))?) {
+    func setPointerStats(_ block: (() -> (Int, Int, UInt64))?) {
         sinkLock.lock()
         pointerStats = block
         sinkLock.unlock()
@@ -261,8 +261,20 @@ final class StreamSession {
         sinkLock.unlock()
         audioRenderer?.stop()
         audioRenderer = nil
+        // The pointer numbers were collected all along and never once read, so
+        // "my clicks stopped working" left no trace on this side at all — the
+        // whole diagnosis had to come from the host. `dropped` being large is
+        // the specific signature of a resize pause that never ended.
+        sinkLock.lock()
+        let pointer = pointerStats?()
+        sinkLock.unlock()
+        let pointerNote = pointer.map { moved, sent, dropped in
+            ", pointer \(sent) sent of \(moved) moves"
+                + (dropped > 0 ? ", \(dropped) dropped mid-resize" : "")
+        } ?? ""
         Log.info("[session] stopped — \(mediaCounters.frames) frames, "
-                 + "\(mediaCounters.dropped) damaged, \(audioFramesPlayed) audio packets")
+                 + "\(mediaCounters.dropped) damaged, \(audioFramesPlayed) audio packets"
+                 + pointerNote)
     }
 
     // MARK: - Input

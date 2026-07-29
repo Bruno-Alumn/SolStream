@@ -146,7 +146,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // input reached the host.
         if arguments.contains("--test-input") {
             DispatchQueue.main.asyncAfter(deadline: .now() + max(1, captureDelay - 2)) { [weak self] in
+                // Both kinds of window. `--launch` builds an AppWindow, which is
+                // what every real session uses, and driving only the mirror left
+                // that path's pointer unverified from the day it was written.
                 self?.streamWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
+                self?.appWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
             }
         }
 

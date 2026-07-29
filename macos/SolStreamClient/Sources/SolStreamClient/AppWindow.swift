@@ -581,8 +581,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
         inputCapture?.enableCapture()
         // The stats line reports whichever window is actually taking input.
         session.setPointerStats { [weak self] in
-            guard let capture = self?.inputCapture else { return (0, 0) }
-            return (capture.mouseMovedSeen, capture.positionsSent)
+            guard let capture = self?.inputCapture else { return (0, 0, 0) }
+            return (capture.mouseMovedSeen, capture.positionsSent,
+                    capture.droppedWhileResizing)
         }
         // Give the host window focus too, so keystrokes land in the right app.
         agent.focus(windowID: remoteWindowID)
@@ -590,6 +591,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         inputCapture?.disableCapture()
+    }
+
+    /// Drive the host pointer to a known point in the picture, for `--test-input`.
+    func sendTestPointer(normalizedX: Double, normalizedY: Double) {
+        let sent = inputCapture?.sendUnitPosition(x: normalizedX, y: normalizedY) ?? false
+        Log.info("[input] test pointer -> \(normalizedX), \(normalizedY)"
+                 + (sent ? "" : " — REFUSED: no crop or canvas set"))
     }
 
     func windowWillClose(_ notification: Notification) {
