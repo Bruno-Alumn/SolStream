@@ -3566,6 +3566,65 @@ std::string ReadLineHidden() {
 }
 
 
+/// Answer "is anybody there" on the local network.
+///
+/// One datagram in, one datagram out. It replaces an mDNS record that Sunshine
+/// used to advertise on this machine's behalf, which is not something that can
+/// be inherited: SolStream would have had to run a responder, and Windows has
+/// no in-box way to advertise an arbitrary service.
+///
+/// What it discloses is the computer's name and the fact that SolStream is
+/// installed, to anybody already on the same network segment. A port scan
+/// establishes both. It grants nothing: every command still requires the token.
+///
+/// The reply is barely larger than the question, so this is not usable as a
+/// reflection amplifier -- but it only ever answers the exact question string,
+/// which keeps it from answering anything else at all.
+void StartDiscoveryResponder() {
+    std::thread([] {
+        SOCKET listener = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (listener == INVALID_SOCKET) {
+            return;
+        }
+        BOOL reuse = TRUE;
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*) &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = INADDR_ANY;
+        address.sin_port = htons(solstream::kDiscoveryPort);
+        if (bind(listener, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
+            Log("[discover] UDP %u is taken; this PC will not answer discovery",
+                solstream::kDiscoveryPort);
+            closesocket(listener);
+            return;
+        }
+
+        wchar_t name[256] = {};
+        DWORD size = 256;
+        GetComputerNameW(name, &size);
+        const std::string reply = "SOLSTREAM-HOST/1 " + ToUtf8(name);
+        Log("[discover] answering on UDP %u as %s", solstream::kDiscoveryPort,
+            ToUtf8(name).c_str());
+
+        char buffer[256];
+        for (;;) {
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+            const int n = recvfrom(listener, buffer, sizeof(buffer) - 1, 0,
+                                   (sockaddr*) &from, &fromLen);
+            if (n <= 0) {
+                continue;
+            }
+            buffer[n] = 0;
+            if (std::string(buffer, (size_t) n) != "SOLSTREAM-DISCOVER/1") {
+                continue;
+            }
+            sendto(listener, reply.c_str(), (int) reply.size(), 0,
+                   (sockaddr*) &from, fromLen);
+        }
+    }).detach();
+}
+
 /// Give back a console nobody asked for.
 ///
 /// The agent starts from a logon task and from a desktop shortcut, and being a
@@ -4019,6 +4078,7 @@ int wmain(int argc, wchar_t** argv) {
     // display, which no monitor shows. A watcher that only runs while someone
     // is streaming would never see the one dialog most worth carrying back.
     StartWatcher();
+    StartDiscoveryResponder();
 
     // The accept loop moves off the main thread so the window can own it.
     //
