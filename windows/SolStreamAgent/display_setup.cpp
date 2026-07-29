@@ -114,13 +114,36 @@ void Add(std::string& note, const std::string& line) {
     note += line;
 }
 
+/// See the note beside the copy in installer.cpp: a bare executable name is
+/// resolved through a search order that begins with the current directory, and
+/// this file runs pnputil.exe elevated.
+std::wstring QualifySystemCommand(const std::wstring& command) {
+    if (command.empty() || command[0] == L'"' || command.find(L':') != std::wstring::npos) {
+        return command;
+    }
+    const size_t space = command.find(L' ');
+    const std::wstring exe = command.substr(0, space);
+    if (exe.find(L'\\') != std::wstring::npos) {
+        return command;
+    }
+    wchar_t system_dir[MAX_PATH] = {0};
+    if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
+        return command;
+    }
+    std::wstring qualified = L"\"" + std::wstring(system_dir) + L"\\" + exe + L"\"";
+    if (space != std::wstring::npos) {
+        qualified += command.substr(space);
+    }
+    return qualified;
+}
+
 DWORD RunHidden(const std::wstring& command) {
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
     startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION process{};
-    std::wstring mutable_command = command;
+    std::wstring mutable_command = QualifySystemCommand(command);
     if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
         return 0xFFFFFFFF;

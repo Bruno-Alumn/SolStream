@@ -78,13 +78,46 @@ std::string Narrow(const std::wstring& text) {
 /// Run a command and wait, returning its exit code. Used for netsh, schtasks
 /// and taskkill, none of which have a usable API and all of which would flash a
 /// console window on a user's desktop if started the obvious way.
+/// Turn a command whose first word is a bare executable name into one naming
+/// the copy in System32.
+///
+/// EVERYTHING HERE RUNS ELEVATED, and `CreateProcessW` with a null
+/// lpApplicationName resolves a bare name through the search order -- which
+/// begins with the directory the process was started from. A setup program is
+/// run from wherever it was downloaded to, and anyone who can write a file
+/// called `powershell.exe` beside it gets it executed as administrator, at the
+/// UAC prompt the user has just agreed to. The same goes for `netsh.exe`,
+/// `schtasks.exe` and `pnputil.exe`, all of which this file asks for by name.
+///
+/// Resolving to System32 removes the search entirely: there is exactly one
+/// path, and it is one only an administrator can write to.
+std::wstring QualifySystemCommand(const std::wstring& command) {
+    if (command.empty() || command[0] == L'"' || command.find(L':') != std::wstring::npos) {
+        return command;  // already qualified, or quoted by the caller
+    }
+    const size_t space = command.find(L' ');
+    const std::wstring exe = command.substr(0, space);
+    if (exe.find(L'\\') != std::wstring::npos) {
+        return command;
+    }
+    wchar_t system_dir[MAX_PATH] = {0};
+    if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
+        return command;
+    }
+    std::wstring qualified = L"\"" + std::wstring(system_dir) + L"\\" + exe + L"\"";
+    if (space != std::wstring::npos) {
+        qualified += command.substr(space);
+    }
+    return qualified;
+}
+
 DWORD RunHidden(const std::wstring& command) {
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
     startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION process{};
-    std::wstring mutable_command = command;
+    std::wstring mutable_command = QualifySystemCommand(command);
     if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
         return (DWORD) -1;

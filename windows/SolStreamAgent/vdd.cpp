@@ -132,7 +132,18 @@ bool InstallBundledDriver(std::string& error) {
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS;
     execute.lpVerb = L"runas";
-    execute.lpFile = L"pnputil.exe";
+    // System32, not a bare name. ShellExecuteEx searches the same way
+    // CreateProcess does, starting with the directory this process was started
+    // from -- and this call is the one that asks for administrator rights and
+    // then installs a kernel-mode driver package. A `pnputil.exe` dropped
+    // beside the setup program would be run instead, elevated, at the prompt
+    // the user has just approved.
+    wchar_t system_dir[MAX_PATH] = {0};
+    std::wstring pnputil = L"pnputil.exe";
+    if (GetSystemDirectoryW(system_dir, MAX_PATH) != 0) {
+        pnputil = std::wstring(system_dir) + L"\\pnputil.exe";
+    }
+    execute.lpFile = pnputil.c_str();
     execute.lpParameters = arguments.c_str();
     execute.nShow = SW_HIDE;
     if (!ShellExecuteExW(&execute)) {
