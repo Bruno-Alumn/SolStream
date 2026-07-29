@@ -265,8 +265,7 @@ public final class MediaClient {
             // typed. This timer is the thing that makes that impossible.
             self.stateLock.lock()
             let pending = self.unacked.filter { $0.seq > self.inputAck }
-            let sinceSent = Double(DispatchTime.now().uptimeNanoseconds
-                                   - self.lastInputSentAt) / 1e6
+            let sinceSent = Self.millis(since: self.lastInputSentAt)
             let giveUp = sinceSent > 300
             if !pending.isEmpty && !giveUp {
                 self.stateLock.unlock()
@@ -284,8 +283,7 @@ public final class MediaClient {
             if ticks % 5 == 0 { self.sendFeedback() }        // 50 ms
             if ticks % 100 == 0 { self.sendPing() }          // 1 s
 
-            let silentMs = Double(DispatchTime.now().uptimeNanoseconds
-                                  - self.lastHeardAt) / 1e6
+            let silentMs = Self.millis(since: self.lastHeardAt)
             if silentMs > 5000 {
                 Log.error("[media] the host has been silent for 5 s")
                 self.running = false
@@ -305,7 +303,20 @@ public final class MediaClient {
     // MARK: - Receiving
 
     private func nowMicros() -> UInt64 {
-        (DispatchTime.now().uptimeNanoseconds - startedAt) / 1000
+        (DispatchTime.now().uptimeNanoseconds &- startedAt) / 1000
+    }
+
+    /// Milliseconds since a timestamp another thread may have just moved.
+    ///
+    /// UInt64 subtraction TRAPS on underflow in Swift, and `now` and the stored
+    /// stamp are read at different instants: the compiler is free to put the
+    /// load of the field after the call that produced `now`, so the receive
+    /// thread can write a NEWER value in between. The result is a process that
+    /// dies with "arithmetic overflow" a few seconds into a stream, on a line
+    /// whose arithmetic is obviously non-negative. It was.
+    private static func millis(since stamp: UInt64) -> Double {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return now > stamp ? Double(now - stamp) / 1e6 : 0
     }
 
     private func receiveLoop() {

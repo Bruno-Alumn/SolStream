@@ -79,8 +79,15 @@ struct MediaSession::Impl {
     std::mutex sealLock;    ///< video, audio and stats all seal on this direction
 
     MediaConfig config;
-    Capture capture;
-    Encoder encoder;
+    // Built fresh for every capture pass and destroyed at the end of it.
+    //
+    // They used to be members that outlived a session, and the second session
+    // on the same agent failed with "the hardware encoder would not open": the
+    // first pass's D3D11 device was still alive inside the capture, holding the
+    // resources the encoder wanted. A clean slate per pass is one line and
+    // removes the whole class.
+    std::unique_ptr<Capture> capture;
+    std::unique_ptr<Encoder> encoder;
     AudioCapture audio;
     InputInjector input;
 
@@ -202,6 +209,11 @@ void MediaSession::Impl::SendPicture(const Picture& picture) {
     }
     picturesSent.fetch_add(1);
 
+    // A picture whose capture time is zero is one the encoder emitted for a
+    // frame id nothing recorded. Counting it would put the whole time since
+    // boot into the mean, which is exactly what the first run reported:
+    // "glass->wire mean 511786.4 ms".
+    if (picture.capturedAt == 0) { return; }
     const double elapsed = MillisBetween(picture.capturedAt, Now());
     lastGlassToWireMs.store(elapsed);
     if (elapsed < minGlassToWireMs.load()) { minGlassToWireMs.store(elapsed); }
@@ -232,12 +244,24 @@ void MediaSession::Impl::CaptureLoop() {
 }
 
 void MediaSession::Impl::RunCapture() {
+    capture = std::make_unique<Capture>();
+    encoder = std::make_unique<Encoder>();
+    struct Teardown {
+        Impl* self;
+        ~Teardown() {
+            if (self->encoder) { self->encoder->Close(); }
+            if (self->capture) { self->capture->Stop(); }
+            self->encoder.reset();
+            self->capture.reset();
+        }
+    } teardown{this};
+
     if (config.window) {
-        if (!capture.StartWindow(config.window)) {
+        if (!capture->StartWindow(config.window)) {
             Log("[media] capture of window %p failed", (void*) config.window);
             return;
         }
-    } else if (!capture.StartMonitor(config.monitor)) {
+    } else if (!capture->StartMonitor(config.monitor)) {
         Log("[media] capture of monitor %p failed", (void*) config.monitor);
         return;
     }
@@ -246,28 +270,26 @@ void MediaSession::Impl::RunCapture() {
     // known until something has been captured from it.
     Frame frame{};
     for (int tries = 0; tries < 100 && running.load(); ++tries) {
-        if (capture.Acquire(frame, 0, 50) && frame.width > 0) { break; }
+        if (capture->Acquire(frame, 0, 50) && frame.width > 0) { break; }
     }
     if (!frame.width || !running.load()) {
         Log("[media] nothing was ever captured");
-        capture.Stop();
         return;
     }
 
     const UINT encodeWidth = config.width ? config.width : frame.width;
     const UINT encodeHeight = config.height ? config.height : frame.height;
-    if (!encoder.Open(capture.Device(), encodeWidth, encodeHeight, config.fps,
+    if (!encoder->Open(capture->Device(), encodeWidth, encodeHeight, config.fps,
                       config.bitrate)) {
         Log("[media] the hardware encoder would not open at %ux%u",
             encodeWidth, encodeHeight);
-        capture.Stop();
         return;
     }
     Log("[media] capturing %ux%u, encoding %ux%u at %u fps, %u kbit/s",
-        frame.width, frame.height, encoder.Width(), encoder.Height(),
+        frame.width, frame.height, encoder->Width(), encoder->Height(),
         config.fps, config.bitrate / 1000);
 
-    encoder.OnPicture([this](const CodedPicture& coded) {
+    encoder->OnPicture([this](const CodedPicture& coded) {
         Picture picture;
         picture.bytes.assign(coded.data, coded.data + coded.length);
         picture.frameId = coded.frameId;
@@ -283,7 +305,7 @@ void MediaSession::Impl::RunCapture() {
                 // recovers in however long the backlog takes.
                 queue.clear();
                 picturesDropped.fetch_add(1);
-                encoder.RequestIdr();
+                if (encoder) { encoder->RequestIdr(); }
             }
             queue.push_back(std::move(picture));
         }
@@ -298,8 +320,8 @@ void MediaSession::Impl::RunCapture() {
     long long lastEncodedAt = Now();
     while (running.load() && !retargetWanted.load()) {
         Frame current{};
-        if (!capture.Acquire(current, lastSerial, idleMs)) {
-            if (!capture.Running()) { break; }
+        if (!capture->Acquire(current, lastSerial, idleMs)) {
+            if (!capture->Running()) { break; }
             continue;
         }
         const bool stale = MillisBetween(lastEncodedAt, Now()) > 250.0;
@@ -308,16 +330,16 @@ void MediaSession::Impl::RunCapture() {
         }
         lastSerial = current.serial;
         lastEncodedAt = Now();
-        encoder.Submit(current.texture, current.width, current.height,
+        encoder->Submit(current.texture, current.width, current.height,
                        current.isNew ? current.capturedAt : Now(), false);
     }
-    encoder.Close();
-    capture.Stop();
 }
 
 void MediaSession::Impl::SenderLoop() {
     timeBeginPeriod(1);
     long long lastStat = 0;
+    long long lastReport = Now();
+    uint64_t lastReportPictures = 0, lastReportBytes = 0;
     while (running.load()) {
         Picture picture;
         bool have = false;
@@ -350,6 +372,38 @@ void MediaSession::Impl::SenderLoop() {
                 (uint64_t) ((now - startedAt) * 1000000 / g_frequency.QuadPart);
             smt::PutBE(stat + 8, hostUs, 8);
             SendSealed(stat, sizeof(stat));
+        }
+
+        // Once every five seconds, what the path is actually doing. Written to
+        // the same log as everything else because the alternative -- asking for
+        // it over the agent channel -- means a session that went wrong at 3am
+        // left no evidence at all.
+        if (MillisBetween(lastReport, now) > 5000.0) {
+            const uint64_t pictures = picturesSent.load();
+            const double elapsed = MillisBetween(lastReport, now) / 1000.0;
+            Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
+                " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
+                " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
+                " | rx %llu, rejected %llu",
+                elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
+                elapsed > 0
+                    ? (double) (bytesSent.load() - lastReportBytes) * 8.0 / elapsed / 1e6
+                    : 0.0,
+                (unsigned long long) (capture ? capture->Delivered() : 0),
+                (unsigned long long) (encoder ? encoder->Pictures() : 0),
+                (unsigned long long) (encoder ? encoder->Submitted() : 0),
+                (unsigned long long) (encoder ? encoder->Dropped() : 0),
+                (unsigned long long) (encoder ? encoder->ExtraSamples() : 0),
+                lastGlassToWireMs.load(),
+                minGlassToWireMs.load() > 1e8 ? 0.0 : minGlassToWireMs.load(),
+                pictures ? sumGlassToWireMs.load() / (double) pictures : 0.0,
+                clientLastFrame.load(), clientDamaged.load(),
+                (unsigned long long) idrRequests.load(),
+                (unsigned long long) datagramsReceived.load(),
+                (unsigned long long) rejected.load());
+            lastReport = now;
+            lastReportPictures = pictures;
+            lastReportBytes = bytesSent.load();
         }
 
         if (lastHeardAt != 0 && MillisBetween(lastHeardAt, now) > kSilenceTimeoutMs) {
@@ -389,7 +443,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
                 if (MillisBetween(lastIdrAt, now) > 200.0) {
                     lastIdrAt = now;
                     idrRequests.fetch_add(1);
-                    encoder.RequestIdr();
+                    if (encoder) { encoder->RequestIdr(); }
                 }
             }
             break;
@@ -636,11 +690,11 @@ std::string MediaSession::StatsJson() const {
                 (unsigned long long) s.rejected.load(),
                 (unsigned long long) s.idrRequests.load(),
                 s.clientLastFrame.load(), s.clientDamaged.load(),
-                (unsigned long long) s.encoder.Submitted(),
-                (unsigned long long) s.encoder.Pictures(),
-                (unsigned long long) s.encoder.Dropped(),
-                (unsigned long long) s.encoder.ExtraSamples(),
-                (unsigned long long) s.capture.Delivered(),
+                (unsigned long long) (s.encoder ? s.encoder->Submitted() : 0),
+                (unsigned long long) (s.encoder ? s.encoder->Pictures() : 0),
+                (unsigned long long) (s.encoder ? s.encoder->Dropped() : 0),
+                (unsigned long long) (s.encoder ? s.encoder->ExtraSamples() : 0),
+                (unsigned long long) (s.capture ? s.capture->Delivered() : 0),
                 s.lastGlassToWireMs.load());
     return buffer;
 }

@@ -1,5 +1,7 @@
 #include "encoder.h"
 
+#include "log.h"
+
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -107,6 +109,7 @@ struct Encoder::Impl {
     EncoderCallback* callback = nullptr;
 
     UINT width = 0, height = 0, fps = 60, bitrate = 20000000;
+    LONGLONG ticksPerFrame = 166666;
     std::atomic<bool> running{false};
 
     std::vector<unsigned char> sequenceHeader;
@@ -135,6 +138,7 @@ struct Encoder::Impl {
     bool Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight, int slot);
     void FeedLocked();
     void Drain();
+    void Emit(LONGLONG pictureTime, bool isIdr);
 };
 
 HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
@@ -297,8 +301,16 @@ void Encoder::Impl::FeedLocked() {
         return;
     }
     sample->AddBuffer(buffer);
-    sample->SetSampleTime((LONGLONG) frameId * 10000000LL / (LONGLONG) fps);
-    sample->SetSampleDuration(10000000LL / (LONGLONG) fps);
+    // ONE INTEGER TICK PER FRAME, so the timestamp divides back exactly.
+    //
+    // The obvious form -- frameId * 10^7 / fps -- does not round-trip. At 60 fps
+    // it truncates to 166666 ticks a frame, and recovering the frame id as
+    // time * fps / 10^7 then loses one in three: frame 3 comes back as frame 2.
+    // The dev box reported "extra samples 116" out of 349 pictures, which is
+    // exactly a third, and every one of those was a picture attributed to the
+    // wrong capture time.
+    sample->SetSampleTime((LONGLONG) frameId * ticksPerFrame);
+    sample->SetSampleDuration(ticksPerFrame);
 
     if (pendingIdr || idrWanted.exchange(false)) {
         VARIANT on{};
@@ -314,10 +326,15 @@ void Encoder::Impl::FeedLocked() {
 }
 
 void Encoder::Impl::Drain() {
-    // Collect every sample the encoder has ready. They are concatenated by
-    // timestamp: one picture may arrive as more than one sample, and a receiver
-    // handed half an access unit does not report an error, it shows a broken
-    // picture.
+    // Drain until the encoder has nothing left, emitting a picture every time
+    // the sample timestamp changes.
+    //
+    // One picture can arrive as more than one sample, and MORE THAN ONE PICTURE
+    // can arrive in a single drain -- 35 of the first 106 pictures on the dev
+    // box did. Concatenating those into one buffer glues two access units
+    // together, which a decoder does not report as an error: it shows a broken
+    // picture, or a right one and a missing one. So the timestamp is the
+    // boundary, and it is acted on rather than merely counted.
     picture.clear();
     LONGLONG pictureTime = -1;
     bool isIdr = false;
@@ -352,19 +369,20 @@ void Encoder::Impl::Drain() {
         result->GetUINT32(MFSampleExtension_CleanPoint, &clean);
 
         if (pictureTime >= 0 && time != pictureTime) {
-            // A second picture in the same drain. Emit the first, then start
-            // over -- concatenating two pictures would be silently undecodable.
-            extraSamples.fetch_add(1);
+            Emit(pictureTime, isIdr);
+            picture.clear();
+            isIdr = false;
         }
-        IMFMediaBuffer* got1 = nullptr;
-        if (SUCCEEDED(result->ConvertToContiguousBuffer(&got1)) && got1) {
+
+        IMFMediaBuffer* contiguous = nullptr;
+        if (SUCCEEDED(result->ConvertToContiguousBuffer(&contiguous)) && contiguous) {
             BYTE* data = nullptr;
             DWORD length = 0;
-            if (SUCCEEDED(got1->Lock(&data, nullptr, &length))) {
+            if (SUCCEEDED(contiguous->Lock(&data, nullptr, &length))) {
                 picture.insert(picture.end(), data, data + length);
-                got1->Unlock();
+                contiguous->Unlock();
             }
-            got1->Release();
+            contiguous->Release();
         }
         pictureTime = time;
         isIdr = isIdr || clean != 0;
@@ -374,10 +392,14 @@ void Encoder::Impl::Drain() {
         if (out.pEvents) { out.pEvents->Release(); }
     }
 
+    Emit(pictureTime, isIdr);
+}
+
+void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
     if (picture.empty() || pictureTime < 0) {
         return;
     }
-    const uint32_t frameId = (uint32_t) (pictureTime * (LONGLONG) fps / 10000000LL);
+    const uint32_t frameId = (uint32_t) (pictureTime / ticksPerFrame);
     Meta& m = meta[frameId % kMetaRing];
 
     if (isIdr && !sequenceHeader.empty()
@@ -386,6 +408,9 @@ void Encoder::Impl::Drain() {
     }
 
     if (m.emitted) {
+        // The same picture twice means one output sample is NOT one picture and
+        // the timestamp boundary above did not catch it. Counted rather than
+        // hidden: it changes what the packetizer is allowed to assume.
         extraSamples.fetch_add(1);
     }
     m.emitted = true;
@@ -417,6 +442,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     s.width = width & ~1u;
     s.height = height & ~1u;
     s.fps = fps ? fps : 60;
+    s.ticksPerFrame = 10000000LL / (LONGLONG) s.fps;
     s.bitrate = bitrateBps;
     if (s.width < 16 || s.height < 16) {
         return false;
@@ -429,6 +455,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                                         (void**) &s.videoDevice))
         || FAILED(s.context->QueryInterface(__uuidof(ID3D11VideoContext),
                                             (void**) &s.videoContext))) {
+        Log("[media] this D3D11 device has no video interfaces");
         Close();
         return false;
     }
@@ -444,6 +471,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_RENDER_TARGET;
         if (FAILED(s.device->CreateTexture2D(&desc, nullptr, &s.nv12[i]))) {
+            Log("[media] could not allocate an NV12 %ux%u texture", s.width, s.height);
             Close();
             return false;
         }
@@ -457,6 +485,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                          MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
                          nullptr, &outInfo, &activates, &count))
         || count == 0) {
+        Log("[media] no hardware H.264 encoder is present");
         Close();
         return false;
     }
@@ -464,6 +493,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     for (UINT32 i = 0; i < count; ++i) { activates[i]->Release(); }
     CoTaskMemFree(activates);
     if (FAILED(activated)) {
+        Log("[media] the encoder would not activate (0x%08lX)", activated);
         Close();
         return false;
     }
@@ -503,6 +533,8 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     HRESULT hr = s.mft->SetOutputType(0, outType, 0);
     Release(outType);
     if (FAILED(hr)) {
+        Log("[media] the encoder refused H.264 %ux%u at %u kbit/s (0x%08lX)",
+            s.width, s.height, s.bitrate / 1000, hr);
         Close();
         return false;
     }
@@ -520,6 +552,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     hr = s.mft->SetInputType(0, inType, 0);
     Release(inType);
     if (FAILED(hr)) {
+        Log("[media] the encoder refused NV12 %ux%u (0x%08lX)", s.width, s.height, hr);
         Close();
         return false;
     }
