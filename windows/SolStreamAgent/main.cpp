@@ -1686,10 +1686,23 @@ struct WindowLock {
     bool saved_topmost = false;
     bool geometry_locked = false;  // the watcher holds this one in place
     bool active = false;           // the agent owes this window a restore
+    /// Bumped on every claim, so the watcher can tell that the slot it read a
+    /// moment ago is still the same tenancy.
+    ///
+    /// The watcher copies `window` and `desired` under the lock and then lets it
+    /// go before doing the slow part -- DwmGetWindowAttribute, ShowWindow,
+    /// SetWindowPos, all of which block on another process's message pump. A
+    /// release landing in that gap leaves it holding coordinates on the virtual
+    /// capture display for a window that has just been put back on a real
+    /// monitor, and it drags it straight back to a display nobody can see. That
+    /// used to be covered by UnlockAll replaying the restore when the socket
+    /// dropped; nothing drops the socket on a window close any more.
+    uint64_t generation = 0;
 };
 
 CRITICAL_SECTION g_lock_cs;
 WindowLock g_locks[kMaxLocks];
+uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 HANDLE g_watcher = nullptr;
 volatile LONG g_watcher_stop = 0;
 
@@ -2275,6 +2288,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             HWND window = nullptr;
             RECT desired{};
             uint64_t closed = 0;
+            uint64_t generation = 0;
             EnterCriticalSection(&g_lock_cs);
             if (g_locks[i].active && SlotWindowGone(g_locks[i])) {
                 // Release the slot here rather than through UnlockWindow: there
@@ -2286,6 +2300,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             } else if (g_locks[i].geometry_locked) {
                 window = g_locks[i].window;
                 desired = g_locks[i].desired;
+                generation = g_locks[i].generation;
             }
             LeaveCriticalSection(&g_lock_cs);
             if (closed != 0) {
@@ -2307,6 +2322,22 @@ DWORD WINAPI WatcherProc(LPVOID) {
             const RECT now = ClientAreaInScreen(window);
             if (now.left == desired.left && now.top == desired.top
                 && now.right == desired.right && now.bottom == desired.bottom) {
+                continue;
+            }
+            // Last look before moving anything. Everything above this line took
+            // long enough for a `lock off` to have arrived, restored the window
+            // and freed the slot -- and placing it now would undo that restore,
+            // dragging a window the user has just got back onto a display that
+            // is about to stop existing. Re-checking is cheap; holding the lock
+            // across the calls above is not, because they block on another
+            // process's message pump.
+            bool still_ours = false;
+            EnterCriticalSection(&g_lock_cs);
+            still_ours = g_locks[i].active && g_locks[i].geometry_locked
+                      && g_locks[i].window == window
+                      && g_locks[i].generation == generation;
+            LeaveCriticalSection(&g_lock_cs);
+            if (!still_ours) {
                 continue;
             }
             PlaceClientArea(window, desired.left, desired.top,
@@ -2348,6 +2379,7 @@ int ClaimSlot(HWND window) {
         g_locks[i] = WindowLock{};
         g_locks[i].window = window;
         g_locks[i].active = true;
+        g_locks[i].generation = ++g_lock_generation;
         g_locks[i].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
         GetWindowThreadProcessId(window, &g_locks[i].pid);
         g_locks[i].saved_topmost =
@@ -4301,6 +4333,19 @@ int wmain(int argc, wchar_t** argv) {
                 // Stopped before the socket closes: the watcher writes to it.
                 StopCursorWatcher();
                 closesocket(client);
+#ifdef SOLSTREAM_MEDIA
+                // And stop streaming to a Mac that has gone. Nothing here did
+                // that: the only thing that ended a session was the client's own
+                // UDP BYE, which sets a flag, and a fifteen-second silence
+                // timeout for when the BYE is lost -- so a Mac that vanished
+                // left the capture, the encoder, the sender and the receive
+                // threads running, its socket and keys held, and whatever key or
+                // mouse button it was holding still down on the host. This is
+                // the backstop the close path used to get for free by dropping
+                // the socket, and it is what makes losing a client the same as
+                // ending a session cleanly.
+                solstream::media::MediaSession::Instance().Stop();
+#endif
                 // Give every managed window its resize border back. A Mac that
                 // goes away must not leave applications permanently unresizable.
                 UnlockAll();

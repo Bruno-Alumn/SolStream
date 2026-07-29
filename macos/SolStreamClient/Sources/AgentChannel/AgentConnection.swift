@@ -405,17 +405,35 @@ public final class AgentConnection {
         }
     }
 
+    /// Whether a socket is up and this connection can carry a request now.
+    ///
+    /// Not "wants to be connected": `wantsConnection` stays true through the
+    /// whole reconnect backoff, and a caller that asks a question during it gets
+    /// an immediate failure rather than an answer.
+    public var isConnected: Bool { connection != nil }
+
+    /// Drop every push callback, without touching the socket.
+    ///
+    /// Handing a live connection from the stream to the picker means handing
+    /// over the callbacks with it, and those close over the windows that have
+    /// just gone. Clearing them is the price of not reconnecting.
+    public func resetCallbacks() {
+        onState = nil
+        onDisplays = nil
+        onCursorShape = nil
+        onWindowClosed = nil
+        onReconnected = nil
+        onWindowsChanged = nil
+        onOccluded = nil
+    }
+
     public func disconnect() {
         // Release the callbacks as well as the socket. They are stored here, so
         // a call site that captures this object strongly makes it retain itself
         // — and then the socket is never cancelled and whatever else the closure
         // captured is pinned too. Clearing them means one such mistake costs a
         // stale closure rather than a permanent leak.
-        onState = nil
-        onDisplays = nil
-        onCursorShape = nil
-        onWindowClosed = nil
-        onReconnected = nil
+        resetCallbacks()
         queue.async { [weak self] in
             guard let self else { return }
             // Before cancelling: `.cancelled` and the receive completion both

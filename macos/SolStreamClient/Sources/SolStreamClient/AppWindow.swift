@@ -450,7 +450,17 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// display while this one is smaller, and the mismatch is drawn as bars.
     func placeAndLock() {
         syncGeometry { [weak self] in
-            guard let self else { return }
+            // `isClosing`, or a `place` still in flight when the user closes the
+            // window comes back afterwards and locks a window that has already
+            // been released. The host claims a fresh slot, records a restore
+            // obligation against the already-restored state, and strips the
+            // resize border again — and nothing will ever send `lock off` for
+            // that id, because this object is gone. The application is left
+            // running with no resize border and no maximise box, snapped back by
+            // the watcher every time it is dragged. `place` is a cross-process
+            // SetWindowPos that blocks on the target's message pump, so on an
+            // application still starting up the window is easy to close first.
+            guard let self, !self.isClosing else { return }
             self.agent.setResizeLock(windowID: self.remoteWindowID, true)
         }
     }
@@ -615,8 +625,20 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // and `isClosing` stops it doing anything.
         resizeAgain = false
         wantsSettle = false
-        agent.setResizeLock(windowID: remoteWindowID, false)
+        // ORDER MATTERS, AND THIS IS THE WHOLE RESTORE. `lock off` reaches
+        // UnlockWindow on the host, which puts back the window style, the
+        // topmost bit, and the placement that carries the window off the virtual
+        // capture display and on to the monitor it came from -- then frees the
+        // slot. It is what used to happen only when the socket dropped, and it
+        // is why closing a window no longer needs to drop it.
+        //
+        // `topmost off` goes FIRST because the host's topmost handler claims a
+        // slot before it looks at what it was asked for: sent afterwards it
+        // re-claims the slot `lock off` has just freed, records a restore
+        // obligation against the already-restored window, and leaks one of the
+        // eight slots for the life of the connection.
         agent.setTopmost(windowID: remoteWindowID, false)
+        agent.setResizeLock(windowID: remoteWindowID, false)
         if let metalView {
             session.detach(metalView)
         }

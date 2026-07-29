@@ -154,6 +154,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // --test-close-after <seconds> closes the streamed window exactly as the
+        // red traffic-light button does — window.close(), so windowWillClose and
+        // onClose run unchanged — and then leaves the app up so the picker that
+        // follows can be read. Driving the real button needs accessibility
+        // permission and a synthetic click; this is the same code path without
+        // either, and the path is the whole point of the test.
+        if let index = arguments.firstIndex(of: "--test-close-after"),
+           index + 1 < arguments.count,
+           let after = Double(arguments[index + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
+                Log.info("[test] closing the streamed window")
+                self?.appWindows.first?.close()
+            }
+        }
+
         // --test-dropdown photographs the host list, which is otherwise only
         // reachable with the mouse.
         if arguments.contains("--test-dropdown") {
@@ -197,9 +212,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// This is the ordinary way in: pick one application, get one window. The
     /// agent is consulted before any stream starts, because the encode canvas has
     /// to match the capture display exactly for crops to be pixel-exact.
-    private func showPicker(host: String) {
+    /// - Parameter existing: a live connection to carry into the picker rather
+    ///   than replacing. Closing a streamed window is not leaving the host, and
+    ///   building a second connection to the same agent is what produced the
+    ///   spurious "already streaming to another Mac".
+    private func showPicker(host: String, reusing existing: AgentConnection? = nil) {
         let agentHost = agentHostOverride ?? host
-        let agent = AgentConnection(host: agentHost)
+        let agent = existing ?? AgentConnection(host: agentHost)
+        // The stream's callbacks must not survive into the picker: they are
+        // stored on the connection and it goes on receiving the host's pushes.
+        agent.resetCallbacks()
         self.agent = agent
 
         let picker = AppPicker(host: host, onChoose: { [weak self] choice in
@@ -269,7 +291,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // application quit on the PC stays offerable and one started there cannot
         // be picked at all.
         agent.onWindowsChanged = fill
-        agent.connect()
+        if existing == nil {
+            agent.connect()
+        } else if agent.isConnected {
+            // A reused socket produces no second `hello`, so the unprompted
+            // `displays` push that normally drives the first fill never comes.
+            fill()
+        }
+        // The third case is deliberate: a connection handed over while it is in
+        // its reconnect backoff cannot answer, and `windows`/`apps` report
+        // failure as an empty list — which the picker would draw as "0 windows
+        // open · 0 apps installed", a confident and wrong answer. Leaving the
+        // spinner up means the reconnect's own `hello` fills it a moment later,
+        // and `onState` above still puts a real failure on screen.
     }
 
     /// The picker's launch path without the picker, for `--launch` and tests.
@@ -661,16 +695,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.appWindows.removeAll { $0 === appWindow }
                 guard self.appWindows.isEmpty else { return }
+                // End the media session by asking, not by dropping the socket.
+                // The UDP BYE alone only sets `running = false` on the host: the
+                // capture, encoder, sender and receive threads, the socket and
+                // the keys all survive until something starts a new session, and
+                // any key or mouse button still held is never released.
                 self.session?.stop()
                 self.session = nil
+                agent.closeMediaSession()
                 self.clipboard?.stop()
                 self.clipboard = nil
-                // Back to the picker rather than quitting: closing one
-                // application is not a reason to disconnect from the host.
+                // KEEP THE AGENT CONNECTION. This used to disconnect and then,
+                // in the same turn, build a fresh one for the picker -- and the
+                // host's one-client gate cannot tell "a client is connected"
+                // from "the last client's teardown is still running". It counts
+                // down only after joining the cursor watcher, closing the socket
+                // and running UnlockAll, whose cross-process SetWindowPlacement
+                // blocks on the streamed application's message pump. The new
+                // connection arrived about thirty milliseconds into that quarter
+                // of a second and was told the host was already streaming to
+                // another Mac -- which the client treats as final, so the picker
+                // sat there with a message about a Mac that did not exist.
+                //
+                // Nothing needed the disconnect: the socket drop was only ever a
+                // way to reach UnlockAll, and the close path already sends
+                // `lock off` for the window it is closing, which restores that
+                // window on its own.
                 if !self.testMode {
-                    self.agent = nil
-                    agent.disconnect()
-                    self.showPicker(host: host)
+                    self.showPicker(host: host, reusing: agent)
                 }
             }
             appWindow.setStatus("Connecting to \(host)", detail: target.title)
