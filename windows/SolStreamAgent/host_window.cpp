@@ -1771,7 +1771,15 @@ bool ShowHostWindow(WindowMode mode) {
         // Not resizable: every part of this is a fixed-height card, and a
         // window draggable to a shape none of its content fits is worse than
         // one that cannot be dragged at all.
-        WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
+        //
+        // WS_CLIPCHILDREN, or the token field flickers once a second forever.
+        // Everything here is drawn with Direct2D except that one real EDIT, and
+        // without this the D2D paint covers the whole client area — including
+        // the rectangle the EDIT occupies — and the EDIT then repaints itself on
+        // top. Two paints of the same pixels on every timer tick is exactly what
+        // flicker is. Clipping the child out of the parent's paint means the
+        // token is drawn once, by the control that owns it.
+        (WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX) | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT,
         wanted.right - wanted.left, wanted.bottom - wanted.top,
         nullptr, nullptr, wc.hInstance, nullptr);
@@ -1805,8 +1813,18 @@ void UpdateHostStatus(const HostStatus& status) {
         g_status = status;
     }
     if (g_window) {
+        // Only when it has actually changed, which is almost never. SetWindowText
+        // on an EDIT clears the selection and puts the caret back at nought, so
+        // writing the same token over the top of itself on every status update
+        // means the field cannot be selected at all: the highlight vanishes the
+        // instant anything on the host changes. Selecting the token is the whole
+        // reason it is a real control rather than drawn text.
         if (g_token_edit) {
-            SetWindowTextW(g_token_edit, status.pairing_token.c_str());
+            wchar_t current[128] = {0};
+            GetWindowTextW(g_token_edit, current, 128);
+            if (status.pairing_token != current) {
+                SetWindowTextW(g_token_edit, status.pairing_token.c_str());
+            }
         }
         InvalidateRect(g_window, nullptr, FALSE);
     }
