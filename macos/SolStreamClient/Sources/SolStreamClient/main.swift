@@ -562,7 +562,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 guard !targets.isEmpty else {
                     Log.error("[app] nothing matched \(queries). Candidates:")
-                    for window in windows { Log.error("[app]   \(window.title)") }
+                    // With geometry. "nothing matched" and "matched something
+                    // the wrong size" are different problems, and the second one
+                    // is invisible without this.
+                    for window in windows {
+                        Log.error("[app]   \(window.title) "
+                                  + "[\(window.x),\(window.y) \(window.width)x\(window.height)]")
+                    }
                     return
                 }
                 DispatchQueue.main.async {
