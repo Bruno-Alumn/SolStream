@@ -20,8 +20,8 @@ A **macOS client** shows the picker, opens the window, decodes the video and
 sends back the keyboard and mouse.
 
 Between them is **SMT/1**, SolStream's own media transport: plain UDP carrying
-AES-256-GCM, with the keys agreed over the agent channel that has already
-authenticated both ends. There is no third program, no pairing PIN, no
+AES-256-GCM, with the keys agreed over the agent channel — which is itself
+encrypted, with an ephemeral key, from the moment it has authenticated. There is no third program, no pairing PIN, no
 certificate exchange and no forward-error-correction tax on the bandwidth.
 `docs/transport-smt1.md` is the design; it was written clean-room from
 requirements.

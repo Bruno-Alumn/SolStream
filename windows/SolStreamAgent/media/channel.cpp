@@ -93,30 +93,58 @@ void Channel::Reset() {
     sessTag = 0;
 }
 
+void Channel::Adopt(Channel& other) {
+    Reset();
+    toClient = other.toClient;
+    fromClient = other.fromClient;
+    sessTag = other.sessTag;
+    // Emptied rather than Reset: Reset would destroy the key handles this
+    // channel has just taken ownership of.
+    other.toClient = smt::Direction{};
+    other.fromClient = smt::Direction{};
+    other.sessTag = 0;
+    other.encrypted = false;
+}
+
 bool DeriveChannelKeys(Channel& channel, const std::string& token,
-                       const std::string& challenge, const std::string& cnonce) {
+                       const std::string& challenge, const std::string& cnonce,
+                       const std::vector<unsigned char>& cpub,
+                       const std::vector<unsigned char>& hpub,
+                       const std::vector<unsigned char>& secret,
+                       std::string& hostAuth) {
     const std::vector<unsigned char> tokenBytes = FromHex(token);
-    if (tokenBytes.empty() || challenge.empty() || cnonce.empty()) {
+    if (tokenBytes.empty() || challenge.empty() || cnonce.empty()
+        || cpub.size() != 65 || hpub.size() != 65 || secret.size() != 32) {
         return false;
     }
 
-    // The salt binds the keys to THIS connection. Both values are fresh per
-    // connection -- the challenge is invented by the host and the nonce by the
-    // client -- so neither end can force a key it has seen before.
-    std::string transcript = "SolStream channel v1";
+    // The salt binds the keys to THIS connection and to THESE public points.
+    // Everything in it is fresh per connection -- the challenge from the host,
+    // the nonce and the ephemeral point from the client, the host's own point --
+    // so neither end can force a key it has seen before, and neither can a third
+    // party swap a point without changing what both ends derive.
+    std::string transcript = "SolStream channel v2";
     transcript += challenge;
     transcript += cnonce;
+    transcript.append((const char*) cpub.data(), cpub.size());
+    transcript.append((const char*) hpub.data(), hpub.size());
     unsigned char salt[32];
     if (!Sha256((const unsigned char*) transcript.data(), transcript.size(), salt)) {
         return false;
     }
+
+    // Z FIRST, THEN THE TOKEN. The ephemeral half is what makes this forward
+    // secret; the token is what keeps it authenticated. Either alone would give
+    // up one of the two.
+    std::vector<unsigned char> ikm = secret;
+    ikm.insert(ikm.end(), tokenBytes.begin(), tokenBytes.end());
     unsigned char prk[32];
-    if (!HmacSha256(salt, 32, tokenBytes.data(), tokenBytes.size(), prk)) {
+    if (!HmacSha256(salt, 32, ikm.data(), ikm.size(), prk)) {
         return false;
     }
     const std::vector<unsigned char> okm =
-        HkdfExpand(prk, "SolStream channel keys v1", 76);
-    if (okm.size() != 76) {
+        HkdfExpand(prk, "SolStream channel keys v2", 100);
+    if (okm.size() != 100) {
         return false;
     }
 
@@ -129,6 +157,15 @@ bool DeriveChannelKeys(Channel& channel, const std::string& token,
     if (!channel.toClient.key || !channel.fromClient.key) {
         channel.Reset();
         return false;
+    }
+
+    // The client checks this before it switches, which is the only thing in the
+    // handshake that authenticates the HOST to the client.
+    static const char* hex = "0123456789abcdef";
+    hostAuth.clear();
+    for (size_t i = 76; i < 88; ++i) {
+        hostAuth.push_back(hex[okm[i] >> 4]);
+        hostAuth.push_back(hex[okm[i] & 0x0F]);
     }
     return true;
 }

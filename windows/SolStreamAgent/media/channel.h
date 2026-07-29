@@ -5,23 +5,37 @@
 // the clear. The media path beside it has been AES-256-GCM since it existed,
 // which made the plaintext channel the most valuable thing on the wire.
 //
-// No new handshake. Auth v2 already has both ends holding the token, a
-// host-chosen challenge and a client-chosen nonce, and already proves possession
-// without transmitting the token. The same three values key the channel through
-// a different label, so this costs no extra round trip:
+// Still no extra round trip. Auth v2 already has both ends holding the token, a
+// host-chosen challenge and a client-chosen nonce; the client's proof message
+// now also carries an ephemeral P-256 public point, and the reply carries the
+// host's. Both are in the clear, which is exactly what they are for.
 //
-//   PRK = HKDF-Extract(salt = SHA256("SolStream channel v1" || challenge || cnonce),
-//                      ikm  = tokenBytes)
-//   okm = HKDF-Expand(PRK, "SolStream channel keys v1", 76)
+//   Z   = ECDH(ephemeral)                              -- discarded immediately
+//   PRK = HKDF-Extract(salt = SHA256("SolStream channel v2" || challenge
+//                                    || cnonce || cpub || hpub),
+//                      ikm  = Z || tokenBytes)
+//   okm = HKDF-Expand(PRK, "SolStream channel keys v2", 100)
 //         0..32  host -> client key      64..70  host -> client nonce fixed field
 //        32..64  client -> host key      70..76  client -> host nonce fixed field
+//        76..88  hostAuth                88..100 clientAuth
 //
-// This is NOT forward secret. An attacker who later learns the token can decrypt
-// a recorded session, because there is no ephemeral key here -- unlike the media
-// path, which mixes in an ECDH secret that is discarded when the session ends.
-// Fixing that means a Diffie-Hellman on the channel before it is encrypted, and
-// it is worth doing; what is here removes passive disclosure to anyone on the
-// path, which is the part that was true of every session simultaneously.
+// THE EPHEMERAL SECRET IS WHAT MAKES THIS FORWARD SECRET, and mixing the token
+// into the same input key material is what keeps it authenticated. The first
+// version of this file derived from the token alone and said plainly that it was
+// not forward secret: anyone who later learned the token could decrypt a session
+// they had recorded. Now they cannot, because the other half of the key material
+// was thrown away when the connection closed.
+//
+// The token also defeats the obvious attack on an unauthenticated Diffie-Hellman.
+// Someone in the middle can substitute their own public point, but without the
+// token they cannot derive the keys either end will use -- so both ends derive
+// different ones, every record fails its tag, and the connection drops. That is
+// a detected failure rather than a silent compromise.
+//
+// `hostAuth` is what lets the CLIENT authenticate the HOST, which nothing did
+// before: the challenge-response proves the client to the host and not the other
+// way round. The host returns its twelve bytes in the auth reply and the client
+// refuses to switch if they disagree.
 //
 // Framing, once encryption is on:
 //
@@ -66,12 +80,27 @@ struct Channel {
     unsigned char sessTag = 0;
 
     void Reset();
+
+    /// Take another channel's keys, leaving it empty.
+    ///
+    /// The derivation happens while the auth reply is being built and the switch
+    /// happens after it has gone out, so the keys have to survive between the
+    /// two without a second copy of the BCrypt handles to destroy.
+    void Adopt(Channel& other);
 };
 
-/// Derive both directions from the auth-v2 material. `token` is the 32 hex
-/// characters; `challenge` and `cnonce` are hex as they went over the wire.
+/// Derive both directions.
+///
+/// `secret` is the raw ECDH shared secret, x-coordinate big-endian — the caller
+/// does the agreement, because the ECDH helpers live beside the media
+/// handshake's and there is no reason for two copies of them. `hostAuth` comes
+/// back as 24 hex characters for the reply.
 bool DeriveChannelKeys(Channel& channel, const std::string& token,
-                       const std::string& challenge, const std::string& cnonce);
+                       const std::string& challenge, const std::string& cnonce,
+                       const std::vector<unsigned char>& cpub,
+                       const std::vector<unsigned char>& hpub,
+                       const std::vector<unsigned char>& secret,
+                       std::string& hostAuth);
 
 /// Seal one message into a length-prefixed record. Returns false if the message
 /// is too large or the channel has no keys.

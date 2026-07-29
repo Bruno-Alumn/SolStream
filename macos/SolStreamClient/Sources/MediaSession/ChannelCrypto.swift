@@ -5,22 +5,33 @@
 // entire clipboard, and until this existed it carried all of it in the clear —
 // beside a media path that had been AES-256-GCM since the day it was written.
 //
-// No new handshake. Auth v2 already leaves both ends holding the token, a
-// host-chosen challenge and a client-chosen nonce, and already proves possession
-// without transmitting the token. Those three key the channel under a different
-// label, so this costs no extra round trip.
+// Still no extra round trip. Auth v2 already leaves both ends holding the token,
+// a host-chosen challenge and a client-chosen nonce; the proof message now also
+// carries an ephemeral P-256 public point and the reply carries the host's. Both
+// travel in the clear, which is what they are for.
 //
-//   PRK = HKDF-Extract(salt: SHA256("SolStream channel v1" || challenge || cnonce),
-//                      ikm:  tokenBytes)
-//   okm = HKDF-Expand(PRK, "SolStream channel keys v1", 76)
+//   Z   = ECDH(ephemeral)                              — discarded immediately
+//   PRK = HKDF-Extract(salt: SHA256("SolStream channel v2" || challenge
+//                                   || cnonce || cpub || hpub),
+//                      ikm:  Z || tokenBytes)
+//   okm = HKDF-Expand(PRK, "SolStream channel keys v2", 100)
 //
-// NOT forward secret, and the header on the Windows side says so too: an
-// attacker who later learns the token can decrypt a recorded session, because
-// there is no ephemeral key here. The media path mixes in an ECDH secret that is
-// discarded when the session ends; doing the same for the channel means a
-// Diffie-Hellman before the channel is encrypted, and it is worth doing. What
-// this removes is passive disclosure to anyone on the path, which was true of
-// every session at once.
+// THE EPHEMERAL HALF IS WHAT MAKES THIS FORWARD SECRET; the token is what keeps
+// it authenticated. The first version of this file derived from the token alone
+// and said so: anyone who later learned it could decrypt a recorded session.
+// They cannot now, because the other half was thrown away when the connection
+// closed.
+//
+// The token also defeats the obvious attack on an unauthenticated
+// Diffie-Hellman. Someone in the middle can substitute their own point, but
+// without the token they cannot derive the keys either end will use — so the two
+// ends derive different ones, every record fails its tag, and the connection
+// drops. A detected failure, not a silent compromise.
+//
+// `hostAuth` is the only thing in the handshake that authenticates the HOST to
+// this Mac: the challenge-response proves this Mac to the host and not the other
+// way round. The host returns its twelve bytes and this refuses to switch if
+// they disagree.
 //
 // Framing, once it is on: four big-endian length bytes, then the sealed record —
 // an eight-byte SMT/1 header, the ciphertext, and a sixteen-byte tag. One JSON
@@ -52,28 +63,42 @@ public final class ChannelCrypto {
     private let toHost: SMTDirection
     private let fromHost: SMTDirection
     private let sessionTag: UInt8
+    /// What the host must return to prove it derived the same 100 bytes.
+    public let hostAuth: String
     /// TCP delivers in order and exactly once, so the next record's counter is
     /// known rather than guessed. A replay window here would be answering a
     /// question the transport below has already answered.
     private var expectedCounter: UInt64 = 0
 
-    public init?(token: String, challenge: String, clientNonce: String) {
+    /// - Parameter secret: the raw ECDH shared secret, x-coordinate big-endian.
+    ///   CryptoKit hands it over that way.
+    public init?(token: String, challenge: String, clientNonce: String,
+                 clientPublic: Data, hostPublic: Data, secret: Data) {
         guard let tokenBytes = Data(smtHex: token), !tokenBytes.isEmpty,
-              !challenge.isEmpty, !clientNonce.isEmpty else { return nil }
+              !challenge.isEmpty, !clientNonce.isEmpty,
+              clientPublic.count == 65, hostPublic.count == 65,
+              secret.count == 32 else { return nil }
 
-        // The salt binds the keys to THIS connection: the challenge is fresh
-        // from the host and the nonce fresh from this Mac, so neither end can
-        // force a key it has seen before.
-        var transcript = Data("SolStream channel v1".utf8)
+        // The salt binds the keys to THIS connection and to THESE points.
+        // Everything in it is fresh per connection, so neither end can force a
+        // key it has seen before and no third party can swap a point without
+        // changing what both ends derive.
+        var transcript = Data("SolStream channel v2".utf8)
         transcript += Data(challenge.utf8)
         transcript += Data(clientNonce.utf8)
+        transcript += clientPublic
+        transcript += hostPublic
         let salt = Data(SHA256.hash(data: transcript))
 
-        let prk = HKDF<SHA256>.extract(inputKeyMaterial: SymmetricKey(data: tokenBytes),
+        // Z FIRST, THEN THE TOKEN. The ephemeral half buys forward secrecy; the
+        // token keeps it authenticated. Either alone gives up one of the two.
+        var ikm = secret
+        ikm += tokenBytes
+        let prk = HKDF<SHA256>.extract(inputKeyMaterial: SymmetricKey(data: ikm),
                                        salt: salt)
         let okm = HKDF<SHA256>.expand(pseudoRandomKey: prk,
-                                      info: Data("SolStream channel keys v1".utf8),
-                                      outputByteCount: 76)
+                                      info: Data("SolStream channel keys v2".utf8),
+                                      outputByteCount: 100)
             .withUnsafeBytes { Data($0) }
 
         toHost = SMTDirection(key: SymmetricKey(data: okm[32..<64]),
@@ -81,6 +106,7 @@ public final class ChannelCrypto {
         fromHost = SMTDirection(key: SymmetricKey(data: okm[0..<32]),
                                 fixed: Data(okm[64..<70]))
         sessionTag = okm[75]
+        hostAuth = Data(okm[76..<88]).smtHex
     }
 
     /// Seal one message into a length-prefixed record.

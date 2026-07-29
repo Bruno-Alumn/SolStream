@@ -1648,6 +1648,9 @@ bool SendLine(SOCKET client, const std::string& text);
 /// The agent channel's own encryption, keyed by what auth v2 already agreed.
 /// Guarded by g_send_cs on the way out; the receive side is single-threaded.
 solstream::media::Channel g_channel;
+/// Derived while answering the auth request, promoted once that answer -- the
+/// last message that crosses in the clear -- has actually gone out.
+solstream::media::Channel g_pending_channel;
 #endif
 
 struct WindowLock {
@@ -2858,14 +2861,48 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                     g_clients_authenticated.fetch_add(1);
                 }
                 authenticated = true;
-                // The same challenge and nonce that just proved the token can
-                // key the channel, so asking for that costs no extra round
-                // trip. Reported back rather than acted on here: the reply
-                // itself has to go out in the clear, and only then does the
-                // encryption start.
+                // The channel's own keys, agreed in the same message that
+                // proved the token so it costs no extra round trip.
+                //
+                // Version 2 exactly, not "2 or more" and not "anything
+                // non-zero": a client that speaks a version this host does not
+                // must stay in the clear rather than have both ends read each
+                // other's bytes as the wrong thing.
                 long long wants = 0;
-                if (FieldNumber(line, "channelCrypto", wants) && wants != 0) {
-                    channel_cnonce = cnonce;
+                std::string cpubHex;
+                if (FieldNumber(line, "channelCrypto", wants) && wants == 2
+                    && FieldString(line, "cpub", cpubHex)) {
+                    const std::vector<unsigned char> cpub = FromHex(cpubHex);
+                    std::vector<unsigned char> hpub;
+                    BCRYPT_KEY_HANDLE pair = nullptr;
+                    if (cpub.size() == 65 && cpub[0] == 0x04) {
+                        pair = NewEcdhKeyPair(hpub);
+                    }
+                    if (pair) {
+                        const std::vector<unsigned char> secret = EcdhSecret(pair, cpub);
+                        // Destroyed here, before the reply is even built. The
+                        // private half existing no longer than it must is the
+                        // whole of what forward secrecy is.
+                        BCryptDestroyKey(pair);
+                        std::string hostAuth;
+                        if (secret.size() == 32
+                            && solstream::media::DeriveChannelKeys(
+                                   g_pending_channel, g_token, challenge, cnonce,
+                                   cpub, hpub, secret, hostAuth)) {
+                            channel_cnonce = cnonce;
+                            static const char* hex = "0123456789abcdef";
+                            std::string hpubHex;
+                            for (unsigned char byte : hpub) {
+                                hpubHex.push_back(hex[byte >> 4]);
+                                hpubHex.push_back(hex[byte & 0x0F]);
+                            }
+                            return "{\"type\":\"auth\",\"ok\":true"
+                                   ",\"channelCrypto\":2"
+                                   ",\"hpub\":\"" + hpubHex + "\""
+                                   ",\"hauth\":\"" + hostAuth + "\"}";
+                        }
+                    }
+                    Log("[agent] could not agree channel keys; staying in the clear");
                 }
                 // Said out loud. Which of the two auth paths a client took is
                 // the first question when one of them misbehaves, and until now
@@ -3483,7 +3520,7 @@ void ServeClient(SOCKET client) {
     // on speaking newline-JSON, and a host that does not offer it never has a
     // client try: a mismatch here is not a degraded channel, it is a socket
     // where each end is reading the other's bytes as the wrong thing entirely.
-    hello += ",\"channelCrypto\":1";
+    hello += ",\"channelCrypto\":2";
 #endif
     hello += "}";
     if (!SendLine(client, hello)) {
@@ -3517,6 +3554,7 @@ void ServeClient(SOCKET client) {
     // encrypted from the last client would meet the next one's plaintext hello
     // with a key it has never heard of.
     g_channel.Reset();
+    g_pending_channel.Reset();
 #endif
 
     std::string buffer;
@@ -3590,13 +3628,10 @@ void ServeClient(SOCKET client) {
             // AFTER the reply, never before: the client is still reading lines
             // until it has read the one that says the proof was accepted.
             if (!channel_cnonce.empty() && !g_channel.encrypted) {
-                if (solstream::media::DeriveChannelKeys(g_channel, g_token, challenge,
-                                                        channel_cnonce)) {
-                    g_channel.encrypted = true;
-                    Log("[agent] the channel is encrypted from here");
-                } else {
-                    Log("[agent] could not derive channel keys; staying in the clear");
-                }
+                g_channel.Adopt(g_pending_channel);
+                g_channel.encrypted = true;
+                Log("[agent] the channel is encrypted from here, "
+                    "with an ephemeral key");
             }
 #endif
             // Authenticating completes the greeting: the display list is part of

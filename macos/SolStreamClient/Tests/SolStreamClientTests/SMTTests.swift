@@ -344,22 +344,50 @@ final class SMTInputTests: XCTestCase {
 /// crypto that is wrong produces a connection that drops for no stated reason.
 final class ChannelCryptoTests: XCTestCase {
 
-    private func pair() -> (ChannelCrypto, ChannelCrypto)? {
-        // Both ends derive from the same three values, and the two directions
-        // are deliberately NOT symmetric -- so one object standing in for both
-        // would pass a test that a real pair fails.
-        guard let a = ChannelCrypto(token: "00112233445566778899aabbccddeeff",
-                                    challenge: String(repeating: "ab", count: 32),
-                                    clientNonce: String(repeating: "cd", count: 32)),
-              let b = ChannelCrypto(token: "00112233445566778899aabbccddeeff",
-                                    challenge: String(repeating: "ab", count: 32),
-                                    clientNonce: String(repeating: "cd", count: 32))
-        else { return nil }
-        return (a, b)
+    /// Fixed scalars rather than random ones, so a failure is reproducible.
+    private func channel(token: String = "00112233445566778899aabbccddeeff",
+                         clientScalar: UInt8 = 0x11,
+                         hostScalar: UInt8 = 0x22) throws -> ChannelCrypto {
+        let clientPriv = try P256.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: clientScalar, count: 32))
+        let hostPriv = try P256.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(repeating: hostScalar, count: 32))
+        let secret = try clientPriv.sharedSecretFromKeyAgreement(with: hostPriv.publicKey)
+        return try XCTUnwrap(ChannelCrypto(
+            token: token,
+            challenge: String(repeating: "ab", count: 32),
+            clientNonce: String(repeating: "cd", count: 32),
+            clientPublic: clientPriv.publicKey.x963Representation,
+            hostPublic: hostPriv.publicKey.x963Representation,
+            secret: secret.withUnsafeBytes { Data($0) }))
+    }
+
+    private func pair() throws -> (ChannelCrypto, ChannelCrypto) {
+        // Both ends derive the same 100 bytes from the same inputs, and the two
+        // directions are deliberately NOT symmetric -- so one object standing in
+        // for both would pass a test that a real pair fails.
+        (try channel(), try channel())
+    }
+
+    /// A different ephemeral key gives different channel keys, which is the
+    /// whole of what forward secrecy buys: the token alone is not enough to
+    /// reconstruct a session whose ephemeral half was thrown away.
+    func testTheEphemeralKeyChangesTheChannelKeys() throws {
+        let a = try channel(clientScalar: 0x11)
+        let b = try channel(clientScalar: 0x33)
+        XCTAssertNotEqual(a.hostAuth, b.hostAuth)
+    }
+
+    /// And the token still has to be right, so an eavesdropper who watched the
+    /// whole Diffie-Hellman in the clear still derives nothing.
+    func testTheTokenIsStillRequired() throws {
+        let right = try channel()
+        let wrong = try channel(token: "00112233445566778899aabbccddeef0")
+        XCTAssertNotEqual(right.hostAuth, wrong.hostAuth)
     }
 
     func testARecordSealedForTheHostDoesNotOpenAsOneFromIt() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         var record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
         // This is the client's own record, which only the HOST can open. Feeding
         // it back to the client must fail: one key for both directions would let
@@ -368,7 +396,7 @@ final class ChannelCryptoTests: XCTestCase {
     }
 
     func testAPartialRecordIsNotAnError() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         let record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
         // Waiting for the rest of a record is the normal case on a stream
         // socket, and must be distinguishable from a record that is wrong.
@@ -378,7 +406,7 @@ final class ChannelCryptoTests: XCTestCase {
     }
 
     func testTamperingWithTheCiphertextIsFatal() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         var record = try client.seal(Data("{\"cmd\":\"ping\"}".utf8))
         record[record.count - 1] ^= 0x01
         var buffer = record
@@ -386,7 +414,7 @@ final class ChannelCryptoTests: XCTestCase {
     }
 
     func testAnAbsurdLengthIsRejectedRatherThanAllocated() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         // Four bytes of 0xFF is a four-gigabyte record. A length is the one
         // field an attacker controls before any authentication happens.
         var buffer = Data([0xFF, 0xFF, 0xFF, 0xFF]) + Data(repeating: 0, count: 32)
@@ -394,7 +422,7 @@ final class ChannelCryptoTests: XCTestCase {
     }
 
     func testAMessageLargerThanTheCapIsRefused() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         let huge = Data(repeating: 0x41, count: ChannelCrypto.maxMessage + 1)
         XCTAssertThrowsError(try client.seal(huge))
     }
@@ -403,7 +431,7 @@ final class ChannelCryptoTests: XCTestCase {
     /// capped a record at 64 KB — dropping the connection on a large paste, in
     /// the encrypted path only.
     func testAClipboardSizedMessageFits() throws {
-        let (client, _) = try XCTUnwrap(pair())
+        let (client, _) = try pair()
         let clipboard = Data(repeating: 0x42, count: 256 * 1024)
         let record = try client.seal(clipboard)
         XCTAssertEqual(record.count, 4 + clipboard.count + SMT.overhead)

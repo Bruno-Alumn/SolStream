@@ -50,11 +50,17 @@ before it, four-byte-length-prefixed AES-256-GCM records after. Both ends
 negotiate it in the greeting, because a mismatch is not a degraded channel but a
 socket where each end reads the other's bytes as the wrong thing.
 
-It is **not forward secret**: there is no ephemeral key, so an attacker who later
-learns the token can decrypt a recorded session. The media path does better —
-it mixes in an ECDH secret discarded when the session ends — and doing the same
-here means a Diffie-Hellman before the channel is encrypted. What this removes is
-passive disclosure to anyone on the path, which was true of every session at once.
+It **is forward secret**. The proof message carries an ephemeral P-256 public
+point and the reply carries the host's; the shared secret is mixed with the token
+into the same HKDF and then discarded, so someone who later learns the token
+cannot decrypt a session they recorded. The token being in the input key material
+is what stops a man in the middle substituting a point: without it they derive
+keys neither end will use, so every record fails its tag and the connection drops
+— a detected failure rather than a silent compromise.
+
+The reply also carries `hostAuth`, twelve bytes of the same expansion. That is
+the only thing in the handshake that authenticates the **host** to the Mac; the
+challenge-response runs the other way. The Mac refuses to switch if it disagrees.
 
 ## The media path — UDP 47631
 

@@ -156,8 +156,11 @@ public final class AgentConnection {
     /// wrong thing entirely, so both halves have to agree before either switches.
     private var hostOffersChannelCrypto = false
     private var channel: ChannelCrypto?
-    /// Built when the proof is sent, promoted when the host says it was good.
-    private var pendingChannel: ChannelCrypto?
+    /// Held between sending the proof and reading the reply that names the
+    /// host's half. Dropped the moment the keys are derived.
+    private var pendingEphemeral: P256.KeyAgreement.PrivateKey?
+    private var pendingChallenge: String?
+    private var pendingClientNonce: String?
 
     private static func tokenKey(for host: String) -> String {
         "SolStream.agentToken.\(host)"
@@ -446,14 +449,17 @@ public final class AgentConnection {
             "proof": Self.hex(Data(proof)),
             "cnonce": Self.hex(clientNonce),
         ]
-        // The same challenge and nonce that prove the token can key the channel,
-        // so asking costs no extra round trip. Armed but not switched on: the
-        // reply to this request still arrives in the clear, and only what
-        // follows it is sealed.
+        // The same message that proves the token also carries an ephemeral
+        // public point, so the channel's keys cost no extra round trip. The
+        // private half lives only until the reply names the host's point, and
+        // that is the whole of what forward secrecy is.
         if hostOffersChannelCrypto {
-            request["channelCrypto"] = 1
-            pendingChannel = ChannelCrypto(token: token, challenge: challenge,
-                                           clientNonce: Self.hex(clientNonce))
+            let ephemeral = P256.KeyAgreement.PrivateKey()
+            request["channelCrypto"] = 2
+            request["cpub"] = ephemeral.publicKey.x963Representation.smtHex
+            pendingEphemeral = ephemeral
+            pendingChallenge = challenge
+            pendingClientNonce = Self.hex(clientNonce)
         }
         guard let line = try? JSONSerialization.data(withJSONObject: request) else {
             return false
@@ -1065,9 +1071,12 @@ public final class AgentConnection {
             // Before any branch below needs it: a token supplied later by the
             // user authenticates against the challenge from THIS greeting.
             authChallenge = message["challenge"] as? String
-            hostOffersChannelCrypto = (message["channelCrypto"] as? Int ?? 0) != 0
+            // Version 2 exactly. A host offering something else stays in the
+            // clear rather than having both ends read each other's bytes as the
+            // wrong thing entirely.
+            hostOffersChannelCrypto = (message["channelCrypto"] as? Int ?? 0) == 2
             channel = nil
-            pendingChannel = nil
+            pendingEphemeral = nil
             Log.info("[agent] host \(host), protocol v\(version)")
             report(.connected(host: host))
             // The greeting says whether a token is wanted. Answering it here,
@@ -1124,16 +1133,43 @@ public final class AgentConnection {
         case "auth":
             if message["ok"] as? Bool == true {
                 if let token { Self.rememberToken(token, for: host) }
-                // This reply is the last thing that arrives in the clear. The
-                // host seals everything after it, so the switch happens here and
-                // not a message earlier or later.
-                if let armed = pendingChannel {
-                    channel = armed
-                    pendingChannel = nil
-                    Log.info("[agent] token accepted; the channel is encrypted from here")
+                // This reply is the last thing that arrives in the clear, and
+                // it carries the host's half of the exchange. The switch happens
+                // here and not a message earlier or later.
+                if let ephemeral = pendingEphemeral,
+                   let challenge = pendingChallenge,
+                   let clientNonce = pendingClientNonce,
+                   let hpubHex = message["hpub"] as? String,
+                   let hpub = Data(smtHex: hpubHex),
+                   let hauth = message["hauth"] as? String,
+                   let peer = try? P256.KeyAgreement.PublicKey(x963Representation: [UInt8](hpub)),
+                   let shared = try? ephemeral.sharedSecretFromKeyAgreement(with: peer),
+                   let derived = ChannelCrypto(
+                       token: token ?? "", challenge: challenge,
+                       clientNonce: clientNonce,
+                       clientPublic: ephemeral.publicKey.x963Representation,
+                       hostPublic: hpub,
+                       secret: shared.withUnsafeBytes { Data($0) }) {
+                    // The host proving it derived the same bytes is the ONLY
+                    // thing here that authenticates the host to this Mac — the
+                    // challenge-response runs the other way.
+                    guard derived.hostAuth == hauth else {
+                        Log.error("[agent] \(host) derived DIFFERENT channel keys — "
+                                  + "refusing the connection")
+                        pendingEphemeral = nil
+                        dropConnection(AgentError.protocolDesync, reconnect: false)
+                        return
+                    }
+                    channel = derived
+                    Log.info("[agent] token accepted; the channel is encrypted from "
+                             + "here, with an ephemeral key")
+                } else if pendingEphemeral != nil {
+                    Log.error("[agent] \(host) accepted the token but would not "
+                              + "agree channel keys; staying in the clear")
                 } else {
                     Log.info("[agent] token accepted")
                 }
+                pendingEphemeral = nil
             } else {
                 Log.error("[agent] token rejected")
                 Self.forgetToken(for: host)
