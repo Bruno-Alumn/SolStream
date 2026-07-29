@@ -13,90 +13,32 @@ final class HostDedupeTests: XCTestCase {
         DiscoveredHost(name: name, address: address)
     }
 
-    func testTwoAdvertisementsOfOneMachineCollapse() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("DESKTOP-EXAMPLE", "192.168.1.40"),
-            host("DESKTOP-EXAMPLE(1)", "192.168.1.40"),
-        ])
-        XCTAssertEqual(rows.count, 1)
-        // The name Bonjour did not have to rename: "PC" reads as the machine,
-        // "PC(1)" reads as a mistake.
-        XCTAssertEqual(rows.first?.name, "DESKTOP-EXAMPLE")
+    /// Discovery is keyed on the ADDRESS a host answered from, so a machine
+    /// cannot appear twice however it names itself.
+    ///
+    /// It used to be keyed on the Bonjour instance name, which could arrive as
+    /// both "DESKTOP-EXAMPLE" and "DESKTOP-EXAMPLE(1)" for one PC — the rename
+    /// Bonjour applies when it thinks a name is taken. That produced one machine
+    /// on two rows, one of which reached a name that did not resolve, and a
+    /// helper existed to collapse them. A host that is discovered by answering
+    /// has nothing left to resolve, so there is nothing left to collapse.
+    func testRecentsAreHiddenWhenDiscoveryAlreadyFoundTheMachine() {
+        let discovered = [host("DESKTOP-EXAMPLE", "192.168.1.40")]
+        let recents = ["192.168.1.40", "desktop-example.local", "10.7.0.2"]
+        XCTAssertEqual(HostBrowser.recentsWorthShowing(recents, discovered: discovered),
+                       ["10.7.0.2"])
     }
 
-    /// Order of arrival must not decide which name survives — mDNS makes no
-    /// promises about which advertisement resolves first.
-    func testTheUnrenamedNameWinsWhicheverArrivesFirst() {
-        for pair in [["DESKTOP(1)", "DESKTOP"], ["DESKTOP", "DESKTOP(1)"]] {
-            let rows = HostBrowser.oneRowPerMachine([
-                host(pair[0], "10.0.0.5"), host(pair[1], "10.0.0.5"),
-            ])
-            XCTAssertEqual(rows.map(\.name), ["DESKTOP"], "arrival order changed the answer")
-        }
+    /// The rename suffix is still stripped when matching recents: a Mac that
+    /// connected to "PC(1).local" once should not now see it listed beside the
+    /// same PC found as "PC".
+    func testARenamedRecentStillMatchesTheMachine() {
+        let discovered = [host("DESKTOP(1)", "192.168.1.40")]
+        XCTAssertEqual(HostBrowser.recentsWorthShowing(["desktop.local"],
+                                                       discovered: discovered),
+                       [])
     }
 
-    /// Two genuinely different PCs must stay two rows, whatever they are called.
-    func testDifferentMachinesAreNotCollapsed() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("GAMING-PC", "192.168.1.40"),
-            host("OFFICE-PC", "192.168.1.41"),
-        ])
-        XCTAssertEqual(rows.count, 2)
-    }
-
-    /// Even two machines that happen to share a name are two machines. Only the
-    /// address identifies one.
-    func testSameNameDifferentAddressesStaySeparate() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("DESKTOP", "192.168.1.40"),
-            host("DESKTOP", "10.7.0.2"),
-        ])
-        XCTAssertEqual(rows.count, 2)
-    }
-
-    /// A host that has not resolved yet keeps its row. Dropping it would hide a
-    /// PC that is merely slow to answer, which is worse than a duplicate.
-    func testUnresolvedHostsStillAppear() {
-        let rows = HostBrowser.oneRowPerMachine([host("SLOW-PC", nil)])
-        XCTAssertEqual(rows.map(\.name), ["SLOW-PC"])
-    }
-
-    /// But an unresolved "(1)" for a machine already listed is that machine's
-    /// second advertisement arriving late, not a new PC.
-    func testUnresolvedDuplicateOfAKnownMachineIsDropped() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("DESKTOP-EXAMPLE", "192.168.1.40"),
-            host("DESKTOP-EXAMPLE(1)", nil),
-        ])
-        XCTAssertEqual(rows.map(\.name), ["DESKTOP-EXAMPLE"])
-    }
-
-    func testRowsAreSortedByName() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("ZED", "10.0.0.3"), host("alpha", "10.0.0.1"), host("Mid", "10.0.0.2"),
-        ])
-        XCTAssertEqual(rows.map(\.name), ["alpha", "Mid", "ZED"])
-    }
-
-    /// The case actually seen: neither advertisement resolved, so the rows
-    /// showed their ".local" fallbacks and an address-only rule collapsed
-    /// nothing. Bonjour's own "(n)" rename has to be enough on its own.
-    func testUnresolvedDuplicatesCollapseByTheRenameSuffix() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("DESKTOP-EXAMPLE", nil),
-            host("DESKTOP-EXAMPLE(1)", nil),
-        ])
-        XCTAssertEqual(rows.map(\.name), ["DESKTOP-EXAMPLE"])
-    }
-
-    /// But a "(n)" that resolved to a DIFFERENT machine is a different machine.
-    func testRenamedEntryAtAnotherAddressSurvives() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("DESKTOP", "192.168.1.40"),
-            host("DESKTOP(1)", "192.168.1.99"),
-        ])
-        XCTAssertEqual(rows.count, 2)
-    }
 
     /// A name that merely ends in brackets is not a rename.
     func testBracketsWithoutDigitsAreNotARename() {
@@ -107,16 +49,6 @@ final class HostDedupeTests: XCTestCase {
         XCTAssertEqual(HostBrowser.baseName(of: "PC(11)"), "PC")
     }
 
-    func testAMachineNamedWithBracketsIsNotCollapsedAway() {
-        let rows = HostBrowser.oneRowPerMachine([
-            host("Media (Living Room)", nil),
-        ])
-        XCTAssertEqual(rows.count, 1)
-    }
-
-    func testNothingFoundIsNoRows() {
-        XCTAssertTrue(HostBrowser.oneRowPerMachine([]).isEmpty)
-    }
 }
 
 /// The connect list draws rows from two places — hosts discovered on the network
