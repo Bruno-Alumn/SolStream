@@ -17,6 +17,8 @@
 
 #include "host_window.h"
 
+#include "media/log.h"
+
 #include <windows.h>
 #include <windowsx.h>
 #include <d2d1.h>
@@ -137,12 +139,15 @@ IDWriteTextFormat* MakeFormat(const wchar_t* family, float size,
 }
 
 bool CreateDeviceIndependentResources() {
-    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d))) {
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d);
+    if (FAILED(hr)) {
+        media::Log("[window] Direct2D would not start (0x%08lX)", hr);
         return false;
     }
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-                                   __uuidof(IDWriteFactory),
-                                   reinterpret_cast<IUnknown**>(&g_dwrite)))) {
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                             reinterpret_cast<IUnknown**>(&g_dwrite));
+    if (FAILED(hr)) {
+        media::Log("[window] DirectWrite would not start (0x%08lX)", hr);
         return false;
     }
     g_fmt_wordmark = MakeFormat(L"Segoe UI Variable Display", type::kWordmark,
@@ -178,9 +183,24 @@ bool EnsureTarget(HWND window) {
     if (size.width == 0 || size.height == 0) {
         return false;
     }
-    if (FAILED(g_d2d->CreateHwndRenderTarget(
-            D2D1::RenderTargetProperties(),
-            D2D1::HwndRenderTargetProperties(window, size), &g_target))) {
+    HRESULT hr = g_d2d->CreateHwndRenderTarget(
+        D2D1::RenderTargetProperties(),
+        D2D1::HwndRenderTargetProperties(window, size), &g_target);
+    if (FAILED(hr)) {
+        // SOFTWARE, EXPLICITLY. The default type is documented to fall back on
+        // its own, and on a machine with a basic render driver -- a virtual
+        // machine, a thin client -- it does not: the call fails and the window
+        // is left painting nothing at all, which is white with a real child
+        // control sitting in it. That was the whole first impression on exactly
+        // the machines that most need one.
+        media::Log("[window] hardware Direct2D failed (0x%08lX); trying software", hr);
+        hr = g_d2d->CreateHwndRenderTarget(
+            D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE),
+            D2D1::HwndRenderTargetProperties(window, size), &g_target);
+    }
+    if (FAILED(hr)) {
+        media::Log("[window] no Direct2D render target at all (0x%08lX); "
+                   "the window will not paint", hr);
         return false;
     }
     // Authoring is in DIPs; this is the only place the scale factor exists.

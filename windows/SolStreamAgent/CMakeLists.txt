@@ -39,7 +39,6 @@ set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
 # path is present in every binary anybody installs.
 if(MSVC)
     set(SOLSTREAM_MEDIA_SOURCES
-        media/log.cpp
         media/smt.cpp
         media/channel.cpp
         media/capture.cpp
@@ -54,6 +53,9 @@ endif()
 
 add_executable(SolStreamAgent
     main.cpp
+    # Not media-only: the host window logs through it too, and it has no
+    # dependency beyond stdio.
+    media/log.cpp
     vdd.cpp
     display_setup.cpp
     host_window.cpp

@@ -62,10 +62,10 @@
 // both arrive through C++/WinRT and the Windows SDK, neither of which mingw
 // has. The cross-compiled build is a development convenience; what ships is
 // built on Windows.
+#include "media/log.h"
 #ifdef SOLSTREAM_MEDIA
 #include "media/capture.h"
 #include "media/channel.h"
-#include "media/log.h"
 #include "media/session.h"
 #endif
 #include "vdd.h"
@@ -3758,12 +3758,10 @@ void ReleaseUnwantedConsole() {
 
 int wmain(int argc, wchar_t** argv) {
     ReleaseUnwantedConsole();
-#ifdef SOLSTREAM_MEDIA
-    // The media path logs through the agent's file rather than through a second
-    // one, and it learns where that is here rather than by declaring a function
-    // it has no way to reach.
+    // Everything outside main.cpp logs through the agent's file rather than
+    // through a second one, and learns where that is here rather than by
+    // declaring a function it has no way to reach.
     solstream::media::SetLogger([](const char* line) { Log("%s", line); });
-#endif
     unsigned short port = kDefaultPort;
     // Loopback by default. This socket has no authentication yet, so the address
     // it binds is the only thing limiting who can drive it.
