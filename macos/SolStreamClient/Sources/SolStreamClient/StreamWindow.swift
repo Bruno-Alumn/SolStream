@@ -4,7 +4,7 @@ import SolStreamLogging
 import VideoDecoder
 import InputCapture
 import MediaSession
-import StreamConnection
+import AgentChannel
 
 /// A window that renders one streamed host session.
 ///

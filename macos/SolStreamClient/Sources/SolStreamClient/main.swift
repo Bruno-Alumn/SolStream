@@ -2,7 +2,7 @@ import Cocoa
 import AppKit
 import SolStreamLogging
 import MediaSession
-import StreamConnection
+import AgentChannel
 
 /// SolStream macOS client entry point.
 struct SolStreamApp {
@@ -910,11 +910,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About SolStream", action: nil, keyEquivalent: "")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Reveal Identity in Finder",
-                        action: #selector(revealIdentity), keyEquivalent: "")
         appMenu.addItem(withTitle: "Reveal Log in Finder",
                         action: #selector(revealLog), keyEquivalent: "")
-        appMenu.addItem(withTitle: "Forget Paired Hosts…",
+        appMenu.addItem(withTitle: "Forget Paired PCs…",
                         action: #selector(forgetHosts), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit SolStream",
@@ -1014,10 +1012,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showConnectWindow()
     }
 
-    @objc private func revealIdentity() {
-        let path = ClientIdentity.shared.certPath
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-    }
 
     /// Flush before revealing: the point of the menu item is that someone is
     /// about to open the file, and the last few lines are usually the ones that
@@ -1041,16 +1035,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func forgetHosts() {
         let alert = NSAlert()
-        alert.messageText = "Forget paired hosts?"
+        alert.messageText = "Forget paired PCs?"
         alert.informativeText = """
-            SolStream will forget the TLS keys it pinned for each host. \
-            Your client identity is kept, so hosts that still trust this Mac \
-            won't ask for a PIN again.
+            SolStream will forget the pairing token it holds for each PC. \
+            You will need to enter the token again — it is shown on SolStream's \
+            own window on that PC, under "Pairing token".
             """
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        ClientIdentity.shared.forgetKnownHosts()
+        for key in UserDefaults.standard.dictionaryRepresentation().keys
+        where key.hasPrefix("SolStream.agentToken.") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        Log.info("[agent] every stored pairing token forgotten")
     }
 
     // MARK: - Test support

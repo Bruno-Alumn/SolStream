@@ -3,7 +3,7 @@ import AppKit
 import SolStreamLogging
 import VideoDecoder
 import MediaSession
-import StreamConnection
+import AgentChannel
 import AudioRenderer
 
 /// One SMT/1 session, feeding any number of windows.

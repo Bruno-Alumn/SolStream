@@ -20,7 +20,7 @@ let package = Package(
                 "VideoDecoder",
                 "AudioRenderer",
                 "InputCapture",
-                "StreamConnection",
+                "AgentChannel",
                 "MediaSession",
                 "SolStreamLogging",
                 "DesignSystem"
@@ -91,10 +91,15 @@ let package = Package(
             ]
         ),
 
-        // -- Stream connection (SRTP, WS control, pairing) --  
+        // -- The agent channel: TCP 47630, newline-JSON, sixteen commands --
+        //
+        // Named StreamConnection until the GameStream client that lived beside
+        // it was deleted. What is left is the channel that was never GameStream:
+        // app enumeration, window placement, the clipboard, the cursor shape,
+        // and the handshake that agrees the media keys.
         .target(
-            name: "StreamConnection",
-            dependencies: ["SolStreamLogging", "MediaSession", "CCommonCrypto", "CEnet"],
+            name: "AgentChannel",
+            dependencies: ["SolStreamLogging", "MediaSession"],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
@@ -102,29 +107,13 @@ let package = Package(
             ]
         ),
 
-        // -- CommonCrypto bridging module --
-        .target(
-            name: "CCommonCrypto",
-            dependencies: [],
-            path: "Sources/CCommonCrypto"
-        ),
 
-        // -- ENET networking library --
-        .target(
-            name: "CEnet",
-            dependencies: [],
-            path: "Sources/CEnet",
-            publicHeadersPath: "include",
-            cSettings: [
-                .headerSearchPath("include"),
-            ]
-        ),
 
         // -- UI Tests --
         .testTarget(
             name: "SolStreamClientTests",
             dependencies: ["SolStreamClient", "SolStreamLogging",
-                           "StreamConnection", "MediaSession",
+                           "AgentChannel", "MediaSession",
                            "VideoDecoder", "AudioRenderer"],
             linkerSettings: [
                 .linkedFramework("XCTest"),

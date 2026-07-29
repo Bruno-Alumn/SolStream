@@ -1,5 +1,5 @@
 import XCTest
-@testable import StreamConnection
+@testable import AgentChannel
 
 /// One PC should be one row.
 ///

@@ -2,7 +2,7 @@ import AppKit
 import DesignSystem
 import SolStreamLogging
 import MediaSession
-import StreamConnection
+import AgentChannel
 
 /// Asks for the host's pairing token.
 ///

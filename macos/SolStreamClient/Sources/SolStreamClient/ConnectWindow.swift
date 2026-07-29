@@ -2,7 +2,7 @@ import AppKit
 import DesignSystem
 import SolStreamLogging
 import MediaSession
-import StreamConnection
+import AgentChannel
 
 /// "Which PC?"
 ///
@@ -158,7 +158,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Everything the row and the button say is derived from one state, so they
     /// can never disagree with each other.
     private func refresh() {
-        state.isPaired = ClientIdentity.shared.isPaired(host: state.address)
+        // "Paired" now means one thing: this Mac holds the host's agent
+        // token. There is no certificate, no PIN and no TLS key to pin --
+        // the token is the whole relationship.
+        state.isPaired = AgentConnection.storedToken(for: state.address) != nil
 
         var dotState: DS.Dot.State = .idle
         var parts: [String] = []
@@ -208,7 +211,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = "Reachable and paired. Connecting is one step."
             connectButton.title = "Connect"
         case (.some(false), _):
-            hintLabel.stringValue = "Not answering on port \(StreamPorts.solstream.http). "
+            hintLabel.stringValue = "Not answering on port \(StreamPorts.agent). "
                                   + "Check the PC is awake and SolStream is running."
             connectButton.title = "Connect"
         case (nil, _):
@@ -278,12 +281,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     /// Is a SolStream host — or a plain Sunshine — answering here?
     ///
-    /// Both bases are tried, because both are real: SolStream's own Windows
-    /// application runs its Sunshine on its own base so it can live beside one
-    /// the user already had, and a host somebody set up for Moonlight answers on
-    /// the stock one. Which it is does not need to be the user's problem.
+    /// One port to try. There used to be two bases -- SolStream's own and the
+    /// stock Sunshine one -- because a host somebody had already set up for
+    /// Moonlight answered on a different number. Neither exists now.
     private static func canReachSunshine(host: String) -> Bool {
-        StreamPorts.candidates.contains { canReach(host: host, port: UInt16($0.http)) }
+        canReach(host: host, port: StreamPorts.agent)
     }
 
     private static func canReach(host: String, port: UInt16) -> Bool {
@@ -368,14 +370,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         var items = discovered.map { host in
             HostDropdown.Item(address: host.connectTarget, name: host.name,
                               detail: host.connectTarget
-                                  + (ClientIdentity.shared.isPaired(host: host.connectTarget)
+                                  + (AgentConnection.storedToken(for: host.connectTarget) != nil
                                      ? " · paired" : " · not paired"),
                               dotState: .live, kind: .discovered)
         }
         items += HostBrowser.recentsWorthShowing(Self.recentHosts,
                                                  discovered: discovered).map { address in
             HostDropdown.Item(address: address, name: nil,
-                              detail: ClientIdentity.shared.isPaired(host: address)
+                              detail: AgentConnection.storedToken(for: address) != nil
                                   ? "paired" : "not paired",
                               dotState: .idle, kind: .recent)
         }

@@ -4,7 +4,7 @@ import SolStreamLogging
 import VideoDecoder
 import InputCapture
 import MediaSession
-import StreamConnection
+import AgentChannel
 
 /// A native macOS window showing one Windows application.
 ///

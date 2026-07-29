@@ -1,5 +1,5 @@
 import XCTest
-@testable import StreamConnection
+@testable import AgentChannel
 
 /// Checks the clipboard size budget.
 ///
