@@ -539,8 +539,26 @@ final class AppWindow: NSObject, NSWindowDelegate {
                              + " does not fit the display; showing "
                              + "\(Int(visible.width))x\(Int(visible.height))")
                 } else {
-                    Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
-                             + " at \(Int(achieved.minX)),\(Int(achieved.minY))")
+                    // Both numbers, always. This logged only what the host
+                    // achieved, so a placement that missed by fifty pixels and one
+                    // that landed exactly wrote indistinguishable lines — and since
+                    // this window then resizes itself to match whatever came back,
+                    // there was nothing anywhere to say the two ends had agreed on
+                    // the wrong rectangle. `missed` is the host's own residual
+                    // after it has corrected itself as far as it can, so anything
+                    // above zero is the application refusing the size rather than
+                    // SolStream getting it wrong.
+                    let asked = "\(Int(requested.width))x\(Int(requested.height))"
+                    let got = "\(Int(achieved.width))x\(Int(achieved.height))"
+                    if placement.missed > 2 {
+                        Log.info("[window] asked the host for \(asked), settled at \(got)"
+                                 + " at \(Int(achieved.minX)),\(Int(achieved.minY))"
+                                 + " — \(placement.missed) px out, so the application"
+                                 + " is refusing that size")
+                    } else {
+                        Log.info("[window] host window \(got)"
+                                 + " at \(Int(achieved.minX)),\(Int(achieved.minY))")
+                    }
                 }
             }
         }

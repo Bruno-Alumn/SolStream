@@ -1112,6 +1112,16 @@ public final class AgentConnection {
         public let minimumSize: CGSize
         /// Width of the host window's resize grab area, in host pixels.
         public let resizeBorder: CGFloat
+        /// How far, in host pixels summed over both axes and both corners, the
+        /// client area ended up from what was asked for — AFTER the host has
+        /// corrected itself as far as it can.
+        ///
+        /// Zero is the ordinary answer. Anything above it is the application
+        /// enforcing a size of its own, and that is worth telling apart from
+        /// SolStream having computed the wrong target: the two used to be the same
+        /// silent outcome, with this window resizing itself to match whatever came
+        /// back either way.
+        public let missed: Int
     }
 
     public func place(windowID: UInt64, at rect: CGRect,
@@ -1133,7 +1143,11 @@ public final class AgentConnection {
                                  height: message["minH"] as? Int ?? 0)
             completion?(Placement(frame: CGRect(x: x, y: y, width: w, height: h),
                                   minimumSize: minimum,
-                                  resizeBorder: CGFloat(message["border"] as? Int ?? 0)))
+                                  resizeBorder: CGFloat(message["border"] as? Int ?? 0),
+                                  // Absent on a host that predates the field, which
+                                  // reads as "landed exactly" — the same thing every
+                                  // such host implicitly claimed before it existed.
+                                  missed: message["missed"] as? Int ?? 0))
         }
     }
 

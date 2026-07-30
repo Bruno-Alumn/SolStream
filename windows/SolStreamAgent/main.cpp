@@ -1800,7 +1800,8 @@ uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 HANDLE g_watcher = nullptr;
 volatile LONG g_watcher_stop = 0;
 
-bool PlaceClientArea(HWND window, int x, int y, int width, int height);
+bool PlaceClientArea(HWND window, int x, int y, int width, int height,
+                     RECT* out_client = nullptr, long long* out_error = nullptr);
 
 /// How wide the window's resize grab area is, in pixels, at its own DPI.
 ///
@@ -1842,10 +1843,31 @@ POINT MinimumClientSize(HWND window) {
 
     // ptMinTrackSize is a whole-window minimum; the crop is the client area, so
     // take the non-client furniture back off.
+    //
+    // AT THE WINDOW'S OWN DPI. AdjustWindowRectEx reads metrics for the calling
+    // thread's DPI context and knows nothing about which display the window is
+    // on, so on a host whose primary runs at 100% and whose capture display runs
+    // at 200% it measured the frame at the wrong scale. On this project's own dev
+    // box the two agree -- the virtual display IS primary -- so it changes
+    // nothing there, which is exactly why it was worth changing: the wrong answer
+    // was invisible on the one machine it gets tested on.
+    //
+    // Note what this does NOT explain. Character Map reports a client-area
+    // minimum HEIGHT of 1 px here, and that is the honest answer rather than a
+    // miscalculation: it declares no minimum of its own, so the prefill stands at
+    // SM_CYMINTRACK, which is caption-plus-border and almost exactly the furniture
+    // being subtracted. A window whose only constraint is "at least as tall as my
+    // own title bar" genuinely has no client-area floor. Do not "fix" that by
+    // inventing one -- an earlier attempt at this substituted a floor derived from
+    // the same two metrics, which is the same number by a longer route.
+    const UINT dpi = GetDpiForWindow(window);
+    const DWORD style = (DWORD) GetWindowLongPtrW(window, GWL_STYLE);
+    const DWORD exStyle = (DWORD) GetWindowLongPtrW(window, GWL_EXSTYLE);
     RECT furniture{0, 0, 0, 0};
-    AdjustWindowRectEx(&furniture,
-                       (DWORD) GetWindowLongPtrW(window, GWL_STYLE), FALSE,
-                       (DWORD) GetWindowLongPtrW(window, GWL_EXSTYLE));
+    if (dpi == 0 || !AdjustWindowRectExForDpi(&furniture, style, FALSE, exStyle, dpi)) {
+        furniture = RECT{0, 0, 0, 0};
+        AdjustWindowRectEx(&furniture, style, FALSE, exStyle);
+    }
     POINT minimum{};
     minimum.x = info.ptMinTrackSize.x - (furniture.right - furniture.left);
     minimum.y = info.ptMinTrackSize.y - (furniture.bottom - furniture.top);
@@ -2636,39 +2658,98 @@ void SetLockedGeometry(HWND window, const RECT& client) {
 /// its frame. So measure the current difference between the two and offset by
 /// it. Measuring beats computing from AdjustWindowRect, which does not know
 /// about DPI scaling, custom frames, or DWM's invisible borders.
-bool PlaceClientArea(HWND window, int x, int y, int width, int height) {
+/// How many times one placement will correct itself before settling for what it
+/// got. Two is enough for the DPI case -- the second attempt measures the frame
+/// the window actually ended up with -- and the third is for a window whose own
+/// WM_WINDOWPOSCHANGING adjusts what it is given. Past that, whatever is left is
+/// the application enforcing something, and asking again just costs another
+/// cross-process round trip on the agent's only command thread.
+constexpr int kPlaceAttempts = 3;
+
+/// The distance between where the client area landed and where it was asked to
+/// be, as one number, so successive attempts can be compared for progress.
+long long PlacementError(const RECT& got, int x, int y, int width, int height) {
+    return llabs((long long) got.left - x)
+         + llabs((long long) got.top - y)
+         + llabs((long long) (got.right - got.left) - width)
+         + llabs((long long) (got.bottom - got.top) - height);
+}
+
+bool PlaceClientArea(HWND window, int x, int y, int width, int height,
+                     RECT* out_client, long long* out_error) {   // NOLINT: see declaration
     if (IsIconic(window)) {
         ShowWindow(window, SW_RESTORE);
     }
 
-    const RECT frame_before = VisibleFrame(window);
-    const RECT client_before = ClientAreaInScreen(window);
+    // ACTIVELY CORRECTED, rather than computed once and hoped for.
+    //
+    // The arithmetic below measures the gap between the visible frame and the
+    // client area BEFORE the move, and applies it to a target the window will
+    // occupy AFTER it. Those are the same number only while nothing about the
+    // frame changes -- and the move that matters most here changes it: carrying a
+    // window from a real monitor at 100% onto the virtual display at 200% doubles
+    // every piece of non-client furniture as a consequence of the move itself. So
+    // the first attempt lands out by the difference, which on a 200% display is
+    // tens of pixels, and NOTHING used to correct it: the reply carried the
+    // missed rectangle, the Mac resized its own window to match it, and
+    // SetLockedGeometry told the watcher to hold the miss in place for the rest
+    // of the session. Both ends agreed, and both were wrong.
+    //
+    // A second attempt measures the frame the window now really has, so it
+    // converges. The loop stops the moment it is exact, and stops early when an
+    // attempt makes no progress -- a window enforcing a minimum or a size grid is
+    // as close as it is going to get, and hammering it would only be slow.
+    bool moved = false;
+    RECT client = ClientAreaInScreen(window);
+    long long best = PlacementError(client, x, y, width, height);
+    for (int attempt = 0; attempt < kPlaceAttempts; ++attempt) {
+        const RECT frame_before = VisibleFrame(window);
+        const RECT client_before = ClientAreaInScreen(window);
 
-    const int border_left = client_before.left - frame_before.left;
-    const int border_top = client_before.top - frame_before.top;
-    const int border_width = (frame_before.right - frame_before.left)
-                           - (client_before.right - client_before.left);
-    const int border_height = (frame_before.bottom - frame_before.top)
-                            - (client_before.bottom - client_before.top);
+        const int border_left = client_before.left - frame_before.left;
+        const int border_top = client_before.top - frame_before.top;
+        const int border_width = (frame_before.right - frame_before.left)
+                               - (client_before.right - client_before.left);
+        const int border_height = (frame_before.bottom - frame_before.top)
+                                - (client_before.bottom - client_before.top);
 
-    // GetWindowRect (what SetWindowPos speaks) may differ from the visible
-    // frame by the invisible resize border; carry that across too.
-    RECT window_rect{};
-    GetWindowRect(window, &window_rect);
-    const int shadow_left = frame_before.left - window_rect.left;
-    const int shadow_top = frame_before.top - window_rect.top;
-    const int shadow_width = (window_rect.right - window_rect.left)
-                           - (frame_before.right - frame_before.left);
-    const int shadow_height = (window_rect.bottom - window_rect.top)
-                            - (frame_before.bottom - frame_before.top);
+        // GetWindowRect (what SetWindowPos speaks) may differ from the visible
+        // frame by the invisible resize border; carry that across too.
+        RECT window_rect{};
+        GetWindowRect(window, &window_rect);
+        const int shadow_left = frame_before.left - window_rect.left;
+        const int shadow_top = frame_before.top - window_rect.top;
+        const int shadow_width = (window_rect.right - window_rect.left)
+                               - (frame_before.right - frame_before.left);
+        const int shadow_height = (window_rect.bottom - window_rect.top)
+                                - (frame_before.bottom - frame_before.top);
 
-    const int target_x = x - border_left - shadow_left;
-    const int target_y = y - border_top - shadow_top;
-    const int target_w = width + border_width + shadow_width;
-    const int target_h = height + border_height + shadow_height;
+        const int target_x = x - border_left - shadow_left;
+        const int target_y = y - border_top - shadow_top;
+        const int target_w = width + border_width + shadow_width;
+        const int target_h = height + border_height + shadow_height;
 
-    return SetWindowPos(window, nullptr, target_x, target_y, target_w, target_h,
-                        SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+        if (!SetWindowPos(window, nullptr, target_x, target_y, target_w, target_h,
+                          SWP_NOZORDER | SWP_NOACTIVATE)) {
+            break;
+        }
+        moved = true;
+        client = ClientAreaInScreen(window);
+        const long long error = PlacementError(client, x, y, width, height);
+        if (error == 0) {
+            best = 0;
+            break;
+        }
+        // No better than the attempt before it: the window is holding a size of
+        // its own, and another go would land in the same place.
+        if (attempt > 0 && error >= best) {
+            break;
+        }
+        best = error;
+    }
+    if (out_client) { *out_client = client; }
+    if (out_error) { *out_error = best; }
+    return moved;
 }
 
 // ΓöÇΓöÇ JSON output ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -3437,20 +3518,36 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!window) {
             return "{\"type\":\"error\",\"message\":\"no such window\"}";
         }
-        const bool ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h);
-        const RECT client = ClientAreaInScreen(window);
+        RECT client{};
+        long long missed = 0;
+        const bool ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h,
+                                        &client, &missed);
+        // A miss that survived every correction is the application refusing the
+        // size, and it is worth a line: it is the difference between "SolStream
+        // sized this wrongly" and "this window will not be that shape", and until
+        // now nothing anywhere recorded which of the two had happened. Only when
+        // it is large enough to see -- an off-by-one on a rounded axis is not news.
+        if (missed > 2) {
+            char title[96] = {0};
+            GetWindowTextA(window, title, sizeof(title) - 1);
+            Log("[place] \"%s\" asked for %lldx%lld at %lld,%lld and settled at "
+                "%ldx%ld at %ld,%ld (%lld px out)",
+                title[0] ? title : "(untitled)", w, h, x, y,
+                client.right - client.left, client.bottom - client.top,
+                client.left, client.top, missed);
+        }
         // The Mac asked for this, so it is the new truth ΓÇö otherwise the watcher
         // would immediately drag the window back to the previous size.
         SetLockedGeometry(window, client);
-        char buffer[256];
+        char buffer[320];
         const POINT minimum = MinimumClientSize(window);
         std::snprintf(buffer, sizeof(buffer),
                       "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld"
-                      ",\"minW\":%ld,\"minH\":%ld,\"border\":%d}",
+                      ",\"minW\":%ld,\"minH\":%ld,\"border\":%d,\"missed\":%lld}",
                       ok ? "true" : "false",
                       client.left, client.top,
                       client.right - client.left, client.bottom - client.top,
-                      minimum.x, minimum.y, ResizeBorderThickness(window));
+                      minimum.x, minimum.y, ResizeBorderThickness(window), missed);
         return buffer;
     }
 
