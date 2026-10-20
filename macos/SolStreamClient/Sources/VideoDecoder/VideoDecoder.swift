@@ -155,7 +155,10 @@ public final class VideoDecoder {
         let status = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sampleBuffer,
-            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing],
+            // No _EnableTemporalProcessing: it lets VideoToolbox hold pictures
+            // back to reorder them, which a stream with no B-frames never needs
+            // and which only adds latency.
+            flags: [._EnableAsynchronousDecompression],
             frameRefcon: nil,
             infoFlagsOut: &flagsOut
         )

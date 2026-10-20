@@ -16,7 +16,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var metalView: MetalView?
     private var inputCapture: InputCapture?
 
-    private let session: StreamSession
+    /// Not `let`: when the stream is lost and restarted, the window stays and
+    /// moves to the new session — see `rebind(to:)`.
+    private var session: StreamSession
     private let agent: AgentConnection
     /// The host window this one is showing. Not private: the agent pushes
     /// closures by id, and the owner has to know which window it means.
@@ -68,7 +70,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.tile = tile
         super.init()
         build(title: remote.title,
-              naturalSize: CGSize(width: remote.width, height: remote.height))
+              naturalSize: remote.naturalSize)
 
         if remote.hidesCaptionWhenCropped {
             Log.info("[window] \"\(remote.title)\" has a standard title bar "
@@ -621,14 +623,38 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         inputCapture?.enableCapture()
-        // The stats line reports whichever window is actually taking input.
+        installPointerStats()
+        // Give the host window focus too, so keystrokes land in the right app.
+        agent.focus(windowID: remoteWindowID)
+    }
+
+    /// The stats line reports whichever window is actually taking input.
+    private func installPointerStats() {
         session.setPointerStats { [weak self] in
             guard let capture = self?.inputCapture else { return (0, 0, 0) }
             return (capture.mouseMovedSeen, capture.positionsSent,
                     capture.droppedWhileResizing)
         }
-        // Give the host window focus too, so keystrokes land in the right app.
-        agent.focus(windowID: remoteWindowID)
+    }
+
+    /// Move to a new stream after the old one was lost, keeping the window, its
+    /// place on the host and its input exactly as they are.
+    ///
+    /// The counters restart with the session, and they are differenced with
+    /// `&-` for the pill: left at the old session's totals, the first sample
+    /// wraps to nearly 2^64 frames and the Int conversion traps.
+    func rebind(to fresh: StreamSession) {
+        guard !isClosing, let metalView else { return }
+        session.detach(metalView)
+        session = fresh
+        fresh.attach(metalView)
+        setTile(tile)
+        lastFrameCount = 0
+        lastByteCount = 0
+        lastSample = Date()
+        if window?.isKeyWindow == true {
+            installPointerStats()
+        }
     }
 
     func windowDidResignKey(_ notification: Notification) {

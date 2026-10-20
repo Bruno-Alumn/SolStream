@@ -152,7 +152,11 @@ public final class VideoReassembler {
         if frameId > highestSeen { highestSeen = frameId }
 
         let stamp = Self.now()
-        var assembly = building[frameId]
+        // Taken OUT of the dictionary, not read from it. A read leaves the
+        // dictionary sharing the buffer, so the write below copies all of it —
+        // half a megabyte per fragment, about a gigabyte a second at 20 Mbit/s,
+        // on the receive thread. Every path below puts it back or retires it.
+        var assembly = building.removeValue(forKey: frameId)
             ?? Assembly(bytes: [UInt8](repeating: 0, count: 512 * 1024),
                         firstSeen: stamp, lastSeen: stamp)
         let end = fragOff + payloadCount

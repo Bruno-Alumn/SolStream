@@ -461,6 +461,14 @@ public final class InputCapture {
 
     private func handleMouseEvent(_ event: NSEvent) {
         guard isCapturing, let view = targetView else { return }
+        // The monitor is application-wide, so with two streamed windows open a
+        // click on the other one arrives here too — and converted into THIS
+        // view's coordinates it lands somewhere arbitrary on the host. A button
+        // already held is the exception: its release must always get through,
+        // or the host is left with a button stuck down.
+        if let window = event.window, window !== view.window, heldButtons.isEmpty {
+            return
+        }
         if isSuspended || view.inLiveResize || (view.window?.inLiveResize ?? false) {
             droppedWhileResizing &+= 1
             // The flag alone is not trusted: if nothing is actually being

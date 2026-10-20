@@ -174,6 +174,35 @@ final class SMTReplayWindowTests: XCTestCase {
         XCTAssertTrue(window.seenOrTooOld(11))
         XCTAssertFalse(window.seenOrTooOld(12))
     }
+
+    /// The slide works a word at a time, with a carry between words. Checked
+    /// against the obvious model — a set of everything recorded — across
+    /// reordering, word-boundary shifts and jumps past the whole window.
+    func testTheWindowAgreesWithASetOfEverythingRecorded() {
+        var generator = SystemRandomNumberGenerator()
+        for _ in 0..<20 {
+            var window = SMTReplayWindow()
+            var recorded = Set<UInt64>()
+            var highest: UInt64 = 0
+            var next: UInt64 = 2000
+            for _ in 0..<3000 {
+                switch UInt8.random(in: 0..<10, using: &generator) {
+                case 0: next += UInt64.random(in: 60...70, using: &generator)
+                case 1: next += UInt64.random(in: 1000...1100, using: &generator)
+                case 2...4: next -= min(next, UInt64.random(in: 1...200, using: &generator))
+                default: next += 1
+                }
+                let expected = recorded.contains(next)
+                    || (!recorded.isEmpty && next + 1024 <= highest)
+                XCTAssertEqual(window.seenOrTooOld(next), expected, "counter \(next)")
+                if !expected {
+                    window.record(next)
+                    recorded.insert(next)
+                    highest = max(highest, next)
+                }
+            }
+        }
+    }
 }
 
 final class VideoReassemblyTests: XCTestCase {

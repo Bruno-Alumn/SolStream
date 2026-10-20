@@ -65,6 +65,22 @@ public struct RemoteWindow: Sendable, Equatable, Identifiable {
     /// application, so cropping the client area already excludes it.
     public var hidesCaptionWhenCropped: Bool { captionInset > 4 }
 
+    /// The client area's size once the window is on the capture display.
+    ///
+    /// `width` and `height` are pixels at the scaling of whatever monitor the
+    /// window is on NOW, and moving it onto the 200% capture display grows it by
+    /// the ratio of the two. Opening the Mac window at the old size and then
+    /// holding the host window to it clipped any fixed-size dialog — Character
+    /// Map came out a third short on a 125% primary. A host that predates this
+    /// reports nothing, and the current size is used as before.
+    public var naturalWidth: Int = 0
+    public var naturalHeight: Int = 0
+    public var naturalSize: CGSize {
+        naturalWidth > 0 && naturalHeight > 0
+            ? CGSize(width: naturalWidth, height: naturalHeight)
+            : CGSize(width: width, height: height)
+    }
+
     public var frame: CGRect {
         CGRect(x: x, y: y, width: width, height: height)
     }
@@ -460,6 +476,16 @@ public final class AgentConnection {
                           + "address only, or a firewall may be blocking the port.")
                 self.report(.failed(Self.explain(error, host: self.host, port: self.port)))
                 self.failPending(error)
+                // While reconnecting, .waiting is a dead end: it retries only on
+                // a network path change, so a PC that refused the connection
+                // because it was mid-reboot would never be tried again once it
+                // came back. Treat it as the failure it is and back off.
+                if self.reconnectAttempt > 0 {
+                    self.connection?.cancel()
+                    self.connection = nil
+                    self.stopHeartbeat()
+                    self.scheduleReconnect()
+                }
             case .cancelled:
                 self.report(.disconnected)
             default:
@@ -777,7 +803,9 @@ public final class AgentConnection {
     }
 
     public func openMediaSession(_ request: MediaRequest = .init()) async -> MediaSession? {
-        guard let token else {
+        // Read on `queue`, where the token is written: this runs on the main
+        // actor, and a token typed or cleared mid-read is a data race.
+        guard let token = queue.sync(execute: { self.token }) else {
             Log.error("[media] no token, so no key material")
             return nil
         }
@@ -1612,14 +1640,17 @@ public final class AgentConnection {
         guard let id = (entry["id"] as? NSNumber)?.uint64Value,
               let x = entry["x"] as? Int, let y = entry["y"] as? Int,
               let w = entry["w"] as? Int, let h = entry["h"] as? Int else { return nil }
-        return RemoteWindow(id: id,
-                            pid: entry["pid"] as? Int ?? 0,
-                            title: entry["title"] as? String ?? "",
-                            className: entry["class"] as? String ?? "",
-                            x: x, y: y, width: w, height: h,
-                            isOccluded: entry["occluded"] as? Bool ?? false,
-                            occludedBy: entry["occludedBy"] as? String,
-                            captionInset: entry["captionInset"] as? Int ?? 0)
+        var window = RemoteWindow(id: id,
+                                  pid: entry["pid"] as? Int ?? 0,
+                                  title: entry["title"] as? String ?? "",
+                                  className: entry["class"] as? String ?? "",
+                                  x: x, y: y, width: w, height: h,
+                                  isOccluded: entry["occluded"] as? Bool ?? false,
+                                  occludedBy: entry["occludedBy"] as? String,
+                                  captionInset: entry["captionInset"] as? Int ?? 0)
+        window.naturalWidth = entry["naturalW"] as? Int ?? 0
+        window.naturalHeight = entry["naturalH"] as? Int ?? 0
+        return window
     }
 }
 

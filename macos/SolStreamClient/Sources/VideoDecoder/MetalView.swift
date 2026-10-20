@@ -198,6 +198,13 @@ public final class MetalView: NSView {
                   destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
         commandBuffer.present(drawable)
+        // The texture cache may recycle the decoder's surface the moment the
+        // CVMetalTexture is released, and the blit has not run yet — it runs
+        // when the GPU gets to it. Holding both until completion is what Apple
+        // asks for; without it a picture can be overwritten mid-copy.
+        commandBuffer.addCompletedHandler { _ in
+            withExtendedLifetime((cvTexture, pixelBuffer)) {}
+        }
         commandBuffer.commit()
     }
 }

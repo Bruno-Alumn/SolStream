@@ -25,6 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var picker: AppPicker?
     private var clipboard: ClipboardBridge?
 
+    /// What the running stream was opened with, so a lost one can be opened
+    /// again without going back through the picker. See `recoverMedia`.
+    private var mediaRequest: AgentConnection.MediaRequest?
+    private var streamConfig: StreamConfig?
+    private var streamDisplay: RemoteDisplay?
+    private var recoveringMedia = false
+    private var mediaRecoveryAttempts = 0
+
     /// Set once from the command line, then reused when the picker sends us
     /// round the loop again.
     private var agentHostOverride: String?
@@ -810,6 +818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                          + (media.message ?? "it gave no reason"))
                 return
             }
+            self.mediaRequest = request
             self.presentApps(host: host, agent: agent, targets: targets,
                              display: display, config: config, media: media)
         }
@@ -823,6 +832,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // negotiation so that a refusal had somewhere to be said; see `attach`.
         picker?.close()
         picker = nil
+        // The picker's refresh goes with it. Left installed, every window the
+        // host opened or closed during the stream — and every reconnect's
+        // greeting — re-enumerated windows and the Start Menu for a picker
+        // nobody can see. Returning to the picker installs them again.
+        agent.onDisplays = nil
+        agent.onWindowsChanged = nil
 
         // Only while something is actually streamed: syncing a clipboard with a
         // machine the user is not looking at would be surprising.
@@ -832,6 +847,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let session = StreamSession(host: host, config: config, session: media)
         self.session = session
+        streamConfig = config
+        streamDisplay = display
+        mediaRecoveryAttempts = 0
 
         let tiles = Self.tileLayout(count: targets.count, on: display)
 
@@ -851,6 +869,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // any key or mouse button still held is never released.
                 self.session?.stop()
                 self.session = nil
+                self.mediaRequest = nil
+                self.streamConfig = nil
+                self.streamDisplay = nil
                 agent.closeMediaSession()
                 self.clipboard?.stop()
                 self.clipboard = nil
@@ -897,26 +918,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[app] \"\(target.title)\" -> tile \(tile)")
         }
 
-        // The watchdog speaks only once frames have been arriving and then stop,
-        // so it never argues with onPhase about a stream that has not started.
-        session.onLiveness = { [weak self] liveness in
-            guard let self else { return }
-            switch liveness {
-            case .live:
-                self.appWindows.forEach { $0.hideStatus() }
-            case .stalled(let seconds):
-                self.appWindows.forEach {
-                    $0.setStatus("Reconnecting…",
-                                 detail: "No picture for \(seconds)s — asking \(host) for a new frame")
-                }
-            case .lost:
-                self.appWindows.forEach {
-                    $0.setError("Lost the stream",
-                                detail: "\(host) stopped sending video and did not answer "
-                                        + "requests for a new frame.")
-                }
-            }
-        }
+        wire(session, host: host, agent: agent)
 
         // Not on `.streaming`: that only means video is arriving. A resumed
         // session is already sending it, so the first frame can land before PLAY
@@ -950,8 +952,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // The host forgets every window it was managing when the socket drops,
         // so a reconnect has to say it all again.
-        agent.onReconnected = { [weak self] in
-            self?.appWindows.forEach { $0.reassertOnHost() }
+        agent.onReconnected = { [weak self, weak agent] in
+            guard let self, let agent else { return }
+            self.appWindows.forEach { $0.reassertOnHost() }
+            // The host ends the media session whenever the agent channel drops
+            // — a Wi-Fi blip, a missed heartbeat, a host restart — so the
+            // picture is gone even though the windows came back. Ask again.
+            self.mediaRecoveryAttempts = 0
+            self.recoverMedia(host: host, agent: agent)
         }
 
         // No host-cursor toggle any more. The capture session is created with
@@ -959,20 +967,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // picture at all -- and this Mac draws a real cursor from the shape the
         // agent pushes. The Sunshine keyboard shortcut that used to flip it, and
         // the belief tracking that went with it, are gone with the protocol.
-
-        session.onPhase = { [weak self] phase in
-            guard let self else { return }
-            switch phase {
-            case .streaming:
-                self.appWindows.forEach { $0.hideStatus() }
-            case .failed(let message):
-                self.appWindows.forEach { $0.setError("Stream failed", detail: message) }
-            case .waitingForVideo:
-                self.appWindows.forEach { $0.setStatus("Waiting for video") }
-            default:
-                break
-            }
-        }
 
         // STARTED LAST, AND THAT IS THE POINT. `start()` calls `onPhase`
         // synchronously — `.waitingForVideo`, and `.failed` when the socket
@@ -987,6 +981,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gets through the NAT — so the only cost of starting here is the few
         // milliseconds spent building the windows.
         session.start()
+    }
+
+    /// The session's own reports, routed to the windows — and, when the picture
+    /// is lost, into `recoverMedia` rather than straight to an error.
+    ///
+    /// Split out of `presentApps` because a recovered session needs exactly the
+    /// same handlers as the first one.
+    private func wire(_ session: StreamSession, host: String, agent: AgentConnection) {
+        // The watchdog speaks only once frames have been arriving and then stop,
+        // so it never argues with onPhase about a stream that has not started.
+        session.onLiveness = { [weak self, weak agent] liveness in
+            guard let self else { return }
+            switch liveness {
+            case .live:
+                self.mediaRecoveryAttempts = 0
+                self.appWindows.forEach { $0.hideStatus() }
+            case .stalled(let seconds):
+                self.appWindows.forEach {
+                    $0.setStatus("Reconnecting…",
+                                 detail: "No picture for \(seconds)s — asking \(host) for a new frame")
+                }
+            case .lost:
+                if let agent, agent.isConnected {
+                    self.recoverMedia(host: host, agent: agent)
+                } else {
+                    // The agent channel is down too; `onReconnected` recovers.
+                    self.appWindows.forEach {
+                        $0.setStatus("Reconnecting…", detail: "Waiting for \(host) to answer")
+                    }
+                }
+            }
+        }
+
+        session.onPhase = { [weak self, weak agent] phase in
+            guard let self else { return }
+            switch phase {
+            case .streaming:
+                self.appWindows.forEach { $0.hideStatus() }
+            case .failed(let message):
+                if let agent, agent.isConnected, self.mediaRecoveryAttempts < 3 {
+                    Log.info("[app] stream failed (\(message)); restarting it")
+                    // On the next turn: `start()` reports a socket that will not
+                    // open synchronously, from inside itself, and tearing the
+                    // session down from in there would run `stop()` mid-`start()`.
+                    DispatchQueue.main.async { [weak self] in
+                        self?.recoverMedia(host: host, agent: agent)
+                    }
+                } else {
+                    self.appWindows.forEach { $0.setError("Stream failed", detail: message) }
+                }
+            case .waitingForVideo:
+                self.appWindows.forEach { $0.setStatus("Waiting for video") }
+            default:
+                break
+            }
+        }
+    }
+
+    /// Open a new media session for the windows already on screen.
+    ///
+    /// A `StreamSession` cannot be restarted in place — `stop()` releases the
+    /// decoder and `start()` does not build another — so this builds a fresh
+    /// one from a fresh `media open` and moves every window onto it. The host's
+    /// `Start` stops whatever session it had first, so asking again is always
+    /// safe. Bounded: after three tries in a row the windows say so and keep
+    /// the Retry button, which goes back to the picker as before.
+    private func recoverMedia(host: String, agent: AgentConnection) {
+        // Every caller is a handler the session or the agent delivers on main.
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !recoveringMedia, !appWindows.isEmpty,
+              let request = mediaRequest, let config = streamConfig,
+              let display = streamDisplay else { return }
+
+        // A host that came back from a restart may have a different display
+        // under the same name, or none. The crops and tiles are in the old
+        // display's pixels, so streaming the new one would show the wrong part
+        // of it: back to the picker instead.
+        let displays = agent.displays
+        if !displays.isEmpty, !displays.contains(where: {
+            $0.name == display.name && $0.width == display.width && $0.height == display.height
+        }) {
+            Log.info("[app] \(display.name) changed while the stream was down; "
+                     + "returning to the picker")
+            appWindows.forEach {
+                $0.setError("Lost the stream",
+                            detail: "\(host)'s display changed. Try Again to pick the app again.")
+            }
+            return
+        }
+
+        recoveringMedia = true
+        mediaRecoveryAttempts += 1
+        let attempt = mediaRecoveryAttempts
+        Log.info("[app] restarting the stream from \(host) (attempt \(attempt))")
+        appWindows.forEach {
+            $0.setStatus("Reconnecting…", detail: "Restarting the stream from \(host)")
+        }
+        // Handlers off first: stopping the old session reports `.failed`
+        // asynchronously, which would land in here again.
+        if let old = session {
+            old.onPhase = nil
+            old.onLiveness = nil
+            old.stop()
+        }
+        session = nil
+
+        Task { @MainActor [weak self, weak agent] in
+            guard let self, let agent else { return }
+            let media = agent.isConnected ? await agent.openMediaSession(request) : nil
+            self.recoveringMedia = false
+            // The windows may all have closed during the wait.
+            guard !self.appWindows.isEmpty, self.session == nil else { return }
+            guard let media, media.streaming else {
+                if attempt < 3, agent.isConnected {
+                    let delay = Double(1 << attempt)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak agent] in
+                        guard let self, let agent, self.session == nil else { return }
+                        self.recoverMedia(host: host, agent: agent)
+                    }
+                } else {
+                    self.appWindows.forEach {
+                        $0.setError("Lost the stream",
+                                    detail: media?.message ?? "\(host) did not start streaming again.")
+                    }
+                }
+                return
+            }
+            let fresh = StreamSession(host: host, config: config, session: media)
+            self.session = fresh
+            self.wire(fresh, host: host, agent: agent)
+            self.appWindows.forEach { $0.rebind(to: fresh) }
+            fresh.start()
+            Log.info("[app] stream restarted")
+        }
     }
 
     // There was a `brokerPairing(pin:host:agent:)` here.

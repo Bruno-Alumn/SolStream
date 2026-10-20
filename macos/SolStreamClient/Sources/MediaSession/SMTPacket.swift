@@ -87,15 +87,25 @@ public struct SMTReplayWindow {
             return
         }
         if counter > highest {
+            // Slot n is `highest - n`, so advancing `highest` moves every slot
+            // up by `shift`: a 1024-bit left shift, done a word at a time. This
+            // runs for nearly every packet, so it does not walk all 1024 bits.
             let shift = counter - highest
-            var slid = [UInt64](repeating: 0, count: 16)
-            if shift < 1024 {
-                for slot in 0..<1024 where (bits[slot / 64] >> (slot % 64)) & 1 == 1 {
-                    let moved = UInt64(slot) + shift
-                    if moved < 1024 { slid[Int(moved / 64)] |= 1 << (moved % 64) }
+            if shift >= 1024 {
+                for word in 0..<16 { bits[word] = 0 }
+            } else {
+                let words = Int(shift / 64)
+                let carry = UInt64(shift % 64)
+                for word in stride(from: 15, through: 0, by: -1) {
+                    let from = word - words
+                    var value: UInt64 = 0
+                    if from >= 0 {
+                        value = bits[from] << carry
+                        if carry > 0 && from > 0 { value |= bits[from - 1] >> (64 - carry) }
+                    }
+                    bits[word] = value
                 }
             }
-            bits = slid
             highest = counter
             bits[0] |= 1
             return
