@@ -39,6 +39,16 @@ std::vector<VirtualDisplay> FindVirtualDisplays();
 /// Is there a usable virtual display?
 bool HasVirtualDisplay();
 
+/// Is this the driver SolStream sets up — the Virtual Display Driver, under any
+/// of the names it has shipped as — rather than some other product's?
+///
+/// Root enumeration says "a virtual display", not "ours". Other software adds
+/// its own (phone-as-monitor apps, remote-desktop tools), and one of those
+/// enumerating first was enough to make SolStream patch, cycle and wait on a
+/// device whose mode list it does not control, conclude the driver "offers no
+/// size SolStream can stream", and fall back to the real monitor.
+bool IsSolStreamDisplayDriver(const std::wstring& name);
+
 /// The driver package SolStream would install, if it ships one.
 ///
 /// Empty when nothing is bundled — in which case the honest thing to tell the

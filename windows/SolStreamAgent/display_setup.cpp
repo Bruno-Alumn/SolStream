@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -347,13 +348,22 @@ struct Adapter {
     bool attached = false;
 };
 
+bool OffersMode(const std::wstring& gdi_name, int width, int height);
+
 /// The virtual display's GDI adapter.
 ///
-/// Root-enumerated first, which is the same test vdd.cpp uses and the principled
-/// one: a display adapter on a bus is a graphics card, one enumerated from the
-/// root is a software device. The name check is the fallback for drivers whose
+/// Root-enumerated, which is the same test vdd.cpp uses and the principled one:
+/// a display adapter on a bus is a graphics card, one enumerated from the root
+/// is a software device. The name check is the fallback for drivers whose
 /// adapter reports a hardware id instead.
+///
+/// But "a virtual display" is not "SolStream's", and taking the first one found
+/// picked a phone-as-monitor product's adapter on the dev box: no ladder mode,
+/// so no virtual display at all. So every candidate is scored — our driver
+/// first, then one already offering a size SolStream streams, then one already
+/// attached — and the best wins.
 bool FindVirtualAdapter(Adapter& out) {
+    int best_score = -1;
     DISPLAY_DEVICEW device{};
     device.cb = sizeof(device);
     for (DWORD n = 0; EnumDisplayDevicesW(nullptr, n, &device, 0); ++n) {
@@ -366,14 +376,27 @@ bool FindVirtualAdapter(Adapter& out) {
         const bool named = upper_name.find(L"VIRTUAL DISPLAY") != std::wstring::npos
                         || upper_name.find(L"IDDSAMPLE") != std::wstring::npos;
         if (root || named) {
-            out.gdi_name = device.DeviceName;
-            out.attached = (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
-            return true;
+            const bool attached =
+                (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
+            bool streamable = false;
+            for (const Mode& mode : kLadder) {
+                if (OffersMode(device.DeviceName, mode.width, mode.height)) {
+                    streamable = true;
+                    break;
+                }
+            }
+            const int score = (IsSolStreamDisplayDriver(name) ? 4 : 0)
+                            + (streamable ? 2 : 0) + (attached ? 1 : 0);
+            if (score > best_score) {
+                best_score = score;
+                out.gdi_name = device.DeviceName;
+                out.attached = attached;
+            }
         }
         device = DISPLAY_DEVICEW{};
         device.cb = sizeof(device);
     }
-    return false;
+    return best_score >= 0;
 }
 
 bool OffersMode(const std::wstring& gdi_name, int width, int height) {
@@ -590,6 +613,12 @@ bool GetAdvancedColour(const DISPLAYCONFIG_PATH_INFO& path, AdvancedColorInfo& o
 
 }  // namespace
 
+std::wstring VirtualDisplayDevice() {
+    Adapter adapter;
+    return FindVirtualAdapter(adapter) && adapter.attached ? adapter.gdi_name
+                                                           : std::wstring{};
+}
+
 bool IsHdrEnabled(const std::wstring& gdi_name) {
     DISPLAYCONFIG_PATH_INFO path{};
     if (!FindPathFor(gdi_name, path)) {
@@ -664,10 +693,44 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     //    cycle. pnputil /restart-device has been in Windows since 10 2004 and
     //    needs nothing installed.
     if (cycle) {
-        for (const VirtualDisplay& display : FindVirtualDisplays()) {
-            RunHidden(L"pnputil.exe /restart-device \"" + display.instance_id + L"\"");
+        // Only the driver whose settings were just written. Restarting someone
+        // else's virtual display blanks whatever they had on it, for nothing.
+        const auto displays = FindVirtualDisplays();
+        const bool ours_present = std::any_of(
+            displays.begin(), displays.end(), [](const VirtualDisplay& display) {
+                return IsSolStreamDisplayDriver(display.friendly_name);
+            });
+        // And checked. A restart that was refused — no administrator rights, or
+        // pnputil answering 3010 because the device wants a reboot instead — left
+        // the driver on its old mode list, and the only trace of it was the
+        // fifteen-second wait below for modes that were never going to appear.
+        bool restarted = false;
+        for (const VirtualDisplay& display : displays) {
+            if (ours_present && !IsSolStreamDisplayDriver(display.friendly_name)) {
+                continue;
+            }
+            const DWORD code = RunHidden(L"pnputil.exe /restart-device \""
+                                         + display.instance_id + L"\"");
+            if (code == 0) {
+                restarted = true;
+                continue;
+            }
+            char detail[96];
+            std::snprintf(detail, sizeof(detail), " (pnputil exit code %lu)",
+                          (unsigned long) code);
+            Add(note, "Could not restart "
+                      + Narrow(display.friendly_name.empty() ? display.instance_id
+                                                             : display.friendly_name)
+                      + detail + ", so its new mode list takes effect after "
+                        "restarting this PC.");
         }
-        Sleep(6000);
+        if (restarted) {
+            Sleep(6000);
+        } else {
+            // Nothing reloaded its settings, so nothing new is coming: treat this
+            // as the no-cycle case rather than wait for it.
+            cycle = false;
+        }
     }
 
     // 3. Find it, and wait for the mode to actually be offered. The device comes

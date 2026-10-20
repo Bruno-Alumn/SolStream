@@ -37,6 +37,7 @@
 #include <wincrypt.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <shellscalingapi.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -184,11 +185,16 @@ void Log(const char* fmt, ...) {
     }
     SYSTEMTIME now{};
     GetLocalTime(&now);
-    char stamped[2176];
+    // The process id, because one file can have two writers: the installed
+    // agent and a development copy both started at logon once, and their lines
+    // interleaved into what read as a single agent that bound its port, failed
+    // to bind it, and carried on regardless.
+    char stamped[2200];
     const int total = std::snprintf(stamped, sizeof(stamped),
-                                    "%04d-%02d-%02d %02d:%02d:%02d  %s\r\n",
+                                    "%04d-%02d-%02d %02d:%02d:%02d  [%lu] %s\r\n",
                                     now.wYear, now.wMonth, now.wDay, now.wHour,
-                                    now.wMinute, now.wSecond, line);
+                                    now.wMinute, now.wSecond,
+                                    (unsigned long) GetCurrentProcessId(), line);
     if (total > 0) {
         DWORD put = 0;
         WriteFile(file, stamped, (DWORD) total, &put, nullptr);
@@ -2785,8 +2791,37 @@ std::string DisplaysJson(const std::vector<Display>& displays) {
     return out;
 }
 
+/// The effective DPI of a monitor, or 0 when Windows will not say.
+UINT MonitorDpi(HMONITOR monitor) {
+    UINT x = 0, y = 0;
+    return monitor && SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &x, &y)) ? x : 0;
+}
+
+/// The effective DPI of the capture display, or 0 when there is none.
+UINT CaptureDisplayDpi() {
+    struct Search { const std::wstring* name; HMONITOR found; } search{&g_capture_display, nullptr};
+    EnumDisplayMonitors(nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
+            auto* search = reinterpret_cast<Search*>(param);
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (GetMonitorInfoW(monitor, &info) && *search->name == info.szDevice) {
+                search->found = monitor;
+                return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&search));
+    return MonitorDpi(search.found);
+}
+
 std::string WindowsJson(const std::vector<WindowInfo>& windows) {
     std::string out = "{\"type\":\"windows\",\"windows\":[";
+    // Every window grows or shrinks by the ratio of the two scalings when it is
+    // moved onto the capture display — DPI-aware ones by WM_DPICHANGED, the
+    // rest by DWM's bitmap stretch — so the size the Mac should open at is that
+    // ratio times the size it is now. Asked of the MONITOR, not the window: an
+    // unaware window answers 96 wherever it is.
+    const UINT capture_dpi = CaptureDisplayDpi();
     for (size_t i = 0; i < windows.size(); ++i) {
         const WindowInfo& window = windows[i];
         std::string entry = i ? "," : "";
@@ -2802,6 +2837,14 @@ std::string WindowsJson(const std::vector<WindowInfo>& windows) {
         entry += ",\"exStyle\":" + std::to_string(
             (unsigned long) GetWindowLongPtrW(window.handle, GWL_EXSTYLE));
         entry += ",\"captionInset\":" + std::to_string(window.caption_inset);
+        const UINT window_dpi =
+            MonitorDpi(MonitorFromWindow(window.handle, MONITOR_DEFAULTTONEAREST));
+        if (capture_dpi > 0 && window_dpi > 0) {
+            entry += ",\"naturalW\":" + std::to_string(MulDiv(
+                window.client.right - window.client.left, (int) capture_dpi, (int) window_dpi));
+            entry += ",\"naturalH\":" + std::to_string(MulDiv(
+                window.client.bottom - window.client.top, (int) capture_dpi, (int) window_dpi));
+        }
         entry += ",\"occluded\":" + std::string(window.occluded ? "true" : "false");
         if (window.occluded) {
             entry += ",\"occludedBy\":\"" + JsonEscape(window.occluded_by) + "\"";
@@ -3450,9 +3493,31 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (want_w < 640 || want_h < 480 || want_w > 8192 || want_h > 8192) {
             return "{\"type\":\"error\",\"message\":\"canvas size out of range\"}";
         }
+        // Only the virtual display this host is capturing. SetDisplayMode writes
+        // with CDS_UPDATEREGISTRY, so a name the Mac got wrong — or a host with
+        // no virtual display, capturing the primary — would permanently change
+        // the resolution of somebody's real monitor. The Mac already only asks
+        // for a display it believes is virtual; this is the host not taking its
+        // word for it. `ok:false` is what the Mac reads as "the host kept its
+        // size", and it carries on at that size.
+        const std::wstring wanted = ToWide(device);
+        const std::wstring virtual_device = solstream::VirtualDisplayDevice();
+        const bool is_capture = !g_capture_display.empty()
+            && _wcsicmp(wanted.c_str(), g_capture_display.c_str()) == 0;
+        const bool is_virtual =
+            (!virtual_device.empty()
+             && _wcsicmp(wanted.c_str(), virtual_device.c_str()) == 0)
+            || solstream::IsSolStreamDisplayDriver(
+                   ToWide(AdapterDescription(wanted.c_str())));
+        if (!is_capture || !is_virtual) {
+            Log("[agent] canvas refused for %s: not the virtual display being "
+                "captured", device.c_str());
+            return "{\"type\":\"canvas\",\"ok\":false,\"message\":\"only the "
+                   "virtual display being captured can be resized\"}";
+        }
         int got_w = 0, got_h = 0;
         int got_hz = 0;
-        if (!SetDisplayMode(ToWide(device), (int) want_w, (int) want_h,
+        if (!SetDisplayMode(wanted, (int) want_w, (int) want_h,
                             got_w, got_h, got_hz)) {
             return "{\"type\":\"canvas\",\"ok\":false,\"message\":\"could not set a display mode\"}";
         }
@@ -4514,8 +4579,37 @@ int wmain(int argc, wchar_t** argv) {
     // arguments, and a second copy would fight the first for the port and lose,
     // so a shortcut press on a machine already running SolStream means "show me
     // the window", which is what every program with a shortcut does.
-    if (solstream::RunningInstalled() && solstream::FocusExistingHostWindow()) {
-        return 0;
+    //
+    // A named mutex, for every copy, rather than looking for a window and only
+    // from the installed one. Two hosts once started together at logon — the
+    // installed task with --listen-all and a development copy with --bind — and
+    // the window check could not have caught that: neither had a window yet.
+    // Both went on to configure the virtual display, cycling it under each
+    // other, and the loser then died on bind with 10013 and said nothing anyone
+    // read. Taken here, before any of that, so the second copy costs nothing.
+    // Local\ is this logon session, which is also the scope of the window and
+    // the desktop being streamed; another user's session is its own host. The
+    // handle is never closed: holding it is the point, and the process exiting
+    // is what lets go of it.
+    {
+        HANDLE instance = CreateMutexW(nullptr, FALSE, L"Local\\SolStreamAgentHost");
+        const DWORD created = GetLastError();
+        // Access denied is also "somebody has it": an elevated copy's mutex
+        // carries a DACL an unelevated one cannot open.
+        if ((instance && created == ERROR_ALREADY_EXISTS)
+            || (!instance && created == ERROR_ACCESS_DENIED)) {
+            const bool focused = solstream::FocusExistingHostWindow();
+            Log("[agent] another SolStream host is already running in this "
+                "session%s; this copy is exiting",
+                focused ? " (its window was brought forward)" : "");
+            return 0;
+        }
+        if (!instance) {
+            // Not worth refusing to start over. The port is still exclusive, so
+            // the worst case is the old one: a second copy that fails to bind.
+            Log("[agent] could not create the single-instance mutex: %lu",
+                (unsigned long) created);
+        }
     }
 
     // An installed SolStream exists to serve a Mac, so it listens like one
@@ -4613,6 +4707,14 @@ int wmain(int argc, wchar_t** argv) {
         const int error = WSAGetLastError();
         if (error != WSAEADDRNOTAVAIL) {
             Log("[agent] bind(%u) failed: %d", port, error);
+            // 10013 is what SO_EXCLUSIVEADDRUSE answers when the port is taken,
+            // not a permissions problem, and a bare number sent the last person
+            // to see it looking at the firewall.
+            if (error == WSAEADDRINUSE || error == WSAEACCES) {
+                Log("[agent] another program holds port %u -- probably another "
+                    "SolStream, perhaps in another user's session. Stop it and "
+                    "start this one again.", port);
+            }
             return 1;
         }
         if (attempt == 0) {
@@ -4691,13 +4793,29 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     // Pick what is captured: the virtual display when there is one, so a
-    // crop can never be a crop out of somebody's real screen.
+    // crop can never be a crop out of somebody's real screen. The one that was
+    // just set up first — matching "virtual" alone also matches other products'
+    // virtual displays, which are not sized for the Mac.
+    const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
     for (const Display& display : EnumerateDisplays()) {
+        if (!configured.empty() && display.device_name == configured) {
+            g_capture_display = ToWide(display.device_name);
+            Log("[agent] capturing %s [%s]", display.device_name.c_str(),
+                display.adapter.c_str());
+            break;
+        }
+    }
+    for (const Display& display : EnumerateDisplays()) {
+        if (!g_capture_display.empty()) {
+            break;
+        }
+        // Ours only. This used to match "virtual" or "idd" anywhere in the
+        // adapter name, which is every phone-as-monitor and remote-desktop
+        // product's display too — and capturing one of those streams a screen
+        // SolStream did not size, from a display it does not control. Better
+        // the primary below, which at least says plainly what it is.
         const std::string& adapter = display.adapter;
-        std::string lowered = adapter;
-        for (char& c : lowered) { c = (char) tolower((unsigned char) c); }
-        if (lowered.find("virtual") != std::string::npos
-            || lowered.find("idd") != std::string::npos) {
+        if (solstream::IsSolStreamDisplayDriver(ToWide(adapter))) {
             g_capture_display = ToWide(display.device_name);
             Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
             break;
@@ -4738,12 +4856,35 @@ int wmain(int argc, wchar_t** argv) {
     // somewhere else, and it is easier to reason about a server thread than
     // about a UI that only pumps between connections.
     std::thread server([listener]() {
+        // Consecutive failures, and when one was last written down. An accept
+        // that fails does so immediately, and the errors that persist —
+        // WSAENOBUFS, WSAEMFILE when the process is out of handles — failed
+        // again on the very next call, so a bare `continue` spun this thread at
+        // the speed of the system call and wrote a log line per lap until the
+        // megabyte cap rotated away everything worth reading.
+        unsigned failures = 0;
+        unsigned long long last_complaint = 0;
+        unsigned suppressed = 0;
         for (;;) {
             SOCKET client = accept(listener, nullptr, nullptr);
             if (client == INVALID_SOCKET) {
-                Log("[agent] accept failed: %d", WSAGetLastError());
+                const int error = WSAGetLastError();
+                ++failures;
+                const unsigned long long now = GetTickCount64();
+                if (last_complaint == 0 || now - last_complaint >= 10000) {
+                    Log("[agent] accept failed: %d (%u more since the last report)",
+                        error, suppressed);
+                    last_complaint = now;
+                    suppressed = 0;
+                } else {
+                    ++suppressed;
+                }
+                // A one-off (a client that reset before it was accepted) costs
+                // ten milliseconds; a persistent one settles at a second a lap.
+                Sleep(failures >= 7 ? 1000 : 10u << (failures - 1));
                 continue;
             }
+            failures = 0;
 
             // One Mac at a time, said out loud rather than by hanging.
             //
@@ -4953,5 +5094,22 @@ int wmain(int argc, wchar_t** argv) {
     // Closing the window takes the host down with it. A capture still holding
     // the display after SolStream is gone is one
     // nobody can see to stop.
-    return code;
+    //
+    // Stopped HERE, once, and then out through ExitProcess rather than a return.
+    // Returning from wmain runs static destructors while the detached server
+    // and client threads are still alive, and one of those is
+    // MediaSession::~MediaSession calling Stop() — which could land while a
+    // client thread, seeing its socket go, was inside Stop() too. Two threads
+    // joining the same std::thread is std::terminate, which is a crash dialog
+    // on the way out of a program the user had just closed. Stop is serialised
+    // inside MediaSession as well; ExitProcess means the destructor never gets
+    // the chance to be the second caller at all.
+#ifdef SOLSTREAM_MEDIA
+    solstream::media::MediaSession::Instance().Stop();
+#endif
+    // And give back every resize border the session took. A client thread
+    // does this when its Mac goes away, but ExitProcess ends that thread
+    // wherever it is, and a window left unresizable outlives the host.
+    UnlockAll();
+    ExitProcess((UINT) code);
 }

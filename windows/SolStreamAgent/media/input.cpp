@@ -241,7 +241,7 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
         // acknowledged event: it keeps a tail of 32 and stops repeating 300 ms
         // after the last new event, so the event was gone from both machines and
         // a key-up lost that way left the key down with nothing to release it.
-        // Recording now happens below, once ApplyOne has said it worked.
+        // Recording now happens below, after ApplyOne has had its attempt.
         if (started_ && seq <= highest_) {
             const uint32_t behind = highest_ - seq;
             if (behind >= 1024 || ((seen_[behind / 64] >> (behind % 64)) & 1)) {
@@ -250,14 +250,21 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
             }
         }
 
-        if (!ApplyOne(kind, body, bodyLen)) {
-            // Left out of the window deliberately. An unrecorded sequence is one
-            // the acknowledgement will not cover, so the client keeps repeating
-            // it and the next copy gets another attempt -- which is the whole
-            // point of numbering events in the first place.
-            continue;
+        // RECORDED WHETHER OR NOT IT APPLIED. A failure used to be left out of
+        // the window so the next copy could try again -- but the failures that
+        // happen are not the kind a retry fixes. A malformed body is malformed
+        // in every copy, and a SendInput refused because an elevated window
+        // has focus is refused for as long as it has. Meanwhile an unrecorded
+        // sequence is a hole the contiguous acknowledgement can never step
+        // over, so one bad event froze the ack for the rest of the session and
+        // every later event was repeated until the Mac's 300 ms give-up, for
+        // ever. The retry it bought was at most those same 300 ms. Counted, so
+        // the stats line says when input is being dropped on the floor.
+        if (ApplyOne(kind, body, bodyLen)) {
+            applied_.fetch_add(1);
+        } else {
+            failed_.fetch_add(1);
         }
-        applied_.fetch_add(1);
 
         if (!started_) {
             started_ = true;
@@ -323,6 +330,7 @@ void InputInjector::Reset() {
     acked_.store(0);
     applied_.store(0);
     duplicates_.store(0);
+    failed_.store(0);
     std::memset(seen_, 0, sizeof(seen_));
 }
 

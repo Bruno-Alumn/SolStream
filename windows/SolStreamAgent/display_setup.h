@@ -50,6 +50,11 @@ constexpr int kDefaultScalePercent = 200;
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                              std::string& note, std::string& error);
 
+/// The attached virtual display SolStream streams from, as \\.\DISPLAYn, or
+/// empty when there is none. The same choice ConfigureVirtualDisplay makes, so
+/// the display that was set up is the display that gets captured.
+std::wstring VirtualDisplayDevice();
+
 /// Is Windows composing this display in HDR? `gdi_name` is a device name of the
 /// form \\.\DISPLAY1. Answers false for a display that cannot do HDR at all.
 bool IsHdrEnabled(const std::wstring& gdi_name);

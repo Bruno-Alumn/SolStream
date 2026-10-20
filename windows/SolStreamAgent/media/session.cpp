@@ -110,6 +110,11 @@ struct MediaSession::Impl {
 
     std::atomic<bool> running{false};
     std::thread captureThread, senderThread, receiveThread, audioThread;
+    /// Held for the whole of Stop. The client thread stops the session when its
+    /// Mac goes away and the host stops it on the way out, and those can
+    /// coincide; two threads joining one std::thread is std::terminate. The
+    /// second caller now waits, then finds nothing left to stop.
+    std::mutex stopLock;
 
     std::mutex queueLock;
     std::condition_variable queueReady;
@@ -432,7 +437,13 @@ void MediaSession::Impl::RunCapture() {
     // repaired and a client joining a static screen waits forever.
     const int idleMs = 1000 / (int) (active.fps ? active.fps : 60);
     long long lastEncodedAt = Now();
-    while (running.load() && !retargetWanted.load()) {
+    // capture->Running() as well, because Acquire never says the source has
+    // gone: once a frame exists it hands back the retained one for ever. A
+    // window that closed mid-session was re-encoded from its last frame every
+    // 250 ms for as long as the session lasted. Capture now notices the item
+    // closing, and the pass -- and with no retarget pending, the session --
+    // ends.
+    while (running.load() && !retargetWanted.load() && capture->Running()) {
         Frame current{};
         if (!capture->Acquire(current, lastSerial, idleMs)) {
             if (!capture->Running()) { break; }
@@ -446,6 +457,9 @@ void MediaSession::Impl::RunCapture() {
         lastEncodedAt = Now();
         encoder->Submit(current.texture, current.width, current.height,
                        current.isNew ? current.capturedAt : Now(), false);
+    }
+    if (running.load() && !retargetWanted.load() && !capture->Running()) {
+        Log("[media] the captured source has closed; ending the session");
     }
 }
 
@@ -512,7 +526,7 @@ void MediaSession::Impl::SenderLoop() {
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
                 " | audio %llu sent, %llu silent | input %llu applied, %llu dup,"
-                " ack %u | rx %llu, rejected %llu",
+                " %llu failed, ack %u | rx %llu, rejected %llu",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
                     ? (double) (bytesSent.load() - lastReportBytes) * 8.0 / elapsed / 1e6
@@ -536,6 +550,7 @@ void MediaSession::Impl::SenderLoop() {
                 // with both. It cost an afternoon to find that out.
                 (unsigned long long) input.Applied(),
                 (unsigned long long) input.Duplicates(),
+                (unsigned long long) input.Failed(),
                 input.Acknowledged(),
                 (unsigned long long) datagramsReceived.load(),
                 (unsigned long long) rejected.load());
@@ -673,6 +688,14 @@ void MediaSession::Impl::ReceiveLoop() {
         lastHeardAt.store(Now());
         HandlePlaintext(plaintext, plaintextLen);
     }
+    // Let go of whatever the client was holding, here and now. A session ends
+    // on its own -- the silence timeout, a BYE, the captured window closing --
+    // well before anything calls Stop(), which waits for the agent channel to
+    // drop or for the next session to start. Until then a key or button the
+    // Mac had down stayed down on the host. This is the thread that applies
+    // input, so releasing here cannot race an Apply; Stop() releases again
+    // after joining it, which finds nothing held and does nothing.
+    input.ReleaseAll();
 }
 
 // ── Lifetime ─────────────────────────────────────────────────────────────────
@@ -749,6 +772,14 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     setsockopt(s.socket, SOL_SOCKET, SO_RCVBUF, (const char*) &rcvbuf, sizeof(rcvbuf));
     DWORD timeout = 200;
     setsockopt(s.socket, SOL_SOCKET, SO_RCVTIMEO, (const char*) &timeout, sizeof(timeout));
+    // Exclusive, as the agent's TCP port is and for the same reason: without it
+    // Windows lets another process that asks for SO_REUSEADDR bind this port on
+    // top of this one, and which of the two then receives the Mac's input
+    // datagrams is up to the stack. Set before bind, which is the only time it
+    // counts.
+    BOOL exclusive = TRUE;
+    setsockopt(s.socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*) &exclusive,
+               sizeof(exclusive));
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -865,6 +896,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
 
 void MediaSession::Stop() {
     Impl& s = *impl_;
+    std::lock_guard<std::mutex> serialised(s.stopLock);
     if (!s.running.exchange(false) && s.socket == INVALID_SOCKET) {
         return;
     }

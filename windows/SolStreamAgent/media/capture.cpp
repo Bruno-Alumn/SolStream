@@ -40,6 +40,18 @@ struct Capture::Impl {
     Direct3D11CaptureFramePool pool{nullptr};
     GraphicsCaptureSession session{nullptr};
     Direct3D11CaptureFramePool::FrameArrived_revoker frameArrived;
+    /// The item going away: the captured window closed, or the monitor was
+    /// disconnected. WGC says so through this event and in no other way -- the
+    /// frames simply stop -- so without it a closed window looked exactly like
+    /// a still one, and the retained frame was re-encoded for the rest of the
+    /// session.
+    GraphicsCaptureItem::Closed_revoker itemClosedEvent;
+    /// Set by that handler, and owned jointly with it. revoke() unhooks the
+    /// handler but does not wait for an invocation already under way, so the
+    /// handler touches nothing of Impl's -- only this flag, which its own copy
+    /// of the pointer keeps alive however late it runs.
+    std::shared_ptr<std::atomic<bool>> itemClosed =
+        std::make_shared<std::atomic<bool>>(false);
 
     /// The retained frame. One texture, copied into on every arrival, so the
     /// WGC frame can be closed immediately -- the frame pool has two buffers and
@@ -129,6 +141,11 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
 
     frameArrived = pool.FrameArrived(auto_revoke,
         [this](Direct3D11CaptureFramePool const& sender, auto&&) { OnFrame(sender); });
+    itemClosed->store(false);
+    itemClosedEvent = item.Closed(auto_revoke,
+        [closed = itemClosed](GraphicsCaptureItem const&, auto&&) {
+            closed->store(true);
+        });
 
     width = (UINT) size.Width;
     height = (UINT) size.Height;
@@ -330,6 +347,7 @@ void Capture::Stop() {
         impl_->running.store(false);
     }
     impl_->frameArrived.revoke();
+    impl_->itemClosedEvent.revoke();
     try {
         if (impl_->session) { impl_->session.Close(); }
         if (impl_->pool) { impl_->pool.Close(); }
@@ -341,7 +359,9 @@ void Capture::Stop() {
     impl_->arrived.notify_all();
 }
 
-bool Capture::Running() const { return impl_ && impl_->running.load(); }
+bool Capture::Running() const {
+    return impl_ && impl_->running.load() && !impl_->itemClosed->load();
+}
 
 ID3D11Device* Capture::Device() const { return impl_ ? impl_->device.get() : nullptr; }
 

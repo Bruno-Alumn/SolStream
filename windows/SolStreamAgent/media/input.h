@@ -75,6 +75,10 @@ public:
     uint32_t Acknowledged() const { return acked_.load(); }
     uint64_t Applied() const { return applied_.load(); }
     uint64_t Duplicates() const { return duplicates_.load(); }
+    /// Events that were recorded as seen without having been applied: a body
+    /// too short for its kind, a kind this host does not know, or a SendInput
+    /// that Windows refused -- typically because an elevated window has focus.
+    uint64_t Failed() const { return failed_.load(); }
 
     /// Release everything currently held. Called when the session ends, because
     /// a client that disappears mid-drag otherwise leaves the host's mouse
@@ -108,6 +112,7 @@ private:
     std::atomic<uint32_t> acked_{0};
     std::atomic<uint64_t> applied_{0};
     std::atomic<uint64_t> duplicates_{0};
+    std::atomic<uint64_t> failed_{0};
 
     /// A 1024-slot window of sequence numbers already applied, the same shape as
     /// the replay window a layer below and for the same reason: repeats must be
