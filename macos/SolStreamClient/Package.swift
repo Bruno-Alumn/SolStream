@@ -27,7 +27,7 @@ let package = Package(
             ]
         ),
 
-        // -- Design tokens (Nocturne), shared with the video overlay --
+        // -- Design tokens (Solar), shared with the video overlay --
         .target(
             name: "DesignSystem",
             dependencies: [],

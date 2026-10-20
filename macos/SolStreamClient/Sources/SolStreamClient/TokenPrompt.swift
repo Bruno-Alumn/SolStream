@@ -15,7 +15,7 @@ import AgentChannel
 /// obvious choice — a modal question with two answers is exactly what it is, and
 /// it gives focus, Escape and Return for free — but it is also the only surface
 /// in the whole pairing flow that ignores the design: a light system panel with
-/// a system-accent default button, in the middle of a dark violet application.
+/// a system-accent default button, in the middle of an application with its own.
 /// The first thing anybody pairing a PC sees should not be the one screen that
 /// looks like it belongs to a different program.
 ///
@@ -50,7 +50,7 @@ enum TokenPrompt {
 
         init(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
             self.completion = completion
-            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 250),
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 250),
                               styleMask: [.titled, .fullSizeContentView],
                               backing: .buffered, defer: false)
             super.init()
@@ -64,7 +64,7 @@ enum TokenPrompt {
                 rejected ? "\(host) didn't accept that token"
                          : "\(host) needs a pairing token")
             heading.font = DS.title
-            heading.textColor = DS.textPrimary
+            heading.textColor = DS.text
             heading.lineBreakMode = .byTruncatingTail
 
             // Points at the host window, which shows the token with a Copy
@@ -79,39 +79,54 @@ enum TokenPrompt {
                 Paste it below — SolStream remembers it for this host, so this \
                 is asked once.
                 """)
-            body.font = DS.secondary
-            body.textColor = DS.textMuted
+            body.font = DS.body
+            body.textColor = DS.textSecondary
 
-            let connect = DS.OutlinedButton(title: "Connect", primary: true,
-                                            target: self, action: #selector(accept))
-            let cancel = DS.OutlinedButton(title: "Cancel", target: self,
-                                           action: #selector(dismiss))
+            let connect = DS.Button(title: "Connect", style: .primary,
+                                    target: self, action: #selector(accept))
+            let cancel = DS.Button(title: "Cancel", target: self, action: #selector(dismiss))
             connect.keyEquivalent = "\r"
             cancel.keyEquivalent = "\u{1b}"
 
+            // Trailing, primary last, as in every other SolStream window.
             let spacer = NSView()
             spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-            let buttons = NSStackView(views: [cancel, spacer, connect])
+            let buttons = NSStackView(views: [spacer, cancel, connect])
             buttons.orientation = .horizontal
+            buttons.spacing = DS.Space.x3
 
-            let stack = NSStackView(views: [heading, body, field, buttons])
+            // The token is data, so the field is mono; the box around it draws
+            // the hairline and, while it has focus, the accent ring.
+            let fieldBox = DS.FieldBox(field: field)
+
+            let stack = NSStackView(views: [heading, body, fieldBox, buttons])
             stack.orientation = .vertical
             stack.alignment = .leading
-            stack.spacing = 14
+            stack.spacing = DS.Space.x2
+            stack.setCustomSpacing(DS.Space.x4, after: body)
+            stack.setCustomSpacing(DS.Space.x6, after: fieldBox)
             stack.translatesAutoresizingMaskIntoConstraints = false
             stack.setHuggingPriority(.init(1), for: .vertical)
 
-            let content = NSView()
+            let inset = DS.Metric.inset
+            // A ground of its own rather than only the window's background
+            // colour: a sheet is drawn over a system material, which shows
+            // through as a warm grey in the dark theme and plain white in the
+            // light one, and neither is `ground`.
+            let content = DS.Box(fill: DS.ground)
             content.addSubview(stack)
             NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-                stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-                stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-                stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24),
+                content.widthAnchor.constraint(equalToConstant: 440),
+                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: inset),
+                stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -inset),
+                stack.topAnchor.constraint(equalTo: content.topAnchor, constant: inset),
+                stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -inset),
+                body.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
-                field.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                fieldBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
             ])
             window.contentView = content
+            window.setContentSize(content.fittingSize)
         }
 
         func present(over parent: NSWindow) {

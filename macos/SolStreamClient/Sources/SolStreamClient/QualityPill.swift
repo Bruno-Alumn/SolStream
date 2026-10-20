@@ -8,7 +8,10 @@ import SolStreamLogging
 /// information that appears only when something is wrong teaches you to dread it,
 /// and one that jumps around draws the eye away from the application. Click it for
 /// the detail. Nothing about quality is ever pushed at you.
-final class QualityPill: NSView {
+///
+/// Drawn as a Solar chip — `raised`, radius 6, 20 high — with the number in mono,
+/// because it is a live number and must not reflow as it changes.
+final class QualityPill: DS.Box {
 
     struct Stats {
         var fps: Int = 0
@@ -28,27 +31,28 @@ final class QualityPill: NSView {
         didSet { refresh() }
     }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.cornerRadius = 9
-        layer?.cornerCurve = .continuous
+    init() {
+        super.init(fill: DS.raised, radius: DS.Metric.chipRadius)
 
-        label.font = DS.monoSmall
-        label.textColor = DS.textMuted
+        label.font = DS.mono
+        label.textColor = DS.textSecondary
         label.alignment = .center
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Stream quality")
 
         for child in [dot, label] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             addSubview(child)
         }
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 62),
-            heightAnchor.constraint(equalToConstant: 18),
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            // Fixed, so "9" to "120" never nudges the title bar.
+            widthAnchor.constraint(equalToConstant: 56),
+            heightAnchor.constraint(equalToConstant: DS.Metric.chipHeight),
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DS.Space.x2),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: DS.Space.x1),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x2),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -56,19 +60,15 @@ final class QualityPill: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override func updateLayer() {
-        layer?.backgroundColor = DS.chromeRaised.withAlphaComponent(0.6).cgColor
-    }
-
     private func refresh() {
         label.stringValue = stats.fps > 0 ? "\(stats.fps)" : "—"
-        // Healthy is the accent; struggling is the accent with its chroma pulled
-        // down; stopped is grey. State never gets a hue of its own.
-        switch stats.fps {
-        case 0: dot.state = .dead
-        case 1..<24: dot.state = .idle
-        default: dot.state = .live
-        }
+        setAccessibilityValue(stats.fps > 0 ? "\(stats.fps) frames per second" : "no frames")
+        // Frames arriving is green, whatever the rate; nothing arriving is the
+        // idle grey. Not amber below some threshold: capture is change-driven,
+        // so a still application streams at 15 fps and is perfectly healthy —
+        // an amber dot there cried wolf on every dialog. A stream that really
+        // is in trouble says so in the status card, in words.
+        dot.state = stats.fps > 0 ? .live : .idle
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -93,16 +93,14 @@ final class QualityPill: NSView {
 
     private func buildDetail() -> NSView {
         func metric(_ value: String, _ caption: String) -> NSView {
-            let big = NSTextField(labelWithString: value)
-            big.font = DS.monoBody
-            big.textColor = DS.textPrimary
-            let small = NSTextField(labelWithString: caption)
-            small.font = DS.monoSmall
-            small.textColor = DS.textFaint
+            // Headline size with monospaced digits: the figure is the point of
+            // the popover, and it must not reflow as it changes.
+            let big = DS.label(value, font: .monospacedDigitSystemFont(ofSize: 15, weight: .semibold))
+            let small = DS.label(caption, font: DS.caption, colour: DS.textMuted)
             let column = NSStackView(views: [big, small])
             column.orientation = .vertical
             column.alignment = .leading
-            column.spacing = 1
+            column.spacing = 2
             return column
         }
 
@@ -113,20 +111,16 @@ final class QualityPill: NSView {
         ])
         row.orientation = .horizontal
         row.distribution = .fillEqually
-        row.spacing = 22
+        row.spacing = DS.Space.x5
 
-        let dropped = NSTextField(labelWithString:
-            "\(stats.droppedFrames) dropped of \(Self.compact(stats.totalFrames))")
-        dropped.font = DS.monoSmall
-        dropped.textColor = DS.textMuted
+        let dropped = NSTextField(labelWithString: "")
+        dropped.attributedStringValue = DS.detail([
+            ("\(stats.droppedFrames) dropped of \(Self.compact(stats.totalFrames))", isData: true),
+        ])
 
-        func line(_ caption: String, _ value: String) -> NSView {
-            let left = NSTextField(labelWithString: caption)
-            left.font = DS.secondary
-            left.textColor = DS.textMuted
-            let right = NSTextField(labelWithString: value)
-            right.font = DS.monoSmall
-            right.textColor = DS.textSecondary
+        func line(_ caption: String, _ value: String, isData: Bool = false) -> NSView {
+            let left = DS.label(caption, font: DS.body, colour: DS.textMuted)
+            let right = DS.label(value, font: isData ? DS.mono : DS.body, colour: DS.textSecondary)
             let spacer = NSView()
             spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             let stack = NSStackView(views: [left, spacer, right])
@@ -139,12 +133,14 @@ final class QualityPill: NSView {
             dropped,
             DS.hairlineView(),
             line("Audio", stats.audioActive ? "playing" : "silent — nothing playing on the PC"),
-            line("Host display", stats.hostDisplay.isEmpty ? "—" : stats.hostDisplay),
+            line("Host display", stats.hostDisplay.isEmpty ? "—" : stats.hostDisplay, isData: true),
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 16, right: 18)
+        stack.spacing = DS.Space.x3
+        stack.setCustomSpacing(DS.Space.x2, after: row)
+        stack.edgeInsets = NSEdgeInsets(top: DS.Space.x5, left: DS.Space.x5,
+                                        bottom: DS.Space.x4, right: DS.Space.x5)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 190))
@@ -154,11 +150,11 @@ final class QualityPill: NSView {
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             stack.topAnchor.constraint(equalTo: container.topAnchor),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor),
-            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
-            dropped.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
+            row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -DS.Space.x5 * 2),
+            dropped.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -DS.Space.x5 * 2),
         ])
         for view in stack.arrangedSubviews where view is NSStackView && view !== row {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36).isActive = true
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -DS.Space.x5 * 2).isActive = true
         }
         return container
     }

@@ -211,12 +211,15 @@ public final class MetalView: NSView {
 
 /// The "connecting / pairing / failed" card drawn over the video surface.
 private final class StatusOverlay: NSView {
-    private let card = NSView()
+    private let card = DS.card()
     private let spinner = NSProgressIndicator()
+    /// Shown beside the title only when something failed: the words carry the
+    /// severity, the coral dot makes it findable at a glance.
+    private let failedDot = DS.Dot(state: .danger)
     private let titleLabel = NSTextField(labelWithString: "")
-    private let detailLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(wrappingLabelWithString: "")
     private let pinLabel = NSTextField(labelWithString: "")
-    private let retryButton = NSButton(title: "Try Again", target: nil, action: nil)
+    private let retryButton = DS.Button(title: "Try Again", style: .primary, target: nil, action: nil)
 
     var onRetry: (() -> Void)?
 
@@ -224,78 +227,78 @@ private final class StatusOverlay: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
 
-        // The card always sits over video, so it holds the dark ramp regardless of
-        // the system appearance — a light card over someone's application would be
-        // the brightest thing on screen, which is the opposite of the intent.
-        card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor(srgbRed: 0x16 / 255, green: 0x18 / 255,
-                                              blue: 0x26 / 255, alpha: 0.95).cgColor
-        card.layer?.cornerRadius = 14
-        card.layer?.cornerCurve = .continuous
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor(srgbRed: 0x3F / 255, green: 0x42 / 255,
-                                          blue: 0x4D / 255, alpha: 1).cgColor
-        // ...and having decided that, say so, or only half of it comes true.
-        // The card's colours above are fixed, but its text is not: the labels
-        // below take DS.textPrimary and DS.secondary, which follow the system
-        // appearance and resolve to near-black in the light one — dark text on
-        // the dark ramp this card just committed to. The spinner already names
-        // the appearance for exactly this reason a few lines down; the rest of
-        // the card needs the same thing said once, here, where it covers every
-        // subview.
+        // The card always sits over video, so it holds the dark theme regardless
+        // of the system appearance — a light card over someone's application
+        // would be the brightest thing on screen, which is the opposite of the
+        // intent.
+        //
+        // Said once, here, as the card's appearance, and that covers everything:
+        // the card is a Solar card (`surface`, a hairline edge, radius 12) whose
+        // colours resolve against the appearance it is drawn in, and so do the
+        // labels, the dot, the spinner and the button inside it. Nocturne's card
+        // fixed its own two colours by hand and then had to name the appearance
+        // anyway, because the text inside followed the system and came out
+        // near-black on the dark card in the light theme.
         card.appearance = NSAppearance(named: .darkAqua)
-        card.translatesAutoresizingMaskIntoConstraints = false
         addSubview(card)
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isIndeterminate = true
-        spinner.appearance = NSAppearance(named: .darkAqua)
         spinner.startAnimation(nil)
 
-        titleLabel.font = DS.section
-        titleLabel.textColor = DS.textPrimary
+        titleLabel.font = DS.headline
+        titleLabel.textColor = DS.text
         titleLabel.alignment = .center
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        detailLabel.font = DS.secondary
-        detailLabel.textColor = DS.textMuted
+        detailLabel.font = DS.body
+        detailLabel.textColor = DS.textSecondary
         detailLabel.alignment = .center
         detailLabel.maximumNumberOfLines = 3
-        detailLabel.lineBreakMode = .byWordWrapping
 
         // The PIN is the hero of that screen: the confusion is never the digits,
         // it is not knowing where they go, so they are large and the instruction
         // sits directly under them.
         pinLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 46, weight: .medium)
-        pinLabel.textColor = DS.accentBright
+        pinLabel.textColor = DS.accentInk
         pinLabel.alignment = .center
         pinLabel.isHidden = true
 
-        retryButton.bezelStyle = .rounded
-        retryButton.appearance = NSAppearance(named: .darkAqua)
         retryButton.target = self
         retryButton.action = #selector(retryTapped)
         retryButton.isHidden = true
 
-        let stack = NSStackView(views: [spinner, pinLabel, titleLabel, detailLabel, retryButton])
+        failedDot.isHidden = true
+        let titleRow = NSStackView(views: [failedDot, titleLabel])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = DS.Space.x2
+
+        let stack = NSStackView(views: [spinner, pinLabel, titleRow, detailLabel, retryButton])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 8
+        stack.spacing = DS.Space.x2
+        stack.setCustomSpacing(DS.Space.x3, after: spinner)
+        stack.setCustomSpacing(DS.Space.x4, after: detailLabel)
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
 
         NSLayoutConstraint.activate([
             card.centerXAnchor.constraint(equalTo: centerXAnchor),
             card.centerYAnchor.constraint(equalTo: centerYAnchor),
-            card.widthAnchor.constraint(greaterThanOrEqualTo: stack.widthAnchor, constant: 48),
+            card.widthAnchor.constraint(greaterThanOrEqualTo: stack.widthAnchor,
+                                        constant: DS.Space.x6 * 2),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
+            card.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
 
             stack.centerXAnchor.constraint(equalTo: card.centerXAnchor),
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 22),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -22),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: card.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: DS.Space.x6),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -DS.Space.x6),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: card.leadingAnchor,
+                                           constant: DS.Space.x6),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor,
+                                            constant: -DS.Space.x6),
             titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
             detailLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
         ])
@@ -314,9 +317,7 @@ private final class StatusOverlay: NSView {
 
     func update(title: String, detail: String?, pin: String?, busy: Bool, isError: Bool) {
         titleLabel.stringValue = title
-        titleLabel.textColor = isError
-            ? NSColor(calibratedRed: 1.0, green: 0.45, blue: 0.42, alpha: 1.0)
-            : .white
+        failedDot.isHidden = !isError
 
         detailLabel.stringValue = detail ?? ""
         detailLabel.isHidden = (detail ?? "").isEmpty

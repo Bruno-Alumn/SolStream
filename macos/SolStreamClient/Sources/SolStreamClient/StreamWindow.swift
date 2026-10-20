@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import DesignSystem
 import SolStreamLogging
 import VideoDecoder
 import InputCapture
@@ -170,9 +171,13 @@ final class StreamWindow: NSObject {
         // See AppWindow.build(): a directly-created NSWindow releases itself on
         // close, which double-releases against the strong property below.
         window.isReleasedWhenClosed = false
-        window.titlebarAppearsTransparent = false
+        // The same chrome as an application window (see AppWindow.build()): a
+        // transparent title bar over Solar's `ground`, held in the dark theme
+        // because it frames video whatever the Mac's appearance.
+        window.titlebarAppearsTransparent = true
         window.minSize = NSSize(width: 640, height: 360)
-        window.backgroundColor = .black
+        window.backgroundColor = DS.ground
+        window.appearance = NSAppearance(named: .darkAqua)
         window.collectionBehavior = [.fullScreenPrimary]
         // NSWindow does not receive mouse-moved events unless it asks. Without
         // this the window server never sends them to us at all, so hovering

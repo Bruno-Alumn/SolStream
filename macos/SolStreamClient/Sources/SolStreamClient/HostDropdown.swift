@@ -14,7 +14,24 @@ import DesignSystem
 /// the control with the selected row aligned to it, so choosing a host does not
 /// make the thing you chose appear to jump. NSPopover always anchors with an
 /// arrow beside its target, which cannot express that. A borderless panel can.
-final class HostDropdown: NSView {
+final class HostDropdown: DS.Box {
+    /// One part of a row's second line: words, or an address or number. The two
+    /// are set differently — see `DS.detail` — so the row has to know which is
+    /// which rather than being handed one joined string.
+    enum Detail: Equatable {
+        case words(String)
+        case data(String)
+
+        static func line(_ parts: [Detail], colour: NSColor) -> NSAttributedString {
+            DS.detail(parts.map {
+                switch $0 {
+                case .words(let text): return (text, isData: false)
+                case .data(let text): return (text, isData: true)
+                }
+            }, colour: colour)
+        }
+    }
+
     struct Item: Equatable {
         /// Which group a row belongs to. Dividers separate *kinds*, never
         /// individual rows.
@@ -22,7 +39,7 @@ final class HostDropdown: NSView {
 
         var address: String
         var name: String?
-        var detail: String
+        var detail: [Detail]
         var dotState: DS.Dot.State
         var kind: Kind
     }
@@ -41,7 +58,8 @@ final class HostDropdown: NSView {
     private let dot = DS.Dot()
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
-    private let chevron = NSTextField(labelWithString: "⌄")
+    private let chevron = NSImageView()
+    private var tracking: NSTrackingArea?
 
     // The open list.
     private var panel: NSPanel?
@@ -54,24 +72,29 @@ final class HostDropdown: NSView {
 
     private var isOpen: Bool { panel != nil }
 
-    // Metrics come straight from the design: 8px radius, 5.6px of vertical
-    // padding around the list, rows padded 5.6/11.2, and a fixed row height that
-    // a subtitle never changes.
+    // Metrics come straight from the design: two-line rows 48 high whatever the
+    // subtitle says, 12 in from the edge, and a list that pads its rows by 4 so
+    // their 8px corners sit concentric inside its 12px ones.
     private enum M {
-        static let rowHeight: CGFloat = 44
-        static let rowInsetX: CGFloat = 11.2
-        static let rowInsetY: CGFloat = 5.6
-        static let listPadY: CGFloat = 5.6
-        static let gap: CGFloat = 8.4
-        static let corner: CGFloat = 8
-        static let width: CGFloat = 356
+        static let rowHeight: CGFloat = DS.Metric.rowHeight
+        static let compactHeight: CGFloat = DS.Metric.rowHeight - DS.Space.x3
+        static let rowInsetX: CGFloat = DS.Space.x3
+        static let listPad: CGFloat = DS.Space.x1
+        static let gap: CGFloat = DS.Space.x3
+        static let dividerHeight: CGFloat = 1 + DS.Space.x1 * 2
+        static let corner: CGFloat = DS.Metric.cardRadius
     }
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    /// The list is exactly as wide as the control, plus its own padding, so
+    /// the rows' text lines up with the control's text underneath it.
+    private var listWidth: CGFloat { max(bounds.width, 320) }
+
+    init() {
+        super.init(fill: DS.surface, stroke: DS.hairline, radius: DS.Metric.fieldRadius)
         build()
     }
 
+    @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit { removeMonitor() }
@@ -79,19 +102,14 @@ final class HostDropdown: NSView {
     // MARK: - The closed control
 
     private func build() {
-        wantsLayer = true
-        layer?.backgroundColor = DS.chrome.cgColor
-        layer?.cornerRadius = DS.Metric.rowCorner
-        layer?.cornerCurve = .continuous
-
         titleLabel.font = DS.body
-        titleLabel.textColor = DS.textPrimary
+        titleLabel.textColor = DS.text
         titleLabel.lineBreakMode = .byTruncatingTail
-        detailLabel.font = DS.monoSmall
-        detailLabel.textColor = DS.textMuted
         detailLabel.lineBreakMode = .byTruncatingTail
-        chevron.font = DS.monoSmall
-        chevron.textColor = DS.textMuted
+        chevron.image = NSImage(systemSymbolName: "chevron.up.chevron.down",
+                                accessibilityDescription: nil)
+        chevron.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        chevron.contentTintColor = DS.textMuted
 
         for child in [dot, titleLabel, detailLabel, chevron] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
@@ -99,20 +117,18 @@ final class HostDropdown: NSView {
         }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: M.rowHeight),
-            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: M.rowInsetX),
+            dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: M.rowInsetX + 2),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: DS.Metric.dot),
-            dot.heightAnchor.constraint(equalToConstant: DS.Metric.dot),
 
             titleLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: M.gap),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor,
                                                  constant: -M.gap),
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: M.rowInsetY),
+            titleLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
 
             detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor,
                                                   constant: -M.gap),
-            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
+            detailLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
 
             chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -M.rowInsetX),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -120,12 +136,29 @@ final class HostDropdown: NSView {
     }
 
     /// Update what the closed control shows.
-    func setSelection(address: String, name: String?, detail: String, dotState: DS.Dot.State) {
+    func setSelection(address: String, name: String?, detail: [Detail], dotState: DS.Dot.State) {
         selectedAddress = address
         titleLabel.stringValue = name ?? (address.isEmpty ? "Choose a PC" : address)
-        detailLabel.stringValue = detail
+        // Without a name the title IS the address, and addresses are set in mono.
+        titleLabel.font = (name == nil && !address.isEmpty) ? DS.mono : DS.body
+        detailLabel.attributedStringValue = Detail.line(detail, colour: DS.textMuted)
         dot.state = dotState
     }
+
+    // Hover lifts the hairline to `edge`, the same thing a secondary button
+    // does, because this is the control you press to change host.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { stroke = DS.edge }
+    override func mouseExited(with event: NSEvent) { stroke = DS.hairline }
 
     override func mouseDown(with event: NSEvent) {
         isOpen ? closeList(commit: false) : openList()
@@ -147,20 +180,17 @@ final class HostDropdown: NSView {
         guard let window else { return }
         rebuildRows()
 
+        // A floating surface: `surface` with an `edge` rather than a hairline,
+        // because it has to hold its own against the window it covers.
         let content = ListView()
         content.onKey = { [weak self] key in self?.handle(key) ?? false }
-        content.wantsLayer = true
-        content.layer?.backgroundColor = DS.chrome.cgColor
-        content.layer?.cornerRadius = M.corner
-        content.layer?.cornerCurve = .continuous
-        content.layer?.borderWidth = 1
-        content.layer?.borderColor = DS.edgeStrong.cgColor
 
         let stack = NSStackView(views: listChildren())
         stack.orientation = .vertical
         stack.spacing = 0
         stack.alignment = .leading
-        stack.edgeInsets = NSEdgeInsets(top: M.listPadY, left: 0, bottom: M.listPadY, right: 0)
+        stack.edgeInsets = NSEdgeInsets(top: M.listPad, left: M.listPad,
+                                        bottom: M.listPad, right: M.listPad)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -180,7 +210,8 @@ final class HostDropdown: NSView {
         // clicked but never typed into, which left no way at all to reach a host
         // that mDNS had not found. It stays a child window, so the connect window
         // behind it goes on drawing as active.
-        let panel = ListPanel(contentRect: NSRect(x: 0, y: 0, width: M.width, height: height),
+        let panelWidth = listWidth + M.listPad * 2
+        let panel = ListPanel(contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: height),
                               styleMask: [.borderless],
                               backing: .buffered, defer: false)
         panel.contentView = content
@@ -191,14 +222,15 @@ final class HostDropdown: NSView {
         panel.isReleasedWhenClosed = false
 
         // Align the selected row over the control, so the chosen host does not
-        // appear to move when the list opens.
+        // appear to move when the list opens. The panel starts one pad to the
+        // left of the control so the rows inside it, not its edge, line up.
         let originInWindow = convert(bounds, to: nil)
         var screenRect = window.convertToScreen(originInWindow)
         let selectedIndex = max(0, rows.firstIndex { $0.address == selectedAddress } ?? 0)
-        let offsetToSelected = M.listPadY + CGFloat(rowOffset(before: selectedIndex))
+        let offsetToSelected = M.listPad + CGFloat(rowOffset(before: selectedIndex))
         screenRect.origin.y -= (height - M.rowHeight - offsetToSelected)
-        panel.setFrame(NSRect(x: screenRect.minX, y: screenRect.origin.y,
-                              width: M.width, height: height), display: false)
+        panel.setFrame(NSRect(x: screenRect.minX - M.listPad, y: screenRect.origin.y,
+                              width: panelWidth, height: height), display: false)
 
         window.addChildWindow(panel, ordered: .above)
         self.panel = panel
@@ -210,7 +242,6 @@ final class HostDropdown: NSView {
         panel.makeKey()
 
         installMonitor()
-        chevron.stringValue = "⌃"
     }
 
     /// Vertical distance from the top of the list to row `index`, counting the
@@ -219,7 +250,7 @@ final class HostDropdown: NSView {
         var offset: CGFloat = 0
         for i in 0..<min(index, rows.count) {
             offset += M.rowHeight
-            if i + 1 < rows.count, rows[i].kind != rows[i + 1].kind { offset += 1 + 11.2 }
+            if i + 1 < rows.count, rows[i].kind != rows[i + 1].kind { offset += M.dividerHeight }
         }
         return offset
     }
@@ -230,34 +261,30 @@ final class HostDropdown: NSView {
             children.append(row)
             // Dividers separate kinds of entry, never every row.
             if index + 1 < rows.count, rows[index].kind != rows[index + 1].kind {
-                children.append(Self.divider())
+                children.append(divider())
             }
         }
-        if !rows.isEmpty { children.append(Self.divider()) }
+        if !rows.isEmpty { children.append(divider()) }
         if isDiscovering { children.append(discoveryFooter()) }
         children.append(manualRow())
         return children
     }
 
-    /// The fading rule: solid across the middle, gone at both ends, inset from
-    /// the row padding.
-    private static func divider() -> NSView {
+    /// A hairline, inset to where row text starts and stops. Plain rather than
+    /// the fading gradient Nocturne used: Solar's rule is one pixel of
+    /// `hairline`, and a line that fades into a darker surface reads as smudge.
+    private func divider() -> NSView {
         let holder = NSView()
         holder.translatesAutoresizingMaskIntoConstraints = false
-        holder.wantsLayer = true
-        let line = CAGradientLayer()
-        line.startPoint = CGPoint(x: 0, y: 0.5)
-        line.endPoint = CGPoint(x: 1, y: 0.5)
-        let solid = DS.textPrimary.withAlphaComponent(0.16).cgColor
-        line.colors = [NSColor.clear.cgColor, solid, solid, NSColor.clear.cgColor]
-        line.locations = [0, 0.14, 0.86, 1]
-        holder.layer?.addSublayer(line)
-        holder.heightAnchor.constraint(equalToConstant: 1 + 11.2).isActive = true
-        holder.widthAnchor.constraint(equalToConstant: M.width).isActive = true
-        DispatchQueue.main.async {
-            line.frame = CGRect(x: M.rowInsetX, y: 5.6,
-                                width: holder.bounds.width - M.rowInsetX * 2, height: 1)
-        }
+        let line = DS.hairlineView()
+        holder.addSubview(line)
+        NSLayoutConstraint.activate([
+            holder.heightAnchor.constraint(equalToConstant: M.dividerHeight),
+            holder.widthAnchor.constraint(equalToConstant: listWidth),
+            line.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: M.rowInsetX),
+            line.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -M.rowInsetX),
+            line.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+        ])
         return holder
     }
 
@@ -266,23 +293,19 @@ final class HostDropdown: NSView {
     private func discoveryFooter() -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
-        let pulse = DS.Dot()
-        pulse.state = .live
-        pulse.pulses = true
-        let label = NSTextField(labelWithString: "Looking for more hosts…")
-        label.font = DS.secondary
-        label.textColor = DS.textMuted
+        // Amber and pulsing: the design's "working" dot, which is exactly what
+        // discovery is doing.
+        let pulse = DS.Dot(state: .working)
+        let label = DS.label("Looking for more PCs…", font: DS.body, colour: DS.textMuted)
         for child in [pulse, label] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(child)
         }
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: M.rowHeight),
-            row.widthAnchor.constraint(equalToConstant: M.width),
-            pulse.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: M.rowInsetX),
+            row.heightAnchor.constraint(equalToConstant: M.compactHeight),
+            row.widthAnchor.constraint(equalToConstant: listWidth),
+            pulse.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: M.rowInsetX + 2),
             pulse.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            pulse.widthAnchor.constraint(equalToConstant: DS.Metric.dot),
-            pulse.heightAnchor.constraint(equalToConstant: DS.Metric.dot),
             label.leadingAnchor.constraint(equalTo: pulse.trailingAnchor, constant: M.gap),
             label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
         ])
@@ -290,41 +313,33 @@ final class HostDropdown: NSView {
     }
 
     /// Manual entry is the last row of the list, not a separate field beside it.
+    /// It is drawn as the design's field — surface, hairline, an accent ring
+    /// while typing — because it is one, and the ⌘K that reaches it sits in a
+    /// chip at its end.
     private func manualRow() -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let field = DS.Field(placeholder: "Enter a hostname or IP…")
+        let field = DS.Field(placeholder: "Enter a hostname or IP address", mono: true)
         field.target = self
         field.action = #selector(manualCommitted)
         manualField = field
 
-        let hint = NSTextField(labelWithString: "⌘K")
-        hint.font = DS.monoSmall
-        hint.textColor = DS.textMuted
-
-        for child in [field, hint] as [NSView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(child)
-        }
+        let box = DS.FieldBox(field: field, trailing: DS.Chip("⌘K"))
+        row.addSubview(box)
         NSLayoutConstraint.activate([
-            row.heightAnchor.constraint(equalToConstant: M.rowHeight),
-            row.widthAnchor.constraint(equalToConstant: M.width),
-            // Indented to where a title sits, so the dot column stays a column
-            // even on the row that has no dot.
-            field.leadingAnchor.constraint(equalTo: row.leadingAnchor,
-                                           constant: M.rowInsetX + DS.Metric.dot + M.gap),
-            field.trailingAnchor.constraint(equalTo: hint.leadingAnchor, constant: -M.gap),
-            field.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            hint.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -M.rowInsetX),
-            hint.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            row.heightAnchor.constraint(equalToConstant: DS.Metric.fieldHeight + M.listPad),
+            row.widthAnchor.constraint(equalToConstant: listWidth),
+            box.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            box.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            box.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
         return row
     }
 
     private func rebuildRows() {
         rows = items.map { item in
-            let row = RowView(item: item, width: M.width, height: M.rowHeight,
+            let row = RowView(item: item, width: listWidth, height: M.rowHeight,
                               insetX: M.rowInsetX, gap: M.gap)
             row.onClick = { [weak self] in
                 self?.selectedAddress = item.address
@@ -368,7 +383,6 @@ final class HostDropdown: NSView {
         panel = nil
         rows = []
         manualField = nil
-        chevron.stringValue = "⌄"
         if commit { onPick?(selectedAddress) }
     }
 
@@ -440,64 +454,61 @@ final class HostDropdown: NSView {
 
     // MARK: - Row
 
-    private final class RowView: NSView {
+    private final class RowView: DS.Box {
         let address: String
         let kind: Item.Kind
         let searchKey: String
         var onClick: (() -> Void)?
         var onHover: ((Bool) -> Void)?
 
+        private let detail: [Detail]
         private let dot = DS.Dot()
         private let titleLabel = NSTextField(labelWithString: "")
         private let detailLabel = NSTextField(labelWithString: "")
-        private let check = NSTextField(labelWithString: "✓")
+        /// The selected row's accent bar, on its leading edge.
+        private let bar = DS.Box(fill: DS.accent, radius: DS.Metric.selectionBar / 2)
         private var isHighlighted = false
+        private var isChecked = false
 
         init(item: Item, width: CGFloat, height: CGFloat, insetX: CGFloat, gap: CGFloat) {
             address = item.address
             kind = item.kind
             searchKey = (item.name ?? item.address).lowercased()
-            super.init(frame: .zero)
-            translatesAutoresizingMaskIntoConstraints = false
-            wantsLayer = true
-            layer?.cornerRadius = 6
-            layer?.cornerCurve = .continuous
+            detail = item.detail
+            super.init(radius: DS.Metric.rowRadius)
 
             dot.state = item.dotState
             titleLabel.stringValue = item.name ?? item.address
-            titleLabel.font = DS.body
-            titleLabel.textColor = DS.textPrimary
+            // A row without a name is titled by its address, which is data.
+            titleLabel.font = item.name == nil ? DS.mono : DS.body
+            titleLabel.textColor = DS.text
             titleLabel.lineBreakMode = .byTruncatingTail
-            detailLabel.stringValue = item.detail
-            detailLabel.font = DS.monoSmall
-            detailLabel.textColor = DS.textMuted
             detailLabel.lineBreakMode = .byTruncatingTail
-            check.font = DS.monoSmall
-            check.textColor = DS.accent
-            check.isHidden = true
+            bar.isHidden = true
 
-            for child in [dot, titleLabel, detailLabel, check] as [NSView] {
+            for child in [bar, dot, titleLabel, detailLabel] as [NSView] {
                 child.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(child)
             }
             NSLayoutConstraint.activate([
                 heightAnchor.constraint(equalToConstant: height),
                 widthAnchor.constraint(equalToConstant: width),
-                dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: insetX),
+                bar.leadingAnchor.constraint(equalTo: leadingAnchor),
+                bar.centerYAnchor.constraint(equalTo: centerYAnchor),
+                bar.widthAnchor.constraint(equalToConstant: DS.Metric.selectionBar),
+                bar.heightAnchor.constraint(equalToConstant: height - DS.Space.x6),
+                dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: insetX + 2),
                 dot.centerYAnchor.constraint(equalTo: centerYAnchor),
-                dot.widthAnchor.constraint(equalToConstant: DS.Metric.dot),
-                dot.heightAnchor.constraint(equalToConstant: DS.Metric.dot),
                 titleLabel.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: gap),
-                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: check.leadingAnchor,
-                                                     constant: -gap),
-                titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 5.6),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor,
+                                                     constant: -insetX),
+                titleLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: 1),
                 detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-                detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: check.leadingAnchor,
-                                                      constant: -gap),
-                detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
-                check.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -insetX),
-                check.centerYAnchor.constraint(equalTo: centerYAnchor),
+                detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor,
+                                                      constant: -insetX),
+                detailLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 2),
             ])
+            restyle()
 
             addTrackingArea(NSTrackingArea(rect: .zero,
                                            options: [.mouseEnteredAndExited, .activeInKeyWindow,
@@ -505,20 +516,34 @@ final class HostDropdown: NSView {
                                            owner: self))
         }
 
+        @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-        /// Selection is a tint; hover is the same tint one step lighter. Under
-        /// Increase Contrast the selected row also gains an accent edge, because
-        /// a tint alone is a low-contrast signal.
+        /// The row under the pointer or the arrow keys: `raised`.
         func setHighlighted(_ highlighted: Bool) {
             isHighlighted = highlighted
-            layer?.backgroundColor = highlighted ? DS.accentTint.cgColor : NSColor.clear.cgColor
-            let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-            layer?.borderWidth = (highlighted && contrast) ? 1 : 0
-            layer?.borderColor = DS.accent.cgColor
+            restyle()
         }
 
-        func setChecked(_ checked: Bool) { check.isHidden = !checked }
+        /// The host already chosen: `accentTint`, its subtitle in
+        /// `accentTintInk`, and the accent bar — Solar's selected row, in place
+        /// of the check mark Nocturne put at the end. Under Increase Contrast it
+        /// also gains an accent edge, because a tint alone is a low-contrast
+        /// signal.
+        func setChecked(_ checked: Bool) {
+            isChecked = checked
+            restyle()
+        }
+
+        private func restyle() {
+            fill = isChecked ? DS.accentTint : (isHighlighted ? DS.raised : nil)
+            bar.isHidden = !isChecked
+            let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            stroke = (isChecked && contrast) ? DS.accent : nil
+            detailLabel.attributedStringValue = Detail.line(
+                detail, colour: isChecked ? DS.accentTintInk : DS.textMuted)
+            setAccessibilitySelected(isChecked)
+        }
 
         override func mouseEntered(with event: NSEvent) { onHover?(true) }
         override func mouseExited(with event: NSEvent) { onHover?(false) }
@@ -533,8 +558,16 @@ final class HostDropdown: NSView {
 
     /// Content view that forwards key presses to the dropdown rather than
     /// beeping at them.
-    private final class ListView: NSView {
+    private final class ListView: DS.Box {
         var onKey: ((NSEvent) -> Bool)?
+
+        init() {
+            super.init(fill: DS.surface, stroke: DS.edge, radius: M.corner)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
         override var acceptsFirstResponder: Bool { true }
         override func keyDown(with event: NSEvent) {
             if onKey?(event) != true { super.keyDown(with: event) }

@@ -1,133 +1,273 @@
 import AppKit
 
-/// Nocturne — the design system for SolStream's chrome.
+/// Solar — the design system for SolStream's chrome. The spec is
+/// `docs/design-system.md`; the Windows host carries the same values in
+/// `host_theme.h`, and the two change together or not at all.
 ///
-/// A dark, near-neutral ground with one blurple accent used only as a line, a dot
-/// or a glow. The premise is that an application whose job is to disappear should
-/// be the darkest surface in the room, not the loudest: the chrome recedes to the
-/// value of a bezel so the remote app is the brightest thing on screen.
+/// A deep, neutral graphite chrome — still the darkest thing on screen, so a
+/// streamed application stays the brightest — and ONE warm accent, sun amber,
+/// spent on the single most important thing on each screen: the primary button,
+/// the selected row, the focus ring, a working dot. Everything else is neutral.
 ///
-/// State never gets its own hue. Healthy is the accent, degraded is the accent
-/// with its chroma pulled down, dead is muted grey. That is what keeps a window
-/// full of somebody else's colours from having to compete with ours.
+/// It replaces Nocturne, whose every surface sat within a few steps of navy and
+/// whose only accent was a desaturated purple used as a line. That was coherent
+/// but dim: with monospace carrying most labels as well, nothing on a screen was
+/// obviously the first thing to look at.
+///
+/// State gets real hues now, but only two and only small: a green dot for live
+/// and a coral one for failed. The words still carry the severity; the colour
+/// just makes it findable.
 public enum DS {
 
     // MARK: - Colour
 
-    /// Each token is a pair: the dark value, then the light one. Light mode is the
-    /// same ramp inverted rather than a separate palette, so a token means the
-    /// same thing in both — "ground" is always the furthest back.
-    private static func dynamic(dark: NSColor, light: NSColor) -> NSColor {
+    /// Each token is a role with a dark and a light value, so drawing code never
+    /// needs to know which theme it is in. The Increase Contrast variants are
+    /// optional and only the edges use them: a 1px line is the one thing in this
+    /// palette that genuinely depends on that setting.
+    private static func dynamic(dark: NSColor, light: NSColor,
+                                darkContrast: NSColor? = nil,
+                                lightContrast: NSColor? = nil) -> NSColor {
         NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            switch appearance.bestMatch(from: [.darkAqua, .aqua,
+                                               .accessibilityHighContrastDarkAqua,
+                                               .accessibilityHighContrastAqua]) {
+            case .accessibilityHighContrastDarkAqua?: return darkContrast ?? dark
+            case .accessibilityHighContrastAqua?: return lightContrast ?? light
+            case .darkAqua?: return dark
+            default: return light
+            }
         }
     }
 
-    private static func hex(_ value: UInt32, alpha: CGFloat = 1) -> NSColor {
+    private static func hex(_ value: UInt32) -> NSColor {
         NSColor(srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
                 green: CGFloat((value >> 8) & 0xFF) / 255,
                 blue: CGFloat(value & 0xFF) / 255,
-                alpha: alpha)
+                alpha: 1)
     }
 
-    /// The furthest-back surface. Window backgrounds.
-    public static let ground = dynamic(dark: hex(0x161826), light: hex(0xF3F5FE))
-    /// Raised surfaces: cards, rows, fields.
-    public static let chrome = dynamic(dark: hex(0x232532), light: hex(0xE4E7F5))
-    /// A pressed or selected row.
-    public static let chromeRaised = dynamic(dark: hex(0x292B31), light: hex(0xF9FAFE))
-    /// The one accent. Lines, dots and glows only — never a filled area larger
-    /// than a button.
-    public static let accent = dynamic(dark: hex(0x9184D9), light: hex(0x5D5294))
-    /// Accent for text on the ground, where the base value is too dim to read.
-    public static let accentBright = dynamic(dark: hex(0xB5ABFC), light: hex(0x4B4190))
-    /// Text inside an outlined action. Its own step in the design, lighter
-    /// than `accentBright` — that one is the link-hover tone and reads hot
-    /// against a border of the same hue.
-    public static let accentOnOutline = dynamic(dark: hex(0xD2CEFD), light: hex(0x423A6A))
-    /// A wash of accent, for the inside of a selected row or a focus ring.
-    public static let accentTint = dynamic(dark: hex(0x423A6A), light: hex(0xE8E5FF))
-    public static let textPrimary = dynamic(dark: hex(0xE9E9ED), light: hex(0x292B31))
-    public static let textSecondary = dynamic(dark: hex(0xB2B6CA), light: hex(0x595D6C))
-    /// Labels, units, anything explanatory.
-    public static let textMuted = dynamic(dark: hex(0x9397AB), light: hex(0x595D6C))
-    /// The dimmest readable step: placeholder text, disabled labels.
-    public static let textFaint = dynamic(dark: hex(0x75798C), light: hex(0x424450))
-    /// Separators. One pixel, never a border box.
-    public static let hairline = dynamic(dark: hex(0x3F424D), light: hex(0xCFD3E5))
-    /// The edge of a surface that floats above the window — a popover or a
-    /// menu. A step stronger than `hairline`, because it has to hold its own
-    /// against whatever it is covering rather than divide two things on the
+    /// Window background. The furthest-back surface.
+    public static let ground = dynamic(dark: hex(0x0E0F12), light: hex(0xF7F6F3))
+    /// Cards, fields, the list background.
+    public static let surface = dynamic(dark: hex(0x17191E), light: hex(0xFFFFFF))
+    /// A hovered row, a secondary button, a chip.
+    public static let raised = dynamic(dark: hex(0x20232A), light: hex(0xEFEDE8))
+    /// Separators and resting borders. One pixel, never a box.
+    public static let hairline = dynamic(dark: hex(0x2A2D35), light: hex(0xE4E1DA),
+                                         darkContrast: hex(0x3A3E48),
+                                         lightContrast: hex(0xCFCBC2))
+    /// Hovered borders, and the edge of a surface that floats — a list panel or
+    /// a popover. A step stronger than `hairline`, because it has to hold its
+    /// own against whatever it is covering rather than divide two things on the
     /// same plane.
-    public static var edgeStrong: NSColor {
-        // Increase Contrast raises it again, which is the one accessibility
-        // setting a 1px edge genuinely depends on.
-        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-            ? dynamic(dark: hex(0x9397AB), light: hex(0x595D6C))
-            : dynamic(dark: hex(0x595D6C), light: hex(0xB2B6CA))
-    }
+    public static let edge = dynamic(dark: hex(0x3A3E48), light: hex(0xCFCBC2),
+                                     darkContrast: hex(0x7C818D),
+                                     lightContrast: hex(0x6A6F79))
 
-    /// Degraded: the accent with its chroma pulled down rather than a new hue.
-    public static let degraded = dynamic(dark: hex(0x796CBF, alpha: 0.55),
-                                         light: hex(0x796CBF, alpha: 0.55))
-    /// Dead. Not red — nothing in this palette shouts.
-    public static let dead = dynamic(dark: hex(0x595D6C), light: hex(0xB2B6CA))
+    public static let text = dynamic(dark: hex(0xF2F2F4), light: hex(0x17181B))
+    /// Supporting text: the sentence under a title, a row's second line.
+    public static let textSecondary = dynamic(dark: hex(0xA9ADB8), light: hex(0x4A4E57))
+    /// Labels and captions.
+    public static let textMuted = dynamic(dark: hex(0x7C818D), light: hex(0x6A6F79))
+    /// Placeholders and disabled labels ONLY — never anything that must be read.
+    public static let textFaint = dynamic(dark: hex(0x5A5F6B), light: hex(0x9A9EA6))
+
+    /// Sun amber. The primary button's fill, a working dot, the focus ring, the
+    /// caret. One thing per screen.
+    public static let accent = dynamic(dark: hex(0xFFB547), light: hex(0xF59E0B))
+    public static let accentHover = dynamic(dark: hex(0xFFC56E), light: hex(0xFBB13C))
+    public static let accentPressed = dynamic(dark: hex(0xE89A2A), light: hex(0xD97706))
+    /// Text on a filled accent. The same near-black in both themes: amber is
+    /// light in both, so it always wants dark ink.
+    public static let onAccent = dynamic(dark: hex(0x1A1205), light: hex(0x1A1205))
+    /// The accent used as text or a 1px line on `ground`/`surface`, where the
+    /// fill value is too pale to read in the light theme.
+    public static let accentInk = dynamic(dark: hex(0xFFC66B), light: hex(0xB45309))
+    /// A selected row, text selection, a primary tag's ground.
+    public static let accentTint = dynamic(dark: hex(0x2B2418), light: hex(0xFDF0DA))
+    /// Text that sits on `accentTint`.
+    public static let accentTintInk = dynamic(dark: hex(0xFFD699), light: hex(0x8A4B06))
+
+    /// Live / connected. A dot, never a fill.
+    public static let live = dynamic(dark: hex(0x4ADE80), light: hex(0x16A34A))
+    /// Failed. A dot, or the words of a destructive action.
+    public static let danger = dynamic(dark: hex(0xFF6B6B), light: hex(0xDC2626))
+
+    /// A dynamic colour pinned to one appearance, for the few surfaces that
+    /// hold the dark theme whatever the system says (the card over video).
+    public static func resolved(_ colour: NSColor, in appearance: NSAppearance) -> CGColor {
+        var result = colour.cgColor
+        appearance.performAsCurrentDrawingAppearance { result = colour.cgColor }
+        return result
+    }
 
     // MARK: - Type
 
-    /// Falls back cleanly: Inter and IBM Plex Mono are the intended faces, but the
-    /// system faces have the same proportions and nothing is bundled.
-    private static func face(_ names: [String], size: CGFloat, weight: NSFont.Weight) -> NSFont {
-        for name in names {
-            if let font = NSFont(name: name, size: size) {
-                return font
-            }
-        }
-        return .systemFont(ofSize: size, weight: weight)
+    /// SF Pro for all UI text. SF Mono only for addresses, tokens and live
+    /// numbers — Nocturne set most labels in mono, and a screen where
+    /// everything is "data" has no data in it. Labels are sentence case; no
+    /// caps, no tracking.
+    public static var display: NSFont { .systemFont(ofSize: 26, weight: .semibold) }
+    public static var title: NSFont { .systemFont(ofSize: 20, weight: .semibold) }
+    public static var headline: NSFont { .systemFont(ofSize: 15, weight: .semibold) }
+    public static var body: NSFont { .systemFont(ofSize: 13, weight: .regular) }
+    public static var caption: NSFont { .systemFont(ofSize: 11, weight: .medium) }
+    /// Addresses, tokens, and numbers that change while you watch them — which
+    /// is the reason they are monospaced: they do not reflow as the value moves.
+    public static var mono: NSFont { .monospacedSystemFont(ofSize: 12, weight: .regular) }
+
+    // MARK: - Space and shape
+
+    /// The spacing scale. Nothing on screen is spaced by a number not in it.
+    public enum Space {
+        public static let x1: CGFloat = 4
+        public static let x2: CGFloat = 8
+        public static let x3: CGFloat = 12
+        public static let x4: CGFloat = 16
+        public static let x5: CGFloat = 20
+        public static let x6: CGFloat = 24
+        public static let x8: CGFloat = 32
+        public static let x12: CGFloat = 48
     }
-
-    private static let sans = ["Inter", "SF Pro Text", "Helvetica Neue"]
-    private static let mono = ["IBM Plex Mono", "SF Mono", "Menlo"]
-
-    public static var title: NSFont { face(sans, size: 25, weight: .medium) }
-    public static var section: NSFont { face(sans, size: 16, weight: .medium) }
-    public static var body: NSFont { face(sans, size: 15, weight: .regular) }
-    public static var secondary: NSFont { face(sans, size: 13, weight: .regular) }
-    /// Numbers and state. Anything that changes while you watch it is monospaced,
-    /// so it does not reflow as the value changes.
-    public static var monoSmall: NSFont { face(mono, size: 11, weight: .regular) }
-    public static var monoBody: NSFont { face(mono, size: 13, weight: .regular) }
-
-    // MARK: - Metric
 
     public enum Metric {
         /// The streamed window's chrome. Deliberately thin: the app is the point.
         public static let titleBar: CGFloat = 28
-        public static let corner: CGFloat = 10
-        public static let rowCorner: CGFloat = 8
-        public static let gutter: CGFloat = 20
-        public static let rowHeight: CGFloat = 52
-        public static let dot: CGFloat = 7
-        public static let monogram: CGFloat = 32
+        /// Every window's content inset.
+        public static let inset: CGFloat = 24
+        public static let buttonHeight: CGFloat = 32
+        public static let buttonRadius: CGFloat = 8
+        public static let fieldHeight: CGFloat = 36
+        public static let fieldRadius: CGFloat = 8
+        /// Two-line rows; `rowHeightCompact` for one line.
+        public static let rowHeight: CGFloat = 48
+        public static let rowHeightCompact: CGFloat = 36
+        public static let rowRadius: CGFloat = 8
+        public static let cardRadius: CGFloat = 12
+        public static let cardInset: CGFloat = 16
+        public static let chipHeight: CGFloat = 20
+        public static let chipRadius: CGFloat = 6
+        public static let tile: CGFloat = 32
+        public static let tileRadius: CGFloat = 8
+        public static let dot: CGFloat = 8
+        /// The accent bar on a selected row's leading edge.
+        public static let selectionBar: CGFloat = 3
     }
 
     // MARK: - Parts
 
-    /// A small state dot. The only coloured thing on a row.
+    /// A layer-backed rectangle whose colours are re-resolved every time it is
+    /// drawn.
+    ///
+    /// `layer.backgroundColor = colour.cgColor` resolves a dynamic colour ONCE,
+    /// against whatever appearance happens to be current at that moment, and
+    /// never again — so a view built that way keeps the theme it was born in
+    /// when the Mac switches between light and dark. Doing it in `updateLayer`
+    /// is what makes it follow: AppKit sets the view's own appearance as current
+    /// around that call, and calls it again when the appearance changes.
+    open class Box: NSView {
+        public var fill: NSColor? { didSet { needsDisplay = true } }
+        public var stroke: NSColor? { didSet { needsDisplay = true } }
+        public var strokeWidth: CGFloat = 1 { didSet { needsDisplay = true } }
+        public var radius: CGFloat = 0 { didSet { needsDisplay = true } }
+
+        public init(fill: NSColor? = nil, stroke: NSColor? = nil, radius: CGFloat = 0) {
+            self.fill = fill
+            self.stroke = stroke
+            self.radius = radius
+            super.init(frame: .zero)
+            wantsLayer = true
+            layerContentsRedrawPolicy = .onSetNeedsDisplay
+            translatesAutoresizingMaskIntoConstraints = false
+        }
+
+        @available(*, unavailable)
+        public required init?(coder: NSCoder) { fatalError() }
+
+        open override var wantsUpdateLayer: Bool { true }
+
+        open override func updateLayer() {
+            guard let layer else { return }
+            layer.backgroundColor = fill?.cgColor
+            layer.borderColor = stroke?.cgColor
+            layer.borderWidth = stroke == nil ? 0 : strokeWidth
+            layer.cornerRadius = radius
+            layer.cornerCurve = .continuous
+        }
+
+        open override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            needsDisplay = true
+        }
+    }
+
+    /// A card: `surface`, a hairline edge, radius 12. Content goes inside at
+    /// `Metric.cardInset`.
+    public static func card() -> Box {
+        Box(fill: surface, stroke: hairline, radius: Metric.cardRadius)
+    }
+
+    /// A one-pixel separator. Never a border box — the design uses single lines.
+    public static func hairlineView() -> NSView {
+        let line = Box(fill: hairline)
+        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return line
+    }
+
+    /// A label in one of the design's roles.
+    public static func label(_ string: String, font: NSFont = DS.body,
+                             colour: NSColor = DS.text) -> NSTextField {
+        let label = NSTextField(labelWithString: string)
+        label.font = font
+        label.textColor = colour
+        label.lineBreakMode = .byTruncatingTail
+        return label
+    }
+
+    /// A caption line that mixes words with an address or a number: the words in
+    /// `caption`, the data in `mono`, so the one font change on the line marks
+    /// the part you might copy.
+    public static func detail(_ parts: [(String, isData: Bool)],
+                              colour: NSColor = DS.textMuted) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for (index, part) in parts.enumerated() {
+            if index > 0 {
+                result.append(NSAttributedString(string: "  ·  ", attributes: [
+                    .font: caption, .foregroundColor: textFaint,
+                ]))
+            }
+            result.append(NSAttributedString(string: part.0, attributes: [
+                .font: part.isData ? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+                                   : caption,
+                .foregroundColor: colour,
+            ]))
+        }
+        return result
+    }
+
+    /// A small state dot.
+    ///
+    /// `live` is connected, `working` is the accent and pulses while something is
+    /// under way, `danger` is failed, `idle` is nothing known. Under Reduce
+    /// Motion the pulse holds steady instead — the dot still says working, it
+    /// just stops moving.
     public final class Dot: NSView {
         public enum State {
-            case live, idle, dead
+            case live, working, danger, idle
         }
 
         public var state: State = .idle {
-            didSet { needsDisplay = true }
+            didSet { needsDisplay = true; updateAnimation() }
         }
 
-        /// A slow pulse says "still listening". Under Reduce Motion it holds
-        /// steady instead — the dot still says live, it just stops moving.
-        public var pulses: Bool = false {
+        /// A working dot that should NOT pulse — a steady "attention" rather than
+        /// "in progress", such as a stream running below its usual frame rate.
+        public var holdsSteady = false {
             didSet { updateAnimation() }
         }
+
+        private var displayOptionsObserver: NSObjectProtocol?
 
         public init(state: State = .idle) {
             self.state = state
@@ -138,6 +278,18 @@ public enum DS {
                 widthAnchor.constraint(equalToConstant: Metric.dot),
                 heightAnchor.constraint(equalToConstant: Metric.dot),
             ])
+            // Reduce Motion can be switched on while a dot is pulsing; it has to
+            // stop then, not at the next state change.
+            displayOptionsObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+                object: nil, queue: .main) { [weak self] _ in self?.updateAnimation() }
+            updateAnimation()
+        }
+
+        deinit {
+            if let displayOptionsObserver {
+                NSWorkspace.shared.notificationCenter.removeObserver(displayOptionsObserver)
+            }
         }
 
         @available(*, unavailable)
@@ -146,52 +298,61 @@ public enum DS {
         public override func draw(_ dirtyRect: NSRect) {
             let colour: NSColor
             switch state {
-            case .live: colour = DS.accent
+            case .live: colour = DS.live
+            case .working: colour = DS.accent
+            case .danger: colour = DS.danger
             case .idle: colour = DS.textFaint
-            case .dead: colour = DS.dead
             }
             colour.setFill()
             NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5)).fill()
         }
 
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            // A layer animation does not survive the layer being torn down and
+            // rebuilt, which happens when a view changes windows.
+            updateAnimation()
+        }
+
         private func updateAnimation() {
             layer?.removeAnimation(forKey: "pulse")
-            guard pulses, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+            guard state == .working, !holdsSteady,
+                  !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
             let fade = CABasicAnimation(keyPath: "opacity")
             fade.fromValue = 1.0
-            fade.toValue = 0.35
-            fade.duration = 1.1
+            fade.toValue = 0.3
+            fade.duration = 0.9
             fade.autoreverses = true
             fade.repeatCount = .infinity
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             layer?.add(fade, forKey: "pulse")
         }
     }
 
-    /// A deterministic monogram, for use until the agent can extract real icons.
+    /// An application's tile: a deterministic monogram until the host sends the
+    /// real icon.
     ///
-    /// Tinted by hashing the executable path into four accent/neutral steps, so a
-    /// given application is always the same colour. Occupies the same slot and
-    /// size a real icon will, so icons drop in later without reflow.
+    /// Tinted by hashing the executable path into four steps, so a given
+    /// application is always the same tile. Occupies the same slot and size a
+    /// real icon does, so the icon drops in later without reflow.
     public final class Monogram: NSView {
         private let label = NSTextField(labelWithString: "")
-        private var tint: NSColor = DS.chromeRaised
+        private var tint: NSColor? = DS.raised
 
         public init(name: String, key: String) {
-            super.init(frame: NSRect(x: 0, y: 0, width: Metric.monogram, height: Metric.monogram))
+            super.init(frame: NSRect(x: 0, y: 0, width: Metric.tile, height: Metric.tile))
             wantsLayer = true
-            layer?.cornerRadius = 7
-            layer?.cornerCurve = .continuous
             translatesAutoresizingMaskIntoConstraints = false
 
             label.stringValue = Self.initials(from: name)
-            label.font = DS.monoSmall
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
             label.alignment = .center
             label.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
 
             NSLayoutConstraint.activate([
-                widthAnchor.constraint(equalToConstant: Metric.monogram),
-                heightAnchor.constraint(equalToConstant: Metric.monogram),
+                widthAnchor.constraint(equalToConstant: Metric.tile),
+                heightAnchor.constraint(equalToConstant: Metric.tile),
                 label.centerXAnchor.constraint(equalTo: centerXAnchor),
                 label.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
@@ -209,7 +370,7 @@ public enum DS {
             iconLayer.frame = bounds.insetBy(dx: 2, dy: 2)
             iconLayer.contentsGravity = .resizeAspect
             label.isHidden = true
-            tint = .clear
+            tint = nil
             needsDisplay = true
         }
 
@@ -219,16 +380,22 @@ public enum DS {
             return sublayer
         }()
 
+        // Without this `updateLayer` is never called, and the tile was drawn
+        // with no ground at all.
+        public override var wantsUpdateLayer: Bool { true }
+
         public override func updateLayer() {
-            layer?.backgroundColor = tint.cgColor
+            layer?.backgroundColor = tint?.cgColor
+            layer?.cornerRadius = Metric.tileRadius
+            layer?.cornerCurve = .continuous
         }
 
         private func apply(step: Int) {
             switch step {
-            case 0: tint = DS.accentTint;   label.textColor = DS.accentOnOutline
-            case 1: tint = DS.chromeRaised; label.textColor = DS.accentBright
-            case 2: tint = DS.chromeRaised; label.textColor = DS.textSecondary
-            default: tint = DS.chrome;      label.textColor = DS.textMuted
+            case 0: tint = DS.accentTint; label.textColor = DS.accentTintInk
+            case 1: tint = DS.raised;     label.textColor = DS.accentInk
+            case 2: tint = DS.raised;     label.textColor = DS.textSecondary
+            default: tint = DS.raised;    label.textColor = DS.textMuted
             }
             needsDisplay = true
         }
@@ -255,62 +422,33 @@ public enum DS {
         }
     }
 
-    /// A small tag. Padded properly: a background drawn tight around the glyphs
-    /// reads as a rendering mistake rather than a tag.
-    public final class Chip: NSTextField {
-        private let padding = NSSize(width: 14, height: 5)
+    /// A small tag: `raised`, caption text in `textMuted`, radius 6, 20 high.
+    /// Padded properly — a background drawn tight around the glyphs reads as a
+    /// rendering mistake rather than a tag.
+    public final class Chip: Box {
+        public let label: NSTextField
 
         public init(_ text: String) {
-            super.init(frame: .zero)
-            stringValue = text
-            font = DS.monoSmall
-            textColor = DS.textMuted
-            isEditable = false
-            isBordered = false
-            isSelectable = false
-            drawsBackground = false
-            alignment = .center
-            wantsLayer = true
-            layer?.cornerRadius = 4
-            layer?.cornerCurve = .continuous
-            translatesAutoresizingMaskIntoConstraints = false
+            label = DS.label(text, font: DS.caption, colour: DS.textMuted)
+            super.init(fill: DS.raised, radius: Metric.chipRadius)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                heightAnchor.constraint(equalToConstant: Metric.chipHeight),
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.x2),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.x2),
+                label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+            setContentHuggingPriority(.required, for: .horizontal)
+            setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
         @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError() }
-
-        public override var intrinsicContentSize: NSSize {
-            var size = super.intrinsicContentSize
-            size.width += padding.width
-            size.height += padding.height
-            return size
-        }
-
-        public override func updateLayer() {
-            layer?.backgroundColor = DS.chromeRaised.cgColor
-        }
-
-        public override func draw(_ dirtyRect: NSRect) {
-            // Centre the text inside the padded box.
-            let inset = bounds.insetBy(dx: padding.width / 2, dy: padding.height / 2)
-            attributedStringValue.draw(in: inset)
-        }
+        public required init?(coder: NSCoder) { fatalError() }
     }
 
-    /// A one-pixel separator. Never a border box — the design uses single lines.
-    public static func hairlineView() -> NSView {
-        let line = NSView()
-        line.wantsLayer = true
-        line.translatesAutoresizingMaskIntoConstraints = false
-        line.layer?.backgroundColor = hairline.cgColor
-        line.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        return line
-    }
-
-    /// The design's outlined action: a hairline box that fills with accent tint on
-    /// hover, rather than a solid button competing with the content.
-    /// A text field the way the design draws every one of them: no border, no
-    /// background, no focus ring, and an accent caret.
+    /// A text field the way the design draws every one of them: no bezel and no
+    /// system focus ring of its own — `FieldBox` draws both — and an accent caret.
     ///
     /// The caret is the fiddly part. `insertionPointColor` belongs to
     /// `NSTextView`, and an `NSTextField` does not own its editor — the window
@@ -318,12 +456,18 @@ public enum DS {
     /// be applied to that borrowed editor each time the field gains focus, not
     /// once at construction.
     public final class Field: NSTextField {
+        /// Placeholder text, drawn in `textFaint` rather than the system's grey.
+        public var placeholder: String {
+            didSet { applyPlaceholder() }
+        }
+
         public init(placeholder: String, mono: Bool = false, readOnly: Bool = false) {
+            self.placeholder = placeholder
             super.init(frame: .zero)
-            placeholderString = placeholder
-            font = mono ? DS.monoBody : DS.body
-            textColor = readOnly ? DS.textSecondary : DS.textPrimary
+            font = mono ? DS.mono : DS.body
+            textColor = readOnly ? DS.textSecondary : DS.text
             isBordered = false
+            isBezeled = false
             drawsBackground = false
             focusRingType = .none
             isEditable = !readOnly
@@ -333,78 +477,228 @@ public enum DS {
             cell?.wraps = false
             cell?.isScrollable = true
             translatesAutoresizingMaskIntoConstraints = false
+            applyPlaceholder()
         }
 
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        private func applyPlaceholder() {
+            placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
+                .font: font ?? DS.body,
+                .foregroundColor: DS.textFaint,
+            ])
+        }
 
         public override func becomeFirstResponder() -> Bool {
             let became = super.becomeFirstResponder()
             if let editor = currentEditor() as? NSTextView {
                 editor.insertionPointColor = DS.accent
-                // The design gives selection the same accent tint the rest of the
-                // interface uses, rather than the system blue.
+                // Selection is the same accent tint a selected row uses, rather
+                // than the system blue.
                 editor.selectedTextAttributes = [
                     .backgroundColor: DS.accentTint,
-                    .foregroundColor: DS.textPrimary,
+                    .foregroundColor: DS.text,
                 ]
             }
             return became
         }
     }
 
-    public final class OutlinedButton: NSButton {
-        private var isPrimary: Bool = false
+    /// The visible field: `surface`, a 1px hairline, and — while the field inside
+    /// has focus — a 2px accent ring in place of that hairline.
+    ///
+    /// Focus is read from the window's first responder rather than from the
+    /// field's own begin/end callbacks. Those fire on editing, not on focus, so a
+    /// field clicked into and left without typing would keep its ring.
+    public final class FieldBox: Box {
+        public let field: Field
+        private var observation: NSKeyValueObservation?
 
-        public init(title: String, primary: Bool = false, target: AnyObject?, action: Selector?) {
+        /// - Parameters:
+        ///   - leading: an icon before the text (16pt), such as a magnifier.
+        ///   - trailing: an accessory after it, such as a shortcut chip.
+        public init(field: Field, leading: NSView? = nil, trailing: NSView? = nil) {
+            self.field = field
+            super.init(fill: DS.surface, stroke: DS.hairline, radius: Metric.fieldRadius)
+            addSubview(field)
+            var constraints = [
+                heightAnchor.constraint(equalToConstant: Metric.fieldHeight),
+                field.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ]
+            if let leading {
+                leading.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(leading)
+                constraints += [
+                    leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.x3),
+                    leading.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    field.leadingAnchor.constraint(equalTo: leading.trailingAnchor, constant: Space.x2),
+                ]
+            } else {
+                constraints.append(field.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                                                  constant: Space.x3))
+            }
+            if let trailing {
+                trailing.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(trailing)
+                constraints += [
+                    trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.x2),
+                    trailing.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    field.trailingAnchor.constraint(equalTo: trailing.leadingAnchor, constant: -Space.x2),
+                ]
+            } else {
+                constraints.append(field.trailingAnchor.constraint(equalTo: trailingAnchor,
+                                                                   constant: -Space.x3))
+            }
+            NSLayoutConstraint.activate(constraints)
+        }
+
+        @available(*, unavailable)
+        public required init?(coder: NSCoder) { fatalError() }
+
+        public override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observation = window?.observe(\.firstResponder, options: [.initial, .new]) {
+                [weak self] window, _ in
+                DispatchQueue.main.async { self?.setFocused(Self.holdsFocus(window, field: self?.field)) }
+            }
+        }
+
+        private static func holdsFocus(_ window: NSWindow, field: Field?) -> Bool {
+            guard let field else { return false }
+            if window.firstResponder === field { return true }
+            // While editing, the first responder is the window's shared field
+            // editor, whose delegate is the field being edited.
+            if let editor = window.firstResponder as? NSTextView,
+               editor.isFieldEditor, editor.delegate === field { return true }
+            return false
+        }
+
+        private func setFocused(_ focused: Bool) {
+            stroke = focused ? DS.accent : DS.hairline
+            strokeWidth = focused ? 2 : 1
+        }
+
+        /// The padding is part of the field: a click there should not miss.
+        public override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(field)
+        }
+    }
+
+    /// The design's two buttons.
+    ///
+    /// `primary` is the screen's one way forward: an `accent` fill with
+    /// `onAccent` text, brightening on hover and deepening while pressed.
+    /// `secondary` is everything else: `raised`, a hairline that lifts to `edge`
+    /// on hover. Drawn entirely here rather than through the cell, so the fill,
+    /// the label and the hover all come from the same tokens in both themes.
+    public final class Button: NSButton {
+        public enum Style { case primary, secondary }
+
+        public var style: Style { didSet { needsDisplay = true } }
+        private var hovering = false { didSet { needsDisplay = true } }
+        private var tracking: NSTrackingArea?
+
+        /// Body size at medium weight: a label on a fill looks thinner than the
+        /// same weight on the ground, and medium puts it back level.
+        private static let labelFont = NSFont.systemFont(ofSize: 13, weight: .medium)
+
+        public init(title: String, style: Style = .secondary, target: AnyObject?, action: Selector?) {
+            self.style = style
             super.init(frame: .zero)
-            self.isPrimary = primary
             self.title = title
             self.target = target
             self.action = action
             isBordered = false
-            wantsLayer = true
-            font = DS.secondary
-            layer?.cornerRadius = 6
-            layer?.cornerCurve = .continuous
-            layer?.borderWidth = 1
-            contentTintColor = primary ? DS.accentOnOutline : DS.textSecondary
+            setButtonType(.momentaryPushIn)
+            focusRingType = .default
             translatesAutoresizingMaskIntoConstraints = false
-            heightAnchor.constraint(equalToConstant: 30).isActive = true
-            // A minimum width so short labels ("Quit") still read as a button
+            heightAnchor.constraint(equalToConstant: Metric.buttonHeight).isActive = true
+            // A minimum width so a short label ("Quit") still reads as a button
             // rather than a box drawn tight around three letters.
-            widthAnchor.constraint(greaterThanOrEqualToConstant: primary ? 108 : 76).isActive = true
-            restyle()
-        }
-
-        /// NSButton sizes to its title; the design wants breathing room inside the
-        /// outline, so pad the intrinsic width.
-        public override var intrinsicContentSize: NSSize {
-            var size = super.intrinsicContentSize
-            size.width += 28
-            return size
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+            setContentHuggingPriority(.required, for: .horizontal)
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError() }
 
-        public override func updateLayer() {
-            restyle()
+        public override var title: String {
+            didSet { invalidateIntrinsicContentSize(); needsDisplay = true }
         }
 
-        private func restyle() {
-            layer?.borderColor = (isPrimary ? DS.accent : DS.hairline).cgColor
-            layer?.backgroundColor = (isPrimary ? DS.accentTint : .clear).cgColor
-            attributedTitle = NSAttributedString(string: title, attributes: [
-                .font: DS.secondary,
-                // This is what actually draws — an attributedTitle wins over
-                // contentTintColor, so both have to agree.
-                .foregroundColor: isPrimary ? DS.accentOnOutline : DS.textSecondary,
+        public override var isEnabled: Bool {
+            didSet { needsDisplay = true }
+        }
+
+        public override var isHighlighted: Bool {
+            didSet { needsDisplay = true }
+        }
+
+        public override var intrinsicContentSize: NSSize {
+            let width = (title as NSString).size(withAttributes: [.font: Self.labelFont]).width
+            return NSSize(width: ceil(width) + Space.x4 * 2, height: Metric.buttonHeight)
+        }
+
+        public override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(rect: .zero,
+                                      options: [.mouseEnteredAndExited, .activeInActiveApp,
+                                                .inVisibleRect],
+                                      owner: self)
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        public override func mouseEntered(with event: NSEvent) { hovering = true }
+        public override func mouseExited(with event: NSEvent) { hovering = false }
+
+        public override func draw(_ dirtyRect: NSRect) {
+            let pressed = isHighlighted || (cell?.isHighlighted ?? false)
+            let shape = NSBezierPath(roundedRect: bounds,
+                                     xRadius: Metric.buttonRadius, yRadius: Metric.buttonRadius)
+            let ink: NSColor
+            switch style {
+            case .primary:
+                // Disabled, it gives the amber up entirely rather than fading
+                // it: amber at partial opacity over graphite is a muddy brown
+                // that reads as a colour of its own, not as "not yet".
+                guard isEnabled else {
+                    DS.raised.setFill()
+                    shape.fill()
+                    ink = DS.textFaint
+                    break
+                }
+                (pressed ? DS.accentPressed : (hovering ? DS.accentHover : DS.accent)).setFill()
+                shape.fill()
+                ink = DS.onAccent
+            case .secondary:
+                (pressed ? DS.hairline : DS.raised).setFill()
+                shape.fill()
+                let edge = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                        xRadius: Metric.buttonRadius - 0.5,
+                                        yRadius: Metric.buttonRadius - 0.5)
+                ((hovering && isEnabled) ? DS.edge : DS.hairline).setStroke()
+                edge.lineWidth = 1
+                edge.stroke()
+                ink = isEnabled ? DS.text : DS.textFaint
+            }
+            let label = NSAttributedString(string: title, attributes: [
+                .font: Self.labelFont,
+                .foregroundColor: ink,
             ])
+            let size = label.size()
+            label.draw(at: NSPoint(x: (bounds.width - size.width) / 2,
+                                   y: (bounds.height - size.height) / 2))
         }
 
-        public func setPrimary(_ primary: Bool) {
-            isPrimary = primary
-            restyle()
+        // Full Keyboard Access draws the ring around the shape that is actually
+        // there, rather than a square around a rounded button.
+        public override func drawFocusRingMask() {
+            NSBezierPath(roundedRect: bounds, xRadius: Metric.buttonRadius,
+                         yRadius: Metric.buttonRadius).fill()
         }
+
+        public override var focusRingMaskBounds: NSRect { bounds }
     }
 }

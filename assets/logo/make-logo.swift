@@ -27,11 +27,11 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-// ── Nocturne tokens ──────────────────────────────────────────────────────────
+// ── Solar tokens ─────────────────────────────────────────────────────────────
 //
-// Copied literally from the design system rather than derived. The ramps were
-// chosen against contrast targets; a generated one lands somewhere plausible
-// and fails in exactly the places nobody screenshots.
+// Copied literally from docs/design-system.md rather than derived. The ramps
+// were chosen against contrast targets; a generated one lands somewhere
+// plausible and fails in exactly the places nobody screenshots.
 
 struct RGB {
     let r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat
@@ -45,13 +45,13 @@ struct RGB {
 }
 
 enum Token {
-    static let tile = RGB(0x232532)        // the app tile
-    static let tileEdge = RGB(0x3F424D)    // its hairline
-    static let frame = RGB(0x595D6C)       // the host display
-    static let frameMid = RGB(0x75798C)    // brightened at 32 and 24
-    static let frameSmall = RGB(0x9397AB)  // brightened again at 20 and 16
-    static let accent = RGB(0x9184D9)      // the application
-    static let mono = RGB(0xE9E9ED)        // template / menu bar
+    static let tile = RGB(0x17191E)        // the app tile: `surface`
+    static let tileEdge = RGB(0x2A2D35)    // its hairline: `hairline`
+    static let frame = RGB(0x5A5F6B)       // the host display: `textFaint`
+    static let frameMid = RGB(0x7C818D)    // brightened at 32 and 24: `textMuted`
+    static let frameSmall = RGB(0xA9ADB8)  // brightened again at 20 and 16: `textSecondary`
+    static let accent = RGB(0xFFB547)      // the application: `accent`, sun amber
+    static let mono = RGB(0xF2F2F4)        // template / menu bar: `text`
 }
 
 /// What ground the mark is being drawn on.
@@ -312,7 +312,7 @@ func contactSheet(_ sizes: [Int], zoom: Int) -> CGImage {
     let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                             bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-    context.setFillColor(RGB(0x161826).cg)
+    context.setFillColor(RGB(0x0E0F12).cg)
     context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
     context.interpolationQuality = .none
 
@@ -324,7 +324,7 @@ func contactSheet(_ sizes: [Int], zoom: Int) -> CGImage {
         context.draw(image, in: box)
         // One line per source pixel, so the whole-pixel coordinates the small
         // artboards are specified in can be counted off the sheet.
-        context.setStrokeColor(RGB(0xE9E9ED, 0.12).cg)
+        context.setStrokeColor(RGB(0xF2F2F4, 0.12).cg)
         context.setLineWidth(1)
         for step in 0...size {
             let offset = CGFloat(step * zoom)

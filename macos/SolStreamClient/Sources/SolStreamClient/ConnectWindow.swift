@@ -8,9 +8,10 @@ import AgentChannel
 ///
 /// Reachability and pairing state are shown on the host row itself rather than
 /// behind a dialog, so connecting is one step and a problem is legible before you
-/// press anything. The dot is the only coloured thing on the row: accent means
-/// reachable, grey means not. The primary button relabels — `Pair & Connect`
-/// rather than a second button — so there is never more than one way forward.
+/// press anything. The dot is the only coloured thing on the row: green is
+/// reachable, a pulsing amber is still checking, coral is not answering. The
+/// primary button relabels — `Pair & Connect` rather than a second button — so
+/// there is never more than one way forward.
 final class ConnectWindow: NSObject, NSWindowDelegate {
     private static let lastHostKey = "SolStream.lastHost"
     private static let recentHostsKey = "SolStream.recentHosts"
@@ -39,14 +40,18 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     private let window: NSWindow
     private let hostDropdown = HostDropdown()
-    private let hintLabel = NSTextField(labelWithString: "")
-    private let connectButton: DS.OutlinedButton
-    private let quitButton: DS.OutlinedButton
+    private let hintLabel = NSTextField(wrappingLabelWithString: "")
+    private let connectButton: DS.Button
+    private let quitButton: DS.Button
 
     private let browser = HostBrowser()
     private var discovered: [DiscoveredHost] = []
     private var state: HostState
     private var probe: DispatchWorkItem?
+    /// Set once a host is picked or typed in this window. Until then the host on
+    /// show is only what was remembered from last time, and discovery is allowed
+    /// to replace it with a better one; after it, nothing replaces a choice.
+    private var hostChosenHere = false
 
     private let onConnect: (String) -> Void
 
@@ -55,15 +60,19 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         self.state = HostState(address: Self.lastHost ?? Self.recentHosts.first ?? "",
                                name: nil, isReachable: nil, isPaired: false, latency: nil)
 
-        connectButton = DS.OutlinedButton(title: "Connect", primary: true, target: nil, action: nil)
-        quitButton = DS.OutlinedButton(title: "Quit", target: nil, action: nil)
+        connectButton = DS.Button(title: "Connect", style: .primary, target: nil, action: nil)
+        quitButton = DS.Button(title: "Quit", target: nil, action: nil)
 
-        // 420x280: the extra height over a bare prompt is what lets reachability,
-        // latency and pairing live on the row instead of in an alert.
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 280),
-                          styleMask: [.titled, .closable, .miniaturizable],
+        // 440 wide and exactly as tall as its content. It used to be a fixed
+        // 420x280 with the content pinned to the top, which left a band of empty
+        // ground under the buttons on every launch. The title bar is transparent
+        // and the content runs under it, so the window reads as one surface with
+        // the traffic lights sitting on it.
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
+                          styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "SolStream"
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.backgroundColor = DS.ground
@@ -76,13 +85,20 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     private func build() {
-        let heading = NSTextField(labelWithString: "Connect to a Windows host")
-        heading.font = DS.title
-        heading.textColor = DS.textPrimary
+        // The mark, small: the one piece of brand on the one screen everybody
+        // sees first. In the bundle this is the app icon; unbundled it is the
+        // generic one, which is why it is an image view and not drawn here.
+        let mark = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
+        mark.imageScaling = .scaleProportionallyUpOrDown
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        mark.setAccessibilityElement(false)
 
-        let subheading = NSTextField(labelWithString: "SolStream streams one app, not the desktop.")
-        subheading.font = DS.secondary
-        subheading.textColor = DS.textMuted
+        let heading = DS.label("Connect to your PC", font: DS.title)
+
+        let subheading = NSTextField(wrappingLabelWithString:
+            "SolStream streams one app from a Windows PC, not the whole desktop.")
+        subheading.font = DS.body
+        subheading.textColor = DS.textSecondary
 
         // ── The host row ────────────────────────────────────────────────────
         //
@@ -93,11 +109,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hostDropdown.translatesAutoresizingMaskIntoConstraints = false
         hostDropdown.onPick = { [weak self] address in self?.hostPicked(address) }
 
-        hintLabel.font = DS.secondary
+        // Supporting text, so `textMuted` rather than secondary: the subheading
+        // above is the sentence to read, this is the footnote to the row.
+        hintLabel.font = DS.body
         hintLabel.textColor = DS.textMuted
-        hintLabel.lineBreakMode = .byWordWrapping
         hintLabel.maximumNumberOfLines = 2
-        hintLabel.preferredMaxLayoutWidth = 356
 
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
@@ -105,35 +121,55 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
 
+        // Both buttons trailing, the primary last, the way every Mac dialog puts
+        // them: the eye ends where the way forward is.
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [quitButton, spacer, connectButton])
+        let buttons = NSStackView(views: [spacer, quitButton, connectButton])
         buttons.orientation = .horizontal
-        buttons.spacing = 10
+        buttons.spacing = DS.Space.x3
 
-        let stack = NSStackView(views: [heading, subheading, hostDropdown, hintLabel, buttons])
+        let stack = NSStackView(views: [mark, heading, subheading, hostDropdown, hintLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 14
-        stack.setCustomSpacing(6, after: heading)
-        stack.setCustomSpacing(20, after: subheading)
-        stack.edgeInsets = NSEdgeInsets(top: 30, left: 32, bottom: 26, right: 32)
+        stack.spacing = DS.Space.x2
+        stack.setCustomSpacing(DS.Space.x4, after: mark)
+        stack.setCustomSpacing(DS.Space.x1, after: heading)
+        stack.setCustomSpacing(DS.Space.x6, after: subheading)
+        // 16, not 24: the hint always reserves a second line, so when it says
+        // one the gap above the buttons is already a line taller.
+        stack.setCustomSpacing(DS.Space.x4, after: hintLabel)
+        // The top inset clears the title bar the content runs under, then the
+        // usual inset below it.
+        let inset = DS.Metric.inset
+        stack.edgeInsets = NSEdgeInsets(top: DS.Metric.titleBar + DS.Space.x5, left: inset,
+                                        bottom: inset, right: inset)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
-        content.wantsLayer = true
         content.addSubview(stack)
+        let width = content.widthAnchor.constraint(equalToConstant: 440)
         NSLayoutConstraint.activate([
+            width,
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            hostDropdown.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
-            hintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64),
+            mark.widthAnchor.constraint(equalToConstant: DS.Space.x12),
+            mark.heightAnchor.constraint(equalToConstant: DS.Space.x12),
+            subheading.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
+            hostDropdown.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
+            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
+            hintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
+            // Always two lines tall. The hint is one line or two depending on
+            // what it is saying, and a window that grows and shrinks by a line
+            // as a probe comes back is a window that jumps under the pointer.
+            hintLabel.heightAnchor.constraint(equalToConstant:
+                ceil(DS.body.boundingRectForFont.height) * 2),
         ])
 
         window.contentView = content
+        window.setContentSize(content.fittingSize)
     }
 
     func show() {
@@ -167,26 +203,29 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.isPaired = AgentConnection.storedToken(for: state.address) != nil
 
         var dotState: DS.Dot.State = .idle
-        var parts: [String] = []
-        // The discovered name, when there is one, is worth more than repeating the
-        // address the field is already showing.
-        if let name = state.name { parts.append(name) }
+        var parts: [HostDropdown.Detail] = []
+        // The row's title is the discovered name when there is one, so the
+        // address goes on the second line; without a name the title IS the
+        // address, and repeating it would say nothing.
+        if state.name != nil, !state.address.isEmpty {
+            parts.append(.data(state.address))
+        }
         switch state.isReachable {
         case .some(true):
-            parts.append(state.isPaired ? "paired" : "not paired")
+            parts.append(.words(state.isPaired ? "Paired" : "Not paired"))
             if let latency = state.latency {
-                parts.append("\(Int(latency * 1000)) ms")
+                parts.append(.data("\(Int(latency * 1000)) ms"))
             }
             dotState = .live
         case .some(false):
-            parts.append("unreachable")
-            dotState = .dead
+            parts.append(.words("Not answering"))
+            dotState = .danger
         case nil:
-            parts.append(state.address.isEmpty ? "enter an address" : "checking…")
-            dotState = .idle
+            parts.append(.words(state.address.isEmpty ? "Enter an address" : "Checking…"))
+            dotState = state.address.isEmpty ? .idle : .working
         }
         hostDropdown.setSelection(address: state.address, name: state.name,
-                                  detail: parts.joined(separator: " · "), dotState: dotState)
+                                  detail: parts, dotState: dotState)
         hostDropdown.items = hostItems()
         hostDropdown.isDiscovering = browser.isRunning
 
@@ -216,11 +255,13 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 .map { HostBrowser.baseName(of: $0.name) ?? $0.name }
                 .joined(separator: ", ")
             hintLabel.stringValue = discovered.isEmpty
-                ? "First connection shows a PIN, unless the PC can approve it itself."
+                // Not the GameStream line it replaced ("First connection shows a
+                // PIN…"): there is no PIN, only the token on the PC's window.
+                ? "The first connection asks for the token shown on the PC."
                 : "Found \(names) on this network."
             connectButton.title = "Connect"
         }
-        connectButton.setPrimary(true)
+        hintLabel.textColor = DS.textMuted
         connectButton.isEnabled = !state.address.isEmpty
     }
 
@@ -249,6 +290,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 guard let self, self.state.address == address else { return }
                 self.state.isReachable = reachable
                 self.state.latency = reachable ? elapsed : nil
+                if !reachable, self.preferDiscoveredHost() { return }
                 // Remember it here rather than on Connect. Typing an address and
                 // then not connecting -- because the stream was for later, or the
                 // window was closed, or connecting failed once -- meant typing the
@@ -298,10 +340,47 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 self.scheduleProbe()
             } else if let match = hosts.first(where: { $0.connectTarget == self.state.address }) {
                 self.state.name = match.name
+            } else if self.preferDiscoveredHost() {
+                return
             }
             self.refresh()
         }
         browser.start()
+    }
+
+    /// Swap a remembered host that is not answering for a discovered one this
+    /// Mac is already paired with. Returns true when it switched.
+    ///
+    /// The window opens on the last host used, and addresses move: a DHCP lease
+    /// renews, and the PC that was 192.168.1.21 yesterday answers discovery
+    /// as DESKTOP-EXAMPLE at 192.168.1.20 today. The window then sat on the
+    /// stale address saying "Checking…", and then "Not answering", while the
+    /// PC it meant was in the list one click away.
+    ///
+    /// "Not answering" includes "has not answered yet". A discovered host has
+    /// just answered — that is how it was discovered — while the remembered
+    /// one is unproven, and waiting out its probe's timeout first would show
+    /// the wrong host for the two seconds anybody spends looking at this.
+    ///
+    /// Only before anybody has chosen a host here, and only for a paired host:
+    /// a choice is never overridden, and a host that would ask for a token is
+    /// not an improvement on one that might yet answer.
+    @discardableResult
+    private func preferDiscoveredHost() -> Bool {
+        guard !hostChosenHere, state.isReachable != true,
+              !discovered.contains(where: { $0.connectTarget == state.address }),
+              let paired = discovered.first(where: {
+                  AgentConnection.storedToken(for: $0.connectTarget) != nil
+              }) else { return false }
+        Log.info("[connect] \(state.address) has not answered; preferring \(paired.connectTarget), "
+                 + "found on the network and already paired")
+        state.address = paired.connectTarget
+        state.name = paired.name
+        state.isReachable = nil
+        state.latency = nil
+        refresh()
+        scheduleProbe()
+        return true
     }
 
     // MARK: - Actions
@@ -309,6 +388,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// A row was committed, or an address typed into the list's last row.
     private func hostPicked(_ address: String) {
         let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        hostChosenHere = true
         guard typed != state.address else { return }
         state.address = typed
         state.name = discovered.first { $0.connectTarget == typed }?.name
@@ -322,7 +402,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let host = state.address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
             hintLabel.stringValue = "Enter a hostname or IP address."
-            hintLabel.textColor = DS.accentBright
+            hintLabel.textColor = DS.danger
             return
         }
         Self.remember(host: host)
@@ -347,16 +427,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func hostItems() -> [HostDropdown.Item] {
         var items = discovered.map { host in
             HostDropdown.Item(address: host.connectTarget, name: host.name,
-                              detail: host.connectTarget
-                                  + (AgentConnection.storedToken(for: host.connectTarget) != nil
-                                     ? " · paired" : " · not paired"),
+                              detail: [.data(host.connectTarget),
+                                       .words(AgentConnection.storedToken(for: host.connectTarget) != nil
+                                              ? "Paired" : "Not paired")],
                               dotState: .live, kind: .discovered)
         }
         items += HostBrowser.recentsWorthShowing(Self.recentHosts,
                                                  discovered: discovered).map { address in
             HostDropdown.Item(address: address, name: nil,
-                              detail: AgentConnection.storedToken(for: address) != nil
-                                  ? "paired" : "not paired",
+                              detail: [.words("Used before"),
+                                       .words(AgentConnection.storedToken(for: address) != nil
+                                              ? "Paired" : "Not paired")],
                               dotState: .idle, kind: .recent)
         }
         return items

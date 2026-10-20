@@ -7,7 +7,8 @@ import AgentChannel
 /// "Which application?"
 ///
 /// One ranked list, no modes and no group headers. Windows already open sort
-/// first, carry a live dot and say "Attach"; installed applications say "Launch".
+/// first and carry a live dot; installed applications do not. The selected row
+/// says what Return will do — "Attach" or "Launch".
 /// Typing re-ranks the whole list by match score with open windows keeping a
 /// bonus, because the thing you can see is usually the thing you meant.
 final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
@@ -20,6 +21,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private struct Row {
         let title: String
         let subtitle: String
+        /// Said only on the selected row; see `present`.
+        var note: String? = nil
         /// Stable across the list, so the tile colour never depends on position.
         let key: String
         let isRunning: Bool
@@ -34,16 +37,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// happens on the window the person is already looking at.
     let window: NSWindow
     private let searchField = DS.Field(placeholder: "")
-    /// The search row: the field plus its shortcut hint, on the design's plain
-    /// surface rather than NSSearchField's own bezel and magnifier.
-    private let searchRow = NSView()
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let hintLabel = NSTextField(labelWithString: "↩ to open")
+    private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
-    private let backButton: DS.OutlinedButton
-    private let openButton: DS.OutlinedButton
+    private let backButton: DS.Button
+    private let openButton: DS.Button
 
     private var allRows: [Row] = []
     private var rows: [Row] = []
@@ -59,18 +58,25 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     init(host: String, onChoose: @escaping (Choice) -> Void, onCancel: @escaping () -> Void) {
         self.onChoose = onChoose
         self.onCancel = onCancel
-        backButton = DS.OutlinedButton(title: "Back", target: nil, action: nil)
-        openButton = DS.OutlinedButton(title: "Open", primary: true, target: nil, action: nil)
+        backButton = DS.Button(title: "Back", target: nil, action: nil)
+        openButton = DS.Button(title: "Open", style: .primary, target: nil, action: nil)
 
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        // The title bar is transparent and the content runs under it, so the
+        // window is one graphite surface with the traffic lights on it, and the
+        // title is the content's own heading rather than small grey text in a
+        // strip. The window still carries its title and subtitle for the Window
+        // menu and VoiceOver; it just does not draw them.
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 600),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable,
+                                      .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = host
         window.subtitle = "Choose an application"
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.backgroundColor = DS.ground
-        window.minSize = NSSize(width: 420, height: 380)
+        window.minSize = NSSize(width: 440, height: 420)
 
         super.init()
         build(host: host)
@@ -78,33 +84,33 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     private func build(host: String) {
-        searchField.placeholderString = "Search windows and apps on \(host)"
+        let heading = DS.label("Choose an application", font: DS.title)
+        let subheading = NSTextField(labelWithString: "")
+        let lead = NSMutableAttributedString(string: "Open windows and installed apps on ", attributes: [
+            .font: DS.body, .foregroundColor: DS.textSecondary,
+        ])
+        lead.append(NSAttributedString(string: host, attributes: [
+            .font: DS.mono, .foregroundColor: DS.textSecondary,
+        ]))
+        subheading.attributedStringValue = lead
+        subheading.lineBreakMode = .byTruncatingMiddle
+
+        searchField.placeholder = "Search"
         searchField.target = self
         searchField.action = #selector(searchChanged)
         // Filter as it is typed rather than on Return: the list is the answer,
         // so making the user commit to see it would be a step for nothing.
         searchField.delegate = self
 
-        let searchHint = NSTextField(labelWithString: "⌘F")
-        searchHint.font = DS.monoSmall
-        searchHint.textColor = DS.textMuted
-        searchHint.translatesAutoresizingMaskIntoConstraints = false
-
-        searchRow.wantsLayer = true
-        searchRow.layer?.backgroundColor = DS.chrome.cgColor
-        searchRow.layer?.cornerRadius = DS.Metric.rowCorner
-        searchRow.layer?.cornerCurve = .continuous
-        searchRow.translatesAutoresizingMaskIntoConstraints = false
-        searchRow.addSubview(searchField)
-        searchRow.addSubview(searchHint)
-        NSLayoutConstraint.activate([
-            searchRow.heightAnchor.constraint(equalToConstant: 38),
-            searchField.leadingAnchor.constraint(equalTo: searchRow.leadingAnchor, constant: 12),
-            searchField.centerYAnchor.constraint(equalTo: searchRow.centerYAnchor),
-            searchField.trailingAnchor.constraint(equalTo: searchHint.leadingAnchor, constant: -8),
-            searchHint.trailingAnchor.constraint(equalTo: searchRow.trailingAnchor, constant: -12),
-            searchHint.centerYAnchor.constraint(equalTo: searchRow.centerYAnchor),
-        ])
+        // The design's field rather than NSSearchField's own bezel. It used to
+        // carry a "⌘F" hint at its end that nothing honoured; the field has
+        // focus from the moment the window opens, so a magnifier says what it
+        // is for without promising a shortcut.
+        let magnifier = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass",
+                                                   accessibilityDescription: nil) ?? NSImage())
+        magnifier.symbolConfiguration = .init(pointSize: 13, weight: .medium)
+        magnifier.contentTintColor = DS.textMuted
+        let searchBox = DS.FieldBox(field: searchField, leading: magnifier)
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("app"))
         column.resizingMask = .autoresizingMask
@@ -126,21 +132,32 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        statusLabel.font = DS.monoSmall
-        statusLabel.textColor = DS.textFaint
-        statusLabel.stringValue = "asking the host what it can run…"
+        // The list sits on a card — `surface`, a hairline edge — so it reads as
+        // one object against the ground, with its rows inset by 4 so their 8px
+        // corners sit concentric inside the card's 12.
+        let listCard = DS.card()
+        listCard.addSubview(scrollView)
+        let pad = DS.Space.x1
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: listCard.leadingAnchor, constant: pad),
+            scrollView.trailingAnchor.constraint(equalTo: listCard.trailingAnchor, constant: -pad),
+            scrollView.topAnchor.constraint(equalTo: listCard.topAnchor, constant: pad),
+            scrollView.bottomAnchor.constraint(equalTo: listCard.bottomAnchor, constant: -pad),
+        ])
+
+        statusLabel.font = DS.body
+        statusLabel.textColor = DS.textMuted
+        statusLabel.stringValue = "Asking the PC what it can run…"
         // A failure message is a sentence, not a label. Left to size itself the
         // window grew wider than the screen to fit one on a single line, and the
         // end of the message — the part that says what to do — went off the
         // right edge where it could not be read at all.
-        statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 3
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        statusLabel.preferredMaxLayoutWidth = 380
-        hintLabel.font = DS.monoSmall
-        hintLabel.textColor = DS.textFaint
-        hintLabel.alignment = .right
+        statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        statusLabel.preferredMaxLayoutWidth = 260
 
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -154,27 +171,31 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         backButton.target = self
         backButton.action = #selector(backTapped)
 
+        // One bar along the bottom: what the PC said on the left, the two ways
+        // out on the right with the primary last. The "↩ to open" hint that
+        // used to sit between them is said by the primary button itself now,
+        // and by the selected row.
         let footerSpacer = NSView()
-        footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [spinner, statusLabel, footerSpacer, hintLabel])
+        footerSpacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let footer = NSStackView(views: [spinner, statusLabel, footerSpacer, backButton, openButton])
         footer.orientation = .horizontal
-        footer.spacing = 7
+        footer.alignment = .centerY
+        footer.spacing = DS.Space.x3
+        footer.setCustomSpacing(DS.Space.x2, after: spinner)
 
-        let buttonSpacer = NSView()
-        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [backButton, buttonSpacer, openButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 10
-
-        let stack = NSStackView(views: [searchRow, scrollView,
-                                        DS.hairlineView(), footer, buttons])
+        let stack = NSStackView(views: [heading, subheading, searchBox, listCard, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
-        stack.setCustomSpacing(8, after: scrollView)
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 22, bottom: 20, right: 22)
+        stack.spacing = DS.Space.x3
+        stack.setCustomSpacing(DS.Space.x1, after: heading)
+        stack.setCustomSpacing(DS.Space.x5, after: subheading)
+        stack.setCustomSpacing(DS.Space.x5, after: listCard)
+        let inset = DS.Metric.inset
+        stack.edgeInsets = NSEdgeInsets(top: DS.Metric.titleBar + DS.Space.x5, left: inset,
+                                        bottom: inset, right: inset)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.setHuggingPriority(.defaultLow, for: .vertical)
+        listCard.setContentHuggingPriority(.init(1), for: .vertical)
 
         let content = NSView()
         content.addSubview(stack)
@@ -184,8 +205,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
-        for view in [searchRow, scrollView, footer, buttons] as [NSView] {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -44).isActive = true
+        for view in [subheading, searchBox, listCard, footer] as [NSView] {
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2).isActive = true
         }
         window.contentView = content
     }
@@ -226,22 +247,30 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             // was. What is worth flagging is the opposite: an application that
             // draws its own caption inside the client area, whose minimise and
             // close buttons therefore arrive inside the stream.
+            //
+            // Said quietly: on the selected row's second line, where the choice
+            // is being made, and in every such row's tooltip. It used to be said
+            // twice on every row — in the subtitle and again as an "own
+            // controls" chip — and on a PC where most open windows are modern
+            // apps that sat on nearly every row, which is the same mistake as
+            // the old "title bar hidden" one.
             Row(title: $0.title,
-                subtitle: $0.hidesCaptionWhenCropped ? "open" : "open · has its own window buttons",
+                subtitle: "Open window",
+                note: $0.hidesCaptionWhenCropped ? nil : "own window buttons",
                 key: "\($0.className)/\($0.id)",
                 isRunning: true,
                 drawsOwnControls: !$0.hidesCaptionWhenCropped,
                 choice: .running($0))
         }
         built += apps.map {
-            Row(title: $0.name, subtitle: "application", key: $0.path,
+            Row(title: $0.name, subtitle: "Installed app", key: $0.path,
                 isRunning: false, drawsOwnControls: false, choice: .launch($0))
         }
 
         allRows = built
-        spinner.stopAnimation(nil)
+        setSpinning(false)
         statusLabel.stringValue = "\(windows.count) window\(windows.count == 1 ? "" : "s") open"
-            + " · \(apps.count) app\(apps.count == 1 ? "" : "s") installed"
+            + " · \(apps.count) app\(apps.count == 1 ? "" : "s")"
         statusLabel.textColor = DS.textMuted
         applyFilter()
         if let keepKey, let again = rows.firstIndex(where: { $0.key == keepKey }) {
@@ -251,16 +280,16 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     func showFailure(_ message: String) {
-        spinner.stopAnimation(nil)
+        setSpinning(false)
         statusLabel.stringValue = message
-        statusLabel.textColor = DS.accentBright
+        statusLabel.textColor = DS.danger
     }
 
     /// A launch is slow — a cold start is many seconds — so the row grows a
     /// progress line in place rather than a modal taking the window over. The
     /// list stays interactive; nothing about it moves.
     func showBusy(_ message: String) {
-        spinner.startAnimation(nil)
+        setSpinning(true)
         statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
         openButton.isEnabled = false
@@ -269,13 +298,21 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     func clearBusy() {
-        spinner.stopAnimation(nil)
+        setSpinning(false)
         let previous = busyRow
         busyRow = nil
         if let previous, previous < rows.count {
             tableView.reloadData(forRowIndexes: [previous], columnIndexes: [0])
         }
         openButton.isEnabled = tableView.selectedRow >= 0
+    }
+
+    /// Hidden as well as stopped: a stopped spinner that is merely not drawn
+    /// still holds its slot in the footer, and the status text sat indented by
+    /// a spinner's width for no visible reason.
+    private func setSpinning(_ spinning: Bool) {
+        spinner.isHidden = !spinning
+        if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
     }
 
     // MARK: - Ranking
@@ -369,12 +406,6 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                    row: Int) -> NSView? {
         let entry = rows[row]
 
-        let dot = DS.Dot(state: entry.isRunning ? .live : .idle)
-        dot.pulses = entry.isRunning
-        // Installed applications get no dot at all rather than a grey one: the
-        // dot means "this is live", and an absent one is quieter than a dim one.
-        dot.isHidden = !entry.isRunning
-
         let monogram = DS.Monogram(name: entry.title, key: entry.key)
         // Cached across reloads: the list redraws on every keystroke, and asking
         // the host again each time would make typing hit the network.
@@ -404,55 +435,23 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             }
         }
 
-        let title = NSTextField(labelWithString: entry.title)
-        title.font = DS.body
-        title.textColor = DS.textPrimary
-        title.lineBreakMode = .byTruncatingTail
-
-        let subtitle = NSTextField(labelWithString: row == busyRow
-                                   ? "starting on the PC — usually 10s cold"
-                                   : entry.subtitle)
-        subtitle.font = DS.monoSmall
-        subtitle.textColor = row == busyRow ? DS.accentBright : DS.textFaint
-
-        let labels = NSStackView(views: [title, subtitle])
-        labels.orientation = .vertical
-        labels.alignment = .leading
-        labels.spacing = 1
-
-        let action = NSTextField(labelWithString: entry.isRunning ? "Attach" : "Launch")
-        action.font = DS.monoSmall
-        action.textColor = DS.textFaint
-
-        let cell = NSView()
-        for child in [dot, monogram, labels, action] as [NSView] {
-            child.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(child)
-        }
-        var constraints: [NSLayoutConstraint] = [
-            dot.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-            dot.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            monogram.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 23),
-            monogram.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            labels.leadingAnchor.constraint(equalTo: monogram.trailingAnchor, constant: 11),
-            labels.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            action.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
-            action.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            labels.trailingAnchor.constraint(lessThanOrEqualTo: action.leadingAnchor, constant: -10),
-        ]
-
-        // The chip warns before you open it, not after: these keep their own
-        // window buttons inside the picture.
+        let busy = row == busyRow
+        let cell = PickerCell(title: entry.title,
+                              subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
+                              // Installed applications get no dot at all rather
+                              // than a grey one: the dot means "this is live", and
+                              // an absent one is quieter than a dim one. A launch
+                              // under way is the amber working dot.
+                              note: busy ? nil : entry.note,
+                              dot: busy ? .working : (entry.isRunning ? .live : nil),
+                              action: entry.isRunning ? "Attach" : "Launch",
+                              tile: monogram)
+        // The longer story behind "own window buttons", for anybody who
+        // wonders: these keep their own minimise and close inside the picture.
         if entry.drawsOwnControls {
-            let chip = DS.Chip("own controls")
-            cell.addSubview(chip)
-            constraints += [
-                chip.trailingAnchor.constraint(equalTo: action.leadingAnchor, constant: -12),
-                chip.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                labels.trailingAnchor.constraint(lessThanOrEqualTo: chip.leadingAnchor, constant: -10),
-            ]
+            cell.toolTip = "This app draws its own window buttons, so they appear "
+                + "inside the streamed window."
         }
-        NSLayoutConstraint.activate(constraints)
         return cell
     }
 
@@ -461,18 +460,148 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 }
 
-/// Selection is an accent-tinted fill with a hairline, not the system blue —
-/// nothing in this palette shouts, and the accent is already the "live" colour.
+/// Solar's row: transparent at rest, `raised` under the pointer, and selected as
+/// `accentTint` with a 3px accent bar on the leading edge — not the system blue,
+/// and not Nocturne's purple outline, which was the heaviest thing in the window.
 private final class PickerRowView: NSTableRowView {
+    private var hovering = false {
+        didSet { needsDisplay = true; syncCell() }
+    }
+
+    override var isSelected: Bool {
+        didSet { syncCell() }
+    }
+
+    // The cell paints its own text colours from the selection, so the system's
+    // "emphasized" inversion has nothing to do and must not try.
+    override var isEmphasized: Bool {
+        get { false }
+        set {}
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        syncCell()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.mouseEnteredAndExited, .activeInKeyWindow,
+                                                 .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    private func syncCell() {
+        for case let cell as PickerCell in subviews {
+            cell.setState(selected: isSelected, hovered: hovering)
+        }
+    }
+
+    private var shape: NSBezierPath {
+        NSBezierPath(roundedRect: bounds, xRadius: DS.Metric.rowRadius, yRadius: DS.Metric.rowRadius)
+    }
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard hovering, !isSelected else { return }
+        DS.raised.setFill()
+        shape.fill()
+    }
+
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 0),
-                                 xRadius: DS.Metric.rowCorner, yRadius: DS.Metric.rowCorner)
         DS.accentTint.setFill()
         shape.fill()
-        DS.accent.withAlphaComponent(0.5).setStroke()
-        shape.lineWidth = 1
-        shape.stroke()
+        let barHeight = bounds.height - DS.Space.x6
+        let bar = NSRect(x: 0, y: (bounds.height - barHeight) / 2,
+                         width: DS.Metric.selectionBar, height: barHeight)
+        DS.accent.setFill()
+        NSBezierPath(roundedRect: bar, xRadius: DS.Metric.selectionBar / 2,
+                     yRadius: DS.Metric.selectionBar / 2).fill()
+        // A tint alone is a low-contrast signal; Increase Contrast adds an edge.
+        if NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast {
+            DS.accent.setStroke()
+            let edge = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                    xRadius: DS.Metric.rowRadius, yRadius: DS.Metric.rowRadius)
+            edge.lineWidth = 1
+            edge.stroke()
+        }
+    }
+}
+
+/// One row's contents: the tile, the title, a second line with the live dot,
+/// and — on the selected or hovered row only — the verb.
+///
+/// The verb was on every row, in mono, beside a chip on most of them; a list of
+/// thirty rows each ending "Launch" is thirty times the same word. On the
+/// selected row it says what Return will do, which is the one place it helps.
+private final class PickerCell: NSTableCellView {
+    private let subtitleLabel: NSTextField
+    private let actionLabel: NSTextField
+    private let action: String
+    private let subtitle: String
+    private let note: String?
+
+    init(title: String, subtitle: String, note: String?, dot: DS.Dot.State?, action: String,
+         tile: NSView) {
+        self.action = action
+        self.subtitle = subtitle
+        self.note = note
+        subtitleLabel = DS.label(subtitle, font: DS.caption, colour: DS.textMuted)
+        actionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
+        super.init(frame: .zero)
+
+        let titleLabel = DS.label(title)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        var second: [NSView] = [subtitleLabel]
+        if let dot {
+            second.insert(DS.Dot(state: dot), at: 0)
+        }
+        let secondLine = NSStackView(views: second)
+        secondLine.orientation = .horizontal
+        secondLine.alignment = .centerY
+        secondLine.spacing = 6
+
+        let labels = NSStackView(views: [titleLabel, secondLine])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 2
+
+        actionLabel.alignment = .right
+        actionLabel.setContentHuggingPriority(.required, for: .horizontal)
+        actionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        for child in [tile, labels, actionLabel] as [NSView] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(child)
+        }
+        NSLayoutConstraint.activate([
+            tile.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DS.Space.x3),
+            tile.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labels.leadingAnchor.constraint(equalTo: tile.trailingAnchor, constant: DS.Space.x3),
+            labels.centerYAnchor.constraint(equalTo: centerYAnchor),
+            actionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x3),
+            actionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labels.trailingAnchor.constraint(lessThanOrEqualTo: actionLabel.leadingAnchor,
+                                             constant: -DS.Space.x3),
+        ])
+        setAccessibilityLabel("\(title), \(subtitle)")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setState(selected: Bool, hovered: Bool) {
+        subtitleLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
+        subtitleLabel.stringValue = (selected ? note : nil).map { "\(subtitle) · \($0)" } ?? subtitle
+        actionLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
+        actionLabel.stringValue = selected ? "\(action)  ↩" : (hovered ? action : "")
     }
 }
 
@@ -481,7 +610,8 @@ extension AppPicker: NSTextFieldDelegate {
         searchChanged()
     }
 
-    /// Make the search field drive the list, which is what the footer promises.
+    /// Make the search field drive the list, which is what the Open button and
+    /// the selected row's "↩" promise.
     ///
     /// The Open button already carries "\r" as its key equivalent, but a focused
     /// NSTextField swallows Return to fire its own action first, so the default

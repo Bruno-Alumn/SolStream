@@ -320,26 +320,29 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // autorelease-pool drain. Only invisible while windows were closed solely
         // at app termination, when the process exits before that drain happens.
         window.isReleasedWhenClosed = false
-        window.backgroundColor = .black
+        // Solar's `ground`, so the strip above the application is the same
+        // graphite as every other SolStream window rather than a black of its
+        // own. It resolves to the dark value, because of the appearance below.
+        window.backgroundColor = DS.ground
         // Say out loud that this chrome is dark, because the line above made it
         // so without telling anyone.
         //
         // `titlebarAppearsTransparent` stops the title bar drawing its own
-        // material, so the black background above shows through the whole strip.
+        // material, so the ground above shows through the whole strip.
         // In the dark appearance that is invisible — AppKit picks a light
         // `labelColor` and the title reads fine. In the LIGHT appearance it
-        // picks black, and draws the title in black on black: the window came up
+        // picks black, and draws the title in black on near-black: the window came up
         // with traffic lights, a quality pill, and no name at all. Verified on
         // the running client, twice in each direction — switching the Mac to
         // Dark made "Character Map" appear and switching back made it vanish.
         //
-        // Deliberately not fixed by dropping the black background. That would
+        // Deliberately not fixed by dropping the dark background. That would
         // hand the strip back to the system material, which is the lighter fix
         // on paper but leaves a video window in a light frame and risks a pale
         // flash during a live resize drag. Naming the appearance keeps the
         // chrome exactly as designed and costs nothing: it also resolves the
         // pill's design tokens to their dark variants, which is what belongs on
-        // a black bar — in light mode the pill was grey on grey.
+        // a dark bar — in light mode the pill was grey on grey.
         window.appearance = NSAppearance(named: .darkAqua)
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 320, height: 200)

@@ -74,14 +74,17 @@ invisible.
 
 ## Colours
 
-Nocturne tokens, copied literally rather than derived:
+Solar tokens (see `docs/design-system.md`), copied literally rather than derived:
 
-| Role | Dark | Light |
-| --- | --- | --- |
-| Tile | `#232532` | `#e4e7f5` |
-| Tile hairline | `#3f424d` | `#cfd3e5` |
-| Frame | `#595d6c` (`#75798c` at 32/24, `#9397ab` at 20/16) | `#9397ab` |
-| Accent | `#9184d9` | `#5d5294` |
+| Role | Value |
+| --- | --- |
+| Tile | `#17191e` (`surface`) |
+| Tile hairline | `#2a2d35` (`hairline`) |
+| Frame | `#5a5f6b` (`#7c818d` at 32/24, `#a9adb8` at 20/16) |
+| Accent | `#ffb547` (`accent`, sun amber) |
+
+The icon is drawn on its dark tile in both themes: an app icon carries its own
+ground, so there is one artwork, not two.
 
 The frame brightens as the artboard shrinks because a hairline at one pixel
 against a dark tile loses its contrast long before it loses its shape.
