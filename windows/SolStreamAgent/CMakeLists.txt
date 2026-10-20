@@ -62,6 +62,9 @@ add_executable(SolStreamAgent
     installer.cpp
     ${SOLSTREAM_MEDIA_SOURCES}
     ${SOLSTREAM_RESOURCES}
+    # Merged into the linker's manifest: no console window when started from
+    # the logon task or a shortcut. See the file.
+    SolStream.manifest
 )
 
 set_target_properties(SolStreamAgent PROPERTIES

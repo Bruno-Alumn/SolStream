@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  SolStream.manifest - merged into the executable's own manifest by the linker.
+
+  consoleAllocationPolicy "detached": SolStream stays a console-subsystem
+  program, so a shell still waits for it when it is asked to print the
+  pairing token, and prints what it says; but Windows no longer gives it a
+  console of its own when it is started any other way: from the logon task,
+  a shortcut, Explorer. On Windows
+  11 with Windows Terminal as the default terminal that console was a whole
+  terminal window opening at every logon, which ReleaseUnwantedConsole could
+  hide only after it had been drawn. Windows 11 24H2 (build 26100) and later;
+  older Windows ignores the element, and ReleaseUnwantedConsole still covers it.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application>
+    <windowsSettings>
+      <consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>
+    </windowsSettings>
+  </application>
+</assembly>

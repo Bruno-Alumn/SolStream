@@ -10,8 +10,8 @@
 // not theirs.
 //
 // Buttons are drawn rather than being child controls, because the design
-// specifies five states per part in literal hex and a stock button can honour
-// none of them. The token is the exception: it is a real EDIT, because
+// (Solar, docs/design-system.md) specifies every state of every part as a
+// colour role, and a stock button can honour none of them. The token is the exception: it is a real EDIT, because
 // selection, the caret and Ctrl+C are the entire reason that field exists and
 // hand-rolling text selection to get them back would be absurd.
 
@@ -27,6 +27,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -35,17 +36,27 @@
 #include "display_setup.h"
 #include "host_theme.h"
 #include "installer.h"
+#include "ports.h"
 #include "vdd.h"
 
 // Not in every SDK this is built against, and they are only integers.
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
+#ifndef DWMWA_TEXT_COLOR
+#define DWMWA_TEXT_COLOR 36
+#endif
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
-#ifndef DWMSBT_MAINWINDOW
-#define DWMSBT_MAINWINDOW 2
+#ifndef DWMSBT_NONE
+#define DWMSBT_NONE 1
 #endif
 
 namespace solstream {
@@ -75,12 +86,38 @@ constexpr UINT WM_SOLSTREAM_JOB_DONE = WM_APP + 1;
 /// Posted while a job is still going, carrying a sentence for the working
 /// phase to show. lparam owns a std::wstring the UI thread deletes.
 constexpr UINT WM_SOLSTREAM_JOB_STEP = WM_APP + 2;
+/// The notification-area icon's callback.
+constexpr UINT WM_SOLSTREAM_TRAY = WM_APP + 3;
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kTrayOpen = 1;
+constexpr UINT kTrayCopyToken = 2;
+constexpr UINT kTrayQuit = 3;
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
 std::mutex g_mutex;
 HostStatus g_status;
 bool g_closed = false;
+
+// ── The notification area ────────────────────────────────────────────────────
+//
+// SolStream is something that runs, not something you look at. It starts at
+// logon with no window at all, lives as an icon beside the clock, and closing
+// its window puts it back there rather than ending it -- the way a remote
+// desktop host is expected to behave, and the only way to promise that nothing
+// on this PC is interrupted by it. Quitting is a deliberate menu choice.
+
+/// Broadcast by Explorer when the taskbar is recreated -- after Explorer
+/// restarts, or a DPI change -- at which point every notification icon is gone
+/// and has to be added again by its owner.
+UINT g_taskbar_created = 0;
+/// Sent by a second launch (a shortcut, the Start menu, setup's "Open") to the
+/// running copy: "show your window". Registered, so both processes agree on it.
+UINT g_show_request = 0;
+bool g_tray_added = false;
+/// Set by the tray's Quit, so the WM_CLOSE that follows ends the program
+/// instead of hiding the window again.
+bool g_quitting = false;
 
 /// Which face the window is showing, fixed at creation.
 WindowMode g_mode = WindowMode::Host;
@@ -113,14 +150,19 @@ ID2D1Factory* g_d2d = nullptr;
 ID2D1HwndRenderTarget* g_target = nullptr;
 ID2D1SolidColorBrush* g_brush = nullptr;
 IDWriteFactory* g_dwrite = nullptr;
+/// Round caps and joins for the tick, so its two strokes meet as one mark
+/// instead of as two rectangles overlapping at a corner.
+ID2D1StrokeStyle* g_round_stroke = nullptr;
 
-IDWriteTextFormat* g_fmt_wordmark = nullptr;
+// One format per type role in the design, and one more for button captions,
+// which are body-sized but carry the 500 stop so a button reads as a button.
+IDWriteTextFormat* g_fmt_display = nullptr;
+IDWriteTextFormat* g_fmt_title = nullptr;
 IDWriteTextFormat* g_fmt_headline = nullptr;
-IDWriteTextFormat* g_fmt_value = nullptr;
-IDWriteTextFormat* g_fmt_label = nullptr;
+IDWriteTextFormat* g_fmt_body = nullptr;
+IDWriteTextFormat* g_fmt_button = nullptr;
+IDWriteTextFormat* g_fmt_caption = nullptr;
 IDWriteTextFormat* g_fmt_mono = nullptr;
-IDWriteTextFormat* g_fmt_token = nullptr;
-IDWriteTextFormat* g_fmt_pin = nullptr;
 
 /// Segoe UI Variable and Cascadia Mono ship with Windows 11. On anything older
 /// DirectWrite falls back on its own; naming the fallback explicitly keeps the
@@ -150,21 +192,25 @@ bool CreateDeviceIndependentResources() {
         media::Log("[window] DirectWrite would not start (0x%08lX)", hr);
         return false;
     }
-    g_fmt_wordmark = MakeFormat(L"Segoe UI Variable Display", type::kWordmark,
-                                DWRITE_FONT_WEIGHT_MEDIUM);
+    g_fmt_display = MakeFormat(L"Segoe UI Variable Display", type::kDisplay,
+                               DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    g_fmt_title = MakeFormat(L"Segoe UI Variable Display", type::kTitle,
+                             DWRITE_FONT_WEIGHT_SEMI_BOLD);
     g_fmt_headline = MakeFormat(L"Segoe UI Variable Text", type::kHeadline,
-                                DWRITE_FONT_WEIGHT_MEDIUM);
-    g_fmt_value = MakeFormat(L"Segoe UI Variable Text", type::kValue,
-                             DWRITE_FONT_WEIGHT_NORMAL);
-    g_fmt_label = MakeFormat(L"Segoe UI Variable Text", type::kLabel,
-                             DWRITE_FONT_WEIGHT_NORMAL);
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    g_fmt_body = MakeFormat(L"Segoe UI Variable Text", type::kBody,
+                            DWRITE_FONT_WEIGHT_NORMAL);
+    g_fmt_button = MakeFormat(L"Segoe UI Variable Text", type::kBody,
+                              DWRITE_FONT_WEIGHT_MEDIUM);
+    g_fmt_caption = MakeFormat(L"Segoe UI Variable Text", type::kCaption,
+                               DWRITE_FONT_WEIGHT_MEDIUM);
     g_fmt_mono = MakeFormat(L"Cascadia Mono", type::kMono,
                             DWRITE_FONT_WEIGHT_NORMAL);
-    g_fmt_token = MakeFormat(L"Cascadia Mono", type::kValue,
-                             DWRITE_FONT_WEIGHT_NORMAL);
-    g_fmt_pin = MakeFormat(L"Cascadia Mono", type::kPin,
-                           DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    return g_fmt_value != nullptr;
+    const D2D1_STROKE_STYLE_PROPERTIES round = D2D1::StrokeStyleProperties(
+        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+        D2D1_LINE_JOIN_ROUND);
+    g_d2d->CreateStrokeStyle(round, nullptr, 0, &g_round_stroke);
+    return g_fmt_body != nullptr;
 }
 
 void DiscardTarget() {
@@ -260,6 +306,9 @@ void Text(const std::wstring& text, IDWriteTextFormat* format,
 /// `designed` is the height the design gives this block. It is honoured when the
 /// text fits inside it, so the window keeps the rhythm it was drawn with, and
 /// exceeded only when the alternative is losing words.
+///
+/// Rounded up to a whole DIP, so everything stacked under it stays on the DIP
+/// grid and a hairline at 100% lands on one row of pixels instead of two.
 float MeasureHeight(const std::wstring& text, IDWriteTextFormat* format, float width,
                     float designed = 0.0f) {
     if (!format || text.empty() || width <= 0.0f) {
@@ -274,7 +323,33 @@ float MeasureHeight(const std::wstring& text, IDWriteTextFormat* format, float w
     DWRITE_TEXT_METRICS metrics{};
     layout->GetMetrics(&metrics);
     layout->Release();
-    return metrics.height > designed ? metrics.height : designed;
+    const float height = std::ceil(metrics.height);
+    return height > designed ? height : designed;
+}
+
+/// How wide this text is on one line, in DIPs. Buttons are sized to their
+/// caption rather than all being one width, so "OK" is not a slab and "Open
+/// SolStream" is not squeezed against its own edges.
+float MeasureWidth(const std::wstring& text, IDWriteTextFormat* format) {
+    if (!format || text.empty()) {
+        return 0.0f;
+    }
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(g_dwrite->CreateTextLayout(text.c_str(), (UINT32) text.size(), format,
+                                          4096.0f, 4096.0f, &layout))
+        || layout == nullptr) {
+        return 0.0f;
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    layout->GetMetrics(&metrics);
+    layout->Release();
+    return std::ceil(metrics.widthIncludingTrailingWhitespace);
+}
+
+/// The height of one line of `format`, for putting a dot beside the FIRST line
+/// of a block that may wrap rather than beside the middle of the block.
+float LineHeight(IDWriteTextFormat* format) {
+    return MeasureHeight(L"Ag", format, 4096.0f);
 }
 
 /// The focus ring: one geometry everywhere. Two DIPs of the parent's own ground
@@ -298,8 +373,8 @@ void FocusRing(const D2D1_RECT_F& control, float control_radius) {
 /// edge — the host display, and the application half out of it.
 ///
 /// Drawn rather than loaded from the .ico beside it, because this is the only
-/// place it appears at a size Windows has no artboard for, and because at 34
-/// DIP on a 200% display it wants 68 real pixels: a scaled 48px icon there is
+/// place it appears at a size Windows has no artboard for, and because at 38
+/// DIP on a 200% display it wants 76 real pixels: a scaled 48px icon there is
 /// visibly soft next to text DirectWrite has hinted. Two rounded rectangles
 /// cost less than the code to pick the right icon size would.
 ///
@@ -311,14 +386,18 @@ void DrawLogo(const D2D1_RECT_F& box) {
     const float side = box.bottom - box.top;
     const float stroke = side < 24.0f ? 1.0f : side / 17.0f;
 
-    // The design's own light-ground lockup, not the dark one inverted: on a
-    // light ground the tile lightens, the frame darkens toward the text, and the
-    // accent goes to its 700 step so a solid block of it still holds its
-    // contrast against a near-white card.
-    const D2D1_COLOR_F tile = g_palette.dark ? Hex(0x232532) : Hex(0xe4e7f5);
-    const D2D1_COLOR_F tileEdge = g_palette.dark ? Hex(0x3f424d) : Hex(0xcfd3e5);
-    const D2D1_COLOR_F frameInk = g_palette.dark ? Hex(0x595d6c) : Hex(0x9397ab);
-    const D2D1_COLOR_F accentInk = g_palette.dark ? Hex(0x9184d9) : Hex(0x5d5294);
+    // Solar's recolouring of the unchanged shape: tile `surface`, tile edge
+    // `hairline`, the application rectangle `accent`. The frame is `edge` in
+    // the design, brightened at small sizes — and this is a small size, where
+    // `edge` itself is close enough to the tile to disappear, so it takes the
+    // next ink up: textMuted on graphite, textFaint on paper, which is the
+    // same distance from the tile in either theme. These are the .ico's
+    // colours too, so the title bar and the header show one drawing.
+    const D2D1_COLOR_F tile = g_palette.surface;
+    const D2D1_COLOR_F tileEdge = g_palette.hairline;
+    const D2D1_COLOR_F frameInk = g_palette.dark ? g_palette.textMuted
+                                                 : g_palette.textFaint;
+    const D2D1_COLOR_F appInk = g_palette.accent;
 
     // 22.4% — the macOS squircle radius, which is also what the tile is drawn at
     // everywhere it appears beside the wordmark.
@@ -338,24 +417,29 @@ void DrawLogo(const D2D1_RECT_F& box) {
 
     // Drawn second, so it covers the frame's right edge. The overlap IS the
     // mark — a window that crossed a boundary and stopped being remote.
-    const D2D1_RECT_F accent{box.left + side * 0.44f, box.top + side * 0.38f,
-                             box.left + side * 0.85f, box.top + side * 0.74f};
-    g_brush->SetColor(accentInk);
+    const D2D1_RECT_F app{box.left + side * 0.44f, box.top + side * 0.38f,
+                          box.left + side * 0.85f, box.top + side * 0.74f};
+    g_brush->SetColor(appInk);
     g_target->FillRoundedRectangle(
-        D2D1::RoundedRect(accent, side * 0.047f, side * 0.047f), g_brush);
+        D2D1::RoundedRect(app, side * 0.047f, side * 0.047f), g_brush);
 }
 
-/// A status mark. Solid accent = good, accent in a ring = needs you, grey =
-/// not present. No new hues and never red: severity lives in the words.
+/// A status dot, 8 DIP. Green = live, accent with a halo = needs you, coral =
+/// failed, faint = idle. The words beside it still carry the severity; the
+/// colour only makes the row findable from across the room.
 void DrawMark(float cx, float cy, Mark mark) {
+    if (mark == Mark::None) {
+        return;
+    }
     if (mark == Mark::NeedsYou) {
         g_brush->SetColor(D2D1::ColorF(g_palette.accent.r, g_palette.accent.g,
-                                       g_palette.accent.b, 0.20f));
+                                       g_palette.accent.b, 0.22f));
         g_target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 7.0f, 7.0f),
                               g_brush);
     }
+    const float r = metric::kDot / 2.0f;
     g_brush->SetColor(MarkColor(g_palette, mark));
-    g_target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 4.0f, 4.0f), g_brush);
+    g_target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), g_brush);
 }
 
 // ── Interaction ──────────────────────────────────────────────────────────────
@@ -389,8 +473,8 @@ enum ButtonId {
 };
 
 /// A tick box. Drawn rather than a real BUTTON control for the same reason the
-/// buttons are: the design specifies its resting, hover, checked and focused
-/// colours in literal hex, and a stock checkbox honours none of them.
+/// buttons are: the design gives its resting, hover, checked and focused looks
+/// as colour roles, and a stock checkbox honours none of them.
 struct Check {
     int id = 0;
     const wchar_t* caption = L"";
@@ -432,8 +516,9 @@ Button* FindButton(int id) {
     return nullptr;
 }
 
-/// Hit rects are taller than paint rects on the small controls — 32 DIP is the
-/// platform minimum and the Copy button is only 22 DIP of visible ink.
+/// Hit rects are never shorter than the platform's 32 DIP minimum. Every button
+/// is drawn at that height now, so this only matters if one is ever drawn
+/// smaller — and then it still is not a target the pointer has to aim for.
 bool HitButton(const Button& button, float x, float y) {
     if (!button.visible) {
         return false;
@@ -445,6 +530,19 @@ bool HitButton(const Button& button, float x, float y) {
            && y >= button.rect.top - grow && y <= button.rect.bottom + grow;
 }
 
+/// The elevation glyph's box, and the gap between it and the caption.
+constexpr float kShieldW = 12.0f;
+constexpr float kShieldGap = 6.0f;
+
+/// A button's width: its caption plus the design's padding, never narrower
+/// than `min_width`, and wider by the glyph when it carries the UAC shield.
+float ButtonWidth(const std::wstring& caption, bool shield, float min_width) {
+    const float width = MeasureWidth(caption, g_fmt_button)
+                      + metric::kButtonPadX * 2.0f
+                      + (shield ? kShieldW + kShieldGap : 0.0f);
+    return width > min_width ? width : min_width;
+}
+
 void DrawButton(const Button& button) {
     if (!button.visible) {
         return;
@@ -452,36 +550,47 @@ void DrawButton(const Button& button) {
     const bool hot = g_hot == button.id;
     const bool down = g_pressed == button.id && hot;
     const bool focused = g_focus == button.id && g_keyboard_nav;
+    const float radius = metric::kRadiusButton;
 
-    D2D1_COLOR_F fill{};
     D2D1_COLOR_F ink{};
     if (button.kind == ButtonKind::Primary) {
-        fill = down ? g_palette.accentPressed
-                    : (hot ? g_palette.accentHover : g_palette.accent);
+        // Filled sun amber, no border. One of these per screen at most: it is
+        // the thing the screen is asking you to do.
+        Fill(button.rect, radius,
+             down ? g_palette.accentPressed
+                  : (hot ? g_palette.accentHover : g_palette.accent));
         ink = g_palette.onAccent;
-        Fill(button.rect, metric::kRadiusControl, fill);
     } else {
-        ink = hot ? g_palette.accentTintInk : g_palette.text;
-        if (down) {
-            Fill(button.rect, metric::kRadiusControl, g_palette.accentTint);
-        }
-        Stroke(button.rect, metric::kRadiusControl,
-               hot ? g_palette.accent : g_palette.hairlineStrong);
+        // Raised, with a hairline that lifts to `edge` under the pointer. Down
+        // is the hairline's own colour as a fill: one step further from the
+        // ground in either theme, which is what a press should look like.
+        Fill(button.rect, radius, down ? g_palette.hairline : g_palette.raised);
+        Stroke(button.rect, radius,
+               hot || down ? g_palette.edge : g_palette.hairline);
+        ink = g_palette.text;
     }
 
-    D2D1_RECT_F label = button.rect;
+    // The caption — and the shield, when there is one — centred as a group,
+    // so the glyph does not push the word off the button's middle.
+    const float caption_w = MeasureWidth(button.caption, g_fmt_button);
+    const float group = caption_w + (button.shield ? kShieldW + kShieldGap : 0.0f);
+    const float mid = (button.rect.left + button.rect.right) / 2.0f;
+    float left = mid - group / 2.0f;
     if (button.shield) {
         // The shield says "this elevates" before the UAC prompt steals focus.
-        const D2D1_RECT_F glyph{button.rect.left + 10.0f, button.rect.top,
-                                button.rect.left + 24.0f, button.rect.bottom};
-        Text(L"⛊", g_fmt_mono, glyph,
-             button.kind == ButtonKind::Primary ? ink : g_palette.accentHover);
-        label.left += metric::kShieldExtra;
+        Text(L"⛊", g_fmt_button,
+             D2D1::RectF(left - 2.0f, button.rect.top, left + kShieldW + 2.0f,
+                         button.rect.bottom),
+             ink, DWRITE_TEXT_ALIGNMENT_CENTER);
+        left += kShieldW + kShieldGap;
     }
-    Text(button.caption, g_fmt_label, label, ink, DWRITE_TEXT_ALIGNMENT_CENTER);
+    Text(button.caption, g_fmt_button,
+         D2D1::RectF(left, button.rect.top, left + caption_w + 1.0f,
+                     button.rect.bottom),
+         ink);
 
     if (focused) {
-        FocusRing(button.rect, metric::kRadiusControl);
+        FocusRing(button.rect, radius);
     }
 }
 
@@ -498,50 +607,64 @@ void DrawCheck(const Check& check) {
     const bool hot = g_hot == check.id;
     const bool focused = g_focus == check.id && g_keyboard_nav;
 
-    const float top = check.rect.top + (metric::kRowH - kBox) / 2.0f;
+    const float row_h = check.rect.bottom - check.rect.top;
+    const float top = check.rect.top + (row_h - kBox) / 2.0f;
     const D2D1_RECT_F box{check.rect.left, top, check.rect.left + kBox, top + kBox};
 
     if (check.checked) {
-        Fill(box, metric::kRadiusControl,
+        Fill(box, metric::kRadiusCheck,
              hot ? g_palette.accentHover : g_palette.accent);
         // The tick, two strokes. A glyph would need a font that has one at this
         // size and would sit a pixel off centre on half the machines that do.
         g_brush->SetColor(g_palette.onAccent);
         const float l = box.left;
         const float t = box.top;
-        g_target->DrawLine(D2D1::Point2F(l + 4.0f, t + 9.0f),
-                           D2D1::Point2F(l + 7.5f, t + 12.5f), g_brush, 2.0f);
-        g_target->DrawLine(D2D1::Point2F(l + 7.5f, t + 12.5f),
-                           D2D1::Point2F(l + 14.0f, t + 5.5f), g_brush, 2.0f);
+        g_target->DrawLine(D2D1::Point2F(l + 4.5f, t + 9.5f),
+                           D2D1::Point2F(l + 7.75f, t + 12.75f), g_brush, 2.0f,
+                           g_round_stroke);
+        g_target->DrawLine(D2D1::Point2F(l + 7.75f, t + 12.75f),
+                           D2D1::Point2F(l + 13.5f, t + 5.75f), g_brush, 2.0f,
+                           g_round_stroke);
     } else {
-        Stroke(box, metric::kRadiusControl,
-               hot ? g_palette.accent : g_palette.hairlineStrong, 1.5f);
+        // An empty box is a control at rest: surface inside, `edge` around it
+        // — a hairline would be too faint to read as something to click.
+        Fill(box, metric::kRadiusCheck, g_palette.surface);
+        Stroke(box, metric::kRadiusCheck,
+               hot ? g_palette.textMuted : g_palette.edge);
     }
 
     const float text_left = check.rect.left + kBox + space::kMd;
-    Text(check.caption, g_fmt_value,
-         D2D1::RectF(text_left, check.rect.top, check.rect.right,
-                     check.rect.top + metric::kRowH),
-         hot ? g_palette.accentTintInk : g_palette.text);
+    Text(check.caption, g_fmt_body,
+         D2D1::RectF(text_left, check.rect.top, check.rect.right, check.rect.bottom),
+         g_palette.text);
 
     if (focused) {
-        FocusRing(box, metric::kRadiusControl);
+        FocusRing(box, metric::kRadiusCheck);
     }
 }
 
 // ── What the window is currently saying ──────────────────────────────────────
 
 struct Screen {
+    // A short title and the sentence under it, the same shape as setup's. One
+    // long headline wrapped and left "this PC." alone on a line of its own; a
+    // title short enough never to wrap cannot do that.
     std::wstring headline;
+    std::wstring subtitle;
     // The banner is a sentence, a reason, and one button. Empty `what` means no
     // banner at all — most of this window's life.
     std::wstring what;
     std::wstring why;
     std::wstring fix;
     std::wstring code;
+    Mark mark = Mark::None;  ///< the dot beside the banner's first line
+    bool fix_primary = true; ///< "OK" is not the thing the screen is asking for
     bool shield = false;
     bool connected = false;
 };
+
+/// The dot beside a notice: working while its job runs, then how it went.
+Mark g_notice_mark = Mark::None;
 
 /// Derive what to show from what the agent last reported. One banner at a time:
 /// failures cascade, and four banners describing one broken link is noise.
@@ -550,25 +673,33 @@ Screen Describe(const HostStatus& status) {
     screen.connected = status.connected_clients > 0;
 
     if (status.address.empty()) {
-        screen.headline = L"Ready, but your Mac can't reach this PC.";
+        screen.headline = L"Not reachable yet.";
+        screen.subtitle = L"SolStream is ready, but your Mac can't reach this PC.";
         screen.what = L"This PC isn't on a network your Mac can see.";
         screen.why = L"SolStream needs both machines on the same local network.";
         screen.code = L"SS-104";
+        screen.mark = Mark::Failed;
         return screen;
     }
     if (!status.streaming_ready) {
-        screen.headline = L"SolStream couldn't start streaming.";
+        screen.headline = L"Streaming didn't start.";
+        screen.subtitle = L"SolStream couldn't start streaming on this PC.";
         screen.what = status.streaming_detail.empty()
                           ? L"The streaming host stopped."
                           : status.streaming_detail;
         screen.why = L"SolStream restarts it on a crash, so a failure that reaches "
                      L"you is a real conflict rather than a hiccup.";
         screen.code = L"SS-311";
+        screen.mark = Mark::Failed;
         return screen;
     }
-    screen.headline = screen.connected
-        ? L"Streaming to your Mac."
-        : L"Ready. Open SolStream on your Mac and pick this PC.";
+    screen.headline = screen.connected ? L"Streaming to your Mac."
+                                       : L"Ready for your Mac.";
+    // Connected, the token is hidden, so the subtitle says where it went rather
+    // than leaving somebody to look for it.
+    screen.subtitle = screen.connected
+        ? L"The pairing token is hidden while your Mac is connected."
+        : L"Open SolStream on your Mac and pick this PC.";
 
     // What a button just did, said in the window rather than in a system dialog
     // that knows nothing about this program's theme. It outranks the driver
@@ -578,8 +709,11 @@ Screen Describe(const HostStatus& status) {
     if (!g_notice.empty()) {
         screen.what = g_notice;
         screen.why = g_notice_detail;
-        // Nothing to dismiss until it has finished saying it.
+        screen.mark = g_notice_mark;
+        // Nothing to dismiss until it has finished saying it. Dismissing is not
+        // the screen's main action, so it is the quiet button.
         screen.fix = g_job_running ? L"" : L"OK";
+        screen.fix_primary = false;
         screen.shield = false;
         return screen;
     }
@@ -587,7 +721,7 @@ Screen Describe(const HostStatus& status) {
     // Missing driver is an advisory, not a failure. SolStream captures the main
     // display instead and everything works — which is why this does not take
     // over the headline, and why the row beside it is "needs you" rather than
-    // the grey mark that means broken.
+    // the coral dot that means broken.
     //
     // It is still worth saying, because the two things it costs are exactly the
     // two a person would otherwise discover the hard way: whatever they drag
@@ -600,6 +734,7 @@ Screen Describe(const HostStatus& status) {
                      L"picture is your monitor's size rather than your Mac's. A "
                      L"virtual display fixes both.";
         screen.fix = L"Install driver";
+        screen.mark = Mark::NeedsYou;
         screen.shield = true;
     }
     return screen;
@@ -610,7 +745,9 @@ Screen Describe(const HostStatus& status) {
 struct Row {
     const wchar_t* label;
     std::wstring value;
-    Mark mark;
+    Mark mark;          ///< None for a fact; a dot only where there is a state
+    bool mono = false;  ///< an address: Cascadia Mono, so 1 and l stay apart
+    bool dim = false;   ///< the value is a placeholder, not a reading
 };
 
 /// The horizontal lockup: mark, gap, wordmark.
@@ -618,38 +755,42 @@ struct Row {
 /// The design fixes the relationship rather than the sizes — the mark's artwork
 /// is as tall as the wordmark's cap height, and the gap between them is that
 /// height divided by 2.5. Segoe UI Variable's cap height is 0.7 of its em, so
-/// the 28 DIP wordmark wants 19.6 DIP of artwork; the artwork is the middle 48%
-/// of the tile, so the tile is 19.6 / 0.48 = 41. That is also the design's own
-/// lockup proportion — a 44 tile against 30 type — arrived at from the other
-/// end, which is the check that the rule and the drawing agree.
-constexpr float kLockupMark = 41.0f;
-constexpr float kLockupH = 42.0f;
+/// the 26 DIP display wordmark wants 18.2 DIP of artwork; the artwork is the
+/// middle 48% of the tile, so the tile is 18.2 / 0.48 = 38.
+constexpr float kLockupMark = 38.0f;
+constexpr float kLockupH = 38.0f;
 
 void DrawLockup(float left, float top, float right) {
     const float mark_top = top + (kLockupH - kLockupMark) / 2.0f;
     DrawLogo(D2D1::RectF(left, mark_top, left + kLockupMark, mark_top + kLockupMark));
-    const float gap = kLockupMark * 0.48f / 2.5f;
-    Text(L"SolStream", g_fmt_wordmark,
+    const float gap = std::round(kLockupMark * 0.48f / 2.5f);
+    Text(L"SolStream", g_fmt_display,
          D2D1::RectF(left + kLockupMark + gap, top, right, top + kLockupH),
          g_palette.text);
 }
 
-/// Make the window tall enough for what was just laid out.
+/// Make the window exactly as tall as what was just laid out.
 ///
-/// The design fixes the window at 460x560 and every block inside it at a height
-/// chosen for the string that was in it when it was drawn. Real strings are
-/// longer on some machines than others — a longer computer name, a failure with
-/// a reason attached, a translated sentence — and a window that cannot grow
-/// answers that by clipping the sentence that explains what went wrong.
+/// There is no designed height any more. The design used to fix the window at
+/// 460x560 and every block inside it at a height chosen for the string that was
+/// in it when it was drawn — which left a third of the host window empty below
+/// the token on a healthy PC, and still clipped the sentence that explains what
+/// went wrong on an unhealthy one. So the window is sized to its content: the
+/// first layout runs before the window is shown, and every later one corrects
+/// it if the content changed.
 ///
-/// Only ever grows, and only by more than a DIP, so this cannot oscillate with
-/// the WM_SIZE it causes.
-void GrowToFit(HWND window, float content_bottom) {
+/// `shrink` is false where the window should only ever grow — setup, once it
+/// is past the choosing phase, where halving the window under the pointer the
+/// moment Install is pressed would look like something broke. Only acts on a
+/// difference of more than a DIP, so it cannot oscillate with the WM_SIZE it
+/// causes: the layout is a function of the content, not of the window.
+void FitToContent(HWND window, float content_bottom, bool shrink) {
     if (!g_target) {
         return;
     }
-    const float wanted = content_bottom + space::kXl;
-    if (wanted <= g_target->GetSize().height + 1.0f) {
+    const float wanted = std::ceil(content_bottom + space::kXl);
+    const float have = g_target->GetSize().height;
+    if (wanted <= have + 1.0f && (!shrink || wanted >= have - 1.0f)) {
         return;
     }
     const UINT dpi = (UINT) g_dpi;
@@ -657,7 +798,7 @@ void GrowToFit(HWND window, float content_bottom) {
                MulDiv((int) wanted, dpi, 96)};
     AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE, 0, dpi);
     SetWindowPos(window, nullptr, 0, 0, frame.right - frame.left,
-                 frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER);
+                 frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void HideAllControls() {
@@ -675,7 +816,7 @@ void HideAllControls() {
 struct SetupCopy {
     std::wstring headline;
     std::wstring lead;
-    std::vector<const wchar_t*> bullets;
+    std::vector<std::wstring> bullets;
     std::wstring go;       ///< the primary button; empty in the working phase
     bool shield = false;
 };
@@ -698,10 +839,19 @@ SetupCopy CopyForPhase() {
             } else {
                 copy.headline = L"Install SolStream on this PC.";
                 copy.lead = L"Afterwards your Mac can open one application from here.";
+                // What InstallSelf actually writes: two firewall rules, both
+                // naming SolStream.exe, one for the agent's TCP port and one for
+                // the media and discovery UDP ports. Taken from ports.h rather
+                // than typed out, so this sentence cannot drift from the rules
+                // the way "the five ports" did. No-break spaces after the
+                // protocols, so a wrap never strands "UDP" from its numbers.
                 copy.bullets = {
                     L"Copies SolStream to Program Files",
-                    L"Opens the five ports your Mac needs, and nothing else",
-                    L"Includes everything it streams with — nothing else to download",
+                    L"Adds two firewall rules for SolStream alone: TCP\u00A0"
+                        + std::to_wstring(kDefaultPort) + L", UDP\u00A0"
+                        + std::to_wstring(kDefaultMediaPort) + L" and "
+                        + std::to_wstring(kDiscoveryPort),
+                    L"Includes everything it streams with — nothing to download",
                 };
                 copy.go = L"Install";
             }
@@ -733,7 +883,7 @@ void DrawWorkingBar(float left, float top, float right) {
     constexpr float kHeight = 4.0f;
     constexpr unsigned kPeriod = 1600;
     const D2D1_RECT_F track{left, top, right, top + kHeight};
-    Fill(track, kHeight / 2.0f, g_palette.inset);
+    Fill(track, kHeight / 2.0f, g_palette.raised);
 
     const float width = right - left;
     const float segment = width * 0.32f;
@@ -749,6 +899,12 @@ void DrawWorkingBar(float left, float top, float right) {
     }
 }
 
+/// A card: `surface`, one hairline, radius 12. Content sits kCardInset inside.
+void DrawCard(const D2D1_RECT_F& rect) {
+    Fill(rect, metric::kRadiusCard, g_palette.surface);
+    Stroke(rect, metric::kRadiusCard, g_palette.hairline);
+}
+
 void LayoutAndPaintSetup(HWND window) {
     if (!EnsureTarget(window)) {
         return;
@@ -757,6 +913,8 @@ void LayoutAndPaintSetup(HWND window) {
     const D2D1_SIZE_F size = g_target->GetSize();
     const float pad = space::kXl;
     const float right = size.width - pad;
+    const float width = right - pad;
+    const float inset = metric::kCardInset;
 
     g_target->BeginDraw();
     g_target->Clear(g_palette.ground);
@@ -764,136 +922,158 @@ void LayoutAndPaintSetup(HWND window) {
 
     float y = pad;
     DrawLockup(pad, y, right);
-    y += kLockupH + space::kMd;
+    y += kLockupH + space::kXl;
 
-    const float headline_h = MeasureHeight(copy.headline, g_fmt_headline,
-                                           right - pad, 52.0f);
-    Text(copy.headline, g_fmt_headline,
-         D2D1::RectF(pad, y, right, y + headline_h), g_palette.text);
-    y += headline_h + space::kLg;
-
-    // The card. In the choosing phase it says what is about to happen, which is
-    // the whole of the consent the UAC prompt is about to ask for in the
-    // abstract; in the others it says what is happening or what happened — and
-    // a failure's reason is the longest string this window ever holds, so it is
-    // measured rather than allotted a height that fits the happy path.
-    const float kLeadH = MeasureHeight(copy.lead, g_fmt_value,
-                                       right - pad - space::kMd * 2.0f, 44.0f);
-    // Per bullet, not one height for all of them. "Keeps your pairing token, so
-    // a reinstall won't make your Mac pair again" wraps to two lines and ran
-    // straight out of the bottom of the card.
-    const float bullet_w = right - pad - space::kMd - space::kLg;
-    std::vector<float> bullet_h;
-    float bullets_h = 0.0f;
-    for (const wchar_t* bullet : copy.bullets) {
-        bullet_h.push_back(MeasureHeight(bullet, g_fmt_label, bullet_w, 24.0f));
-        bullets_h += bullet_h.back();
-    }
-    const bool working = g_phase == Phase::Working;
-    const float card_h = space::kMd + kLeadH
-                       + (copy.bullets.empty() ? 0.0f : space::kSm + bullets_h)
-                       + (working ? space::kMd + 4.0f : 0.0f)
-                       + space::kMd;
-    const float card_top = y;
-    Fill(D2D1::RectF(pad, card_top, right, card_top + card_h), metric::kRadiusCard,
-         g_palette.card);
-    Stroke(D2D1::RectF(pad, card_top, right, card_top + card_h), metric::kRadiusCard,
-           g_palette.hairlineStrong);
-
-    float inner = card_top + space::kMd;
-    Text(copy.lead, g_fmt_value,
-         D2D1::RectF(pad + space::kMd, inner, right - space::kMd, inner + kLeadH),
+    // The title, then the sentence under it. A failure's reason is the longest
+    // string this window ever holds, so both are measured rather than allotted
+    // a height that fits the happy path.
+    const float title_h = MeasureHeight(copy.headline, g_fmt_title, width);
+    Text(copy.headline, g_fmt_title, D2D1::RectF(pad, y, right, y + title_h),
          g_palette.text);
-    inner += kLeadH;
+    y += title_h;
+    if (!copy.lead.empty()) {
+        y += space::kSm;
+        const float lead_h = MeasureHeight(copy.lead, g_fmt_body, width);
+        Text(copy.lead, g_fmt_body, D2D1::RectF(pad, y, right, y + lead_h),
+             g_palette.textSecondary);
+        y += lead_h;
+    }
+    if (g_phase == Phase::Working) {
+        y += space::kLgr;
+        DrawWorkingBar(pad, y, right);
+        y += 4.0f;
+    }
+    if (g_phase == Phase::Failed) {
+        // The log is the one thing worth asking for when this goes wrong on a
+        // machine nobody was watching, so its path is on screen and not in a
+        // support article.
+        y += space::kMd;
+        const std::wstring log = L"Log: " + InstallLogPath();
+        const float log_h = MeasureHeight(log, g_fmt_caption, width);
+        Text(log, g_fmt_caption, D2D1::RectF(pad, y, right, y + log_h),
+             g_palette.textMuted);
+        y += log_h;
+    }
 
+    // The card, in the choosing phase only. It says what is about to happen,
+    // which is the whole of the consent the UAC prompt is about to ask for in
+    // the abstract.
     if (!copy.bullets.empty()) {
-        inner += space::kSm;
-        for (size_t i = 0; i < copy.bullets.size(); ++i) {
-            const float height = bullet_h[i];
-            // The mark sits on the first line rather than in the middle of the
-            // block, so a two-line bullet does not put its dot beside the gap.
-            DrawMark(pad + space::kMd + 4.0f, inner + 12.0f, Mark::Good);
-            Text(copy.bullets[i], g_fmt_label,
-                 D2D1::RectF(pad + space::kMd + space::kLg, inner, right - space::kMd,
-                             inner + height),
-                 g_palette.muted);
-            inner += height;
+        y += space::kLgr;
+        // Per bullet, not one height for all of them. "Keeps your pairing
+        // token, so a reinstall won't make your Mac pair again" wraps to two
+        // lines and ran straight out of the bottom of the card.
+        const float dot_w = 6.0f;
+        const float bullet_left = pad + inset + dot_w + space::kMd;
+        const float bullet_w = right - inset - bullet_left;
+        std::vector<float> bullet_h;
+        float bullets_h = 0.0f;
+        for (const std::wstring& bullet : copy.bullets) {
+            bullet_h.push_back(MeasureHeight(bullet, g_fmt_body, bullet_w));
+            bullets_h += bullet_h.back();
         }
+        bullets_h += space::kSm * (float) (copy.bullets.size() - 1);
+        const float card_h = inset + bullets_h + inset;
+        DrawCard(D2D1::RectF(pad, y, right, y + card_h));
+
+        const float line = LineHeight(g_fmt_body);
+        float inner = y + inset;
+        for (size_t i = 0; i < copy.bullets.size(); ++i) {
+            // The dot sits on the first line rather than in the middle of the
+            // block, so a two-line bullet does not put its dot beside the gap.
+            // Neutral, not a status: nothing here has happened yet.
+            g_brush->SetColor(g_palette.textMuted);
+            g_target->FillEllipse(
+                D2D1::Ellipse(D2D1::Point2F(pad + inset + dot_w / 2.0f,
+                                            inner + line / 2.0f),
+                              dot_w / 2.0f, dot_w / 2.0f),
+                g_brush);
+            Text(copy.bullets[i], g_fmt_body,
+                 D2D1::RectF(bullet_left, inner, right - inset, inner + bullet_h[i]),
+                 g_palette.text);
+            inner += bullet_h[i] + space::kSm;
+        }
+        y += card_h;
     }
-    if (working) {
-        inner += space::kMd;
-        DrawWorkingBar(pad + space::kMd, inner, right - space::kMd);
-    }
-    y = card_top + card_h + space::kXl;
 
     // The tick boxes, only while there is still a choice to make and only when
     // installing — there is nothing optional about removing something.
     if (g_phase == Phase::Choosing && g_mode == WindowMode::Setup) {
-        Text(L"Also", g_fmt_label, D2D1::RectF(pad, y, right, y + 18.0f),
-             g_palette.muted);
-        y += 18.0f + space::kXs;
+        y += space::kXl;
+        const float label_h = LineHeight(g_fmt_body);
+        Text(L"Also", g_fmt_body, D2D1::RectF(pad, y, right, y + label_h),
+             g_palette.textMuted);
+        y += label_h;
+        // The box sits on the content edge, in line with everything above it.
+        // Its focus ring reaches kFocusClearance outside that, into the 24 DIP
+        // window inset, which is room enough.
         for (Check& check : g_checks) {
             check.visible = true;
-            check.rect = D2D1::RectF(pad + metric::kFocusClearance, y,
-                                     right, y + metric::kRowH);
+            check.rect = D2D1::RectF(pad, y, right, y + metric::kRowH);
             DrawCheck(check);
             y += metric::kRowH;
         }
-        y += space::kLg;
-
-        Text(L"Installs to " + InstallDirectory(), g_fmt_mono,
-             D2D1::RectF(pad, y, right, y + 18.0f), g_palette.faint);
-        y += 18.0f;
+        y += space::kSm;
+        const std::wstring where = L"Installs to " + InstallDirectory();
+        const float where_h = MeasureHeight(where, g_fmt_caption, width);
+        Text(where, g_fmt_caption, D2D1::RectF(pad, y, right, y + where_h),
+             g_palette.textMuted);
+        y += where_h;
     }
-    // The buttons are anchored to the bottom edge, so growing for the content
-    // has to leave room for them as well or a long failure message runs
-    // underneath them.
-    const float content_bottom = y + space::kLg + metric::kButtonH;
 
-    // The buttons sit on the bottom edge, where a setup program's buttons are.
-    const float button_top = size.height - pad - metric::kButtonH;
-    float button_left = pad;
-    auto place = [&](int id, const std::wstring& caption, ButtonKind kind,
-                     bool shield) {
-        Button* button = FindButton(id);
-        if (!button) {
-            return;
-        }
-        const float width = metric::kButtonMinW + (shield ? metric::kShieldExtra : 0.0f);
-        button->rect = D2D1::RectF(button_left, button_top, button_left + width,
-                                   button_top + metric::kButtonH);
-        button->caption = caption;
-        button->kind = kind;
-        button->shield = shield;
-        button->visible = true;
-        DrawButton(*button);
-        button_left += width + space::kMd;
-    };
-
+    // The buttons sit on the bottom edge, right-aligned, where a Windows setup
+    // program's buttons are — primary first, so Tab reaches it first.
+    struct Spec { int id; std::wstring caption; ButtonKind kind; bool shield; };
+    std::vector<Spec> specs;
     switch (g_phase) {
         case Phase::Choosing:
-            place(g_mode == WindowMode::Uninstall ? kIdRemove : kIdInstall, copy.go,
-                  ButtonKind::Primary, copy.shield);
-            place(kIdCancel, L"Cancel", ButtonKind::Secondary, false);
+            specs.push_back({g_mode == WindowMode::Uninstall ? kIdRemove : kIdInstall,
+                             copy.go, ButtonKind::Primary, copy.shield});
+            specs.push_back({kIdCancel, L"Cancel", ButtonKind::Secondary, false});
             break;
         case Phase::Working:
             break;  // nothing to press, and a greyed button is still a target
         case Phase::Done:
             if (g_mode == WindowMode::Setup) {
-                place(kIdOpenApp, L"Open SolStream", ButtonKind::Primary, false);
+                specs.push_back({kIdOpenApp, L"Open SolStream", ButtonKind::Primary,
+                                 false});
             }
-            place(kIdClose, L"Close", ButtonKind::Secondary, false);
+            specs.push_back({kIdClose, L"Close", ButtonKind::Secondary, false});
             break;
         case Phase::Failed:
-            place(kIdRetry, L"Try again", ButtonKind::Primary, copy.shield);
-            place(kIdClose, L"Close", ButtonKind::Secondary, false);
-            // The log is the one thing worth asking for when this goes wrong on
-            // a machine nobody was watching, so its path is on screen and not in
-            // a support article.
-            Text(InstallLogPath(), g_fmt_mono,
-                 D2D1::RectF(pad, button_top - 22.0f, right, button_top - 4.0f),
-                 g_palette.faint);
+            specs.push_back({kIdRetry, L"Try again", ButtonKind::Primary, copy.shield});
+            specs.push_back({kIdClose, L"Close", ButtonKind::Secondary, false});
             break;
+    }
+    // Room for the buttons as well, or a long failure message runs underneath
+    // them. With no buttons (the working phase) the content simply ends.
+    const float content_bottom =
+        specs.empty() ? y : y + space::kXl + metric::kButtonH;
+
+    const float button_top = size.height - pad - metric::kButtonH;
+    std::vector<float> widths;
+    float total = 0.0f;
+    for (const Spec& spec : specs) {
+        widths.push_back(ButtonWidth(spec.caption, spec.shield, metric::kButtonMinW));
+        total += widths.back();
+    }
+    if (!specs.empty()) {
+        total += space::kSm * (float) (specs.size() - 1);
+    }
+    float button_left = right - total;
+    for (size_t i = 0; i < specs.size(); ++i) {
+        Button* button = FindButton(specs[i].id);
+        if (!button) {
+            continue;
+        }
+        button->rect = D2D1::RectF(button_left, button_top, button_left + widths[i],
+                                   button_top + metric::kButtonH);
+        button->caption = specs[i].caption;
+        button->kind = specs[i].kind;
+        button->shield = specs[i].shield;
+        button->visible = true;
+        DrawButton(*button);
+        button_left += widths[i] + space::kSm;
     }
 
     const HRESULT hr = g_target->EndDraw();
@@ -908,7 +1088,10 @@ void LayoutAndPaintSetup(HWND window) {
         DiscardTarget();
         return;
     }
-    GrowToFit(window, content_bottom);
+    // Exact while there is still a choice on screen; after that only ever
+    // taller, so pressing Install does not collapse the window under the
+    // pointer. The working phase's slack sits above the (absent) buttons.
+    FitToContent(window, content_bottom, g_phase == Phase::Choosing);
 }
 
 void LayoutAndPaint(HWND window) {
@@ -945,6 +1128,8 @@ void LayoutAndPaint(HWND window) {
     const D2D1_SIZE_F size = g_target->GetSize();
     const float pad = space::kXl;
     const float right = size.width - pad;
+    const float width = right - pad;
+    const float inset = metric::kCardInset;
 
     g_target->BeginDraw();
     g_target->Clear(g_palette.ground);
@@ -952,19 +1137,27 @@ void LayoutAndPaint(HWND window) {
 
     float y = pad;
 
-    // The lockup: the mark, then the wordmark in Segoe UI Variable Display at a
-    // real 500 axis stop.
+    // The lockup: the mark, then the wordmark in Segoe UI Variable Display at
+    // the design's semibold.
     DrawLockup(pad, y, right);
-    y += kLockupH + space::kMd;
+    y += kLockupH + space::kXl;
 
-    // The headline answers "is this PC ready" before anything else is read.
-    const float headline_h = MeasureHeight(screen.headline, g_fmt_headline,
-                                           right - pad, 52.0f);
-    Text(screen.headline, g_fmt_headline,
-         D2D1::RectF(pad, y, right, y + headline_h), g_palette.text);
-    y += headline_h + space::kLg;
+    // The title answers "is this PC ready" before anything else is read; the
+    // subtitle says what to do about it.
+    const float title_h = MeasureHeight(screen.headline, g_fmt_title, width);
+    Text(screen.headline, g_fmt_title, D2D1::RectF(pad, y, right, y + title_h),
+         g_palette.text);
+    y += title_h;
+    if (!screen.subtitle.empty()) {
+        y += space::kSm;
+        const float sub_h = MeasureHeight(screen.subtitle, g_fmt_body, width);
+        Text(screen.subtitle, g_fmt_body, D2D1::RectF(pad, y, right, y + sub_h),
+             g_palette.textSecondary);
+        y += sub_h;
+    }
+    y += space::kLgr;
 
-    // The banner sits under the headline and above the rows, because the rows
+    // The banner sits under the title and above the rows, because the rows
     // are its evidence. One sentence, one reason, one button that does the
     // thing — never "Learn more".
     Button* fix = FindButton(kIdBannerFix);
@@ -975,94 +1168,124 @@ void LayoutAndPaint(HWND window) {
         // Height first, then the card, then its contents. D2D has no z-order —
         // the order of the calls is the z-order — so anything drawn before the
         // fill is simply painted over.
-        const float text_w = right - pad - space::kMd * 2.0f;
-        const float kWhatH = MeasureHeight(screen.what, g_fmt_value, text_w, 22.0f);
-        const float kWhyH = MeasureHeight(screen.why, g_fmt_label, text_w, 40.0f);
+        const bool dot = screen.mark != Mark::None;
+        const float text_left = pad + inset + (dot ? metric::kDot + space::kMd : 0.0f);
+        const float text_w = right - inset - text_left;
+        const float what_h = MeasureHeight(screen.what, g_fmt_headline, text_w);
+        const float why_h = MeasureHeight(screen.why, g_fmt_body, text_w);
         const bool has_fix = fix && !screen.fix.empty();
         const float top = y;
-        const float height = space::kMd + kWhatH + space::kXs + kWhyH
-                             + (has_fix ? space::kSm + metric::kButtonH : 0.0f)
-                             + space::kMd;
+        const float height = inset + what_h
+                             + (why_h > 0.0f ? space::kXs + why_h : 0.0f)
+                             + (has_fix ? space::kLg + metric::kButtonH : 0.0f)
+                             + inset;
+        DrawCard(D2D1::RectF(pad, top, right, top + height));
 
-        Fill(D2D1::RectF(pad, top, right, top + height), metric::kRadiusCard,
-             g_palette.card);
-        Stroke(D2D1::RectF(pad, top, right, top + height), metric::kRadiusCard,
-               g_palette.hairlineStrong);
-
-        float inner = top + space::kMd;
-        Text(screen.what, g_fmt_value,
-             D2D1::RectF(pad + space::kMd, inner, right - space::kMd,
-                         inner + kWhatH), g_palette.text);
-        inner += kWhatH + space::kXs;
-        Text(screen.why, g_fmt_label,
-             D2D1::RectF(pad + space::kMd, inner, right - space::kMd,
-                         inner + kWhyH), g_palette.muted);
-        inner += kWhyH + space::kSm;
+        float inner = top + inset;
+        DrawMark(pad + inset + metric::kDot / 2.0f,
+                 inner + LineHeight(g_fmt_headline) / 2.0f, screen.mark);
+        Text(screen.what, g_fmt_headline,
+             D2D1::RectF(text_left, inner, right - inset, inner + what_h),
+             g_palette.text);
+        inner += what_h;
+        if (why_h > 0.0f) {
+            inner += space::kXs;
+            Text(screen.why, g_fmt_body,
+                 D2D1::RectF(text_left, inner, right - inset, inner + why_h),
+                 g_palette.textSecondary);
+            inner += why_h;
+        }
 
         if (has_fix) {
-            const float width = metric::kButtonMinW
-                                + (screen.shield ? metric::kShieldExtra : 0.0f);
-            fix->rect = D2D1::RectF(pad + space::kMd, inner,
-                                    pad + space::kMd + width,
+            inner += space::kLg;
+            const float button_w = ButtonWidth(screen.fix, screen.shield, 0.0f);
+            fix->rect = D2D1::RectF(text_left, inner, text_left + button_w,
                                     inner + metric::kButtonH);
             fix->caption = screen.fix;
             fix->shield = screen.shield;
-            fix->kind = ButtonKind::Primary;
+            fix->kind = screen.fix_primary ? ButtonKind::Primary
+                                           : ButtonKind::Secondary;
             fix->visible = true;
             DrawButton(*fix);
-            if (!screen.code.empty()) {
-                // For support, not for the user: small, quiet, always there.
-                Text(screen.code, g_fmt_mono,
-                     D2D1::RectF(right - 90.0f - space::kMd, inner,
-                                 right - space::kMd, inner + metric::kButtonH),
-                     g_palette.faint, DWRITE_TEXT_ALIGNMENT_TRAILING);
-            }
+        }
+        if (!screen.code.empty()) {
+            // For support, not for the user: small, quiet, always there —
+            // trailing on the first line, out of the sentence's way.
+            Text(screen.code, g_fmt_caption,
+                 D2D1::RectF(right - inset - 80.0f, top + inset, right - inset,
+                             top + inset + LineHeight(g_fmt_headline)),
+                 g_palette.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
         y = top + height + space::kLg;
     }
 
-    // Four rows, in the order they fail. A status list is a table, so its rules
-    // do not fade — a fading rule inside a table reads as damage.
+    // Four rows, in the order they fail, in one card. Separated by hairlines
+    // rather than boxed: a status list is a table, and its rules do not fade —
+    // a fading rule inside a table reads as damage.
+    //
+    // The first two are facts — a name and an address — and have no dot: a
+    // green dot beside a computer's name claims a state the name does not
+    // have, and four green dots in a column is a pattern nobody reads. The
+    // dot sits beside the VALUE, on the trailing side, so the labels stay one
+    // clean column whether a row has a state or not.
     std::vector<Row> rows;
     rows.push_back({L"This PC",
                     status.computer_name.empty() ? L"—" : status.computer_name,
-                    Mark::Good});
+                    Mark::None, false, status.computer_name.empty()});
     rows.push_back({L"Address",
                     status.address.empty() ? L"not reachable" : status.address,
-                    status.address.empty() ? Mark::Absent : Mark::Good});
+                    Mark::None, !status.address.empty(), status.address.empty()});
     if (screen.connected) {
         rows.push_back({L"Serving",
                         std::to_wstring(status.connected_clients) + L" of 1 · Mac only",
-                        Mark::Good});
+                        Mark::Live});
     } else {
         rows.push_back({L"Streaming",
                         status.streaming_ready ? L"running" : L"not running",
-                        status.streaming_ready ? Mark::Good : Mark::Absent});
+                        status.streaming_ready ? Mark::Live : Mark::Failed});
     }
     // Named for what it is doing rather than for what is missing. "Virtual
     // display: not installed" reads as a broken component; "Display: your main
-    // display" reads as a choice, which is what it is.
+    // display" reads as a choice, which is what it is — and its dot is the
+    // accent that means "works, but there is something to do", not coral.
     rows.push_back(status.virtual_display
         ? Row{L"Virtual display",
               status.display_detail.empty() ? L"—" : status.display_detail,
-              Mark::Good}
+              Mark::Live}
         : Row{L"Display", L"your main display", Mark::NeedsYou});
 
-    for (const Row& row : rows) {
-        DrawMark(pad + 4.0f, y + metric::kRowH / 2.0f, row.mark);
-        Text(row.label, g_fmt_label,
-             D2D1::RectF(pad + space::kLg, y, pad + 150.0f, y + metric::kRowH),
-             g_palette.muted);
-        Text(row.value, g_fmt_value,
-             D2D1::RectF(pad + 150.0f, y, right, y + metric::kRowH),
-             row.mark == Mark::Absent ? g_palette.muted : g_palette.text);
-        Fill(D2D1::RectF(pad, y + metric::kRowH - 1.0f, right, y + metric::kRowH),
-             0.0f, g_palette.rule);
-        y += metric::kRowH;
+    const float list_top = y;
+    const float list_h = space::kXs * 2.0f + metric::kRowH * (float) rows.size();
+    DrawCard(D2D1::RectF(pad, list_top, right, list_top + list_h));
+    float ry = list_top + space::kXs;
+    const float label_left = pad + inset;
+    const float value_left = label_left + 120.0f;
+    const float value_right = right - inset;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const Row& row = rows[i];
+        if (i > 0) {
+            Fill(D2D1::RectF(pad + inset, ry, right - inset, ry + 1.0f), 0.0f,
+                 g_palette.hairline);
+        }
+        Text(row.label, g_fmt_body,
+             D2D1::RectF(label_left, ry, value_left, ry + metric::kRowH),
+             g_palette.textMuted);
+        IDWriteTextFormat* format = row.mono ? g_fmt_mono : g_fmt_body;
+        Text(row.value, format,
+             D2D1::RectF(value_left, ry, value_right, ry + metric::kRowH),
+             row.dim || row.mark == Mark::Failed ? g_palette.textSecondary
+                                                 : g_palette.text,
+             DWRITE_TEXT_ALIGNMENT_TRAILING);
+        if (row.mark != Mark::None) {
+            const float value_w = MeasureWidth(row.value, format);
+            DrawMark(value_right - value_w - space::kSm - metric::kDot / 2.0f,
+                     ry + metric::kRowH / 2.0f, row.mark);
+        }
+        ry += metric::kRowH;
     }
-    y += space::kXl;
+    y = list_top + list_h;
 
-    // The token answers "what do I type on my Mac", and sits above the buttons
+    // The token answers "what do I type on my Mac", and sits under the rows
     // because it is read far more often than any button is pressed. It hides
     // itself while a Mac is connected: a visible pairing token beside a live
     // session is an invitation.
@@ -1071,31 +1294,43 @@ void LayoutAndPaint(HWND window) {
         if (g_token_edit) { ShowWindow(g_token_edit, SW_HIDE); }
         if (copy) { copy->visible = false; }
     } else {
-        Text(L"Pairing token — the Mac asks for this once", g_fmt_label,
-             D2D1::RectF(pad, y, right, y + 18.0f), g_palette.muted);
-        y += 18.0f + space::kSm;
+        y += space::kXl;
+        const float label_h = LineHeight(g_fmt_body);
+        Text(L"Pairing token", g_fmt_body, D2D1::RectF(pad, y, right, y + label_h),
+             g_palette.textSecondary);
+        Text(L"Your Mac asks for it once", g_fmt_body,
+             D2D1::RectF(pad, y, right, y + label_h), g_palette.textMuted,
+             DWRITE_TEXT_ALIGNMENT_TRAILING);
+        y += label_h + space::kSm;
 
-        // Copy is a small button beside the field, not a full-width action:
-        // 22 DIP of visible ink with a 32 DIP hit rect around it. Reserve its
-        // width plus a gutter, or the field runs underneath it — and a child
-        // EDIT always paints above Direct2D content, so the overlap is total.
-        constexpr float kCopyW = 58.0f;
-        const float field_right = right - kCopyW - space::kMd;
+        // Copy is a secondary button beside the field, not a full-width
+        // action. Reserve its width plus a gutter, or the field runs underneath
+        // it — and a child EDIT always paints above Direct2D content, so the
+        // overlap is total.
+        const float copy_w = ButtonWidth(L"Copy", false, 64.0f);
+        const float field_right = right - copy_w - space::kSm;
         const D2D1_RECT_F field{pad, y, field_right, y + metric::kFieldH};
         const bool field_focus = GetFocus() == g_token_edit;
-        Fill(field, metric::kRadiusControl, g_palette.inset);
-        Stroke(field, metric::kRadiusControl,
-               field_focus ? g_palette.accent : g_palette.hairline);
+        Fill(field, metric::kRadiusField, g_palette.surface);
+        // Focused, the hairline itself becomes the 2 DIP accent ring — the
+        // field's own border, not a second ring outside it.
+        if (field_focus) {
+            Stroke(field, metric::kRadiusField, g_palette.accent, metric::kFocusStroke);
+        } else {
+            Stroke(field, metric::kRadiusField, g_palette.hairline);
+        }
 
-        // The EDIT sits one DIP inside the drawn rect, so the hairline is ours
-        // and never the system's.
+        // The EDIT sits inside the drawn rect, so the border is ours and never
+        // the system's, and its one line of text is centred in the field.
         if (g_token_edit) {
             const float scale = g_dpi / 96.0f;
-            const float inset = metric::kFieldInset + 6.0f;
-            const int x = (int) ((field.left + inset) * scale);
-            const int y_px = (int) ((field.top + 8.0f) * scale);
-            const int w = (int) ((field.right - field.left - inset * 2) * scale);
-            const int h = (int) (18.0f * scale);
+            constexpr float kTextH = 16.0f;
+            const int x = (int) std::lround((field.left + metric::kFieldPadX) * scale);
+            const int y_px = (int) std::lround(
+                (field.top + (metric::kFieldH - kTextH) / 2.0f) * scale);
+            const int w = (int) std::lround(
+                (field.right - field.left - metric::kFieldPadX * 2) * scale);
+            const int h = (int) std::lround(kTextH * scale);
             // Only when it has actually moved. This runs on every paint, and a
             // SetWindowPos that changes nothing still repaints the control and
             // still carries SWP_SHOWWINDOW -- so the field was being redrawn
@@ -1116,14 +1351,14 @@ void LayoutAndPaint(HWND window) {
 
         if (copy) {
             const float mid = y + metric::kFieldH / 2.0f;
-            copy->rect = D2D1::RectF(right - kCopyW, mid - metric::kCopyVisual / 2.0f,
-                                     right, mid + metric::kCopyVisual / 2.0f);
+            copy->rect = D2D1::RectF(right - copy_w, mid - metric::kButtonH / 2.0f,
+                                     right, mid + metric::kButtonH / 2.0f);
             copy->caption = L"Copy";
             copy->kind = ButtonKind::Secondary;
             copy->visible = true;
             DrawButton(*copy);
         }
-        y += metric::kFieldH + space::kLg;
+        y += metric::kFieldH;
     }
     const float content_bottom = y;
 
@@ -1146,8 +1381,10 @@ void LayoutAndPaint(HWND window) {
     }
 
     // After EndDraw, never during it: resizing invalidates the render target
-    // this function is holding.
-    GrowToFit(window, content_bottom);
+    // this function is holding. Both ways on this window: the banner coming
+    // and going is the only thing that changes its height, and a window that
+    // kept the banner's height after it went is the dead space this replaced.
+    FitToContent(window, content_bottom, true);
 }
 
 // ── Theme ────────────────────────────────────────────────────────────────────
@@ -1168,16 +1405,113 @@ bool SystemPrefersDark() {
     return ok ? value == 0 : true;
 }
 
+COLORREF ToColorRef(const D2D1_COLOR_F& colour) {
+    return RGB((int) std::lround(colour.r * 255.0f), (int) std::lround(colour.g * 255.0f),
+               (int) std::lround(colour.b * 255.0f));
+}
+
 /// Follow the system immediately on WM_SETTINGCHANGE — never a restart, and
 /// never an in-app theme switch, which would be a second source of truth for
 /// something Windows already decides.
+///
+/// The frame is painted to match: the title bar and the one-pixel border are
+/// `ground`, the same colour as every pixel of the client area, so the window
+/// is one surface from edge to edge. Without this the title bar and border
+/// took the system's own dark grey and the content looked like a panel set
+/// into somebody else's frame. Windows 10 ignores the caption and border
+/// colours and keeps the immersive dark frame, which is the nearest it has.
 void ApplyTheme(HWND window) {
     const bool dark = SystemPrefersDark();
     g_palette = dark ? DarkPalette() : LightPalette();
     const BOOL immersive = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive,
                           sizeof(immersive));
+    const COLORREF caption = ToColorRef(g_palette.ground);
+    const COLORREF border = ToColorRef(g_palette.ground);
+    const COLORREF title = ToColorRef(g_palette.text);
+    DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    DwmSetWindowAttribute(window, DWMWA_TEXT_COLOR, &title, sizeof(title));
     InvalidateRect(window, nullptr, FALSE);
+    if (g_token_edit) {
+        InvalidateRect(g_token_edit, nullptr, TRUE);
+    }
+}
+
+/// The token field's caret, in the accent and kCaretW wide.
+///
+/// The EDIT makes its own 1px black-on-XOR caret in WM_SETFOCUS and then only
+/// moves, shows and hides it; EN_SETFOCUS arrives after that, so replacing the
+/// caret here leaves every other part of the control's behaviour alone — no
+/// subclassing, nothing between the EDIT and its own messages. A caret is
+/// XORed onto what is under it, so the bitmap is the accent XOR the field's
+/// ground, which comes out as the accent on that ground. The bitmap must
+/// outlive the caret, so the previous one is freed only when the next is made
+/// (the EDIT has destroyed the old caret on the way out by then).
+///
+/// The selection highlight stays the system's: an EDIT has no message for its
+/// colours, and painting it ourselves would mean owning the selection drawing
+/// this control exists to provide.
+HBITMAP g_caret_bitmap = nullptr;
+
+void AmberCaret() {
+    if (!g_token_edit) {
+        return;
+    }
+    HDC dc = GetDC(g_token_edit);
+    HFONT old = (HFONT) SelectObject(dc, g_edit_font);
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    SelectObject(dc, old);
+    const int width = (int) std::lround(metric::kCaretW * g_dpi / 96.0f);
+    const int height = metrics.tmHeight > 0 ? metrics.tmHeight : 16;
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
+    if (bitmap) {
+        HDC mem = CreateCompatibleDC(dc);
+        HGDIOBJ previous = SelectObject(mem, bitmap);
+        const COLORREF accent = ToColorRef(g_palette.accent);
+        const COLORREF ground = ToColorRef(g_palette.surface);
+        HBRUSH brush = CreateSolidBrush(accent ^ ground);
+        RECT all{0, 0, width, height};
+        FillRect(mem, &all, brush);
+        DeleteObject(brush);
+        SelectObject(mem, previous);
+        DeleteDC(mem);
+    }
+    ReleaseDC(g_token_edit, dc);
+    if (!bitmap) {
+        return;
+    }
+    POINT where{};
+    GetCaretPos(&where);
+    if (CreateCaret(g_token_edit, bitmap, width, height)) {
+        SetCaretPos(where.x, where.y);
+        ShowCaret(g_token_edit);
+        if (g_caret_bitmap) {
+            DeleteObject(g_caret_bitmap);
+        }
+        g_caret_bitmap = bitmap;
+    } else {
+        DeleteObject(bitmap);
+    }
+}
+
+/// Cascadia Mono at the design's mono size, in this window's DPI. Recreated
+/// when the window moves to a monitor with a different scale, or the token
+/// would stay at the old monitor's pixel size inside a field that scaled.
+void SetEditFont() {
+    if (!g_token_edit) {
+        return;
+    }
+    HFONT font = CreateFontW(
+        -(int) std::lround(type::kMono * g_dpi / 96.0f), 0, 0, 0, FW_NORMAL, FALSE,
+        FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
+    SendMessageW(g_token_edit, WM_SETFONT, (WPARAM) font, TRUE);
+    if (g_edit_font) {
+        DeleteObject(g_edit_font);
+    }
+    g_edit_font = font;
 }
 
 // ── Window ───────────────────────────────────────────────────────────────────
@@ -1306,6 +1640,7 @@ void StartDisplayJob(HWND window) {
     g_job_running = true;
     g_notice = L"Setting the virtual display up…";
     g_notice_detail = L"Installing the driver.";
+    g_notice_mark = Mark::NeedsYou;
     InvalidateRect(window, nullptr, FALSE);
 
     std::thread([window] {
@@ -1338,6 +1673,7 @@ void Activate(HWND window, int id) {
             if (!g_notice.empty()) {
                 g_notice.clear();
                 g_notice_detail.clear();
+                g_notice_mark = Mark::None;
                 InvalidateRect(window, nullptr, FALSE);
                 break;
             }
@@ -1454,7 +1790,114 @@ void MoveFocus(HWND window, int direction) {
 
 float ToDip(int pixels) { return pixels * 96.0f / g_dpi; }
 
+std::wstring TrayTip(const HostStatus& status) {
+    if (!status.agent_listening) {
+        return L"SolStream \u2014 not reachable yet";
+    }
+    if (status.connected_clients > 0) {
+        return L"SolStream \u2014 streaming to your Mac";
+    }
+    return L"SolStream \u2014 ready for your Mac";
+}
+
+NOTIFYICONDATAW TrayData(HWND window) {
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = window;
+    data.uID = kTrayIconId;
+    return data;
+}
+
+void AddTrayIcon(HWND window) {
+    NOTIFYICONDATAW data = TrayData(window);
+    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    data.uCallbackMessage = WM_SOLSTREAM_TRAY;
+    // The small artboard, loaded at the notification area's own size: the
+    // 16px mark is a hand-drawn redraw, not a scale, and asking for exactly
+    // that size picks it rather than shrinking the 256. Not LoadIconMetric,
+    // which lives only in Common Controls 6 -- a version this executable does
+    // not opt into, so importing it stopped the program loading at all.
+    data.hIcon = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                    IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                    GetSystemMetrics(SM_CYSMICON), 0);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        wcsncpy_s(data.szTip, TrayTip(g_status).c_str(), _TRUNCATE);
+    }
+    g_tray_added = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    if (g_tray_added) {
+        data.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
+}
+
+void RemoveTrayIcon(HWND window) {
+    if (g_tray_added) {
+        NOTIFYICONDATAW data = TrayData(window);
+        Shell_NotifyIconW(NIM_DELETE, &data);
+        g_tray_added = false;
+    }
+}
+
+/// Bring the window back from the tray, in front. Called on the UI thread, in
+/// response to a click on the icon or a second launch -- both of which hand
+/// this process the right to take the foreground.
+void ShowFromTray(HWND window) {
+    ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(window);
+}
+
+void ShowTrayMenu(HWND window) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open SolStream");
+    AppendMenuW(menu, MF_STRING, kTrayCopyToken, L"Copy pairing token");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kTrayQuit, L"Quit SolStream");
+    SetMenuDefaultItem(menu, kTrayOpen, FALSE);
+    POINT at{};
+    GetCursorPos(&at);
+    // Without taking the foreground first the menu never dismisses when the
+    // user clicks elsewhere: the documented quirk of TrackPopupMenu from a
+    // notification icon.
+    SetForegroundWindow(window);
+    const UINT chosen = (UINT) TrackPopupMenuEx(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON
+                  | (GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN),
+        at.x, at.y, window, nullptr);
+    DestroyMenu(menu);
+    switch (chosen) {
+        case kTrayOpen:
+            ShowFromTray(window);
+            break;
+        case kTrayCopyToken: {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            CopyToClipboard(g_status.pairing_token);
+            break;
+        }
+        case kTrayQuit:
+            g_quitting = true;
+            PostMessageW(window, WM_CLOSE, 0, 0);
+            break;
+        default:
+            break;
+    }
+}
+
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (g_taskbar_created != 0 && message == g_taskbar_created) {
+        if (g_mode == WindowMode::Host) {
+            g_tray_added = false;
+            AddTrayIcon(window);
+        }
+        return 0;
+    }
+    if (g_show_request != 0 && message == g_show_request) {
+        ShowFromTray(window);
+        return 0;
+    }
     switch (message) {
         case WM_CREATE: {
             g_dpi = (float) GetDpiForWindow(window);
@@ -1490,17 +1933,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 // Cascadia Mono, sized in the same DIPs as everything else. A token
                 // in the proportional UI font is a token whose characters cannot be
                 // told apart when somebody reads it aloud.
-                g_edit_font = CreateFontW(
-                    -(int) (type::kValue * g_dpi / 96.0f), 0, 0, 0, FW_NORMAL, FALSE,
-                    FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN,
-                    L"Cascadia Mono");
-                SendMessageW(g_token_edit, WM_SETFONT, (WPARAM) g_edit_font, TRUE);
+                SetEditFont();
+                AddTrayIcon(window);
             }
 
-            // Mica, so the window sits in the system's own material rather than
-            // pretending to be a flat rectangle on top of it.
-            const int backdrop = DWMSBT_MAINWINDOW;
+            // No Mica. Solar's ground is a flat colour by design — the darkest
+            // thing on screen, so the streamed application stays the brightest
+            // — and Mica tints the title bar with the wallpaper, which is
+            // exactly the frame-around-a-panel look the caption colour in
+            // ApplyTheme exists to remove. Said explicitly rather than left to
+            // the default, which a future Windows may change.
+            const int backdrop = DWMSBT_NONE;
             DwmSetWindowAttribute(window, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop,
                                   sizeof(backdrop));
             ApplyTheme(window);
@@ -1533,6 +1976,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 // question in the same banner the button was in.
                 g_notice = ok ? L"The display is set up."
                               : L"SolStream couldn't set the display up.";
+                g_notice_mark = ok ? Mark::Live : Mark::Failed;
                 g_notice_detail = *text;
             } else {
                 g_phase = ok ? Phase::Done : Phase::Failed;
@@ -1649,18 +2093,29 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // The field's ground and ink come from the drawn surface around it,
             // so the EDIT never looks like a system control that wandered in.
             auto dc = (HDC) wparam;
-            const D2D1_COLOR_F& bg = g_palette.inset;
-            const D2D1_COLOR_F& fg = g_palette.text;
+            const COLORREF bg = ToColorRef(g_palette.surface);
+            const COLORREF fg = ToColorRef(g_palette.text);
             static HBRUSH brush = nullptr;
             if (brush) { DeleteObject(brush); }
-            brush = CreateSolidBrush(RGB((int) (bg.r * 255), (int) (bg.g * 255),
-                                         (int) (bg.b * 255)));
-            SetBkColor(dc, RGB((int) (bg.r * 255), (int) (bg.g * 255),
-                               (int) (bg.b * 255)));
-            SetTextColor(dc, RGB((int) (fg.r * 255), (int) (fg.g * 255),
-                                 (int) (fg.b * 255)));
+            brush = CreateSolidBrush(bg);
+            SetBkColor(dc, bg);
+            SetTextColor(dc, fg);
             return (LRESULT) brush;
         }
+
+        case WM_COMMAND:
+            // The field's border is drawn by this window and becomes the accent
+            // ring while the EDIT has focus, so it has to be told the moment
+            // focus arrives or leaves — not on the next once-a-second tick.
+            if (LOWORD(wparam) == kEditId
+                && (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS)) {
+                if (HIWORD(wparam) == EN_SETFOCUS) {
+                    AmberCaret();
+                }
+                InvalidateRect(window, nullptr, FALSE);
+                return 0;
+            }
+            break;
 
         case WM_SETTINGCHANGE:
             if (lparam && wcscmp((const wchar_t*) lparam, L"ImmersiveColorSet") == 0) {
@@ -1673,6 +2128,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             if (g_target) {
                 g_target->SetDpi(g_dpi, g_dpi);
             }
+            SetEditFont();
             const RECT* suggested = (const RECT*) lparam;
             SetWindowPos(window, nullptr, suggested->left, suggested->top,
                          suggested->right - suggested->left,
@@ -1707,7 +2163,30 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
         }
 
+        case WM_SOLSTREAM_TRAY:
+            // NOTIFYICON_VERSION_4: the event is in the low word of lparam.
+            switch (LOWORD(lparam)) {
+                case NIN_SELECT:
+                case NIN_KEYSELECT:
+                    ShowFromTray(window);
+                    break;
+                case WM_CONTEXTMENU:
+                    ShowTrayMenu(window);
+                    break;
+                default:
+                    break;
+            }
+            return 0;
+
         case WM_CLOSE:
+            // The host goes back to the tray: closing the window is putting it
+            // away, not turning SolStream off, and a Mac that was about to
+            // connect should still find it. Quit in the tray menu is the way
+            // to end it.
+            if (g_mode == WindowMode::Host && !g_quitting && g_tray_added) {
+                ShowWindow(window, SW_HIDE);
+                return 0;
+            }
             // Not in the middle of writing to Program Files. The work happens in
             // another process and would carry on regardless, so closing here
             // would not stop it — it would only take away the one thing that
@@ -1726,6 +2205,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
 
         case WM_DESTROY:
+            RemoveTrayIcon(window);
             DiscardTarget();
             PostQuitMessage(0);
             return 0;
@@ -1738,8 +2218,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 
 }  // namespace
 
-bool ShowHostWindow(WindowMode mode) {
+bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     g_mode = mode;
+    g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+    g_show_request = RegisterWindowMessageW(L"SolStream.ShowHostWindow");
     if (!CreateDeviceIndependentResources()) {
         return false;
     }
@@ -1769,11 +2251,9 @@ bool ShowHostWindow(WindowMode mode) {
 
     const UINT dpi = GetDpiForSystem();
     const int width = MulDiv((int) metric::kWindowW, dpi, 96);
-    // Uninstall has no tick boxes and no install path to show, so the same
-    // height would be a third of a window of empty space above the buttons.
-    const float wanted_height =
-        mode == WindowMode::Uninstall ? 400.0f : metric::kWindowH;
-    const int height = MulDiv((int) wanted_height, dpi, 96);
+    // A first guess only: the layout pass below measures the real height
+    // before anything is on screen.
+    const int height = MulDiv((int) metric::kWindowH, dpi, 96);
     RECT wanted{0, 0, width, height};
     AdjustWindowRectExForDpi(&wanted, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE,
                              0, dpi);
@@ -1800,6 +2280,15 @@ bool ShowHostWindow(WindowMode mode) {
     if (!g_window) {
         return false;
     }
+    // Lay out once while the window is still hidden, so it is shown already at
+    // the height of what it says rather than at a guess that then snaps. The
+    // creating thread's DPI may not be the monitor's; WM_CREATE read the real
+    // one, and this pass measures with it.
+    if (mode == WindowMode::Host) {
+        LayoutAndPaint(g_window);
+    } else {
+        LayoutAndPaintSetup(g_window);
+    }
     if (mode != WindowMode::Host) {
         // Centred and in front. Setup is the only thing this process is doing,
         // and a setup window that opens behind the browser the download came
@@ -1812,6 +2301,13 @@ bool ShowHostWindow(WindowMode mode) {
                      (screen_w - (frame.right - frame.left)) / 2,
                      (screen_h - (frame.bottom - frame.top)) / 2, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER);
+    }
+    // At logon the host starts in the tray and shows nothing: a program that
+    // opens a window on every login is a program that interrupts every login.
+    // Only if the tray icon could not be added -- no Explorer, a stripped-down
+    // shell -- is the window shown anyway, or there would be no way to reach it.
+    if (mode == WindowMode::Host && start_hidden && g_tray_added) {
+        return true;
     }
     ShowWindow(g_window, SW_SHOW);
     UpdateWindow(g_window);
@@ -1840,6 +2336,12 @@ void UpdateHostStatus(const HostStatus& status) {
                 SetWindowTextW(g_token_edit, status.pairing_token.c_str());
             }
         }
+        if (g_tray_added) {
+            NOTIFYICONDATAW data = TrayData(g_window);
+            data.uFlags = NIF_TIP | NIF_SHOWTIP;
+            wcsncpy_s(data.szTip, TrayTip(status).c_str(), _TRUNCATE);
+            Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
         InvalidateRect(g_window, nullptr, FALSE);
     }
 }
@@ -1864,16 +2366,16 @@ bool FocusExistingHostWindow() {
     if (!existing || existing == g_window) {
         return false;
     }
-    if (IsIconic(existing)) {
-        ShowWindow(existing, SW_RESTORE);
+    // The window may be hidden in the tray, which ShowWindow from another
+    // process can un-hide but not bring forward. So ask the owner to show
+    // itself, and hand it the foreground right this process holds -- a
+    // shortcut press does hold it, the shell gives it over for exactly this.
+    DWORD owner = 0;
+    GetWindowThreadProcessId(existing, &owner);
+    if (owner) {
+        AllowSetForegroundWindow(owner);
     }
-    // SetForegroundWindow is refused to a process that does not own the
-    // foreground, and a shortcut press does own it — the shell hands it over for
-    // exactly this. If it is refused anyway the window is at least restored and
-    // flashing in the taskbar, which is the same fallback Windows itself uses.
-    if (!SetForegroundWindow(existing)) {
-        FlashWindow(existing, TRUE);
-    }
+    PostMessageW(existing, RegisterWindowMessageW(L"SolStream.ShowHostWindow"), 0, 0);
     return true;
 }
 

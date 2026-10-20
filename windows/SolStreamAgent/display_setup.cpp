@@ -579,6 +579,13 @@ bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& not
         Add(note, "This display cannot scale to " + std::to_string(percent) + "%.");
         return false;
     }
+    // Already there, which is every start after the first. Setting it anyway is
+    // a display reconfiguration at every logon: Windows re-lays out the desktop
+    // and every window on it gets a WM_DPICHANGED, for a value that did not
+    // change. A background program must not do that to the person at the PC.
+    if (recommended + get.current_relative == target) {
+        return true;
+    }
 
     DpiSetRequest set{};
     set.header.type = kSetDpiScale;

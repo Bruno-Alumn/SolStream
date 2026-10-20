@@ -864,7 +864,7 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
         // --listen-all because an installed host that only answers on loopback is
         // one no Mac can reach. The socket still requires the pairing token off
         // loopback; the window shows that token. That is the lock, not the address.
-        L"      <Arguments>--listen-all</Arguments>\r\n"
+        L"      <Arguments>--listen-all --background</Arguments>\r\n"
         L"      <WorkingDirectory>" + destination + L"</WorkingDirectory>\r\n"
         L"    </Exec>\r\n"
         L"  </Actions>\r\n"

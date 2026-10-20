@@ -45,7 +45,9 @@ enum class WindowMode {
 /// in which case the caller should carry on headless rather than exit — the
 /// agent is useful without a UI, and a machine with no window station (a service
 /// in session 0) is exactly where that happens.
-bool ShowHostWindow(WindowMode mode = WindowMode::Host);
+/// `start_hidden`: the host goes straight to the notification area with no
+/// window, which is how it starts at logon. Ignored for setup and uninstall.
+bool ShowHostWindow(WindowMode mode = WindowMode::Host, bool start_hidden = false);
 
 /// Replace what the window displays. Safe to call from any thread.
 void UpdateHostStatus(const HostStatus& status);

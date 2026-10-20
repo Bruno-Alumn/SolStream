@@ -4391,6 +4391,7 @@ int wmain(int argc, wchar_t** argv) {
     // verification in this project is done over SSH, where there is no desktop
     // to put a window on.
     bool headless = false;
+    bool start_hidden = false;
     bool install_driver = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -4406,6 +4407,10 @@ int wmain(int argc, wchar_t** argv) {
             bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
             bind_address = "0.0.0.0";
+        } else if (arg == L"--background") {
+            // Straight to the notification area, no window: how the logon
+            // task starts it.
+            start_hidden = true;
         } else if (arg == L"--print-token") {
             print_token = true;
         } else if (arg == L"--no-auth") {
@@ -5014,7 +5019,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    if (!solstream::ShowHostWindow()) {
+    if (!solstream::ShowHostWindow(solstream::WindowMode::Host, start_hidden)) {
         // No window station — a scheduled task in session 0, typically. The
         // agent is still useful there, so carry on rather than exiting: the
         // alternative is a host that silently refuses to start for a reason
