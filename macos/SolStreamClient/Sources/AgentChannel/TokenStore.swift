@@ -2,171 +2,191 @@ import Foundation
 import Security
 import SolStreamLogging
 
-/// The pairing token for each host, in the login keychain.
+/// The pairing token for each host, in a file only this user can read.
 ///
 /// The token is the root of the media key schedule, so it does not belong in a
-/// preferences plist that backups, sync and `defaults read` all see. Stored as a
-/// generic password (service `com.solstream.macclient`, account = host) in the
-/// file-based login keychain rather than the data-protection one, because the
-/// latter needs an entitlement the unbundled `swift build` executable cannot
-/// carry.
+/// preferences plist that sync and `defaults read` see. It lives in
+/// `~/Library/Application Support/SolStream/pairing-tokens.json`: the directory
+/// 0700, the file 0600, excluded from backups -- the same shape the PC keeps its
+/// own copy in, under the user's local application data.
 ///
-/// Builds before this kept the token in UserDefaults; the first read of a host
-/// moves it across and deletes the old entry once the keychain has it.
+/// Not the keychain. It was there briefly, and on current macOS a keychain item
+/// is tied by its partition list to the exact signed executable that created
+/// it; SolStream is signed ad hoc, so every update is a new executable and
+/// every update stopped at "SolStream wants to use your confidential
+/// information" before it could connect -- whatever the item's own access list
+/// said. A program whose whole point is not to interrupt cannot do that.
 ///
-/// Cached per process, so the connect window can ask "is this host paired?"
-/// on every keystroke without a keychain round trip — and so a build whose
-/// signature the keychain does not recognise yet asks the user at most once.
-/// Never logs a token.
+/// Tokens kept by earlier builds are moved across on first use: from the
+/// keychain (read with prompts disabled, so an item macOS will not hand over
+/// silently is skipped rather than asked about) and from UserDefaults.
+///
+/// Cached per process, so the connect window can ask "is this host paired?" on
+/// every keystroke without touching the disk. Never logs a token.
 public enum TokenStore {
     static let service = "com.solstream.macclient"
     private static let legacyPrefix = "SolStream.agentToken."
 
     private static let lock = NSLock()
-    /// host -> token, or host -> nil once looked up and found missing.
-    private static var cache: [String: String?] = [:]
+    /// host -> token, as stored. Loaded once.
+    private static var tokens: [String: String]?
 
     public static func token(for host: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        if let cached = cache[host] { return cached }
-        let found = readKeychain(host) ?? migrateLegacy(host)
-        cache[host] = .some(found)
-        return found
+        if let known = loaded()[host] { return known }
+        guard let moved = legacyDefault(host) ?? legacyKeychain(host) else { return nil }
+        store(moved, for: host)
+        Log.info("[agent] moved the pairing token for \(host) to SolStream's own store")
+        return moved
     }
 
     public static func hasToken(for host: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if let cached = cache[host] { return cached != nil }
-        // Attributes only: whether an item exists is answerable without
-        // decrypting it, so this never puts up a keychain prompt.
-        var query = baseQuery(host)
+        if loaded()[host] != nil { return true }
+        if UserDefaults.standard.string(forKey: legacyPrefix + host) != nil { return true }
+        // Attributes only: whether an old keychain item exists is answerable
+        // without its contents, so this never puts up a prompt.
+        var query = keychainQuery(host)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess { return true }
-        return UserDefaults.standard.string(forKey: legacyPrefix + host) != nil
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
     public static func set(_ token: String, for host: String) {
         lock.lock()
         defer { lock.unlock() }
-        if case .some(.some(let known)) = cache[host], known == token { return }
-        if writeKeychain(token, host) {
-            cache[host] = .some(token)
-        } else {
-            // Kept for this run so the session still works; not written
-            // anywhere weaker than the keychain.
-            cache[host] = .some(token)
-            Log.error("[agent] could not store the pairing token for \(host) in the keychain")
-        }
+        guard loaded()[host] != token else { return }
+        store(token, for: host)
     }
 
     public static func remove(for host: String) {
         lock.lock()
         defer { lock.unlock() }
-        SecItemDelete(baseQuery(host) as CFDictionary)
+        var current = loaded()
+        current[host] = nil
+        save(current)
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
-        cache[host] = .some(nil)
+        SecItemDelete(keychainQuery(host) as CFDictionary)
     }
 
     /// Forget every host.
     public static func removeAll() {
         lock.lock()
         defer { lock.unlock() }
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service]
-        // SecItemDelete removes every match in the file-based keychain; looped
-        // anyway in case a keychain version stops at the first.
-        while SecItemDelete(query as CFDictionary) == errSecSuccess {}
+        save([:])
         for key in UserDefaults.standard.dictionaryRepresentation().keys
         where key.hasPrefix(legacyPrefix) {
             UserDefaults.standard.removeObject(forKey: key)
         }
-        cache.removeAll()
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service]
+        while SecItemDelete(query as CFDictionary) == errSecSuccess {}
     }
 
-    // MARK: - Keychain
+    // MARK: - The file
 
-    private static func baseQuery(_ host: String) -> [String: Any] {
+    /// For tests, so they never read or write the person's real tokens.
+    static var directoryOverride: URL? {
+        didSet { lock.lock(); tokens = nil; lock.unlock() }
+    }
+
+    static var fileURL: URL {
+        if let directoryOverride {
+            return directoryOverride.appendingPathComponent("pairing-tokens.json")
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("SolStream", isDirectory: true)
+            .appendingPathComponent("pairing-tokens.json")
+    }
+
+    /// Call with `lock` held.
+    private static func loaded() -> [String: String] {
+        if let tokens { return tokens }
+        var read: [String: String] = [:]
+        if let data = try? Data(contentsOf: fileURL),
+           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+            read = decoded
+        }
+        tokens = read
+        return read
+    }
+
+    /// Call with `lock` held.
+    private static func store(_ token: String, for host: String) {
+        var current = loaded()
+        current[host] = token
+        save(current)
+        // Gone from the old places once the new one has it, so a token is never
+        // in two stores that could disagree.
+        UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
+        SecItemDelete(keychainQuery(host) as CFDictionary)
+    }
+
+    /// Call with `lock` held. Kept in memory for this run even if the write
+    /// fails, so a session that just authenticated keeps working.
+    private static func save(_ next: [String: String]) {
+        tokens = next
+        let fm = FileManager.default
+        let directory = fileURL.deletingLastPathComponent()
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            let data = try JSONEncoder().encode(next)
+            // Written to a 0600 file from the first byte: creating it with the
+            // default umask and tightening it afterwards would leave a moment
+            // in which it is readable by others.
+            let temporary = directory.appendingPathComponent(".pairing-tokens.tmp")
+            fm.createFile(atPath: temporary.path, contents: data,
+                          attributes: [.posixPermissions: 0o600])
+            if fm.fileExists(atPath: fileURL.path) {
+                _ = try fm.replaceItemAt(fileURL, withItemAt: temporary)
+            } else {
+                try fm.moveItem(at: temporary, to: fileURL)
+            }
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            var excluded = URLResourceValues()
+            excluded.isExcludedFromBackup = true
+            var url = fileURL
+            try url.setResourceValues(excluded)
+        } catch {
+            Log.error("[agent] could not save the pairing tokens: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Where earlier builds kept them
+
+    private static func legacyDefault(_ host: String) -> String? {
+        UserDefaults.standard.string(forKey: legacyPrefix + host)
+    }
+
+    private static func keychainQuery(_ host: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecAttrAccount as String: host]
     }
 
-    private static func readKeychain(_ host: String) -> String? {
-        var query = baseQuery(host)
+    /// A token a keychain build left behind, if macOS hands it over without
+    /// asking. Never with a prompt: an item this executable is not trusted for
+    /// fails here, and the person types the token once more instead of meeting
+    /// a password dialog at launch.
+    private static func legacyKeychain(_ host: String) -> String? {
+        var query = keychainQuery(host)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let data = result as? Data else {
             if status != errSecItemNotFound {
-                Log.error("[agent] keychain read for \(host) failed (\(status))")
+                Log.info("[agent] an older keychain copy of the token for \(host) "
+                         + "could not be read without a prompt (\(status)); skipped")
             }
             return nil
         }
         return String(data: data, encoding: .utf8)
-    }
-
-    private static func writeKeychain(_ token: String, _ host: String) -> Bool {
-        let data = Data(token.utf8)
-        let update = SecItemUpdate(baseQuery(host) as CFDictionary,
-                                   [kSecValueData as String: data] as CFDictionary)
-        if update == errSecSuccess { return true }
-        guard update == errSecItemNotFound else {
-            Log.error("[agent] keychain update for \(host) failed (\(update))")
-            return false
-        }
-        var add = baseQuery(host)
-        add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = "SolStream pairing token (\(host))"
-        if let access = openAccess("SolStream pairing token (\(host))") {
-            add[kSecAttrAccess as String] = access
-        }
-        let status = SecItemAdd(add as CFDictionary, nil)
-        if status != errSecSuccess {
-            Log.error("[agent] keychain add for \(host) failed (\(status))")
-        }
-        return status == errSecSuccess
-    }
-
-    /// An access list that lets SolStream read the item without asking.
-    ///
-    /// The default trusts only the exact executable that created the item, and
-    /// every ad-hoc build is a new executable as far as the keychain knows, so
-    /// each update put up "SolStream wants to use your confidential
-    /// information" before it could connect -- an interruption on every
-    /// upgrade, for a token that until this month sat in a plain preferences
-    /// file. Readable by this user's applications without a prompt, the token
-    /// is still encrypted at rest in the login keychain and still out of
-    /// backups and `defaults read`, which is what moving it here was for.
-    ///
-    /// The SecAccess API is deprecated in favour of the data-protection
-    /// keychain, which needs an entitlement an ad-hoc or unbundled build
-    /// cannot carry. Nil on failure, and the item is then stored with the
-    /// default access instead.
-    private static func openAccess(_ label: String) -> SecAccess? {
-        var access: SecAccess?
-        guard SecAccessCreate(label as CFString, nil, &access) == errSecSuccess,
-              let access else { return nil }
-        let decrypt = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt)
-        for case let acl as SecACL in (decrypt as? [Any]) ?? [] {
-            // A nil application list means any application.
-            SecACLSetContents(acl, nil, label as CFString, [])
-        }
-        return access
-    }
-
-    /// Move a token stored by an older build into the keychain. The old entry
-    /// is deleted only once the keychain holds it.
-    private static func migrateLegacy(_ host: String) -> String? {
-        let key = legacyPrefix + host
-        guard let legacy = UserDefaults.standard.string(forKey: key) else { return nil }
-        if writeKeychain(legacy, host) {
-            UserDefaults.standard.removeObject(forKey: key)
-            Log.info("[agent] moved the pairing token for \(host) into the keychain")
-        }
-        return legacy
     }
 }
