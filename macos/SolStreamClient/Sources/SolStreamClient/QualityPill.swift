@@ -1,5 +1,6 @@
 import AppKit
 import DesignSystem
+import InputCapture
 import SolStreamLogging
 
 /// A dot and an fps count, living in the streamed window's title bar.
@@ -91,7 +92,7 @@ final class QualityPill: DS.Box {
         popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
     }
 
-    private func buildDetail() -> NSView {
+    func buildDetail() -> NSView {
         func metric(_ value: String, _ caption: String) -> NSView {
             // Headline size with monospaced digits: the figure is the point of
             // the popover, and it must not reflow as it changes.
@@ -128,12 +129,39 @@ final class QualityPill: DS.Box {
             return stack
         }
 
+        // The mouse mode lives here, beside the numbers it affects, rather than
+        // in a menu: it is a per-moment choice -- a game now, a spreadsheet in
+        // a minute -- and this is the one control on the streamed window.
+        let modes = NSSegmentedControl(labels: ["Desktop", "Gaming"], trackingMode: .selectOne,
+                                       target: self, action: #selector(pointerModeChosen(_:)))
+        modes.selectedSegment = InputCapture.pointerMode == .gaming ? 1 : 0
+        modes.segmentStyle = .rounded
+        modes.selectedSegmentBezelColor = DS.accent
+        // Hugs its labels, so the spacer -- not the control -- takes the slack
+        // and the toggle sits against the right edge like the values above it.
+        modes.setContentHuggingPriority(.required, for: .horizontal)
+        modes.setAccessibilityLabel("Mouse mode")
+        let mouseLabel = DS.label("Mouse", font: DS.body, colour: DS.textMuted)
+        let modeSpacer = NSView()
+        modeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let mouseRow = NSStackView(views: [mouseLabel, modeSpacer, modes])
+        mouseRow.orientation = .horizontal
+        let mouseHint = DS.label(Self.pointerHint(InputCapture.pointerMode),
+                                 font: DS.caption, colour: DS.textMuted)
+        mouseHint.lineBreakMode = .byWordWrapping
+        mouseHint.maximumNumberOfLines = 2
+        mouseHint.preferredMaxLayoutWidth = 280
+        self.mouseHint = mouseHint
+
         let stack = NSStackView(views: [
             row,
             dropped,
             DS.hairlineView(),
             line("Audio", stats.audioActive ? "playing" : "silent — nothing playing on the PC"),
             line("Host display", stats.hostDisplay.isEmpty ? "—" : stats.hostDisplay, isData: true),
+            DS.hairlineView(),
+            mouseRow,
+            mouseHint,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -143,7 +171,7 @@ final class QualityPill: DS.Box {
                                         bottom: DS.Space.x4, right: DS.Space.x5)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 190))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 262))
         container.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -156,7 +184,28 @@ final class QualityPill: DS.Box {
         for view in stack.arrangedSubviews where view is NSStackView && view !== row {
             view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -DS.Space.x5 * 2).isActive = true
         }
+        // As tall as what it holds, measured, rather than a fixed guess that
+        // either clipped the mouse rows or left a band of empty popover.
+        container.layoutSubtreeIfNeeded()
+        container.setFrameSize(NSSize(width: 320, height: ceil(stack.fittingSize.height)))
         return container
+    }
+
+    private weak var mouseHint: NSTextField?
+
+    @objc private func pointerModeChosen(_ sender: NSSegmentedControl) {
+        let mode: InputCapture.PointerMode = sender.selectedSegment == 1 ? .gaming : .desktop
+        InputCapture.pointerMode = mode
+        mouseHint?.stringValue = Self.pointerHint(mode)
+    }
+
+    private static func pointerHint(_ mode: InputCapture.PointerMode) -> String {
+        switch mode {
+        case .desktop:
+            return "The PC's pointer goes exactly where yours is. Best for ordinary apps."
+        case .gaming:
+            return "Click in the window to capture the mouse for games. ⌃⌥ releases it."
+        }
     }
 
     private static func compact(_ value: UInt64) -> String {

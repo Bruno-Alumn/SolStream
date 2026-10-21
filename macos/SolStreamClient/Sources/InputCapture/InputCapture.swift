@@ -45,6 +45,46 @@ public final class InputCapture {
     private var mouseMonitor: Any?
     private var isCapturing = false
 
+    // MARK: Pointer mode
+
+    /// How the mouse reaches the host.
+    ///
+    /// Desktop sends where the pointer IS: an absolute position inside the
+    /// picture, so the host cursor lands exactly under the Mac's -- right for
+    /// every ordinary application. Games want the opposite. A first-person game
+    /// reads raw motion and recentres its own cursor, so absolute positions
+    /// either do nothing or snap the view about, and the Mac's cursor leaving
+    /// the window stops the turn dead. Gaming captures the mouse on a click
+    /// inside the picture -- hidden, held still, only movement sent -- until
+    /// ⌃⌥ releases it, or the window stops being the key one.
+    public enum PointerMode: String, CaseIterable {
+        case desktop, gaming
+    }
+
+    public static let pointerModeChanged = Notification.Name("SolStream.pointerModeChanged")
+    private static let pointerModeKey = "SolStream.pointerMode"
+
+    /// One mode for every streamed window, remembered across launches.
+    public static var pointerMode: PointerMode {
+        get {
+            UserDefaults.standard.string(forKey: pointerModeKey)
+                .flatMap(PointerMode.init(rawValue:)) ?? .desktop
+        }
+        set {
+            guard newValue != pointerMode else { return }
+            UserDefaults.standard.set(newValue.rawValue, forKey: pointerModeKey)
+            Log.info("[input] pointer mode: \(newValue.rawValue)")
+            NotificationCenter.default.post(name: pointerModeChanged, object: nil)
+        }
+    }
+
+    /// The mouse is captured for a game: cursor hidden and decoupled.
+    public private(set) var isPointerCaptured = false
+    /// Sub-pixel motion carried between events, so slow movement is not lost
+    /// to rounding.
+    private var relativeResidual = CGPoint.zero
+    private var modeObserver: NSObjectProtocol?
+
     /// Modifier flags as of the last `.flagsChanged`, so transitions can be
     /// turned into individual key down/up events.
     private var lastModifierFlags: NSEvent.ModifierFlags = []
@@ -208,6 +248,7 @@ public final class InputCapture {
 
     deinit {
         disableCapture()
+        if let modeObserver { NotificationCenter.default.removeObserver(modeObserver) }
     }
 
     /// Attach to the view whose bounds define the input coordinate space.
@@ -227,6 +268,13 @@ public final class InputCapture {
     public func enableCapture() {
         guard !isCapturing else { return }
         isCapturing = true
+        if modeObserver == nil {
+            modeObserver = NotificationCenter.default.addObserver(
+                forName: Self.pointerModeChanged, object: nil, queue: .main
+            ) { [weak self] _ in
+                if Self.pointerMode == .desktop { self?.releasePointer() }
+            }
+        }
         installMonitors()
         syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
     }
@@ -235,6 +283,7 @@ public final class InputCapture {
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
+        releasePointer()
         releaseHeldInput()
         removeMonitors()
         scrollResidual = .zero
@@ -328,6 +377,13 @@ public final class InputCapture {
             let deviceFlags = flags.rawValue
             if event.keyCode == Self.capsLockKeyCode {
                 syncCapsLock(to: flags.contains(.capsLock))
+            }
+            // ⌃⌥ lets a captured mouse go -- the chord VMware and Parallels
+            // taught everyone, and one no game binds on its own. Still
+            // forwarded below: the host must see the modifiers come up again.
+            if isPointerCaptured,
+               flags.intersection([.control, .option, .command, .shift]) == [.control, .option] {
+                releasePointer()
             }
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
                !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
@@ -516,6 +572,19 @@ public final class InputCapture {
             }
         }
 
+        if isPointerCaptured {
+            handleCapturedPointer(event, in: view)
+            return
+        }
+        if Self.pointerMode == .gaming,
+           [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type),
+           sendPosition(for: event, in: view) {
+            // The click that captures is also delivered: it is usually the one
+            // that focuses the game, or fires. The position just sent puts the
+            // host cursor where it was clicked, and motion is relative from there.
+            capturePointer()
+        }
+
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             if event.type == .mouseMoved { mouseMovedSeen += 1 }
@@ -556,6 +625,78 @@ public final class InputCapture {
             // is under the cursor, so the pointer has to be where the wheel was
             // turned before the wheel arrives.
             guard sendPosition(for: event, in: view) else { return }
+            let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
+                                        deltaY: event.scrollingDeltaY,
+                                        precise: event.hasPreciseScrollingDeltas,
+                                        residual: scrollResidual)
+            scrollResidual = wheel.residual
+            if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
+            if wheel.horizontal != 0 {
+                onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal))
+            }
+
+        default:
+            break
+        }
+    }
+
+    // MARK: - Captured pointer
+
+    private func capturePointer() {
+        guard !isPointerCaptured else { return }
+        isPointerCaptured = true
+        relativeResidual = .zero
+        // Decoupled, so the Mac's cursor stays put while the mouse still
+        // reports motion; hidden, so it is not a stray arrow over the game.
+        CGAssociateMouseAndMouseCursorPosition(0)
+        NSCursor.hide()
+        Log.info("[input] mouse captured for gaming; ⌃⌥ releases it")
+    }
+
+    /// Give the mouse back to the Mac. Safe to call whether or not it is held.
+    public func releasePointer() {
+        guard isPointerCaptured else { return }
+        isPointerCaptured = false
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
+        Log.info("[input] mouse released")
+    }
+
+    /// Motion while captured: relative deltas, in the picture's pixels.
+    ///
+    /// NSEvent's deltas are in points and already carry the Mac's pointer
+    /// acceleration, which is what the hand on the mouse is calibrated to.
+    /// Scaled by how many canvas pixels one point of this view shows, so a
+    /// turn feels the same whatever size the window is.
+    private func handleCapturedPointer(_ event: NSEvent, in view: NSView) {
+        switch event.type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            mouseMovedSeen += 1
+            let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
+            let perPoint = view.bounds.width > 0 ? source.width / view.bounds.width : 1
+            let x = relativeResidual.x + event.deltaX * perPoint
+            let y = relativeResidual.y + event.deltaY * perPoint
+            let dx = Int(x.rounded(.towardZero))
+            let dy = Int(y.rounded(.towardZero))
+            relativeResidual = CGPoint(x: x - CGFloat(dx), y: y - CGFloat(dy))
+            if dx != 0 || dy != 0 {
+                positionsSent += 1
+                onInput?(SMTInput.mouseMoveRelative(deltaX: dx, deltaY: dy))
+            }
+
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if let button = button(for: event) {
+                heldButtons.insert(button)
+                onInput?(SMTInput.mouseButton(button, pressed: true))
+            }
+
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            if let button = button(for: event) {
+                heldButtons.remove(button)
+                onInput?(SMTInput.mouseButton(button, pressed: false))
+            }
+
+        case .scrollWheel:
             let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
                                         deltaY: event.scrollingDeltaY,
                                         precise: event.hasPreciseScrollingDeltas,
