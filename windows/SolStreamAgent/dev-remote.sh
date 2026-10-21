@@ -8,9 +8,13 @@
 # in the logged-on user's session. Sockets are not session-isolated, so the
 # agent can still be driven over loopback from an SSH session.
 set -e
+# Your PC, your key and where the repository is on it. Set these in your
+# shell profile rather than editing them here, so nothing personal is committed:
+#   export SOLSTREAM_HOST=you@your-pc   SOLSTREAM_KEY=~/.ssh/your_key
+#   export SOLSTREAM_REPO='C:\Users\you\Desktop\SolStream'
 HOST=${SOLSTREAM_HOST:-you@100.101.102.103}
 KEY=${SOLSTREAM_KEY:-$HOME/.ssh/id_ed25519_pc}
-REPO='C:\Users\you\Desktop\SolStream'
+REPO=${SOLSTREAM_REPO:-'C:\Users\you\Desktop\SolStream'}
 SSH="ssh -i $KEY -o BatchMode=yes -o ConnectTimeout=20 $HOST"
 
 case "${1:-build}" in
