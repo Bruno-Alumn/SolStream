@@ -1155,6 +1155,12 @@ public final class AgentConnection {
     public struct Placement: Sendable, Equatable {
         public let frame: CGRect
         public let minimumSize: CGSize
+        /// Zero on an axis the application does not limit.
+        public var maximumSize: CGSize = .zero
+        /// False for a window with no sizing border -- a dialog laid out once
+        /// for one size. The host only moves those, and reports the size the
+        /// application chose; this side has to hold its window at that size.
+        public var isResizable = true
         /// Width of the host window's resize grab area, in host pixels.
         public let resizeBorder: CGFloat
         /// How far, in host pixels summed over both axes and both corners, the
@@ -1186,13 +1192,19 @@ public final class AgentConnection {
             }
             let minimum = CGSize(width: message["minW"] as? Int ?? 0,
                                  height: message["minH"] as? Int ?? 0)
-            completion?(Placement(frame: CGRect(x: x, y: y, width: w, height: h),
-                                  minimumSize: minimum,
-                                  resizeBorder: CGFloat(message["border"] as? Int ?? 0),
-                                  // Absent on a host that predates the field, which
-                                  // reads as "landed exactly" — the same thing every
-                                  // such host implicitly claimed before it existed.
-                                  missed: message["missed"] as? Int ?? 0))
+            var placement = Placement(frame: CGRect(x: x, y: y, width: w, height: h),
+                                      minimumSize: minimum,
+                                      resizeBorder: CGFloat(message["border"] as? Int ?? 0),
+                                      // Absent on a host that predates the field,
+                                      // which reads as "landed exactly" — the same
+                                      // thing every such host implicitly claimed.
+                                      missed: message["missed"] as? Int ?? 0)
+            // Both absent on an older host: no maximum, and resizable, which is
+            // what this side assumed before the fields existed.
+            placement.maximumSize = CGSize(width: message["maxW"] as? Int ?? 0,
+                                           height: message["maxH"] as? Int ?? 0)
+            placement.isResizable = message["resizable"] as? Bool ?? true
+            completion?(placement)
         }
     }
 

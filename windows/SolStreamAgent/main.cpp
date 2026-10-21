@@ -1761,7 +1761,8 @@ int ResizeBorderThickness(HWND window) {
          + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
 }
 
-/// The smallest client area this window will accept, in pixels.
+/// The client-area sizes this window accepts, in pixels, and whether it can be
+/// resized at all.
 ///
 /// Asked of the window rather than inferred from what it does. Watching for "we
 /// asked for less and got more" sounds equivalent and is not: that is also what
@@ -1773,7 +1774,15 @@ int ResizeBorderThickness(HWND window) {
 /// that ignores the message still yields the system defaults rather than zeroes.
 /// Sent with a timeout because it crosses into another process, and a hung
 /// application must not take the agent with it.
-POINT MinimumClientSize(HWND window) {
+struct ClientLimits {
+    POINT minimum{1, 1};
+    /// Zero on an axis the application does not limit.
+    POINT maximum{0, 0};
+    /// Whether the user could resize it before SolStream touched it.
+    bool resizable = true;
+};
+
+ClientLimits ClientSizeLimits(HWND window) {
     MINMAXINFO info{};
     info.ptMinTrackSize.x = GetSystemMetrics(SM_CXMINTRACK);
     info.ptMinTrackSize.y = GetSystemMetrics(SM_CYMINTRACK);
@@ -1810,13 +1819,40 @@ POINT MinimumClientSize(HWND window) {
         furniture = RECT{0, 0, 0, 0};
         AdjustWindowRectEx(&furniture, style, FALSE, exStyle);
     }
-    POINT minimum{};
-    minimum.x = info.ptMinTrackSize.x - (furniture.right - furniture.left);
-    minimum.y = info.ptMinTrackSize.y - (furniture.bottom - furniture.top);
-    if (minimum.x < 1) { minimum.x = 1; }
-    if (minimum.y < 1) { minimum.y = 1; }
-    return minimum;
+    ClientLimits limits;
+    const LONG furnitureW = furniture.right - furniture.left;
+    const LONG furnitureH = furniture.bottom - furniture.top;
+    limits.minimum.x = std::max<LONG>(1, info.ptMinTrackSize.x - furnitureW);
+    limits.minimum.y = std::max<LONG>(1, info.ptMinTrackSize.y - furnitureH);
+    // A maximum only when the application set one: the prefill is the size of
+    // the whole virtual desktop plus borders, which is "no limit", and saying
+    // so as a number would cap the Mac window at an arbitrary size.
+    if (info.ptMaxTrackSize.x < GetSystemMetrics(SM_CXMAXTRACK)) {
+        limits.maximum.x = std::max<LONG>(limits.minimum.x, info.ptMaxTrackSize.x - furnitureW);
+    }
+    if (info.ptMaxTrackSize.y < GetSystemMetrics(SM_CYMAXTRACK)) {
+        limits.maximum.y = std::max<LONG>(limits.minimum.y, info.ptMaxTrackSize.y - furnitureH);
+    }
+
+    // Resizable means a sizing border -- as the window had it before the lock
+    // took it away. A dialog like Character Map has none: Windows lets
+    // SetWindowPos make it any size, so it reports no meaningful minimum, but
+    // its controls are laid out once for one size and a smaller window simply
+    // cuts them off. The Mac has to hold such a window at the size it is.
+    limits.resizable = (style & WS_THICKFRAME) != 0;
+    if (!limits.resizable) {
+        EnterCriticalSection(&g_lock_cs);
+        for (int i = 0; i < kMaxLocks; ++i) {
+            if (g_locks[i].active && g_locks[i].window == window) {
+                limits.resizable = (g_locks[i].removed_style & WS_THICKFRAME) != 0;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_lock_cs);
+    }
+    return limits;
 }
+
 
 /// Has this slot's window gone?
 ///
@@ -2823,6 +2859,48 @@ bool PlaceClientArea(HWND window, int x, int y, int width, int height,
     return moved;
 }
 
+/// Put a window's client area at x,y and leave its size to the application.
+///
+/// For a window that cannot be resized -- a dialog like Character Map. Its
+/// controls are laid out for the size it chooses, and moving it onto the 200%
+/// capture display makes it choose again (WM_DPICHANGED). Forcing the size the
+/// Mac computed from the old display clipped its right-hand buttons. So it is
+/// only moved, by the distance its client origin is from where it should be,
+/// and whatever size it settles at is the answer. Twice, because the move that
+/// changes its DPI also changes its frame, and with it where the client area
+/// sits inside the frame.
+bool MoveClientArea(HWND window, int x, int y, RECT* out_client) {
+    if (Unresponsive(window)) {
+        if (out_client) { *out_client = ClientAreaInScreen(window); }
+        return false;
+    }
+    if (IsIconic(window)) {
+        ShowWindow(window, SW_RESTORE);
+    }
+    bool moved = false;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const RECT client = ClientAreaInScreen(window);
+        const int dx = x - client.left;
+        const int dy = y - client.top;
+        if (dx == 0 && dy == 0) {
+            break;
+        }
+        RECT frame{};
+        GetWindowRect(window, &frame);
+        if (!SetWindowPos(window, nullptr, frame.left + dx, frame.top + dy, 0, 0,
+                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+            break;
+        }
+        moved = true;
+    }
+    const RECT client = ClientAreaInScreen(window);
+    if (out_client) { *out_client = client; }
+    // Already where it was asked to be is success too: the Mac's settling pass
+    // asks again for the place the window is already in, and a "not ok" for
+    // that was dropped on the floor along with the size it carried.
+    return moved || (client.left == x && client.top == y);
+}
+
 // ── JSON output ──────────────────────────────────────────────────────────────
 
 std::string DisplaysJson(const std::vector<Display>& displays) {
@@ -3586,8 +3664,12 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         }
         RECT client{};
         long long missed = 0;
-        const bool ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h,
-                                        &client, &missed);
+        // A window that cannot be resized is moved and keeps its own size; see
+        // MoveClientArea. Not a miss: the size it reports is the size it is.
+        const bool fixed_size = !ClientSizeLimits(window).resizable;
+        const bool ok = fixed_size
+            ? MoveClientArea(window, (int) x, (int) y, &client)
+            : PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
         // A miss that survived every correction is the application refusing the
         // size, and it is worth a line: it is the difference between "SolStream
         // sized this wrongly" and "this window will not be that shape", and until
@@ -3605,15 +3687,19 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // The Mac asked for this, so it is the new truth — otherwise the watcher
         // would immediately drag the window back to the previous size.
         SetLockedGeometry(window, client);
-        char buffer[320];
-        const POINT minimum = MinimumClientSize(window);
+        char buffer[384];
+        const ClientLimits limits = ClientSizeLimits(window);
         std::snprintf(buffer, sizeof(buffer),
                       "{\"type\":\"placed\",\"ok\":%s,\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld"
-                      ",\"minW\":%ld,\"minH\":%ld,\"border\":%d,\"missed\":%lld}",
+                      ",\"minW\":%ld,\"minH\":%ld,\"maxW\":%ld,\"maxH\":%ld"
+                      ",\"resizable\":%s,\"border\":%d,\"missed\":%lld}",
                       ok ? "true" : "false",
                       client.left, client.top,
                       client.right - client.left, client.bottom - client.top,
-                      minimum.x, minimum.y, ResizeBorderThickness(window), missed);
+                      limits.minimum.x, limits.minimum.y,
+                      limits.maximum.x, limits.maximum.y,
+                      limits.resizable ? "true" : "false",
+                      ResizeBorderThickness(window), missed);
         return buffer;
     }
 

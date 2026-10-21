@@ -36,6 +36,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// One `place` in flight at a time — see `requestResize`.
     private var resizeInFlight = false
+    /// The one automatic fit after opening has been scheduled; see `settleOnce`.
+    private var didSettle = false
     private var resizeAgain = false
     private var wantsSettle = false
 
@@ -440,6 +442,27 @@ final class AppWindow: NSObject, NSWindowDelegate {
             // application still starting up the window is easy to close first.
             guard let self, !self.isClosing else { return }
             self.agent.setResizeLock(windowID: self.remoteWindowID, true)
+            self.settleOnce()
+        }
+    }
+
+    /// One more fit, a moment after the window first opens.
+    ///
+    /// The first placement lands while the application is still reacting to
+    /// the move: carried onto the 200% capture display it gets WM_DPICHANGED,
+    /// and many applications -- Electron and Chromium ones especially -- lay
+    /// themselves out again a beat later, at a size or position the first
+    /// reply never saw. The picture and this window then disagreed until the
+    /// user nudged the window edge, which is exactly the "resize it once and it
+    /// updates" chore this does for them. Same path as that nudge, and a no-op
+    /// when nothing moved.
+    private func settleOnce() {
+        guard !didSettle else { return }
+        didSettle = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, !self.isClosing,
+                  !(self.window?.inLiveResize ?? false) else { return }
+            self.requestResize(settle: true)
         }
     }
 
@@ -488,11 +511,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // so the visible rectangle is what the crop and this window must
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
-                self.applyMinimumSize(placement.minimumSize, scale: scale)
+                let visible = achieved.intersection(self.displayRect)
+                self.applySizeLimits(placement, achieved: visible, scale: scale)
                 if placement.resizeBorder > 0 {
                     self.inputCapture?.edgeGuard = placement.resizeBorder
                 }
-                let visible = achieved.intersection(self.displayRect)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
                 if matchBack {
@@ -524,6 +547,58 @@ final class AppWindow: NSObject, NSWindowDelegate {
                                  + " at \(Int(achieved.minX)),\(Int(achieved.minY))")
                     }
                 }
+            }
+        }
+    }
+
+    /// Hold this window to the sizes the host application accepts.
+    ///
+    /// A window the application cannot resize -- no sizing border, a dialog
+    /// laid out once -- is held at exactly the size it is: dragging it smaller
+    /// here would only crop its controls off on the PC, which is what letting
+    /// any size through used to do. A resizable one gets the application's own
+    /// minimum and, when it declares one, its maximum.
+    private func applySizeLimits(_ placement: AgentConnection.Placement,
+                                 achieved: CGRect, scale: CGFloat) {
+        guard let window, scale > 0 else { return }
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame.size
+        func points(_ pixels: CGSize) -> NSSize {
+            var size = NSSize(width: (pixels.width / scale).rounded(),
+                              height: (pixels.height / scale).rounded())
+            if let screen {
+                size.width = min(size.width, screen.width)
+                size.height = min(size.height, screen.height)
+            }
+            return size
+        }
+
+        if !placement.isResizable {
+            guard achieved.width >= 1, achieved.height >= 1 else { return }
+            let fixed = points(achieved.size)
+            guard window.contentMinSize != fixed || window.contentMaxSize != fixed
+                  || window.styleMask.contains(.resizable) else { return }
+            window.contentMinSize = fixed
+            window.contentMaxSize = fixed
+            window.styleMask.remove(.resizable)
+            Log.info("[window] the host application cannot be resized; holding this window at "
+                     + "\(Int(fixed.width))x\(Int(fixed.height)) points")
+            return
+        }
+
+        if !window.styleMask.contains(.resizable) {
+            window.styleMask.insert(.resizable)
+        }
+        applyMinimumSize(placement.minimumSize, scale: scale)
+        let maximum = placement.maximumSize
+        if maximum.width > 0 || maximum.height > 0 {
+            let limit = points(CGSize(width: maximum.width > 0 ? maximum.width : .greatestFiniteMagnitude,
+                                      height: maximum.height > 0 ? maximum.height : .greatestFiniteMagnitude))
+            let ceiling = NSSize(width: max(limit.width, window.contentMinSize.width),
+                                 height: max(limit.height, window.contentMinSize.height))
+            if window.contentMaxSize != ceiling {
+                window.contentMaxSize = ceiling
+                Log.info("[window] host maximum is \(Int(maximum.width))x\(Int(maximum.height)); "
+                         + "this window stops at \(Int(ceiling.width))x\(Int(ceiling.height)) points")
             }
         }
     }
