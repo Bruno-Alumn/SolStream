@@ -90,6 +90,15 @@ public final class MediaClient {
     private var lastInputSentAt: UInt64 = 0
 
     private var needKeyframe = false
+    /// Set by damage, cleared by the IDR that repairs it. While it is set,
+    /// P-frames are not decoded: each one references the picture that never
+    /// arrived, and decoding them smears the damage across the window --
+    /// worst on text, which is most of what a desktop application is. The
+    /// last good picture stays on screen instead, for the round trip an IDR
+    /// takes. And the request is repeated until one arrives, because a
+    /// keyframe request is one datagram on the same lossy link.
+    private var awaitingKeyframe = false
+    private var keyframeAskedAt: UInt64 = 0
     private var timer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "solstream.media.timer")
 
@@ -105,7 +114,10 @@ public final class MediaClient {
             self.stateLock.lock()
             self.stats.framesComplete = self.reassembler.complete
             self.lastCompleteFrame = picture.frameId
+            if picture.isIdr { self.awaitingKeyframe = false }
+            let hold = self.awaitingKeyframe
             self.stateLock.unlock()
+            if hold { return }
             self.onVideo?(picture.bytes, picture.isIdr)
         }
         reassembler.onDamaged = { [weak self] frameId in
@@ -113,7 +125,15 @@ public final class MediaClient {
             self.stateLock.lock()
             self.stats.framesDamaged = self.reassembler.damaged
             self.needKeyframe = true
+            self.awaitingKeyframe = true
+            // Now, from this thread, not on the next 50 ms feedback tick: the
+            // tick added up to half a frame-period of recovery on top of the
+            // damage itself. Once per burst -- a lost run reports every frame
+            // in it, and the host takes one request per 200 ms anyway.
+            let askNow = Self.millis(since: self.keyframeAskedAt) > 20
+            if askNow { self.keyframeAskedAt = DispatchTime.now().uptimeNanoseconds }
             self.stateLock.unlock()
+            if askNow { self.sendFeedback() }
             Log.debug("[media] frame \(frameId) never completed; asking for a keyframe")
         }
     }
@@ -485,6 +505,16 @@ public final class MediaClient {
                 }
                 self.stateLock.unlock()
             }
+
+            // Still holding for a keyframe a quarter-second after asking: the
+            // request or the IDR was lost. Ask again -- just past the host's
+            // 200 ms rate limit, so the repeat is never the one it ignores.
+            self.stateLock.lock()
+            if self.awaitingKeyframe && Self.millis(since: self.keyframeAskedAt) > 250 {
+                self.needKeyframe = true
+                self.keyframeAskedAt = DispatchTime.now().uptimeNanoseconds
+            }
+            self.stateLock.unlock()
 
             if ticks % 5 == 0 { self.sendFeedback() }        // 50 ms
             if ticks % 100 == 0 { self.sendPing() }          // 1 s

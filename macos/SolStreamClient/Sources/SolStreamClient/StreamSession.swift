@@ -298,17 +298,10 @@ final class StreamSession {
         }
     }
 
-    /// Tear the session down. Synchronous, always.
-    ///
-    /// This used to take a `waitUntilDone` flag, threaded through
-    /// `StreamWindow.stopStreaming` and passed as `true` by
-    /// `applicationWillTerminate` — the one place it matters, because the process
-    /// is about to exit and the host has to see the BYE or it stays busy for the
-    /// next client. The parameter was never read. What made that survivable is
-    /// that the teardown below is already synchronous: `media.stop()` sends the
-    /// BYE, shuts the socket down and waits up to a second for the receive thread
-    /// to leave. So the flag promised nothing that was not already true, which is
-    /// exactly why nobody noticed it did nothing. Removed rather than honoured.
+    /// Tear the session down. Synchronous, always: `media.stop()` sends the BYE,
+    /// shuts the socket down and waits up to a second for the receive thread to
+    /// leave, which is what `applicationWillTerminate` relies on -- the host has
+    /// to see the BYE or it stays busy for the next client.
     func stop() {
         guard isRunning else { return }
         isRunning = false
@@ -355,9 +348,6 @@ final class StreamSession {
         media.sendInput(event)
     }
 
-    func requestKeyframe() {
-        media.requestKeyframe()
-    }
 
     // MARK: - Sinks
 
@@ -379,9 +369,4 @@ final class StreamSession {
         Log.info("[session] \(remaining) window(s) attached")
     }
 
-    var attachedWindowCount: Int {
-        sinkLock.lock()
-        defer { sinkLock.unlock() }
-        return sinks.count
-    }
 }

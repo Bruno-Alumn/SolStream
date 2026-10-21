@@ -33,7 +33,7 @@ final class AudioRingBufferTests: XCTestCase {
     }
 
     func testRoundTripsExactly() {
-        let ring = AudioRingBuffer()
+        let ring = AudioRingBuffer(prefillMilliseconds: 0)
         let input = stereo(frames: 240)
         write(input, to: ring)
         XCTAssertEqual(ring.available, input.count)
@@ -45,7 +45,7 @@ final class AudioRingBufferTests: XCTestCase {
     /// the end of the storage.
     func testSurvivesWraparound() {
         let ring = AudioRingBuffer(capacityMilliseconds: 20, targetMilliseconds: 5,
-                                   ceilingMilliseconds: 15)
+                                   ceilingMilliseconds: 15, prefillMilliseconds: 0)
         for round in 0..<50 {
             let input = stereo(frames: 96, startingAt: round * 96)
             write(input, to: ring)
@@ -55,7 +55,7 @@ final class AudioRingBufferTests: XCTestCase {
     }
 
     func testUnderrunPadsWithSilence() {
-        let ring = AudioRingBuffer()
+        let ring = AudioRingBuffer(prefillMilliseconds: 0)
         write(stereo(frames: 2), to: ring)
         let out = read(10, from: ring)
         XCTAssertEqual(Array(out.prefix(4)), stereo(frames: 2))
@@ -97,7 +97,7 @@ final class AudioRingBufferTests: XCTestCase {
     /// rest of the session.
     func testInterleaveParitySurvivesTrimming() {
         let ring = AudioRingBuffer(capacityMilliseconds: 10, targetMilliseconds: 2,
-                                   ceilingMilliseconds: 8)
+                                   ceilingMilliseconds: 8, prefillMilliseconds: 0)
         // Odd frame counts, so a trim that rounded carelessly would land between
         // a left and a right sample.
         for round in 0..<40 {
@@ -116,13 +116,45 @@ final class AudioRingBufferTests: XCTestCase {
     /// being refused outright.
     func testPacketLargerThanCapacityKeepsItsNewestEnd() {
         let ring = AudioRingBuffer(capacityMilliseconds: 10, targetMilliseconds: 2,
-                                   ceilingMilliseconds: 200)
+                                   ceilingMilliseconds: 200, prefillMilliseconds: 0)
         let capacitySamples = (48000 * 10 / 1000) * 2
         let input = stereo(frames: 2000)   // 4000 samples, well over capacity
         write(input, to: ring)
 
         XCTAssertEqual(ring.available, capacitySamples)
         XCTAssertEqual(read(capacitySamples, from: ring), Array(input.suffix(capacitySamples)))
+    }
+
+    /// Playback waits for a cushion before it starts, and again after it runs
+    /// dry, so a sound does not begin from an empty buffer that the next late
+    /// packet turns into a click.
+    func testPlaybackWaitsForTheCushionAndReprimesAfterAnUnderrun() {
+        let ring = AudioRingBuffer(prefillMilliseconds: 25)
+        let fiveMs = 48000 * 5 / 1000
+        write(stereo(frames: fiveMs), to: ring)
+        XCTAssertEqual(read(fiveMs * 2, from: ring), [Int16](repeating: 0, count: fiveMs * 2),
+                       "played before the cushion was there")
+        XCTAssertEqual(ring.available, fiveMs * 2, "the held audio was consumed")
+
+        write(stereo(frames: fiveMs * 5, startingAt: fiveMs), to: ring)   // now 30 ms
+        let out = read(fiveMs * 2, from: ring)
+        XCTAssertEqual(out, stereo(frames: fiveMs), "the cushion did not start playing in order")
+
+        // Drain it, run dry, and the next packet has to wait for a cushion again.
+        _ = read(ring.available + 2, from: ring)
+        write(stereo(frames: fiveMs), to: ring)
+        XCTAssertEqual(read(2, from: ring), [0, 0], "did not re-prime after the underrun")
+    }
+
+    /// Ordinary drift comes down a little per packet, not as one jump.
+    func testDriftIsTrimmedGently() {
+        let ring = AudioRingBuffer(capacityMilliseconds: 500, targetMilliseconds: 50,
+                                   ceilingMilliseconds: 120, prefillMilliseconds: 0)
+        write(stereo(frames: 48000 * 118 / 1000), to: ring)   // just under the ceiling
+        write(stereo(frames: 48000 * 5 / 1000), to: ring)     // crosses it
+        let afterMs = Double(ring.available / 2) / 48.0
+        XCTAssertGreaterThan(afterMs, 115, "drift was corrected as one jump")
+        XCTAssertLessThan(afterMs, 123)
     }
 
     func testEmptyWriteIsIgnored() {

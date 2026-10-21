@@ -149,6 +149,24 @@ public final class VideoReassembler {
         let payloadCount = b.count - 16
         guard payloadCount > 0, finished.contains(frameId) == false else { return }
 
+        // A gap in the frame ids is a picture lost WHOLE. An assembly only
+        // exists once a fragment of it arrives, so a one- or two-datagram
+        // P-frame -- typing, a cursor blink -- that lost every datagram was
+        // never retired, never reported, and the pictures after it were decoded
+        // against a reference that was not there. Ids are consecutive per
+        // encoder pass, and a single paced path barely reorders, so a jump is
+        // damage. Not when the jump lands on an IDR: that is the host starting
+        // over after dropping pictures itself, and the IDR is the repair.
+        if highestSeen > 0, frameId > highestSeen &+ 1, flags & SMT.flagIdr == 0 {
+            let missing = min(frameId - highestSeen - 1, 64)
+            for gap in 1...missing {
+                let lost = highestSeen &+ gap
+                if building[lost] == nil, finished.insert(lost).inserted {
+                    damaged &+= 1
+                    onDamaged?(lost)
+                }
+            }
+        }
         if frameId > highestSeen { highestSeen = frameId }
 
         let stamp = Self.now()
@@ -236,5 +254,6 @@ public final class VideoReassembler {
     public func reset() {
         building.removeAll()
         finished.removeAll()
+        highestSeen = 0
     }
 }

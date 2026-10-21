@@ -1,4 +1,5 @@
 #include "input.h"
+#include "smt.h"
 
 #include <dwmapi.h>
 
@@ -272,19 +273,7 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
             std::memset(seen_, 0, sizeof(seen_));
             seen_[0] = 1;
         } else if (seq > highest_) {
-            const uint32_t shift = seq - highest_;
-            uint64_t slid[16] = {};
-            if (shift < 1024) {
-                for (int slot = 0; slot < 1024; ++slot) {
-                    if ((seen_[slot / 64] >> (slot % 64)) & 1) {
-                        const uint32_t moved = (uint32_t) slot + shift;
-                        if (moved < 1024) {
-                            slid[moved / 64] |= 1ull << (moved % 64);
-                        }
-                    }
-                }
-            }
-            std::memcpy(seen_, slid, sizeof(seen_));
+            smt::SlideWindow(seen_, seq - highest_);
             highest_ = seq;
             seen_[0] |= 1;
         } else {

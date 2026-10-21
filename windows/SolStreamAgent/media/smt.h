@@ -118,6 +118,29 @@ BCRYPT_KEY_HANDLE MakeKey(const unsigned char* key32);
 size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* plaintext,
             size_t plaintextLen, unsigned char* datagram, size_t datagramCapacity);
 
+/// Advance a 1024-slot window, where slot n means "highest minus n", by
+/// `shift`: a 1024-bit left shift, a word at a time with the carry between
+/// words. Runs for nearly every packet, so it does not walk the bits. The
+/// replay window here and the input dedupe in input.cpp both use it, and the
+/// Mac's SMTReplayWindow does the same.
+inline void SlideWindow(uint64_t (&bits)[16], uint64_t shift) {
+    if (shift >= 1024) {
+        for (uint64_t& word : bits) { word = 0; }
+        return;
+    }
+    const int words = (int) (shift / 64);
+    const unsigned carry = (unsigned) (shift % 64);
+    for (int word = 15; word >= 0; --word) {
+        const int from = word - words;
+        uint64_t value = 0;
+        if (from >= 0) {
+            value = bits[from] << carry;
+            if (carry > 0 && from > 0) { value |= bits[from - 1] >> (64 - carry); }
+        }
+        bits[word] = value;
+    }
+}
+
 /// A 1024-packet sliding replay window.
 ///
 /// Updated only AFTER the AEAD open succeeds. A counter that is merely old still
@@ -146,18 +169,7 @@ struct ReplayWindow {
         }
         if (counter > highest) {
             const uint64_t shift = counter - highest;
-            uint64_t slid[16] = {};
-            if (shift < 1024) {
-                for (int slot = 0; slot < 1024; ++slot) {
-                    if ((bits[slot / 64] >> (slot % 64)) & 1) {
-                        const uint64_t moved = (uint64_t) slot + shift;
-                        if (moved < 1024) {
-                            slid[moved / 64] |= 1ull << (moved % 64);
-                        }
-                    }
-                }
-            }
-            std::memcpy(bits, slid, sizeof(bits));
+            SlideWindow(bits, shift);
             highest = counter;
             bits[0] |= 1;
             return;

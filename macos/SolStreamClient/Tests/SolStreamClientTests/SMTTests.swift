@@ -241,6 +241,35 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertEqual(reassembler.lastCompleteFrame, 1)
     }
 
+    func testAPictureLostWholeIsReportedDamaged() {
+        let reassembler = VideoReassembler()
+        var damaged: [UInt32] = []
+        reassembler.onDamaged = { damaged.append($0) }
+        let payload = Data(repeating: 7, count: 100)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        // 2 and 3 never arrive at all; 4 does.
+        reassembler.ingest(fragment(frameId: 4, offset: 0, payload: payload,
+                                    start: true, end: true))
+        XCTAssertEqual(damaged, [2, 3])
+        XCTAssertEqual(reassembler.damaged, 2)
+    }
+
+    func testAJumpOntoAnIdrIsNotDamage() {
+        let reassembler = VideoReassembler()
+        var damaged: [UInt32] = []
+        reassembler.onDamaged = { damaged.append($0) }
+        let payload = Data(repeating: 7, count: 100)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        // The host dropped 2-4 itself and started over with an IDR.
+        reassembler.ingest(fragment(frameId: 5, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        XCTAssertEqual(damaged, [])
+    }
+
     func testFragmentsReassembleByByteOffset() {
         let reassembler = VideoReassembler()
         var pictures: [VideoReassembler.Picture] = []

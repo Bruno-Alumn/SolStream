@@ -242,10 +242,23 @@ final class AudioRingBuffer {
     /// Whole frames discarded to keep latency bounded, for diagnostics.
     private(set) var framesDropped: UInt64 = 0
 
+    /// Holding playback until `prefill` has arrived. True at the start and
+    /// again after every underrun. The host sends nothing at all while the PC
+    /// is silent, so every sound used to begin playing from an empty buffer,
+    /// and the first late 5 ms packet on Wi-Fi was a click. A short cushion
+    /// first costs that much latency once per sound and removes the clicks.
+    private var priming = true
+    private let prefill: Int
+    /// At most this much is trimmed per packet when the buffer runs long, so
+    /// drift is corrected a few milliseconds at a time instead of as one
+    /// audible 70 ms jump from the ceiling back down to the target.
+    private let trimStep: Int
+
     init(sampleRate: Int = 48000, channels: Int = 2,
          capacityMilliseconds: Int = 500,
          targetMilliseconds: Int = 50,
-         ceilingMilliseconds: Int = 120) {
+         ceilingMilliseconds: Int = 120,
+         prefillMilliseconds: Int = 25) {
         func samples(_ milliseconds: Int) -> Int {
             let frames = sampleRate * milliseconds / 1000
             return frames * channels
@@ -253,6 +266,10 @@ final class AudioRingBuffer {
         capacity = samples(capacityMilliseconds)
         target = samples(targetMilliseconds)
         ceiling = samples(ceilingMilliseconds)
+        // Never more cushion than the target the buffer is steered towards.
+        prefill = min(samples(prefillMilliseconds), target)
+        priming = prefill > 0
+        trimStep = samples(2)
 
         storage = .allocate(capacity: capacity)
         storage.initialize(repeating: 0, count: capacity)
@@ -300,9 +317,13 @@ final class AudioRingBuffer {
         head = (head + count) % capacity
         filled += count
 
-        // Correct drift continuously rather than only at saturation.
+        // Correct drift continuously rather than only at saturation, and
+        // gently: a couple of milliseconds per packet until back at target. A
+        // backlog past twice the ceiling is not drift -- the Mac stalled, or a
+        // burst arrived at once -- and goes straight back to the target.
         if filled > ceiling {
-            discardOldest(filled - target)
+            discardOldest(filled > 2 * ceiling ? filled - target
+                                               : min(filled - target, trimStep))
         }
     }
 
@@ -310,7 +331,9 @@ final class AudioRingBuffer {
     func read(into destination: UnsafeMutablePointer<Int16>, count: Int) {
         guard count > 0 else { return }
         os_unfair_lock_lock(lock)
-        let take = min(count, filled)
+        if priming && filled >= prefill { priming = false }
+        let take = priming ? 0 : min(count, filled)
+        if !priming && take < count { priming = true }   // underrun: re-cushion
         if take > 0 {
             let first = min(take, capacity - tail)
             destination.update(from: storage.advanced(by: tail), count: first)

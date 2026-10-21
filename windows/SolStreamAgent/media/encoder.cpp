@@ -777,6 +777,33 @@ Encoder::~Encoder() {
     impl_->sink = nullptr;
 }
 
+/// The encoder's tuning, applied through ICodecAPI.
+///
+/// Keyframes on request only: the GOP is an hour long, so the only IDRs are
+/// the first, the ones the client asks for when it detects loss, and the ones
+/// a new pass starts with. The client detects every loss -- a damaged picture,
+/// and since 10-21 a picture lost whole -- and freezes on the last good one
+/// until the IDR it asked for arrives, so a periodic refresh buys nothing and
+/// costs a burst the size of six ordinary frames every second.
+void ApplyCodecSettings(Encoder::Impl& s) {
+    VARIANT v{};
+    v.vt = VT_BOOL;
+    v.boolVal = VARIANT_TRUE;
+    s.codec->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+    VARIANT mode{};
+    mode.vt = VT_UI4;
+    mode.ulVal = eAVEncCommonRateControlMode_CBR;
+    s.codec->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
+    VARIANT rate{};
+    rate.vt = VT_UI4;
+    rate.ulVal = s.bitrate;
+    s.codec->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &rate);
+    VARIANT gop{};
+    gop.vt = VT_UI4;
+    gop.ulVal = (s.fps ? s.fps : 60) * 3600;
+    s.codec->SetValue(&CODECAPI_AVEncMPVGOPSize, &gop);
+}
+
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                    UINT bitrateBps) {
     Impl& s = *impl_;
@@ -893,6 +920,16 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
         }
     }
 
+    // Before type negotiation. Set only afterwards, as this used to be, the
+    // NVIDIA MFT accepted every property and kept its defaults: low latency
+    // read back OFF, and a keyframe every 60 frames that nobody asked for --
+    // ~120 KB bursts once a second, the frames most likely to lose a fragment
+    // on Wi-Fi, each costing ~25 ms of pacing.
+    s.mft->QueryInterface(IID_PPV_ARGS(&s.codec));
+    if (s.codec) {
+        ApplyCodecSettings(s);
+    }
+
     IMFMediaType* outType = nullptr;
     // Checked because the next line dereferences it. MFStartup belongs to the
     // session that owns this encoder rather than to this class, so an Open on a
@@ -943,20 +980,31 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
         return false;
     }
 
-    s.mft->QueryInterface(IID_PPV_ARGS(&s.codec));
     if (s.codec) {
-        VARIANT v{};
-        v.vt = VT_BOOL;
-        v.boolVal = VARIANT_TRUE;
-        s.codec->SetValue(&CODECAPI_AVLowLatencyMode, &v);
-        VARIANT mode{};
-        mode.vt = VT_UI4;
-        mode.ulVal = eAVEncCommonRateControlMode_CBR;
-        s.codec->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-        VARIANT rate{};
-        rate.vt = VT_UI4;
-        rate.ulVal = s.bitrate;
-        s.codec->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &rate);
+        // And again now the types are set: some MFTs only take these after
+        // negotiation, others only before (see above), and asking twice is
+        // harmless where both are accepted.
+        ApplyCodecSettings(s);
+        // What the encoder actually settled on, said once per pass. Several
+        // hardware MFTs accept a property and ignore it, and every tuning
+        // decision about keyframe size and frequency starts from these.
+        auto setting = [&](const GUID& key) -> long long {
+            VARIANT value{};
+            if (FAILED(s.codec->GetValue(&key, &value))) { return -1; }
+            switch (value.vt) {
+                case VT_UI4: return (long long) value.ulVal;
+                case VT_UI8: return (long long) value.ullVal;
+                case VT_BOOL: return value.boolVal ? 1 : 0;
+                default: return -2;
+            }
+        };
+        Log("[media] encoder settings: low latency %lld, rate mode %lld, gop %lld,"
+            " b-frames %lld, vbv %lld bits",
+            setting(CODECAPI_AVLowLatencyMode),
+            setting(CODECAPI_AVEncCommonRateControlMode),
+            setting(CODECAPI_AVEncMPVGOPSize),
+            setting(CODECAPI_AVEncMPVDefaultBPictureCount),
+            setting(CODECAPI_AVEncCommonBufferSize));
         // SLICES ARE LEFT ALONE. spike/mf-encode asked for four per frame and
         // got 1.5, and a packetizer that assumes one output sample is one
         // picture is correct only when it is. The Drain above counts every
@@ -1117,6 +1165,8 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
 }
 
 void Encoder::RequestIdr() { impl_->idrWanted.store(true); }
+
+bool Encoder::IdrPending() const { return impl_->idrWanted.load(); }
 
 void Encoder::SetBitrate(UINT bitrateBps) {
     Impl& s = *impl_;

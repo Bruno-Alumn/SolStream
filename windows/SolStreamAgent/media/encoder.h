@@ -71,6 +71,8 @@ public:
                 long long capturedAt, bool forceIdr);
 
     void RequestIdr();
+    /// A keyframe has been asked for and not yet produced.
+    bool IdrPending() const;
     void SetBitrate(UINT bitrateBps);
 
     /// Diagnostics. `extraSamples` counts output samples that arrived for a

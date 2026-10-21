@@ -134,6 +134,11 @@ struct MediaSession::Impl {
 
     std::atomic<uint64_t> datagramsSent{0}, bytesSent{0};
     std::atomic<uint64_t> picturesSent{0}, picturesDropped{0};
+    /// Keyframes sent and their bytes, for the stats line: the size of an IDR
+    /// is what decides how long it occupies the link and how likely it is to
+    /// lose a fragment on Wi-Fi.
+    std::atomic<uint64_t> idrsSent{0}, idrBytes{0};
+    HANDLE pacingTimer = nullptr;
     std::atomic<uint64_t> datagramsReceived{0}, rejected{0};
     std::atomic<uint64_t> idrRequests{0};
     std::atomic<uint32_t> clientLastFrame{0};
@@ -201,23 +206,28 @@ void MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t lengt
 }
 
 void MediaSession::Impl::WaitUntil(long long deadline) {
+    // Slept on a high-resolution waitable timer, never spun. The pacing slot is
+    // about 300 us per datagram, so the old last-two-milliseconds spin ran for
+    // the whole time a frame was being sent -- roughly half of wall time on a
+    // core of the host. The timer can wake a little late; the schedule is
+    // absolute (nextSlot advances by each datagram's cost, not from "now"), so
+    // a late wake sends the next one or two at once and the average rate is
+    // unchanged. Anything under 200 us is sent now rather than slept for.
     for (;;) {
         const long long now = Now();
         if (now >= deadline) { return; }
         const long long remainingUs =
             (deadline - now) * 1000000 / g_frequency.QuadPart;
-        if (remainingUs > 2000) {
-            Sleep(1);
-        } else {
-            // The last two milliseconds are spun, because timeBeginPeriod(1) is
-            // as fine as Sleep gets and the pacing this exists for is measured
-            // in hundreds of microseconds per datagram. YieldProcessor is what
-            // keeps that from being a hot loop: it hints to the core that this
-            // thread is waiting, which hands the pipeline to the sibling
-            // hyperthread instead of starving it. Without it a session pegged a
-            // logical core for its whole length.
-            YieldProcessor();
+        if (remainingUs < 200) { return; }
+        if (pacingTimer) {
+            LARGE_INTEGER due{};
+            due.QuadPart = -(remainingUs * 10);   // relative, in 100 ns units
+            if (SetWaitableTimerEx(pacingTimer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+                WaitForSingleObject(pacingTimer, 50);
+                continue;
+            }
         }
+        Sleep(1);
     }
 }
 
@@ -264,6 +274,10 @@ void MediaSession::Impl::SendPicture(const Picture& picture) {
             ((double) (kVideoHeader + chunk + smt::kOverhead + 28) * ticksPerByte);
     }
     picturesSent.fetch_add(1);
+    if (picture.isIdr) {
+        idrsSent.fetch_add(1);
+        idrBytes.fetch_add(size);
+    }
 
     // A picture whose capture time is zero is one the encoder emitted for a
     // frame id nothing recorded. Counting it would put the whole time since
@@ -449,7 +463,13 @@ void MediaSession::Impl::RunCapture() {
             if (!capture->Running()) { break; }
             continue;
         }
-        const bool stale = MillisBetween(lastEncodedAt, Now()) > 250.0;
+        // A keyframe the client is waiting for counts as stale too. The request
+        // only sets a flag the next Submit consumes, and on a still window the
+        // next Submit was the 250 ms refresh -- a quarter of a second of frozen
+        // picture on the Mac for every lost datagram, on exactly the content
+        // that changes least. The retained frame is re-encoded now instead.
+        const bool stale = MillisBetween(lastEncodedAt, Now()) > 250.0
+                        || encoder->IdrPending();
         if (!current.isNew && !stale) {
             continue;
         }
@@ -465,6 +485,12 @@ void MediaSession::Impl::RunCapture() {
 
 void MediaSession::Impl::SenderLoop() {
     timeBeginPeriod(1);
+    // High resolution, or it rounds to the 1 ms tick and pacing degrades to
+    // bursts. Windows 10 1803 and later; on anything older this is null and
+    // WaitUntil falls back to Sleep(1).
+    pacingTimer = CreateWaitableTimerExW(nullptr, nullptr,
+                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_ALL_ACCESS);
     long long lastStat = 0;
     long long lastReport = Now();
     uint64_t lastReportPictures = 0, lastReportBytes = 0;
@@ -526,7 +552,7 @@ void MediaSession::Impl::SenderLoop() {
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
                 " | audio %llu sent, %llu silent | input %llu applied, %llu dup,"
-                " %llu failed, ack %u | rx %llu, rejected %llu",
+                " %llu failed, ack %u | rx %llu, rejected %llu | idr %llu, mean %llu KB",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
                     ? (double) (bytesSent.load() - lastReportBytes) * 8.0 / elapsed / 1e6
@@ -553,7 +579,11 @@ void MediaSession::Impl::SenderLoop() {
                 (unsigned long long) input.Failed(),
                 input.Acknowledged(),
                 (unsigned long long) datagramsReceived.load(),
-                (unsigned long long) rejected.load());
+                (unsigned long long) rejected.load(),
+                (unsigned long long) idrsSent.load(),
+                (unsigned long long) (idrsSent.load()
+                                          ? idrBytes.load() / idrsSent.load() / 1024
+                                          : 0));
             lastReport = now;
             lastReportPictures = pictures;
             lastReportBytes = bytesSent.load();
@@ -577,6 +607,10 @@ void MediaSession::Impl::SenderLoop() {
             running.store(false);
             break;
         }
+    }
+    if (pacingTimer) {
+        CloseHandle(pacingTimer);
+        pacingTimer = nullptr;
     }
     timeEndPeriod(1);
 }
@@ -813,6 +847,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
 
     s.datagramsSent = 0; s.bytesSent = 0;
     s.picturesSent = 0; s.picturesDropped = 0;
+    s.idrsSent = 0; s.idrBytes = 0;
     s.datagramsReceived = 0; s.rejected = 0; s.idrRequests = 0;
 
     {
