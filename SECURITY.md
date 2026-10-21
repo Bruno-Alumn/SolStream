@@ -28,6 +28,8 @@ impact you expect.
 ## Hygiene in this repository
 
 - No secrets, tokens, keys, host names, addresses or personal paths are
-  committed. CI runs gitleaks over every push (`.gitleaks.toml`).
+  committed. CI runs gitleaks over every push (`.gitleaks.toml`), and
+  `.githooks/pre-commit` refuses a commit that would add one -- enable it in
+  a clone with `git config core.hooksPath .githooks`.
 - Pairing tokens live in the Mac's login Keychain and in the PC user's local
   application data, never in the repository.
