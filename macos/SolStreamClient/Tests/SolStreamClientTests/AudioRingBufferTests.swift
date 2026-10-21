@@ -162,4 +162,60 @@ final class AudioRingBufferTests: XCTestCase {
         write([], to: ring)
         XCTAssertEqual(ring.available, 0)
     }
+
+    // MARK: - Buffering
+
+    private func samples(ms: Int) -> Int { 48000 * ms / 1000 * 2 }
+
+    func testBufferingChoicesMapToTheirLevels() {
+        XCTAssertEqual(AudioRenderer.Buffering.lowLatency.latency,
+                       .init(prefillMilliseconds: 25, targetMilliseconds: 50, ceilingMilliseconds: 120))
+        XCTAssertEqual(AudioRenderer.Buffering.steady.latency,
+                       .init(prefillMilliseconds: 60, targetMilliseconds: 100, ceilingMilliseconds: 220))
+    }
+
+    func testSwitchingBufferingSwapsAllThreeLevels() {
+        let ring = AudioRingBuffer(latency: AudioRenderer.Buffering.lowLatency.latency)
+        XCTAssertTrue(ring.levels == (samples(ms: 25), samples(ms: 50), samples(ms: 120)))
+        ring.setLatency(AudioRenderer.Buffering.steady.latency)
+        XCTAssertTrue(ring.levels == (samples(ms: 60), samples(ms: 100), samples(ms: 220)))
+        ring.setLatency(AudioRenderer.Buffering.lowLatency.latency)
+        XCTAssertTrue(ring.levels == (samples(ms: 25), samples(ms: 50), samples(ms: 120)))
+    }
+
+    /// Steady lets a clump of packets stand as cushion that low latency trims.
+    func testSteadyKeepsABacklogLowLatencyWouldTrim() {
+        let low = AudioRingBuffer(latency: AudioRenderer.Buffering.lowLatency.latency)
+        write(stereo(frames: 48 * 200), to: low)
+        XCTAssertLessThan(low.available, samples(ms: 200))
+
+        let steady = AudioRingBuffer(latency: AudioRenderer.Buffering.lowLatency.latency)
+        steady.setLatency(AudioRenderer.Buffering.steady.latency)
+        write(stereo(frames: 48 * 200), to: steady)
+        XCTAssertEqual(steady.available, samples(ms: 200))
+
+        // And a burst past twice the new ceiling goes to the new target.
+        write(stereo(frames: 48 * 250), to: steady)
+        XCTAssertEqual(steady.available, samples(ms: 100))
+    }
+
+    /// Back to low latency on a live stream: the backlog comes down a couple of
+    /// milliseconds per packet, not as one audible jump.
+    func testSwitchingToLowLatencyTrimsGently() {
+        let ring = AudioRingBuffer(latency: AudioRenderer.Buffering.steady.latency)
+        write(stereo(frames: 48 * 200), to: ring)
+        ring.setLatency(AudioRenderer.Buffering.lowLatency.latency)
+        write(stereo(frames: 48 * 5), to: ring)
+        XCTAssertEqual(ring.available, samples(ms: 203))
+    }
+
+    /// Steady's larger cushion is what playback waits for after it primes.
+    func testSteadyWaitsForItsLargerCushion() {
+        let ring = AudioRingBuffer(latency: AudioRenderer.Buffering.lowLatency.latency)
+        ring.setLatency(AudioRenderer.Buffering.steady.latency)
+        write(stereo(frames: 48 * 30), to: ring)
+        XCTAssertEqual(read(4, from: ring), [0, 0, 0, 0], "played before the steady cushion was there")
+        write(stereo(frames: 48 * 35, startingAt: 48 * 30), to: ring)
+        XCTAssertEqual(read(4, from: ring), Array(stereo(frames: 2)))
+    }
 }

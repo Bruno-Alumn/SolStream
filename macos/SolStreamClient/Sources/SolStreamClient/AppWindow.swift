@@ -50,6 +50,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var isMatchingHostSize = false
 
     private let pill = QualityPill()
+    /// Says how to get the mouse back, the first time this window takes it.
+    private let captureHint = CaptureHint()
+    private var hasExplainedCapture = false
     private var qualityTimer: Timer?
     private var lastFrameCount: UInt64 = 0
     private var lastByteCount: UInt64 = 0
@@ -117,6 +120,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             stats.audioActive = snapshot.audioFrames > 0
             stats.hostDisplay = "\(self.display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
                 + "· \(self.display.width)×\(self.display.height)"
+            stats.hostReportsCursor = self.inputCapture?.hostReportsCursorVisibility ?? false
             self.pill.stats = stats
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -265,6 +269,43 @@ final class AppWindow: NSObject, NSWindowDelegate {
         metalView?.remoteCursor = cursor
     }
 
+    /// The host's cursor changed: its shape, by name, as the agent pushes it,
+    /// or "hidden" when it has none on screen.
+    ///
+    /// Hidden still draws an arrow over the picture -- see
+    /// `HostCursor.macCursor` -- and goes to the input capture, which in
+    /// gaming mode takes the mouse for the game and gives it back when a shape
+    /// returns.
+    ///
+    /// The host speaks only on a change, so this wants calling once as the
+    /// window opens as well, with the last push the connection heard: a game
+    /// already in play has nothing new to say, and a window that never hears
+    /// "hidden" takes the mouse on a click and keeps it through the first
+    /// pause menu. Nothing is kept from one window for the next instead: no
+    /// window hears the pushes sent while the picker has the connection, so
+    /// whatever was kept would be stale.
+    /// - Parameter reportsHidden: the push said the host reports a hidden
+    ///   cursor at all, so gaming mode follows it from here rather than after
+    ///   seeing a whole hide and show.
+    func hostCursorChanged(_ shape: String, reportsHidden: Bool = false) {
+        setRemoteCursor(HostCursor.macCursor(for: shape))
+        guard let capture = inputCapture else { return }
+        if reportsHidden { capture.hostReportsCursorVisibility = true }
+        capture.hostCursorVisibilityChanged(hidden: HostCursor.isHidden(shape))
+    }
+
+    /// Show the note on the first capture, and take it away when the mouse is
+    /// given back: by then it is out of date.
+    private func pointerCaptureChanged(_ captured: Bool) {
+        guard captured else {
+            captureHint.dismiss()
+            return
+        }
+        guard !hasExplainedCapture else { return }
+        hasExplainedCapture = true
+        captureHint.flash()
+    }
+
     /// Point this window at a different region of the canvas.
     func setTile(_ rect: CGRect) {
         tile = rect
@@ -319,10 +360,23 @@ final class AppWindow: NSObject, NSWindowDelegate {
         window.contentView = view
         metalView = view
 
+        // Over the picture rather than in the title bar: it is about the
+        // pointer, which has just vanished from exactly there.
+        view.addSubview(captureHint)
+        NSLayoutConstraint.activate([
+            captureHint.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            captureHint.topAnchor.constraint(equalTo: view.topAnchor, constant: DS.Space.x4),
+            captureHint.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor,
+                                               constant: -2 * DS.Space.x4),
+        ])
+
         let capture = InputCapture()
         capture.attach(to: view)
         capture.onInput = { [weak self] packet in
             self?.session.sendInput(packet)
+        }
+        capture.onPointerCaptureChanged = { [weak self] captured in
+            self?.pointerCaptureChanged(captured)
         }
         inputCapture = capture
 
@@ -741,6 +795,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             Log.info("[input] \"\(window?.title ?? "")\": \(capture.mouseMovedSeen) moves, "
                      + "\(capture.positionsSent) positions sent, "
                      + "\(capture.positionsOutside) outside the picture, "
+                     + "\(capture.withheldFromGame) withheld from a game, "
                      + "\(capture.droppedWhileResizing) dropped mid-resize")
         }
 
@@ -800,5 +855,73 @@ final class AppWindow: NSObject, NSWindowDelegate {
     var onRetry: (() -> Void)? {
         get { metalView?.onRetry }
         set { metalView?.onRetry = newValue }
+    }
+}
+
+/// A short note over the picture the first time a window takes the mouse.
+///
+/// Gaming mode can take the mouse without a click -- the game hiding its
+/// cursor, the window coming forward over it -- and a pointer that vanishes
+/// the moment it touches the window, with nothing on screen to say why, reads
+/// as a fault. Once per window: after that the user knows. A view of its own,
+/// not the status overlay, which `MetalView.present()` hides on every frame.
+final class CaptureHint: DS.Box {
+    static let text = "The game has the mouse. ⌃⌥ gives it back."
+
+    private var pendingDismiss: DispatchWorkItem?
+
+    init() {
+        super.init(fill: DS.surface, stroke: DS.edge, radius: DS.Metric.buttonRadius)
+        let label = DS.label(Self.text, font: DS.caption, colour: DS.textSecondary)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 28),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DS.Space.x3),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x3),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        alphaValue = 0
+        isHidden = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// A note about the picture never takes a click meant for it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Show the note, and take it away again after `seconds`.
+    func flash(for seconds: TimeInterval = 2.5) {
+        pendingDismiss?.cancel()
+        isHidden = false
+        fade(to: 1)
+        let dismiss = DispatchWorkItem { [weak self] in self?.dismiss() }
+        pendingDismiss = dismiss
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: dismiss)
+    }
+
+    func dismiss() {
+        pendingDismiss?.cancel()
+        pendingDismiss = nil
+        guard !isHidden else { return }
+        fade(to: 0) { [weak self] in
+            // Unless a flash arrived during the fade.
+            guard let self, self.pendingDismiss == nil else { return }
+            self.isHidden = true
+        }
+    }
+
+    private func fade(to alpha: CGFloat, then completion: (() -> Void)? = nil) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            alphaValue = alpha
+            completion?()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            animator().alphaValue = alpha
+        }, completionHandler: completion)
     }
 }

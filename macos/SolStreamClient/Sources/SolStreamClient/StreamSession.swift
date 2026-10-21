@@ -53,6 +53,10 @@ final class StreamSession {
     /// because `start()` is where the renderer is built, and building one for a
     /// session that asked for no audio takes the output device to play nothing.
     private let wantsAudio: Bool
+    /// Pushes volume, mute and buffering into the live renderer. Main thread
+    /// only. A block observer is held by NotificationCenter until removed, so
+    /// it is removed wherever the renderer is let go.
+    private var settingsObserver: NSObjectProtocol?
 
     /// Supplied by the focused window so the stats line can report input.
     ///
@@ -207,9 +211,15 @@ final class StreamSession {
         // default output device, kept a CoreAudio unit running and had nothing
         // whatever to play through it for the length of the session.
         if wantsAudio {
+            // Configured before the socket opens, so the first sound already
+            // plays at the chosen level and with the chosen cushion.
+            let renderer = AudioRenderer()
+            loggedAudio = nil   // every session says what it starts with
+            applyAudioSettings(to: renderer)
             audioLock.lock()
-            audioRenderer = AudioRenderer()
+            audioRenderer = renderer
             audioLock.unlock()
+            observeAudioSettings()
         }
 
         onPhase?(.waitingForVideo)
@@ -221,6 +231,7 @@ final class StreamSession {
             // is again by the line above — so the teardown down there never runs
             // for a session that failed to start, and the renderer sat on the
             // device until the whole session was released.
+            stopObservingAudioSettings()
             audioLock.lock()
             let renderer = audioRenderer
             audioRenderer = nil
@@ -319,6 +330,7 @@ final class StreamSession {
         sinkLock.lock()
         sinks.removeAll()
         sinkLock.unlock()
+        stopObservingAudioSettings()
         audioLock.lock()
         let renderer = audioRenderer
         audioRenderer = nil
@@ -338,6 +350,71 @@ final class StreamSession {
         Log.info("[session] stopped — \(mediaCounters.frames) frames, "
                  + "\(mediaCounters.dropped) damaged, \(audioFramesPlayed) audio packets"
                  + pointerNote)
+    }
+
+    deinit {
+        stopObservingAudioSettings()
+    }
+
+    // MARK: - Sound settings
+
+    /// Volume, mute and buffering apply to a playing stream as they are. Sound
+    /// on or off does not -- the host's audio capture is fixed when the media
+    /// session opens -- and is whoever restarts the session's business.
+    ///
+    /// `StreamSettings.volume` is where the slider sits, and this is the one
+    /// place it becomes a gain, so the popover and the Settings window share
+    /// one loudness curve.
+    private func applyAudioSettings(to renderer: AudioRenderer) {
+        let settings = StreamSettings.shared
+        let remote = StreamSettings.isRemote(host: host)
+        let buffering = settings.audioBuffering.resolved(remote: remote)
+        renderer.volume = AudioRenderer.amplitude(forPosition: settings.volume)
+        renderer.isMuted = settings.isMuted
+        renderer.buffering = buffering
+
+        // A stream that is silent because mute was remembered from yesterday,
+        // or the volume left at nothing, otherwise logs exactly like one that
+        // plays. Said when the session starts and again whenever mute or the
+        // buffering changes, but not for the volume alone: a slider drag
+        // changes it on every mouse move.
+        let state = LoggedAudio(muted: settings.isMuted, buffering: buffering)
+        guard state != loggedAudio else { return }
+        loggedAudio = state
+        let percent = Int((settings.volume * 100).rounded())
+        Log.info("[audio] volume \(percent)%\(state.muted ? ", muted" : ""), "
+                 + "buffering \(buffering.rawValue) "
+                 + "(\(settings.audioBuffering.rawValue)\(remote ? ", remote" : ""))")
+    }
+
+    private struct LoggedAudio: Equatable {
+        var muted: Bool
+        var buffering: AudioRenderer.Buffering
+    }
+
+    /// What `applyAudioSettings` last logged. Main thread only.
+    private var loggedAudio: LoggedAudio?
+
+    private func observeAudioSettings() {
+        guard settingsObserver == nil else { return }
+        // Every change is applied, whatever it was: all three setters are
+        // cheap and idempotent, and sorting out which setting moved would only
+        // be a second copy of StreamSettings' keys to keep in step.
+        settingsObserver = NotificationCenter.default.addObserver(
+            forName: StreamSettings.didChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.audioLock.lock()
+            let renderer = self.audioRenderer
+            self.audioLock.unlock()
+            if let renderer { self.applyAudioSettings(to: renderer) }
+        }
+    }
+
+    private func stopObservingAudioSettings() {
+        guard let settingsObserver else { return }
+        NotificationCenter.default.removeObserver(settingsObserver)
+        self.settingsObserver = nil
     }
 
     // MARK: - Input

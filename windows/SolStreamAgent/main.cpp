@@ -3855,6 +3855,20 @@ bool SendLine(SOCKET client, const std::string& text) {
 // status, and the agent serves one command at a time on one thread, so a poll
 // fast enough to feel immediate would sit in front of every `place` sent during
 // a live resize. This costs one line per actual change instead.
+//
+// Whether there is a cursor at all is pushed the same way, as the shape
+// "hidden". A game reading raw motion hides it -- GLFW games such as Minecraft
+// set a null cursor over their window, others call ShowCursor(FALSE) -- and
+// shows one again for a menu. The Mac's gaming mode follows that: the mouse is
+// taken while it is hidden and given back the moment a shape returns. A Mac
+// that predates "hidden" draws its arrow for a name it does not know, which is
+// what it drew for a hidden cursor before.
+//
+// Every push also carries "reportsHidden":1. A shape alone cannot say whether
+// the agent behind it would ever send "hidden" -- one that predates it never
+// does -- and without that the Mac has to watch a game hide its cursor AND show
+// it again before it dares follow, which is a whole round of menus with no
+// pointer. Macs that read only "shape" are unaffected by the extra key.
 
 struct NamedCursor {
     const wchar_t* id;
@@ -3899,6 +3913,11 @@ volatile LONG g_cursor_stop = 0;
 volatile LONG g_cursor_generation = 0;
 
 const char* CursorName(HCURSOR cursor) {
+    // Before the table, so a system cursor that failed to load (a null handle)
+    // cannot match a cursor that could not be read.
+    if (cursor == nullptr) {
+        return "arrow";
+    }
     for (NamedCursor& known : g_cursors) {
         if (known.handle == nullptr) {
             known.handle = LoadCursorW(nullptr, known.id);
@@ -3910,33 +3929,74 @@ const char* CursorName(HCURSOR cursor) {
     return "arrow";
 }
 
+/// Whether an application has taken the cursor off the screen -- a game reading
+/// the mouse itself -- rather than Windows simply not drawing one.
+///
+/// GLFW and SDL hide it with SetCursor(NULL), which leaves no handle; others
+/// call ShowCursor(FALSE), which clears CURSOR_SHOWING. But Windows clears that
+/// flag on its own as well: for pen and touch input, which it marks
+/// CURSOR_SUPPRESSED, and on a PC with no mouse, whose display count starts
+/// below zero and stays there whatever SendInput does. Neither is a game asking
+/// for the mouse. Reported as hidden, they would put "hidden" in place of every
+/// shape for as long as they last -- no I-beam over a text field even in
+/// desktop mode -- and have gaming mode take the mouse over a menu.
+bool HiddenByApplication(const CURSORINFO& info) {
+    if (info.hCursor == nullptr) {
+        return true;
+    }
+    if ((info.flags & CURSOR_SHOWING) != 0 || (info.flags & CURSOR_SUPPRESSED) != 0) {
+        return false;
+    }
+    return GetSystemMetrics(SM_MOUSEPRESENT) != 0;
+}
+
 DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
     const LONG mine = (LONG) (LONG_PTR) parameter;
     HCURSOR last = nullptr;
+    bool last_hidden = false;
     bool logged_once = false;
     while (InterlockedCompareExchange(&g_cursor_stop, 0, 0) == 0
            && InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
-        CURSORINFO info{};
-        info.cbSize = sizeof(info);
-        const BOOL got = GetCursorInfo(&info);
-        HCURSOR current = got ? info.hCursor : nullptr;
         if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
-            // Not authenticated yet. Forget the last shape too, so the first
+            // Not authenticated yet. Forget the last state too, so the first
             // push after authentication carries the current one rather than
             // being skipped as unchanged.
             last = nullptr;
+            last_hidden = false;
             Sleep(40);
             continue;
         }
+        CURSORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!GetCursorInfo(&info)) {
+            // A failed read -- the secure desktop holding the input during a
+            // UAC prompt, say -- says nothing about the application, so the
+            // last state stands and nothing is sent. Either answer could be
+            // wrong: "hidden" has the Mac take the mouse for a game that never
+            // asked, and a shape gives it back from one that still wants it.
+            Sleep(40);
+            continue;
+        }
+        const bool hidden = HiddenByApplication(info);
+        // No handle while hidden: a game swapping cursors it never shows is no
+        // change worth a line.
+        HCURSOR current = hidden ? nullptr : info.hCursor;
         if (!logged_once) {
             logged_once = true;
-            Log("[cursor] reporting shape changes (currently %s)", CursorName(current));
+            Log("[cursor] reporting shape changes (currently %s)",
+                hidden ? "hidden" : CursorName(current));
         }
-        if (current != last) {
+        if (current != last || hidden != last_hidden) {
+            if (hidden != last_hidden) {
+                // One line per hide and show: when the Mac holds on to the
+                // mouse in a menu, this says whether the PC ever said so.
+                Log("[cursor] %s", hidden ? "hidden" : "shown again");
+            }
             last = current;
+            last_hidden = hidden;
             std::string line = "{\"type\":\"cursor\",\"shape\":\"";
-            line += CursorName(current);
-            line += "\"}";
+            line += hidden ? "hidden" : CursorName(current);
+            line += "\",\"reportsHidden\":1}";
             // Read the socket AND write to it under the send lock, which the
             // client thread retires it under -- as NotifyWindowClosed does.
             // Releasing the lock between the two left a window in which the

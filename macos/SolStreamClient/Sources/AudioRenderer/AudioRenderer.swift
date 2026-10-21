@@ -20,7 +20,72 @@ public final class AudioRenderer {
     private let bitsPerChannel: UInt32 = 16
 
     /// Interleaved stereo samples waiting to be played (internal for the callback).
-    let ringBuffer = AudioRingBuffer()
+    let ringBuffer = AudioRingBuffer(latency: Buffering.lowLatency.latency)
+    /// Volume and mute, read by the render callback (internal for the callback).
+    let gain = AudioGain()
+
+    /// How much audio is held before playing, traded against latency.
+    public enum Buffering: String, CaseIterable, Sendable {
+        /// The least delay; right on a wired or good home network.
+        case lowLatency
+        /// More cushion, for Wi-Fi and the internet, where packets arrive in
+        /// clumps and a thin buffer runs dry between them.
+        case steady
+
+        /// Steady roughly doubles each figure: a Wi-Fi or internet path
+        /// delivers in clumps tens of milliseconds apart, and a 50 ms target
+        /// with a 120 ms ceiling both runs dry between clumps and trims away
+        /// the backlog a clump leaves, which is the cushion for the next gap.
+        var latency: AudioRingBuffer.Latency {
+            switch self {
+            case .lowLatency:
+                return .init(prefillMilliseconds: 25, targetMilliseconds: 50, ceilingMilliseconds: 120)
+            case .steady:
+                return .init(prefillMilliseconds: 60, targetMilliseconds: 100, ceilingMilliseconds: 220)
+            }
+        }
+    }
+
+    /// 0...1, applied to every sample played, as amplitude. A change is ramped
+    /// over 10 ms, so a slider drag never clicks. Safe to set from any thread
+    /// while the stream plays. A slider's position goes through
+    /// `amplitude(forPosition:)` first.
+    public var volume: Float {
+        get { gain.volume }
+        set { gain.volume = newValue }
+    }
+
+    /// The amplitude for a volume slider at `position` (0...1).
+    ///
+    /// Heard loudness goes roughly as amplitude to the power 0.6, so a slider
+    /// that maps straight to amplitude is -6 dB at its middle -- still most of
+    /// the way to full -- and squeezes everything from quiet to silent into its
+    /// bottom tenth. Squared, the middle is -12 dB, which sounds about half as
+    /// loud, and a tenth of the way along is -40 dB rather than -20.
+    public static func amplitude(forPosition position: Float) -> Float {
+        let clamped = position.isNaN ? 1 : min(max(position, 0), 1)
+        return clamped * clamped
+    }
+
+    /// Silence without stopping the stream or forgetting the volume. The unit
+    /// keeps running and keeps draining the buffer, so unmuting resumes in
+    /// step with the picture rather than from a backlog built up while muted.
+    public var isMuted: Bool {
+        get { gain.isMuted }
+        set { gain.isMuted = newValue }
+    }
+
+    /// See `Buffering`. Safe to change while the stream plays, and nothing is
+    /// interrupted to apply it: a lower ceiling trims the backlog down a few
+    /// milliseconds per packet, and a larger cushion is built the next time
+    /// playback primes -- which on the paths that need it is the next underrun.
+    /// Set it from one thread at a time; StreamSession uses the main thread.
+    public var buffering: Buffering = .lowLatency {
+        didSet {
+            guard buffering != oldValue else { return }
+            ringBuffer.setLatency(buffering.latency)
+        }
+    }
 
     public init() {
         setupAudio()
@@ -185,14 +250,147 @@ private let renderCallback: AURenderCallback = {(
 
     for buffer in bufferList {
         guard let data = buffer.mData else { continue }
+        let samples = data.assumingMemoryBound(to: Int16.self)
         let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.stride
         // One block copy rather than a per-sample loop with a lock acquisition
         // and a bounds check each time round.
-        renderer.ringBuffer.read(into: data.assumingMemoryBound(to: Int16.self),
-                                 count: sampleCount)
+        renderer.ringBuffer.read(into: samples, count: sampleCount)
+        renderer.gain.apply(to: samples, count: sampleCount,
+                            channels: Int(buffer.mNumberChannels))
     }
 
     return noErr
+}
+
+// MARK: - Gain
+
+/// Volume and mute, set from the main thread and applied on the render thread.
+///
+/// The render thread must never wait on the main thread, so it reads the level
+/// with `os_unfair_lock_trylock` and, in the rare buffer where the main thread
+/// is mid-store, keeps the level it already had; the next buffer, ten
+/// milliseconds later, picks up the new one. An aligned 32-bit load would also
+/// never tear on arm64, but a Swift load racing a store is undefined behaviour
+/// whatever the instruction does, and a try-lock costs one atomic compare.
+///
+/// Every change is a linear ramp from the gain playing now to the new one. A
+/// step in gain is a step in the waveform, and at full scale that is a click --
+/// worst of all for mute, which is a step all the way to zero.
+///
+/// The ramp is a fixed 10 ms and carries on across buffers, rather than lasting
+/// one render buffer: the buffer is as short as the smallest any app on the
+/// same output device asks for, and with a browser or a music app holding it
+/// at 64 frames a one-buffer ramp is 1.3 ms, short enough to click again.
+final class AudioGain {
+    /// Frames a change is spread over: 10 ms at the stream's 48 kHz.
+    static let rampFrames = 480
+
+    private let lock: UnsafeMutablePointer<os_unfair_lock>
+    // Guarded by `lock`.
+    private var volumeStorage: Float = 1
+    private var mutedStorage = false
+
+    // Render thread only: the level the last frame played at, where the ramp
+    // is heading, and how far it still has to go.
+    private var current: Float = 1
+    private var target: Float = 1
+    private var step: Float = 0
+    private var rampLeft = 0
+
+    init() {
+        lock = .allocate(capacity: 1)
+        lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {
+        lock.deinitialize(count: 1)
+        lock.deallocate()
+    }
+
+    var volume: Float {
+        get {
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
+            return volumeStorage
+        }
+        set {
+            // A NaN would reach Int16(_:) as NaN and trap on the render thread.
+            let clamped = newValue.isNaN ? 1 : min(max(newValue, 0), 1)
+            os_unfair_lock_lock(lock)
+            volumeStorage = clamped
+            os_unfair_lock_unlock(lock)
+        }
+    }
+
+    var isMuted: Bool {
+        get {
+            os_unfair_lock_lock(lock)
+            defer { os_unfair_lock_unlock(lock) }
+            return mutedStorage
+        }
+        set {
+            os_unfair_lock_lock(lock)
+            mutedStorage = newValue
+            os_unfair_lock_unlock(lock)
+        }
+    }
+
+    /// Scale `count` interleaved samples in place. Render thread only: no
+    /// allocation, no blocking, no Objective-C.
+    func apply(to samples: UnsafeMutablePointer<Int16>, count: Int, channels: Int) {
+        guard count > 0, channels > 0 else { return }
+        if os_unfair_lock_trylock(lock) {
+            let wanted = mutedStorage ? 0 : volumeStorage
+            os_unfair_lock_unlock(lock)
+            // A new level mid-ramp starts a fresh ramp from wherever the old
+            // one had got to, so a slider drag is followed without a corner.
+            if wanted != target {
+                target = wanted
+                rampLeft = Self.rampFrames
+                step = (target - current) / Float(rampLeft)
+            }
+        }
+
+        if rampLeft == 0 {
+            if current == 1 { return }   // full volume: leave the samples bit-exact
+            if current == 0 {
+                samples.update(repeating: 0, count: count)
+                return
+            }
+        }
+
+        // Per frame, not per sample, so left and right of one frame always
+        // get the same gain and the stereo image does not wobble mid-ramp.
+        let frames = count / channels
+        var index = 0
+        for _ in 0..<frames {
+            if rampLeft > 0 {
+                rampLeft -= 1
+                // Land on the target exactly: a rounding error short of 1 or 0
+                // would keep the fast paths above from ever applying again.
+                current = rampLeft == 0 ? target : current + step
+            }
+            let gain = min(max(current, 0), 1)
+            for _ in 0..<channels {
+                samples[index] = Self.scale(samples[index], by: gain)
+                index += 1
+            }
+        }
+        // A partial frame cannot happen with whole-frame buffers, but if one
+        // did it should play at the level its frame would have.
+        while index < count {
+            samples[index] = Self.scale(samples[index], by: min(max(current, 0), 1))
+            index += 1
+        }
+    }
+
+    /// With `gain` in 0...1 the product is inside Int16's range, so the
+    /// conversion cannot trap; the clamp is there so that stays true.
+    @inline(__always)
+    private static func scale(_ sample: Int16, by gain: Float) -> Int16 {
+        let scaled = (Float(sample) * gain).rounded()
+        return Int16(min(max(scaled, -32768), 32767))
+    }
 }
 
 // MARK: - Ring buffer
@@ -227,11 +425,25 @@ private let renderCallback: AURenderCallback = {(
 /// That is a real trade, but the alternative it replaces was undefined
 /// behaviour, not a faster correct thing.
 final class AudioRingBuffer {
+    /// The three levels the backlog is steered by, in milliseconds.
+    struct Latency: Equatable {
+        /// Held before playback starts, and again after every underrun.
+        var prefillMilliseconds: Int
+        /// Where a trim brings the backlog back down to.
+        var targetMilliseconds: Int
+        /// The backlog past which trimming starts.
+        var ceilingMilliseconds: Int
+    }
+
     private let storage: UnsafeMutablePointer<Int16>
     private let capacity: Int
+    private let sampleRate: Int
+    private let channels: Int
     /// Backlog to aim for after a trim, and the level that triggers one.
-    private let target: Int
-    private let ceiling: Int
+    /// Guarded by `lock`, like everything below that changes: `setLatency`
+    /// swaps them on the main thread while `write` and `read` use them.
+    private var target: Int
+    private var ceiling: Int
 
     private var head = 0     // next write
     private var tail = 0     // next read
@@ -248,7 +460,7 @@ final class AudioRingBuffer {
     /// and the first late 5 ms packet on Wi-Fi was a click. A short cushion
     /// first costs that much latency once per sound and removes the clicks.
     private var priming = true
-    private let prefill: Int
+    private var prefill: Int
     /// At most this much is trimmed per packet when the buffer runs long, so
     /// drift is corrected a few milliseconds at a time instead of as one
     /// audible 70 ms jump from the ceiling back down to the target.
@@ -259,23 +471,59 @@ final class AudioRingBuffer {
          targetMilliseconds: Int = 50,
          ceilingMilliseconds: Int = 120,
          prefillMilliseconds: Int = 25) {
-        func samples(_ milliseconds: Int) -> Int {
-            let frames = sampleRate * milliseconds / 1000
-            return frames * channels
-        }
-        capacity = samples(capacityMilliseconds)
-        target = samples(targetMilliseconds)
-        ceiling = samples(ceilingMilliseconds)
+        self.sampleRate = sampleRate
+        self.channels = channels
+        capacity = Self.samples(capacityMilliseconds, sampleRate: sampleRate, channels: channels)
+        target = Self.samples(targetMilliseconds, sampleRate: sampleRate, channels: channels)
+        ceiling = Self.samples(ceilingMilliseconds, sampleRate: sampleRate, channels: channels)
         // Never more cushion than the target the buffer is steered towards.
-        prefill = min(samples(prefillMilliseconds), target)
+        prefill = min(Self.samples(prefillMilliseconds, sampleRate: sampleRate, channels: channels),
+                      target)
         priming = prefill > 0
-        trimStep = samples(2)
+        trimStep = Self.samples(2, sampleRate: sampleRate, channels: channels)
 
         storage = .allocate(capacity: capacity)
         storage.initialize(repeating: 0, count: capacity)
 
         lock = .allocate(capacity: 1)
         lock.initialize(to: os_unfair_lock())
+    }
+
+    convenience init(latency: Latency, capacityMilliseconds: Int = 500) {
+        self.init(capacityMilliseconds: capacityMilliseconds,
+                  targetMilliseconds: latency.targetMilliseconds,
+                  ceilingMilliseconds: latency.ceilingMilliseconds,
+                  prefillMilliseconds: latency.prefillMilliseconds)
+    }
+
+    private static func samples(_ milliseconds: Int, sampleRate: Int, channels: Int) -> Int {
+        let frames = sampleRate * milliseconds / 1000
+        return frames * channels
+    }
+
+    /// Swap the three levels on a live stream.
+    ///
+    /// Nothing is dropped or held here. The next `write` trims towards a lower
+    /// ceiling at the usual few milliseconds per packet, and a larger prefill
+    /// applies the next time playback primes; forcing a re-prime now would cut
+    /// the sound that is playing to build a cushion nobody had yet missed.
+    func setLatency(_ latency: Latency) {
+        let newTarget = Self.samples(latency.targetMilliseconds, sampleRate: sampleRate, channels: channels)
+        let newCeiling = Self.samples(latency.ceilingMilliseconds, sampleRate: sampleRate, channels: channels)
+        let newPrefill = min(Self.samples(latency.prefillMilliseconds, sampleRate: sampleRate, channels: channels),
+                             newTarget)
+        os_unfair_lock_lock(lock)
+        target = newTarget
+        ceiling = newCeiling
+        prefill = newPrefill
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// The levels in force, in samples, for tests.
+    var levels: (prefill: Int, target: Int, ceiling: Int) {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return (prefill, target, ceiling)
     }
 
     deinit {

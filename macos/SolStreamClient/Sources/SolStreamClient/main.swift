@@ -29,8 +29,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mediaRequest: AgentConnection.MediaRequest?
     private var streamConfig: StreamConfig?
     private var streamDisplay: RemoteDisplay?
+    private var streamHost: String?
     private var recoveringMedia = false
     private var mediaRecoveryAttempts = 0
+
+    /// Fields a command-line flag set, which the Settings window does not
+    /// override; see `StreamSettings.apply`.
+    private var settingsOverrides: Set<StreamSettings.Override> = []
+    private var settingsWindow: SettingsWindow?
+    private var settingsObservers: [NSObjectProtocol] = []
+    /// A settings change waiting out its debounce; see `scheduleMediaRestart`.
+    private var pendingRestart: DispatchWorkItem?
 
     /// Set once from the command line, then reused when the picker sends us
     /// round the loop again.
@@ -48,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         buildMenu()
+        observeSettings()
         Log.startSession(version: "v0.3")
 
         let arguments = CommandLine.arguments
@@ -67,11 +77,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             testMode = true
         }
 
+        // Each of these wins over the Settings window for this run: the test
+        // harness, and anybody debugging from a terminal, must get exactly what
+        // they typed, whatever was last chosen in the window.
         var config = StreamConfig()
+        var overrides: Set<StreamSettings.Override> = []
         if let kbps = value(after: "--bitrate").flatMap(Int.init) {
             config.bitrateKbps = kbps
+            overrides.insert(.bitrate)
             Log.info("[stream] bitrate \(kbps) kbit/s")
         }
+        if let fps = value(after: "--fps").flatMap(Int.init), fps > 0 {
+            config.frameRate = fps
+            overrides.insert(.frameRate)
+            Log.info("[stream] \(fps) fps")
+        }
+        if arguments.contains("--no-audio") {
+            config.audio = false
+            overrides.insert(.audio)
+            Log.info("[stream] no sound from the host")
+        }
+        settingsOverrides = overrides
+        QualityPill.commandLineOverrides = overrides
 
         let host = value(after: "--host")
         // The agent may be reached somewhere other than the stream host — over
@@ -605,7 +632,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        var config = baseConfig
+        // What the Settings window chose, under whatever the command line set.
+        var config = StreamSettings.shared.apply(to: baseConfig, host: host,
+                                                 overrides: settingsOverrides)
+        Log.info("[stream] \(Self.describe(config))")
         // The encode canvas matches the capture display, which makes the scale
         // factor 1.0 and every crop pixel-exact. Fixed for the session: the
         // encoder's output type is set once, so changing it means a new encoder
@@ -673,17 +703,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Only while something is actually streamed, and Mac-to-PC only while
         // one of these windows has the keyboard: copying a password in another
-        // application must not send it to the PC.
+        // application must not send it to the PC. Built whatever Settings says,
+        // and started only if it says so, so that turning sync on mid-stream
+        // has a bridge to start; see `applyClipboardSetting`.
         let bridge = ClipboardBridge(agent: agent) { [weak self] in
             self?.appWindows.contains { $0.window?.isKeyWindow == true } ?? false
         }
         clipboard = bridge
-        bridge.start()
+        if StreamSettings.shared.syncsClipboard {
+            bridge.start(resuming: false)
+        } else {
+            Log.info("[clipboard] sync is off in Settings")
+        }
 
         let session = StreamSession(host: host, config: config, session: media)
         self.session = session
         streamConfig = config
         streamDisplay = display
+        streamHost = host
         mediaRecoveryAttempts = 0
 
         let tiles = Self.tileLayout(count: targets.count, on: display)
@@ -707,6 +744,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.mediaRequest = nil
                 self.streamConfig = nil
                 self.streamDisplay = nil
+                self.streamHost = nil
+                self.pendingRestart?.cancel()
+                self.pendingRestart = nil
                 agent.closeMediaSession()
                 self.clipboard?.stop()
                 self.clipboard = nil
@@ -730,6 +770,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.appWindows.forEach { $0.close() }
             }
             appWindows.append(appWindow)
+            // What the host last said about its cursor, before the window can
+            // become key: it only pushes on change, and the push that said a
+            // game had hidden it went to the picker.
+            if let shape = agent.lastCursorShape {
+                appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
+            }
             appWindow.show()
 
             // Size the host window to this one and pin it there. The window owns
@@ -746,10 +792,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The host pushes this whenever its cursor changes shape. Applied to
         // every window: the cursor is global to the host, and only the one the
         // pointer is actually over can show it anyway.
-        agent.onCursorShape = { [weak self] shape in
-            guard let self else { return }
-            let cursor = HostCursor.macCursor(for: shape)
-            self.appWindows.forEach { $0.setRemoteCursor(cursor) }
+        agent.onCursorShape = { [weak self, weak agent] shape in
+            let reportsHidden = agent?.cursorReportsHidden ?? false
+            self?.appWindows.forEach { $0.hostCursorChanged(shape, reportsHidden: reportsHidden) }
         }
 
         // Closing the application on the Windows side ends the stream, without
@@ -816,6 +861,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gets through the NAT — so the only cost of starting here is the few
         // milliseconds spent building the windows.
         session.start()
+
+        // The request was built before the host was asked, and Settings can be
+        // open beside the picker while it answers. A change made in that wait
+        // found no windows to restart, so it is caught up with here; the
+        // debounce and the recovery guards treat it like any other.
+        if let request = mediaRequest,
+           Self.applying(StreamSettings.shared, to: request, config: config, host: host,
+                         overrides: settingsOverrides) != nil {
+            Log.info("[app] settings changed while the stream was opening")
+            scheduleMediaRestart()
+        }
     }
 
     /// The session's own reports, routed to the windows — and, when the picture
@@ -887,7 +943,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `Start` stops whatever session it had first, so asking again is always
     /// safe. Bounded: after three tries in a row the windows say so and keep
     /// the Retry button, which goes back to the picker as before.
-    private func recoverMedia(host: String, agent: AgentConnection) {
+    /// - Parameter status: what the windows say meanwhile, when it is not a
+    ///   reconnect -- a restart to apply new settings, which nothing went wrong
+    ///   to cause.
+    private func recoverMedia(host: String, agent: AgentConnection,
+                              status: (title: String, detail: String)? = nil) {
         // Every caller is a handler the session or the agent delivers on main.
         dispatchPrecondition(condition: .onQueue(.main))
         guard !recoveringMedia, !appWindows.isEmpty,
@@ -916,8 +976,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mediaRecoveryAttempts += 1
         let attempt = mediaRecoveryAttempts
         Log.info("[app] restarting the stream from \(host) (attempt \(attempt))")
+        let status = status ?? ("Reconnecting…", "Restarting the stream from \(host)")
         appWindows.forEach {
-            $0.setStatus("Reconnecting…", detail: "Restarting the stream from \(host)")
+            $0.setStatus(status.title, detail: status.detail)
         }
         // Handlers off first: stopping the old session reports `.failed`
         // asynchronously, which would land in here again.
@@ -956,6 +1017,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fresh.start()
             Log.info("[app] stream restarted")
         }
+    }
+
+    // MARK: - Settings
+
+    private func observeSettings() {
+        let center = NotificationCenter.default
+        settingsObservers = [
+            // From the popover on a streamed window, which has no business
+            // owning a window of its own.
+            center.addObserver(forName: StreamSettings.openSettingsRequest, object: nil,
+                               queue: .main) { [weak self] _ in
+                self?.showSettings()
+            },
+            center.addObserver(forName: StreamSettings.didChange, object: nil,
+                               queue: .main) { [weak self] note in
+                let restarts = note.userInfo?[StreamSettings.restartsStreamKey] as? Bool ?? false
+                self?.settingsChanged(restartsStream: restarts)
+            },
+        ]
+    }
+
+    /// One window, made the first time it is asked for and brought forward
+    /// every time after.
+    @objc private func showSettings() {
+        let settings = settingsWindow ?? SettingsWindow()
+        settingsWindow = settings
+        settings.show()
+    }
+
+    /// Volume, buffering and the mouse are applied by whoever owns them as they
+    /// change. What is left here is the clipboard, and the changes the host can
+    /// only take by opening the stream again.
+    private func settingsChanged(restartsStream: Bool) {
+        applyClipboardSetting()
+        if restartsStream, !appWindows.isEmpty {
+            scheduleMediaRestart()
+        }
+    }
+
+    /// Start or stop the running stream's clipboard bridge to match Settings.
+    private func applyClipboardSetting() {
+        guard let clipboard else { return }
+        let wanted = StreamSettings.shared.syncsClipboard
+        guard wanted != clipboard.isRunning else { return }
+        if wanted {
+            // Only ever mid-stream here -- the bridge exists only while one is
+            // open -- so this is sync coming on over clipboards that were left
+            // alone, whether or not it was on when the stream opened.
+            clipboard.start(resuming: true)
+        } else {
+            clipboard.stop()
+            Log.info("[clipboard] sync turned off in Settings")
+        }
+    }
+
+    /// Restart the picture once the settings have stopped moving.
+    ///
+    /// A quality pop-up stepped through three choices, or 30 and 60 tried back
+    /// to back, is one restart rather than a blackout per click: each restart
+    /// costs the windows their picture until the host's first keyframe.
+    private func scheduleMediaRestart(after delay: TimeInterval = 0.3) {
+        pendingRestart?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingRestart = nil
+            self?.restartMedia(reason: "settings changed")
+        }
+        pendingRestart = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Open the stream again with what Settings now says, keeping the windows.
+    ///
+    /// Frame rate, bitrate and whether the PC captures its sound are fixed on
+    /// the host when a media session opens, so a new value needs a new session.
+    /// This rebuilds the stored request from the settings and hands it to
+    /// `recoverMedia`, which already knows how to swap a session under windows
+    /// that stay where they are.
+    private func restartMedia(reason: String) {
+        guard !appWindows.isEmpty, let host = streamHost, let agent,
+              let request = mediaRequest, let config = streamConfig else { return }
+        // A recovery in flight is opening a session with the old request, and
+        // a second open would race it. Once it settles, this comes round again.
+        guard !recoveringMedia else {
+            scheduleMediaRestart()
+            return
+        }
+        guard let fresh = Self.applying(StreamSettings.shared, to: request, config: config,
+                                        host: host, overrides: settingsOverrides) else {
+            // Balanced at home is the same 20 Mbps as Automatic: nothing to do.
+            return
+        }
+        mediaRequest = fresh.request
+        streamConfig = fresh.config
+        Log.info("[app] \(reason); restarting the stream at \(Self.describe(fresh.config))")
+        // With the agent down, `onReconnected` brings the stream back and
+        // reads the request just stored. With it up, this opens the session
+        // now -- including when recovery has given up and the windows say
+        // "Lost the stream", which is exactly when a lower quality or 30 fps
+        // is reached for. A retry still waiting out its backoff is dropped
+        // when it fires: by `recoverMedia` while this one is in flight, and by
+        // its own check for a session once this one has succeeded.
+        guard agent.isConnected else { return }
+        mediaRecoveryAttempts = 0
+        recoverMedia(host: host, agent: agent,
+                     status: ("Applying settings…", "Restarting the picture from \(host)"))
+    }
+
+    /// `request` and `config` with the settings' frame rate, bitrate and sound,
+    /// or nil when the stream already has all three -- in which case there is
+    /// nothing to restart for.
+    static func applying(_ settings: StreamSettings, to request: AgentConnection.MediaRequest,
+                         config: StreamConfig, host: String,
+                         overrides: Set<StreamSettings.Override>)
+        -> (request: AgentConnection.MediaRequest, config: StreamConfig)? {
+        let fresh = settings.apply(to: config, host: host, overrides: overrides)
+        guard fresh.frameRate != config.frameRate || fresh.bitrateKbps != config.bitrateKbps
+                || fresh.audio != config.audio else { return nil }
+        var updated = request
+        updated.fps = fresh.frameRate
+        updated.bitrate = fresh.bitrateKbps * 1000
+        updated.audio = fresh.audio
+        return (updated, fresh)
+    }
+
+    static func describe(_ config: StreamConfig) -> String {
+        "\(config.frameRate) fps, \(config.bitrateKbps) kbit/s, sound \(config.audio ? "on" : "off")"
     }
 
     /// Choose which host display to stream.
@@ -1066,6 +1253,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About SolStream", action: nil, keyEquivalent: "")
         appMenu.addItem(.separator())
+        // ⌘, as in every Mac application, and not moved onto ⌃⌘: it is not
+        // reserved the way ⌘Q is, so while a streamed window has the keyboard
+        // it reaches the PC as Ctrl+, -- many Windows applications' own
+        // settings -- and the menu bar, or the stream's popover, is the way in
+        // from there.
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Reveal Log in Finder",
                         action: #selector(revealLog), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -1159,6 +1353,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboard = nil
         session?.stop()
         session = nil
+        pendingRestart?.cancel()
+        pendingRestart = nil
+        streamHost = nil
         agent?.disconnect()
         agent = nil
         picker?.close()

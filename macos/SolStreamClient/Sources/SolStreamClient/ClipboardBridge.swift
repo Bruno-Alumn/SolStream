@@ -43,6 +43,9 @@ final class ClipboardBridge {
     /// not the user's.
     private var lastSyncedText: String?
     private var inFlight = false
+    /// The next answer from the host is a baseline to remember, not a change
+    /// to copy over.
+    private var adoptsRemoteBaseline = false
     /// Whether a Mac copy may go to the PC right now.
     private let mayPush: () -> Bool
 
@@ -62,8 +65,27 @@ final class ClipboardBridge {
         stop()
     }
 
-    func start() {
+    var isRunning: Bool { timer != nil }
+
+    /// - Parameter resuming: sync is being turned on in Settings with a stream
+    ///   already open, rather than the stream opening with it on.
+    ///
+    /// Said by the caller rather than worked out here, because a bridge that
+    /// has never run is not proof of a stream that is just opening: one that
+    /// opened with sync off is built and left stopped, and turning sync on
+    /// later is its first start.
+    func start(resuming: Bool) {
         guard timer == nil else { return }
+        // Turned on mid-stream: whatever either side copied while sync was
+        // off stays where it was copied, and the next copy is the first to
+        // cross. Picking up either one would overwrite the other machine's
+        // clipboard with something copied there when it was not being synced
+        // -- the very thing having it off asked for. A stream opening with
+        // sync on pulls the PC's clipboard over, as it always has.
+        if resuming {
+            lastLocalChangeCount = pasteboard.changeCount
+            adoptsRemoteBaseline = true
+        }
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -120,8 +142,14 @@ final class ClipboardBridge {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.inFlight = false
-                guard let remote else { return }
+                // Asked for before a stop and answered after it: sync is off
+                // now, so the answer is not applied.
+                guard let remote, self.isRunning else { return }
                 self.lastRemoteSequence = remote.sequence
+                if self.adoptsRemoteBaseline {
+                    self.adoptsRemoteBaseline = false
+                    return
+                }
                 // Empty text is not an empty clipboard — it is also how an image
                 // on the host arrives. See the note on the class: this is why the
                 // Mac's clipboard is left alone rather than cleared.

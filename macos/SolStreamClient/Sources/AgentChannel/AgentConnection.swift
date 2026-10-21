@@ -249,6 +249,15 @@ public final class AgentConnection {
     public var onDisplays: (([RemoteDisplay]) -> Void)?
     /// The Windows cursor changed shape. Pushed by the host, not polled.
     public var onCursorShape: ((String) -> Void)?
+    /// The host's last cursor push, kept whether or not anyone is listening.
+    /// The host says its state once after authentication -- while the picker
+    /// holds the connection and nobody has set `onCursorShape` -- and after
+    /// that only on change, so a window opened during a game that already hides
+    /// its cursor would otherwise never hear "hidden". Main thread.
+    public private(set) var lastCursorShape: String?
+    /// The host declares on its pushes that it reports a hidden cursor at all,
+    /// which a host built before that reporting never does.
+    public private(set) var cursorReportsHidden = false
     /// A window this client was streaming has been closed on the host. Pushed
     /// the moment the host notices, so the Mac window goes with it rather than
     /// sitting there showing the last frame of an application that has quit.
@@ -663,6 +672,10 @@ public final class AgentConnection {
             self.connection = nil
             self.failPending(AgentError.disconnected)
         }
+        // Not in resetCallbacks: handing the connection to the picker keeps it,
+        // and with it what the host last said about its cursor.
+        lastCursorShape = nil
+        cursorReportsHidden = false
     }
 
     // MARK: - Requests
@@ -1546,7 +1559,13 @@ public final class AgentConnection {
             // Unsolicited, like hello: the host pushes it when the Windows
             // cursor changes shape, so it must not consume a pending reply slot.
             if let shape = message["shape"] as? String {
-                DispatchQueue.main.async { [weak self] in self?.onCursorShape?(shape) }
+                let reportsHidden = (message["reportsHidden"] as? NSNumber)?.boolValue ?? false
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.lastCursorShape = shape
+                    self.cursorReportsHidden = reportsHidden
+                    self.onCursorShape?(shape)
+                }
             }
             return
         case "busy":

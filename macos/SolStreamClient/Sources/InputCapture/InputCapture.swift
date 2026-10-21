@@ -56,7 +56,8 @@ public final class InputCapture {
     /// either do nothing or snap the view about, and the Mac's cursor leaving
     /// the window stops the turn dead. Gaming captures the mouse on a click
     /// inside the picture -- hidden, held still, only movement sent -- until
-    /// ⌃⌥ releases it, or the window stops being the key one.
+    /// ⌃⌥ releases it, or the window stops being the key one. With
+    /// `followsHostCursor` it also follows the game: see `CapturePolicy`.
     public enum PointerMode: String, CaseIterable {
         case desktop, gaming
     }
@@ -78,12 +79,69 @@ public final class InputCapture {
         }
     }
 
+    private static let sensitivityKey = "SolStream.gamingSensitivity"
+    private static let followsCursorKey = "SolStream.followsHostCursor"
+
+    /// Multiplier on relative motion while the mouse is captured for a game,
+    /// remembered across launches. 1 is the Mac's own feel.
+    public static var gamingSensitivity: Double {
+        get {
+            let stored = UserDefaults.standard.object(forKey: sensitivityKey) as? Double ?? 1
+            return min(max(stored, 0.25), 4)
+        }
+        set {
+            UserDefaults.standard.set(min(max(newValue, 0.25), 4), forKey: sensitivityKey)
+            NotificationCenter.default.post(name: pointerModeChanged, object: nil)
+        }
+    }
+
+    /// In gaming mode, capture the mouse while the PC hides its cursor and give
+    /// it back the moment the PC shows one -- a game's pause menu -- rather than
+    /// only on a click and on ⌃⌥. On by default; a host too old to report its
+    /// cursor's visibility simply never triggers it.
+    public static var followsHostCursor: Bool {
+        get { UserDefaults.standard.object(forKey: followsCursorKey) as? Bool ?? true }
+        set {
+            UserDefaults.standard.set(newValue, forKey: followsCursorKey)
+            NotificationCenter.default.post(name: pointerModeChanged, object: nil)
+        }
+    }
+
     /// The mouse is captured for a game: cursor hidden and decoupled.
     public private(set) var isPointerCaptured = false
     /// Sub-pixel motion carried between events, so slow movement is not lost
     /// to rounding.
     private var relativeResidual = CGPoint.zero
+    /// `gamingSensitivity`, read when the mouse is taken and when it changes
+    /// rather than from the defaults on every move of a 1000 Hz mouse.
+    private var sensitivity = CGFloat(InputCapture.gamingSensitivity)
     private var modeObserver: NSObjectProtocol?
+    private var policy = CapturePolicy()
+
+    /// Whether the host reports its cursor going away and coming back, so
+    /// gaming mode can follow it. Set by the owner when the host says so on a
+    /// push of its own; otherwise learned from watching it do both.
+    public var hostReportsCursorVisibility: Bool {
+        get { policy.hostReportsVisibility }
+        set { policy.hostReportsVisibility = newValue }
+    }
+
+    /// Told when the mouse is taken (true) and given back (false), so the
+    /// window can say how to get it back.
+    public var onPointerCaptureChanged: ((Bool) -> Void)?
+
+    /// What capturing does to the real cursor: decouples it from the mouse,
+    /// so it stays put while the mouse still reports motion, and hides it, so
+    /// it is not a stray arrow over the game -- or undoes both. Replaceable so
+    /// the tests can take the mouse without taking it from whoever runs them.
+    var lockSystemPointer: (Bool) -> Void = { locked in
+        CGAssociateMouseAndMouseCursorPosition(locked ? 0 : 1)
+        if locked { NSCursor.hide() } else { NSCursor.unhide() }
+    }
+
+    /// Where a test says the pointer is, as a unit point in the picture, or
+    /// nil for not over it. Unset, the window server is asked.
+    var pointerStandIn: (() -> CGPoint?)?
 
     /// Modifier flags as of the last `.flagsChanged`, so transitions can be
     /// turned into individual key down/up events.
@@ -221,6 +279,9 @@ public final class InputCapture {
     /// letterbox, or anywhere else the key window hears about — and so were
     /// not sent. Without it "moved but nothing sent" reads as a fault.
     public private(set) var positionsOutside = 0
+    /// Pointer events not sent because a game was reading raw motion and the
+    /// mouse was not captured -- see `handleUncapturedOverGame`.
+    public private(set) var withheldFromGame = 0
 
     /// What a scroll left over after rounding to whole Windows units, per
     /// axis. A trackpad reports fractions of a point, and rounding each event
@@ -272,18 +333,30 @@ public final class InputCapture {
             modeObserver = NotificationCenter.default.addObserver(
                 forName: Self.pointerModeChanged, object: nil, queue: .main
             ) { [weak self] _ in
-                if Self.pointerMode == .desktop { self?.releasePointer() }
+                guard let self else { return }
+                self.sensitivity = CGFloat(Self.gamingSensitivity)
+                // Desktop gives the mouse back; following switched on in a
+                // menu does too. Asked of the pointer as it is, which is over
+                // whatever control changed the setting, not the picture.
+                self.apply(self.policy.wantsCapture(after: .reconsider,
+                                                    self.moment(pointerInside: self.pointerIsOverPicture())),
+                           because: "the mouse settings changed")
             }
         }
         installMonitors()
         syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
+        // A game that already has its cursor hidden gets the mouse back as the
+        // window comes forward, as one running on this Mac would -- if the
+        // pointer is over the picture. Never after ⌃⌥, until a click.
+        apply(policy.wantsCapture(after: .reconsider, moment(pointerInside: pointerIsOverPicture())),
+              because: "the window became key with the PC's cursor hidden")
     }
 
     /// Disable capture. Called when the window resigns key.
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
-        releasePointer()
+        releasePointer("the window stopped being key")
         releaseHeldInput()
         removeMonitors()
         scrollResidual = .zero
@@ -383,7 +456,8 @@ public final class InputCapture {
             // forwarded below: the host must see the modifiers come up again.
             if isPointerCaptured,
                flags.intersection([.control, .option, .command, .shift]) == [.control, .option] {
-                releasePointer()
+                apply(policy.wantsCapture(after: .releaseChord, moment(pointerInside: true)),
+                      because: "⌃⌥")
             }
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
                !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
@@ -549,7 +623,9 @@ public final class InputCapture {
         return true
     }
 
-    private func handleMouseEvent(_ event: NSEvent) {
+    /// Not private so the packets a click or a move produces can be tested
+    /// against real `NSEvent`s, as `handleKeyEvent`'s are.
+    func handleMouseEvent(_ event: NSEvent) {
         guard isCapturing, let view = targetView else { return }
         // The monitor is application-wide, so with two streamed windows open a
         // click on the other one arrives here too — and converted into THIS
@@ -576,13 +652,12 @@ public final class InputCapture {
             handleCapturedPointer(event, in: view)
             return
         }
-        if Self.pointerMode == .gaming,
-           [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type),
-           sendPosition(for: event, in: view) {
-            // The click that captures is also delivered: it is usually the one
-            // that focuses the game, or fires. The position just sent puts the
-            // host cursor where it was clicked, and motion is relative from there.
-            capturePointer()
+        if Self.pointerMode == .gaming {
+            if takesPointer(on: event, in: view) { return }
+            if gameReadsMotion {
+                handleUncapturedOverGame(event)
+                return
+            }
         }
 
         switch event.type {
@@ -640,48 +715,308 @@ public final class InputCapture {
         }
     }
 
+    // MARK: - Following the host's cursor
+
+    /// When gaming mode holds the mouse, decided from facts alone.
+    ///
+    /// Kept apart from the side effects -- hiding the Mac's cursor, decoupling
+    /// it from the mouse -- so the rule can be tested without a mouse. The rule
+    /// is what went wrong: a game's pause menu showed its cursor, the Mac went
+    /// on holding the mouse, and the menu had no pointer at all.
+    ///
+    /// Following the host means its cursor decides. Hidden -- GLFW's null
+    /// cursor, ShowCursor(FALSE) -- is a game reading raw motion, so the mouse
+    /// is taken as soon as the pointer is over the picture. Shown is a menu, so
+    /// the mouse is given back, and a click in it is just a click.
+    struct CapturePolicy: Equatable {
+        /// What the host last said: its cursor is off the screen.
+        private(set) var hostCursorHidden = false
+
+        /// The host reports its cursor going away as well as its shape, so a
+        /// shape from it can be trusted to mean "shown".
+        ///
+        /// An agent that does says so on every push, and the owner sets this
+        /// from that. Otherwise it is learned from seeing the host both hide
+        /// its cursor and show one -- both, not just "hidden": an agent older
+        /// than the report only ever sends shapes, and one that misread a PC
+        /// with no mouse could say "hidden" for ever. Following either would
+        /// leave a click unable to take the mouse, or nothing able to give it
+        /// back; until then a click takes it and ⌃⌥ releases it, as before.
+        var hostReportsVisibility = false
+        private var seenHidden = false
+        private var seenShown = false
+
+        /// ⌃⌥ let the mouse go while the game still had its cursor hidden.
+        ///
+        /// Held until the next click in the picture, or until the game shows a
+        /// cursor and so ends the spell it was asking for: otherwise the very
+        /// next move over the picture would take the mouse straight back.
+        private(set) var releasedByHand = false
+
+        enum Event: Equatable {
+            /// The host pushed its cursor: hidden, or a shape.
+            case hostCursor(hidden: Bool)
+            /// A button went down.
+            case click
+            /// The pointer moved.
+            case pointerMoved
+            /// ⌃⌥ while the mouse was held.
+            case releaseChord
+            /// Nothing from the hand: focus or a setting changed.
+            case reconsider
+        }
+
+        /// What the policy does not remember for itself.
+        struct Moment {
+            var mode: PointerMode
+            var followsHostCursor: Bool
+            /// The window is key and its input is being captured.
+            var isActive: Bool
+            /// The Mac's pointer is over the picture -- or, for anything but a
+            /// click, a button is held.
+            var pointerInside: Bool
+            var isCaptured: Bool
+        }
+
+        /// Whether the host's cursor decides, rather than clicks and ⌃⌥ alone.
+        func isFollowing(_ followsHostCursor: Bool) -> Bool {
+            followsHostCursor && hostReportsVisibility
+        }
+
+        /// Take in `event`, and say whether the mouse should now be held.
+        mutating func wantsCapture(after event: Event, _ now: Moment) -> Bool {
+            switch event {
+            case .hostCursor(let hidden):
+                hostCursorHidden = hidden
+                if hidden {
+                    seenHidden = true
+                } else {
+                    seenShown = true
+                    releasedByHand = false
+                }
+                if seenHidden && seenShown { hostReportsVisibility = true }
+            case .click where now.pointerInside:
+                releasedByHand = false
+            case .releaseChord:
+                releasedByHand = true
+                return false
+            default:
+                break
+            }
+            return Self.shouldCapture(mode: now.mode,
+                                      following: isFollowing(now.followsHostCursor),
+                                      hostHidden: hostCursorHidden,
+                                      isActive: now.isActive,
+                                      pointerInside: now.pointerInside,
+                                      releasedByHand: releasedByHand,
+                                      isCaptured: now.isCaptured,
+                                      clicked: event == .click)
+        }
+
+        /// The rule itself, with nothing remembered.
+        static func shouldCapture(mode: PointerMode, following: Bool, hostHidden: Bool,
+                                  isActive: Bool, pointerInside: Bool, releasedByHand: Bool,
+                                  isCaptured: Bool, clicked: Bool) -> Bool {
+            guard isActive, mode == .gaming else { return false }
+            guard following else {
+                // Clicks and ⌃⌥ alone: a click in the picture takes the mouse,
+                // and only letting go gives it back.
+                return isCaptured || (clicked && pointerInside)
+            }
+            // A cursor on the PC is a menu, and a menu needs a pointer.
+            guard hostHidden else { return false }
+            if isCaptured { return true }
+            if clicked { return pointerInside }
+            return pointerInside && !releasedByHand
+        }
+    }
+
+    /// The host's cursor went off the screen, or came back as a shape.
+    ///
+    /// Called for every cursor push. In gaming mode, following the host, the
+    /// game hiding its cursor takes the mouse if the pointer is over the
+    /// picture, and the game showing one -- a pause menu, an inventory -- gives
+    /// it back.
+    ///
+    /// Given back, the Mac's cursor reappears where it was taken, and the PC's
+    /// is somewhere else: only motion was sent while the mouse was held, and
+    /// Minecraft, for one, centres its cursor as a menu opens. The menu would
+    /// then highlight the button under a pointer nobody can see until the
+    /// first move. So the PC's cursor is put under the Mac's at once -- safe
+    /// now, because a game that shows a cursor has stopped reading raw motion.
+    public func hostCursorVisibilityChanged(hidden: Bool) {
+        let wasHidden = policy.hostCursorHidden
+        let inside = isCapturing && (pointerIsOverPicture() || !heldButtons.isEmpty)
+        apply(policy.wantsCapture(after: .hostCursor(hidden: hidden), moment(pointerInside: inside)),
+              because: hidden ? "the PC hid its cursor" : "the PC showed its cursor")
+        guard wasHidden, !hidden, isCapturing, !isPointerCaptured, Self.pointerMode == .gaming,
+              policy.isFollowing(Self.followsHostCursor),
+              let pointer = pointerUnitPoint() else { return }
+        sendUnitPosition(x: pointer.x, y: pointer.y)
+    }
+
+    /// The game has its cursor hidden and is reading raw motion, and the mouse
+    /// is not captured: ⌃⌥ let it go, or the pointer is over something
+    /// covering the picture. Only asked once a captured mouse has been ruled
+    /// out.
+    private var gameReadsMotion: Bool {
+        policy.isFollowing(Self.followsHostCursor) && policy.hostCursorHidden
+    }
+
+    /// Pointer events while `gameReadsMotion`, which mostly go nowhere.
+    ///
+    /// The host injects an absolute position as a jump of its cursor, which a
+    /// game reading raw motion turns into a swing of its camera: the pointer
+    /// travelling up to the title bar after ⌃⌥ would turn the player round,
+    /// and the wheel on the way change what they hold. Neither is sent. A click
+    /// in the picture has already taken the mouse back, in `takesPointer`; a
+    /// release still goes, as the button alone, so nothing is left held down.
+    private func handleUncapturedOverGame(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            if let button = button(for: event), heldButtons.remove(button) != nil {
+                onInput?(SMTInput.mouseButton(button, pressed: false))
+            }
+        default:
+            if event.type == .mouseMoved { mouseMovedSeen += 1 }
+            withheldFromGame += 1
+        }
+    }
+
+    private func moment(pointerInside: Bool) -> CapturePolicy.Moment {
+        CapturePolicy.Moment(mode: Self.pointerMode, followsHostCursor: Self.followsHostCursor,
+                             isActive: isCapturing, pointerInside: pointerInside,
+                             isCaptured: isPointerCaptured)
+    }
+
+    private func apply(_ wanted: Bool, because reason: String) {
+        if wanted {
+            capturePointer(reason)
+        } else {
+            releasePointer(reason)
+        }
+    }
+
+    /// Capture the mouse if this event is the one gaming mode takes it on.
+    ///
+    /// - Returns: true when the event has been handled as a captured one.
+    private func takesPointer(on event: NSEvent, in view: NSView) -> Bool {
+        let isClick = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
+        let isMove = [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
+                      .otherMouseDragged].contains(event.type)
+        guard isClick || isMove else { return false }
+        // A click must land in the picture itself; a move may be a drag that
+        // has carried a held button out of it.
+        let inside = pictureUnitPoint(for: event, in: view) != nil
+            || (isMove && !heldButtons.isEmpty)
+        guard policy.wantsCapture(after: isClick ? .click : .pointerMoved,
+                                  moment(pointerInside: inside)) else { return false }
+        // The key window hears every move, wherever the pointer is -- over
+        // another application's window covering the picture, too. A click is
+        // delivered to the window it lands on, so only a move has to ask
+        // whether the picture is really what is under the pointer. Asked only
+        // now, when the answer would take the mouse.
+        if isMove, heldButtons.isEmpty, !pointerIsOverPicture() { return false }
+
+        if policy.isFollowing(Self.followsHostCursor) {
+            // The game has its cursor hidden and is reading motion, not
+            // position: an absolute position now would turn its camera. So the
+            // mouse is taken first, and this event goes as a captured one --
+            // a click as the button alone.
+            capturePointer(isClick ? "a click in the picture" : "the PC's cursor is hidden")
+            handleCapturedPointer(event, in: view)
+            return true
+        }
+        // The click that captures is also delivered: it is usually the one
+        // that focuses the game, or fires. The position sent first puts the
+        // host cursor where it was clicked, and motion is relative from there.
+        sendPosition(for: event, in: view)
+        capturePointer("a click in the picture")
+        return false
+    }
+
+    /// Where the Mac's pointer is in the picture right now, as 0...1 from its
+    /// top-left -- or nil when it is not over the picture, or is under
+    /// something drawn above it: the stats popover, another window. Always nil
+    /// during a resize: decoupling the cursor would stop the frame under the
+    /// hand dragging it.
+    private func pointerUnitPoint() -> CGPoint? {
+        if let pointerStandIn { return pointerStandIn() }
+        guard let view = targetView, let window = view.window,
+              !window.inLiveResize else { return nil }
+        let onScreen = NSEvent.mouseLocation
+        guard NSWindow.windowNumber(at: onScreen, belowWindowWithWindowNumber: 0)
+                == window.windowNumber else { return nil }
+        let point = view.convert(window.convertPoint(fromScreen: onScreen), from: nil)
+        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
+        return Self.unitPoint(viewPoint: point, viewSize: view.bounds.size,
+                              source: source, isFlipped: view.isFlipped)
+    }
+
+    private func pointerIsOverPicture() -> Bool {
+        pointerUnitPoint() != nil
+    }
+
+    /// Where an event falls in the picture, or nil when it is outside it.
+    private func pictureUnitPoint(for event: NSEvent, in view: NSView) -> CGPoint? {
+        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
+        return Self.unitPoint(viewPoint: view.convert(event.locationInWindow, from: nil),
+                              viewSize: view.bounds.size, source: source,
+                              isFlipped: view.isFlipped)
+    }
+
     // MARK: - Captured pointer
 
-    private func capturePointer() {
+    private func capturePointer(_ reason: String) {
         guard !isPointerCaptured else { return }
         isPointerCaptured = true
         relativeResidual = .zero
-        // Decoupled, so the Mac's cursor stays put while the mouse still
-        // reports motion; hidden, so it is not a stray arrow over the game.
-        CGAssociateMouseAndMouseCursorPosition(0)
-        NSCursor.hide()
-        Log.info("[input] mouse captured for gaming; ⌃⌥ releases it")
+        sensitivity = CGFloat(Self.gamingSensitivity)
+        lockSystemPointer(true)
+        Log.info("[input] mouse captured for gaming (\(reason)); ⌃⌥ releases it")
+        onPointerCaptureChanged?(true)
     }
 
     /// Give the mouse back to the Mac. Safe to call whether or not it is held.
-    public func releasePointer() {
+    public func releasePointer(_ reason: String? = nil) {
         guard isPointerCaptured else { return }
         isPointerCaptured = false
-        CGAssociateMouseAndMouseCursorPosition(1)
-        NSCursor.unhide()
-        Log.info("[input] mouse released")
+        lockSystemPointer(false)
+        Log.info("[input] mouse released" + (reason.map { " (\($0))" } ?? ""))
+        onPointerCaptureChanged?(false)
     }
 
-    /// Motion while captured: relative deltas, in the picture's pixels.
+    /// Motion while captured, in canvas pixels, and what rounding left over.
     ///
     /// NSEvent's deltas are in points and already carry the Mac's pointer
     /// acceleration, which is what the hand on the mouse is calibrated to.
     /// Scaled by how many canvas pixels one point of this view shows, so a
-    /// turn feels the same whatever size the window is.
+    /// turn feels the same whatever size the window is, then by the chosen
+    /// sensitivity.
+    static func relativeMotion(deltaX: CGFloat, deltaY: CGFloat, pixelsPerPoint: CGFloat,
+                               sensitivity: CGFloat, residual: CGPoint)
+        -> (dx: Int, dy: Int, residual: CGPoint) {
+        let scale = pixelsPerPoint * sensitivity
+        let x = residual.x + deltaX * scale
+        let y = residual.y + deltaY * scale
+        let dx = Int(x.rounded(.towardZero))
+        let dy = Int(y.rounded(.towardZero))
+        return (dx, dy, CGPoint(x: x - CGFloat(dx), y: y - CGFloat(dy)))
+    }
+
     private func handleCapturedPointer(_ event: NSEvent, in view: NSView) {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             mouseMovedSeen += 1
             let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
             let perPoint = view.bounds.width > 0 ? source.width / view.bounds.width : 1
-            let x = relativeResidual.x + event.deltaX * perPoint
-            let y = relativeResidual.y + event.deltaY * perPoint
-            let dx = Int(x.rounded(.towardZero))
-            let dy = Int(y.rounded(.towardZero))
-            relativeResidual = CGPoint(x: x - CGFloat(dx), y: y - CGFloat(dy))
-            if dx != 0 || dy != 0 {
+            let motion = Self.relativeMotion(deltaX: event.deltaX, deltaY: event.deltaY,
+                                             pixelsPerPoint: perPoint, sensitivity: sensitivity,
+                                             residual: relativeResidual)
+            relativeResidual = motion.residual
+            if motion.dx != 0 || motion.dy != 0 {
                 positionsSent += 1
-                onInput?(SMTInput.mouseMoveRelative(deltaX: dx, deltaY: dy))
+                onInput?(SMTInput.mouseMoveRelative(deltaX: motion.dx, deltaY: motion.dy))
             }
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -691,8 +1026,11 @@ public final class InputCapture {
             }
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            if let button = button(for: event) {
-                heldButtons.remove(button)
+            // Only a button the host was told is down. The mouse can be taken
+            // between a press and its release -- the game hiding its cursor, or
+            // the window coming forward under a click it never forwarded -- and
+            // a lone release is not something to hand an application.
+            if let button = button(for: event), heldButtons.remove(button) != nil {
                 onInput?(SMTInput.mouseButton(button, pressed: false))
             }
 
