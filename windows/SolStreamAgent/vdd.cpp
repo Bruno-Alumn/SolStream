@@ -14,6 +14,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
+#include <mutex>
+
+#include "util.h"
 
 namespace solstream {
 namespace {
@@ -26,11 +30,6 @@ std::wstring ExecutableDir() {
     std::wstring full(path);
     const size_t slash = full.find_last_of(L'\\');
     return slash == std::wstring::npos ? std::wstring{} : full.substr(0, slash);
-}
-
-std::wstring Upper(std::wstring text) {
-    std::transform(text.begin(), text.end(), text.begin(), ::towupper);
-    return text;
 }
 
 }  // namespace
@@ -54,7 +53,7 @@ std::vector<VirtualDisplay> FindVirtualDisplays() {
         }
         // Root-enumerated means a software device rather than a card on a bus,
         // which is exactly what an indirect display driver is.
-        if (Upper(instance).rfind(L"ROOT\\DISPLAY", 0) != 0) {
+        if (FoldCase(instance).rfind(L"root\\display", 0) != 0) {
             continue;
         }
 
@@ -83,11 +82,30 @@ std::vector<VirtualDisplay> FindVirtualDisplays() {
 }
 
 bool IsSolStreamDisplayDriver(const std::wstring& name) {
-    const std::wstring upper = Upper(name);
-    return upper.find(L"VIRTUAL DISPLAY DRIVER") != std::wstring::npos
-        || upper.find(L"IDDSAMPLE") != std::wstring::npos
-        || upper.find(L"SOLSTREAM") != std::wstring::npos
-        || upper.find(L"MTT") != std::wstring::npos;
+    const std::wstring folded = FoldCase(name);
+    if (folded.find(L"virtual display driver") != std::wstring::npos
+        || folded.find(L"iddsample") != std::wstring::npos
+        || folded.find(L"solstream") != std::wstring::npos) {
+        return true;
+    }
+    // MikeTheTech's vendor token -- "VDD by MTT", "MttVDD" -- as a word of its
+    // own, never three letters inside some other product's name.
+    size_t start = 0;
+    while (start < folded.size()) {
+        while (start < folded.size() && !std::iswalnum(folded[start])) {
+            ++start;
+        }
+        size_t end = start;
+        while (end < folded.size() && std::iswalnum(folded[end])) {
+            ++end;
+        }
+        const std::wstring word = folded.substr(start, end - start);
+        if (word == L"mtt" || word.rfind(L"mttvdd", 0) == 0) {
+            return true;
+        }
+        start = end;
+    }
+    return false;
 }
 
 bool HasVirtualDisplay() {
@@ -110,6 +128,26 @@ bool HasVirtualDisplay() {
         }
     }
     return false;
+}
+
+bool HasVirtualDisplayCached() {
+    // A SetupDi scan takes the PnP lock and costs milliseconds, and the window,
+    // the `status` command and the busy refusal all ask -- the first of them
+    // once a second, forever, and the second before anybody has authenticated.
+    // Display drivers come and go on the scale of minutes, so ten seconds stale
+    // is fresh enough for every one of them.
+    static std::mutex guard;
+    static bool known = false;
+    static bool answer = false;
+    static ULONGLONG checked_at = 0;
+    std::lock_guard<std::mutex> held(guard);
+    const ULONGLONG now = GetTickCount64();
+    if (!known || now - checked_at >= 10000) {
+        answer = HasVirtualDisplay();
+        checked_at = now;
+        known = true;
+    }
+    return answer;
 }
 
 std::wstring BundledDriverPackage() {

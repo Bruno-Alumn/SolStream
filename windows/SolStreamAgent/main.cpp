@@ -1,14 +1,17 @@
-﻿// SolStream Agent ΓÇö the Windows half of single-application streaming.
+﻿// SolStream Agent — the Windows half of single-application streaming.
 //
-// It does one job: make a chosen application's window sit at a known,
-// non-overlapping rectangle on a chosen display, and tell the Mac where it is.
-// The Mac then crops that rectangle out of the single SMT/1 stream and
-// presents it as a native window.
+// This file is the control side: the authenticated agent channel, window and
+// application enumeration, placement and locking, discovery and startup. It
+// makes a chosen application's window sit at a known, non-overlapping
+// rectangle on the capture display and tells the Mac where it is; the Mac crops
+// that rectangle out of the single SMT/1 stream and presents it as a native
+// window. Capture, encode and transport are in media/, the window in
+// host_window.cpp.
 //
-// Deliberately plain Win32 ΓÇö SetWindowPos, EnumWindows, GetMonitorInfo, a
-// socket. No D3D, no WinRT, no COM lifetimes, no shared handles. That is the
-// only kind of Windows code that can be written correctly without a debugger,
-// which matters because this is developed on a Mac and cross-compiled.
+// The code here is plain Win32 on purpose -- SetWindowPos, EnumWindows,
+// GetMonitorInfo, a socket -- because it is developed on a Mac and
+// cross-compiled, and that is the kind of Windows code that can be checked
+// without a debugger.
 //
 // Build (macOS cross):  ./build-cross.sh
 // Build (Windows):      cmake --build . --target SolStreamAgent
@@ -34,6 +37,7 @@
 #include <tlhelp32.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <objbase.h>
 #include <wincrypt.h>
 #include <winhttp.h>
 #include <bcrypt.h>
@@ -59,6 +63,7 @@
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
+#include "util.h"
 
 // The media path is MSVC-only: Windows.Graphics.Capture and Media Foundation
 // both arrive through C++/WinRT and the Windows SDK, neither of which mingw
@@ -74,6 +79,13 @@
 
 namespace {
 
+using solstream::FoldCase;
+using solstream::FromHex;
+using solstream::LocalDataPath;
+using solstream::ToHex;
+using solstream::ToUtf8;
+using solstream::ToWide;
+
 constexpr unsigned short kDefaultPort = solstream::kDefaultPort;
 
 // By default this socket is bound to loopback only and reached through an SSH
@@ -87,7 +99,7 @@ constexpr int kProtocolVersion = 2;
 // with the matching pair in AgentConnection.swift, because the clipboard is the
 // one command whose payload is sized by the user rather than by the protocol.
 //
-// JSON escaping can expand text sixfold ΓÇö a control byte becomes \u00xx ΓÇö so the
+// JSON escaping can expand text sixfold — a control byte becomes \u00xx — so the
 // line limit must clear six times the payload cap at both ends. Getting this
 // wrong is not a truncated clipboard: whichever side hits its line cap first
 // tears down the control channel mid-session.
@@ -111,24 +123,7 @@ std::atomic<int> g_clients_connected{0};
 /// moment is the token, and connecting is what made it disappear.
 std::atomic<int> g_clients_authenticated{0};
 
-// ΓöÇΓöÇ Logging ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-
-/// Where the running agent leaves a record of itself.
-///
-/// It did not used to leave one. Log() wrote to stderr, and an installed agent
-/// starts from a scheduled task with no console attached to write it to — so on
-/// every machine that was not a development box, the program that had just
-/// failed to stream had said exactly nothing about why. Beside the token, which
-/// is where this program's other state already lives.
-std::wstring AgentLogPath() {
-    wchar_t buffer[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
-        return {};
-    }
-    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\solstream.log";
-}
+// ── Logging ──────────────────────────────────────────────────────────────────
 
 void Log(const char* fmt, ...) {
     char line[2048];
@@ -146,22 +141,17 @@ void Log(const char* fmt, ...) {
     // Opened per line rather than held: this runs for days, and a handle held
     // open for days is a log nobody can delete and a last line nobody can read
     // until the process exits.
-    static const std::wstring path = AgentLogPath();
+    // Beside the token. Log() used to write only to stderr, and an installed
+    // agent has no console, so a failure on any machine but a development box
+    // said nothing at all.
+    static const std::wstring path = LocalDataPath(L"solstream.log");
     if (path.empty()) {
         return;
     }
-    // SERIALISED, AND SHARED WITH OTHER WRITERS. Nine threads log through here --
-    // the watcher, the cursor watcher, the client thread, the capture, the
-    // sender, the receive loop, the audio thread, the discovery responder and
-    // the status thread -- and the share mode was FILE_SHARE_READ, which forbids
-    // a second writer. So whenever two of them logged at once the second
-    // CreateFileW failed with a sharing violation and its line went nowhere:
-    // silently, with no error checked, on the one diagnostic this program has on
-    // a machine with no console. The rotation was worse -- MoveFileW cannot
-    // rename a file another handle has open without FILE_SHARE_DELETE, so a busy
-    // log simply grew past its cap for ever. The mutex is what makes the
-    // size-check-then-rotate sequence atomic; the wider share mode is what stops
-    // an external tail(1) or the other log file from breaking either.
+    // Serialised, and opened shared with other writers including DELETE: several
+    // threads log through here, a narrower share mode silently lost the second
+    // of two simultaneous lines, and rotation could not rename a file another
+    // handle had open. The mutex makes check-size-then-rotate atomic.
     static std::mutex writing;
     std::lock_guard<std::mutex> held(writing);
     constexpr DWORD kShare = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -202,7 +192,7 @@ void Log(const char* fmt, ...) {
     CloseHandle(file);
 }
 
-// ΓöÇΓöÇ Text ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Text ─────────────────────────────────────────────────────────────────────
 
 /// An address somebody could actually type on their Mac.
 ///
@@ -324,37 +314,8 @@ std::vector<std::string> SplitLines(const std::string& text) {
     return lines;
 }
 
-std::string ToUtf8(const std::wstring& text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(),
-                                           nullptr, 0, nullptr, nullptr);
-    if (needed <= 0) {
-        return {};
-    }
-    std::string out(static_cast<size_t>(needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(),
-                        out.data(), needed, nullptr, nullptr);
-    return out;
-}
-
-std::wstring ToWide(const std::string& text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(),
-                                           nullptr, 0);
-    if (needed <= 0) {
-        return {};
-    }
-    std::wstring out(static_cast<size_t>(needed), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(), out.data(), needed);
-    return out;
-}
-
 /// Escape a string for embedding in JSON. Window titles are arbitrary user
-/// text ΓÇö quotes and backslashes in them would otherwise corrupt the stream.
+/// text — quotes and backslashes in them would otherwise corrupt the stream.
 std::string JsonEscape(const std::string& text) {
     std::string out;
     out.reserve(text.size() + 8);
@@ -378,7 +339,7 @@ std::string JsonEscape(const std::string& text) {
     return out;
 }
 
-// ΓöÇΓöÇ Displays ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Displays ─────────────────────────────────────────────────────────────────
 
 struct Display {
     std::string device_name;  // matches the DXGI DeviceName
@@ -436,8 +397,8 @@ std::vector<Display> EnumerateDisplays() {
 /// upscaled and looks soft.
 ///
 /// This only ever SWITCHES between modes the driver already offers, which is
-/// immediate. Adding a mode to a virtual display is the expensive operation ΓÇö it
-/// needs a device restart ΓÇö so the modes are seeded once at setup instead.
+/// immediate. Adding a mode to a virtual display is the expensive operation — it
+/// needs a device restart — so the modes are seeded once at setup instead.
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
@@ -468,7 +429,7 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
         if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
             continue;
         }
-        // Smallest area that still covers the request ΓÇö and, among equals, the
+        // Smallest area that still covers the request — and, among equals, the
         // highest refresh rate. Ranking on area alone left the winner as
         // whichever mode the driver happened to enumerate first, and the virtual
         // display offers every resolution at every rate, so that was a coin toss
@@ -521,7 +482,7 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     return true;
 }
 
-// ΓöÇΓöÇ Windows ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Windows ──────────────────────────────────────────────────────────────────
 
 struct WindowInfo {
     HWND handle = nullptr;
@@ -542,7 +503,7 @@ struct WindowInfo {
     /// The Mac crops the CLIENT area, so a standard caption is already outside
     /// the crop and its minimise/maximise/close buttons never reach the stream.
     /// A window that draws its own caption inside the client area (Explorer,
-    /// Chrome, Discord) reports 0 here ΓÇö and for those the buttons share a strip
+    /// Chrome, Discord) reports 0 here — and for those the buttons share a strip
     /// with tabs and the address bar, so cropping them off would take real UI
     /// with them.
     int caption_inset = 0;
@@ -642,10 +603,9 @@ bool IsUserWindow(HWND window) {
     // Never our own host window. It is visible, titled, unowned and not a tool
     // window, so it passes every test below and a client could ask for its
     // handle, `place` it onto the captured display and `focus` it -- which would
-    // put the pairing PIN, and anything else this program asks a human at the PC
-    // to confirm, inside the video feed of the client doing the asking, with the
-    // clicks to match. The confirmation is only worth anything if it happens
-    // somewhere the remote side cannot reach.
+    // put the pairing token, and anything else this program shows a human at the
+    // PC, inside the video feed of the client doing the asking, with the clicks
+    // to match.
     DWORD pid = 0;
     GetWindowThreadProcessId(window, &pid);
     if (pid == GetCurrentProcessId()) {
@@ -687,7 +647,7 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     auto* state = reinterpret_cast<EnumState*>(param);
 
     // Anything visible can occlude, including the tool windows and owned
-    // dialogs that IsUserWindow filters out of the reported list ΓÇö but only if
+    // dialogs that IsUserWindow filters out of the reported list — but only if
     // it actually paints. Screen-wide click-through overlays (the NVIDIA
     // GeForce overlay is the usual one) sit above everything and would
     // otherwise report constant false occlusion.
@@ -730,13 +690,13 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     info.class_name = ToUtf8(class_name);
 
     // Everything already in `above` was enumerated earlier, i.e. is higher in
-    // the Z-order. Report whichever covers the most of the tile ΓÇö the first one
+    // the Z-order. Report whichever covers the most of the tile — the first one
     // found is not necessarily the one a user would blame.
     //
     // The last entry is this window itself ONLY when the block at the top of
     // this function appended it, and that block has a test the reported list
-    // does not: CanPaintOver. A window that fails it ΓÇö any window built on
-    // UpdateLayeredWindow, which is a great many of them ΓÇö is still a user
+    // does not: CanPaintOver. A window that fails it — any window built on
+    // UpdateLayeredWindow, which is a great many of them — is still a user
     // window and still gets here, with nothing of its own in `above`. Skipping
     // the last entry unconditionally therefore skipped a real occluder, and it
     // skipped the nearest one, which is the one most likely to be over the tile.
@@ -849,12 +809,22 @@ uint64_t IdFromWindow(HWND window) {
 /// of the request — the whole problem here is a call that claims nothing and
 /// fails anyway.
 bool ForceForeground(HWND window) {
+    // A hung application cannot take the foreground anyway, and every call
+    // below would wait on its message loop -- and AttachThreadInput would tie
+    // this thread's input to a queue nobody is reading.
+    if (IsHungAppWindow(window)) {
+        return false;
+    }
     if (IsIconic(window)) {
         ShowWindow(window, SW_RESTORE);
     }
     // Z-order first, and unconditionally: raising is not subject to the
     // foreground restriction, and it is what capture needs even in the case
-    // where focus cannot be won.
+    // where focus cannot be won. Synchronous: the foreground attempts below
+    // depend on the window already being on top, and an asynchronous raise
+    // lost the first of them in a live session -- "could not take the
+    // foreground" until a later attempt landed. The hung check above is what
+    // keeps this from blocking.
     SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     BringWindowToTop(window);
 
@@ -880,7 +850,7 @@ bool ForceForeground(HWND window) {
     return GetForegroundWindow() == window;
 }
 
-// ΓöÇΓöÇ Launchable applications ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Launchable applications ──────────────────────────────────────────────────
 
 struct AppEntry {
     std::string name;
@@ -890,8 +860,7 @@ struct AppEntry {
 /// Walk a Start Menu tree collecting shortcuts.
 ///
 /// The shortcuts are launched as-is rather than resolved to their targets: that
-/// keeps the arguments, working directory and "run as" flags the installer chose,
-/// and avoids needing COM for IShellLink.
+/// keeps the arguments, working directory and "run as" flags the installer chose.
 void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int depth) {
     if (depth > 4) {
         return;
@@ -915,8 +884,7 @@ void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int dept
             continue;
         }
         const std::wstring stem = name.substr(0, name.size() - 4);
-        std::wstring lowered = stem;
-        std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::towlower);
+        const std::wstring lowered = FoldCase(stem);
         // Nobody wants to stream an uninstaller, and clicking one by accident
         // from a list of application names would be genuinely bad.
         if (lowered.find(L"uninstall") != std::wstring::npos) {
@@ -954,7 +922,7 @@ std::vector<AppEntry> EnumerateApps() {
 /// `\\attacker\share\payload.exe` ran it as the logged-in user, and `icon` would
 /// happily reach the same UNC path and hand over a set of NTLM credentials on
 /// the way. Checking against the list the agent just produced costs one
-/// directory walk and removes the primitive rather than narrowing it ΓÇö there is
+/// directory walk and removes the primitive rather than narrowing it — there is
 /// no path a client can name that the user could not have clicked in their own
 /// Start Menu.
 ///
@@ -963,37 +931,35 @@ std::vector<AppEntry> EnumerateApps() {
 /// canonicalisation to get subtly wrong, and no argument about what `..` means
 /// halfway through a UNC path.
 ///
-/// Cached, because membership is asked once per icon and the picker asks for one
-/// icon per row as rows scroll into view. Re-walking two Start Menu trees to
-/// depth 4 for each of those put real disk I/O on the agent's single command
-/// thread, and every other command queues behind it.
+/// Cached, because membership is asked once per icon, and the list itself is
+/// asked for every time the Mac redraws its picker -- which a window opening or
+/// closing anywhere on the PC makes it do. Each walk of two Start Menu trees to
+/// depth 4 is disk I/O on the agent's single command thread, with every other
+/// command queued behind it. Ten seconds stale is fresh enough for "what is
+/// installed".
 ///
 /// No lock: commands are served one at a time, on one thread.
+std::vector<AppEntry> g_advertised_apps;
 std::set<std::wstring> g_advertised_paths;
-DWORD g_advertised_at = 0;
-constexpr DWORD kAdvertisedTtlMs = 5000;
+ULONGLONG g_advertised_at = 0;
+constexpr ULONGLONG kAdvertisedTtlMs = 10000;
 
-std::wstring FoldCase(const std::wstring& text) {
-    std::wstring lowered = text;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::towlower);
-    return lowered;
-}
-
-void RememberAdvertised(const std::vector<AppEntry>& apps) {
-    g_advertised_paths.clear();
-    for (const AppEntry& app : apps) {
-        g_advertised_paths.insert(FoldCase(app.path));
+/// The application list, walked again only when the cached one is stale.
+const std::vector<AppEntry>& AdvertisedApps() {
+    const ULONGLONG now = GetTickCount64();
+    if (g_advertised_at == 0 || now - g_advertised_at > kAdvertisedTtlMs) {
+        g_advertised_apps = EnumerateApps();
+        g_advertised_paths.clear();
+        for (const AppEntry& app : g_advertised_apps) {
+            g_advertised_paths.insert(FoldCase(app.path));
+        }
+        g_advertised_at = now;
     }
-    // Zero means "never populated", so nudge past it on the once-in-49-days
-    // tick where GetTickCount returns 0.
-    g_advertised_at = GetTickCount() | 1;
+    return g_advertised_apps;
 }
 
 bool IsAdvertisedApp(const std::wstring& path) {
-    const DWORD now = GetTickCount();
-    if (g_advertised_at == 0 || now - g_advertised_at > kAdvertisedTtlMs) {
-        RememberAdvertised(EnumerateApps());
-    }
+    AdvertisedApps();
     return g_advertised_paths.count(FoldCase(path)) != 0;
 }
 
@@ -1003,9 +969,30 @@ bool IsAdvertisedApp(const std::wstring& path) {
 /// run a stub that spawns the real process, so the window that appears belongs to
 /// a different pid. So take a snapshot first and watch for a window that was not
 /// there before, preferring a pid match while there is still time to wait for one.
+/// The user windows open right now, with their owning process: what the launch
+/// wait compares against, without the titles, classes and occlusion pass that
+/// EnumerateWindows computes for the picker.
+struct OpenWindow {
+    HWND handle;
+    DWORD pid;
+};
+
+std::vector<OpenWindow> OpenUserWindows() {
+    std::vector<OpenWindow> found;
+    EnumWindows([](HWND window, LPARAM param) -> BOOL {
+        if (IsUserWindow(window)) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(window, &pid);
+            reinterpret_cast<std::vector<OpenWindow>*>(param)->push_back({window, pid});
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
 uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     std::set<HWND> before;
-    for (const WindowInfo& window : EnumerateWindows()) {
+    for (const OpenWindow& window : OpenUserWindows()) {
         before.insert(window.handle);
     }
     const HWND foreground_before = GetForegroundWindow();
@@ -1016,8 +1003,19 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     request.lpVerb = L"open";
     request.lpFile = path.c_str();
     request.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&request)) {
-        Log("[agent] ShellExecuteEx failed: %lu", GetLastError());
+    // ShellExecuteEx may hand a shortcut to a shell extension, which is COM, and
+    // Windows documents it as needing COM initialised on the calling thread.
+    // Scoped to this call rather than the whole client thread, whose apartment
+    // the media path's WinRT calls would otherwise inherit.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED
+                                                | COINIT_DISABLE_OLE1DDE);
+    const BOOL executed = ShellExecuteExW(&request);
+    const DWORD execute_error = GetLastError();
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
+    if (!executed) {
+        Log("[agent] ShellExecuteEx failed: %lu", execute_error);
         return 0;
     }
     DWORD launched_pid = 0;
@@ -1032,7 +1030,7 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     ULONGLONG fallback_seen = 0;
     while (GetTickCount64() < deadline) {
         Sleep(250);
-        for (const WindowInfo& window : EnumerateWindows()) {
+        for (const OpenWindow& window : OpenUserWindows()) {
             if (before.count(window.handle)) {
                 continue;
             }
@@ -1051,7 +1049,7 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
         }
 
         // No new window may be the correct outcome rather than a failure: an
-        // application that is already running usually reuses its window ΓÇö
+        // application that is already running usually reuses its window —
         // Explorer opens a tab in the existing one, and single-instance
         // applications just raise theirs. Starting an application does always
         // bring its window forward, so a foreground window that changed is very
@@ -1068,17 +1066,16 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
     return fallback ? IdFromWindow(fallback) : 0;
 }
 
-// ΓöÇΓöÇ Clipboard ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Clipboard ────────────────────────────────────────────────────────────────
 //
 // Text only, and deliberately so. Images and files raise questions this does not
-// need to answer yet ΓÇö how large is too large, what happens to a 2 GB file
-// dropped on a link ΓÇö whereas text is what people actually copy between a Mac and
+// need to answer yet — how large is too large, what happens to a 2 GB file
+// dropped on a link — whereas text is what people actually copy between a Mac and
 // a remote application all day.
 //
-// Implemented here rather than in the separate ClipboardMonitor daemon: that one
-// stands up its own WebSocket server with no authentication, and the agent is
-// already the one authenticated channel to this machine. A second open port for
-// this would be a second thing to secure.
+// Carried on the agent channel because it is the one authenticated, encrypted
+// channel to this machine; a second port for it would be a second thing to
+// secure.
 
 /// The clipboard is a shared, contended resource: another process can hold it
 /// open, and OpenClipboard fails rather than waiting.
@@ -1136,7 +1133,7 @@ std::string ClipboardGetJson() {
     if (text.size() > kMaxClipboardBytes) {
         // Cut between codepoints, not at a byte offset. resize() alone can slice
         // a multi-byte character in half, and the Mac rejects the whole line as
-        // malformed JSON ΓÇö losing the reply, not just the tail of the text.
+        // malformed JSON — losing the reply, not just the tail of the text.
         size_t cut = kMaxClipboardBytes;
         while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
             --cut;
@@ -1179,7 +1176,7 @@ std::string ClipboardSetJson(const std::string& text) {
          + std::to_string(ClipboardSequence()) + "}";
 }
 
-// ΓöÇΓöÇ Icons ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Icons ────────────────────────────────────────────────────────────────────
 //
 // Sent as raw BGRA plus dimensions rather than PNG. Neither side then needs an
 // image codec: the agent stays plain Win32 with no GDI+ lifetime to get wrong,
@@ -1188,7 +1185,7 @@ std::string ClipboardSetJson(const std::string& text) {
 
 /// Render an HICON into a straight-alpha BGRA buffer.
 ///
-/// Icons come back from Windows as two bitmaps ΓÇö colour and mask ΓÇö and the colour
+/// Icons come back from Windows as two bitmaps — colour and mask — and the colour
 /// one is only sometimes 32-bit with real alpha. Drawing onto a black DIB and
 /// taking the mask into account handles both cases, which matters because the
 /// 16-colour icons some old executables still carry would otherwise come out as
@@ -1294,7 +1291,7 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
          + ",\"bgra\":\"" + Base64Encode(bgra) + "\"}";
 }
 
-// ΓöÇΓöÇ Authentication ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Authentication ───────────────────────────────────────────────────────────
 //
 // This socket can enumerate and move every window on the machine and launch
 // arbitrary applications. Binding a single trusted address limits who can reach
@@ -1303,57 +1300,36 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
 // any command is accepted.
 //
 // The token is generated on first run and kept in the user's own profile. It is
-// not encrypted, deliberately ΓÇö the point is for the person at the machine to be
+// not encrypted, deliberately — the point is for the person at the machine to be
 // able to read it and give it to their Mac.
 //
-// Plaintext over TCP means this authenticates the client to the host and nothing
-// more: it does not encrypt the session or protect against someone who can read
-// the traffic. On a home LAN or a VPN that is the right amount of security for
-// what it guards. Do not mistake it for more than that.
+// The token itself never crosses the wire: the client proves it holds it with
+// an HMAC over a per-connection challenge (ProofMatches), and the same exchange
+// agrees the forward-secret keys the channel is encrypted with from then on.
+// docs/architecture.md has the whole handshake.
 
 std::string g_token;
 bool g_require_auth = true;
 /// Bumped and persisted on every media session. It is in the key-schedule
 /// transcript so that two sessions cannot derive the same keys even on a machine
 /// whose RNG is repeating itself after an image restore -- the one failure that
-/// would otherwise be silent and total.
-///
-/// "Persisted" was the load-bearing half of that sentence and nothing did it:
-/// the counter lived only in this variable, so it restarted at zero with the
-/// process. An image restore takes the agent down with it, which is precisely
-/// the case the counter exists for -- restore the same image twice, get the same
-/// RNG stream, and the first media session of each run derived identical keys.
-/// It is now read at startup and written on every bump, beside the token.
+/// would otherwise be silent and total. Persisted beside the token, because an
+/// image restore restarts the process too: a counter kept only in memory would
+/// start from zero again, with the same RNG stream, and repeat the keys.
 unsigned long long g_media_count = 0;
 
-std::wstring TokenPath() {
-    wchar_t buffer[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
-        return {};
-    }
-    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\agent.token";
-}
-
-std::string RandomToken() {
-    unsigned char bytes[16] = {};
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+/// `count` random bytes as lowercase hex, or empty if the RNG refuses.
+std::string RandomHex(size_t count) {
+    std::vector<unsigned char> bytes(count);
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
                                         BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
         return {};
     }
-    static const char* hex = "0123456789abcdef";
-    std::string out;
-    out.reserve(sizeof(bytes) * 2);
-    for (unsigned char byte : bytes) {
-        out.push_back(hex[byte >> 4]);
-        out.push_back(hex[byte & 0x0F]);
-    }
-    return out;
+    return ToHex(bytes);
 }
 
 std::string LoadOrCreateToken() {
-    const std::wstring path = TokenPath();
+    const std::wstring path = LocalDataPath(L"agent.token");
     if (path.empty()) {
         return {};
     }
@@ -1376,7 +1352,7 @@ std::string LoadOrCreateToken() {
         }
     }
 
-    const std::string fresh = RandomToken();
+    const std::string fresh = RandomHex(16);
     if (fresh.empty()) {
         return {};
     }
@@ -1390,19 +1366,6 @@ std::string LoadOrCreateToken() {
     return fresh;
 }
 
-/// Where the media session counter lives. Beside the token, because it is the
-/// same kind of thing: state this machine must remember across restarts for the
-/// key schedule to mean anything.
-std::wstring MediaCountPath() {
-    wchar_t buffer[MAX_PATH] = {};
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", buffer, MAX_PATH)) {
-        return {};
-    }
-    const std::wstring dir = std::wstring(buffer) + L"\\SolStream";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\media.count";
-}
-
 /// The counter as it stood when this machine last opened a media session.
 ///
 /// A missing or unreadable file reads as zero, which is where an agent that has
@@ -1410,7 +1373,7 @@ std::wstring MediaCountPath() {
 /// one -- if the file cannot be read the counter repeats, exactly as it did
 /// before this existed -- but it is not a reason to refuse to stream.
 unsigned long long LoadMediaCount() {
-    const std::wstring path = MediaCountPath();
+    const std::wstring path = LocalDataPath(L"media.count");
     if (path.empty()) {
         return 0;
     }
@@ -1434,7 +1397,7 @@ unsigned long long LoadMediaCount() {
 /// behind it. Ahead costs a skipped number; behind hands the next session the
 /// same transcript.
 void SaveMediaCount(unsigned long long count) {
-    const std::wstring path = MediaCountPath();
+    const std::wstring path = LocalDataPath(L"media.count");
     if (path.empty()) {
         return;
     }
@@ -1450,48 +1413,6 @@ void SaveMediaCount(unsigned long long count) {
         WriteFile(file, text, (DWORD) written, &put, nullptr);
     }
     CloseHandle(file);
-}
-
-/// Constant-time compare, so a wrong token cannot be found a character at a time
-/// by timing the reply.
-/// `count` random bytes as lowercase hex.
-std::string RandomHex(size_t count) {
-    std::vector<unsigned char> bytes(count);
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        return {};
-    }
-    static const char* hex = "0123456789abcdef";
-    std::string out;
-    out.reserve(count * 2);
-    for (unsigned char byte : bytes) {
-        out.push_back(hex[byte >> 4]);
-        out.push_back(hex[byte & 0x0F]);
-    }
-    return out;
-}
-
-std::vector<unsigned char> FromHex(const std::string& hex) {
-    std::vector<unsigned char> out;
-    if (hex.size() % 2 != 0) {
-        return out;
-    }
-    for (size_t i = 0; i < hex.size(); i += 2) {
-        int high = -1, low = -1;
-        auto nibble = [](char c) -> int {
-            if (c >= '0' && c <= '9') { return c - '0'; }
-            if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
-            if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
-            return -1;
-        };
-        high = nibble(hex[i]);
-        low = nibble(hex[i + 1]);
-        if (high < 0 || low < 0) {
-            return {};
-        }
-        out.push_back((unsigned char) ((high << 4) | low));
-    }
-    return out;
 }
 
 std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
@@ -1706,17 +1627,12 @@ std::vector<unsigned char> DeriveMediaKeys(const std::vector<unsigned char>& cpu
     return HkdfExpand(prk, info, 108);
 }
 
-// There was a `TokenMatches` here, the constant-time compare the legacy auth
-// path used. Its one caller has gone -- see the refusal in the `auth` handler --
-// and the only comparison against the token now is `ProofMatches`, which
-// compares HMAC tags rather than the token itself.
-
-// ΓöÇΓöÇ Geometry lock ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Geometry lock ────────────────────────────────────────────────────────────
 //
 // The Mac crops a FIXED rectangle out of the shared canvas, so a window resized
 // on the host stops lining up with it and the stream shows desktop where the
-// application used to be. Size has to be driven from the macOS window ΓÇö the thing
-// the user is actually looking at ΓÇö and only from there.
+// application used to be. Size has to be driven from the macOS window — the thing
+// the user is actually looking at — and only from there.
 //
 // Two layers, because one is not enough. Removing WS_THICKFRAME and
 // WS_MAXIMIZEBOX takes away the resize border and the maximise affordance, which
@@ -1765,10 +1681,20 @@ solstream::media::Channel g_pending_channel;
 SOCKET g_channel_socket = INVALID_SOCKET;
 #endif
 
+/// The frame bits a geometry lock takes away, and the only style bits the agent
+/// ever writes. Everything else in the style word belongs to the application --
+/// WS_MAXIMIZE, WS_DISABLED while it shows a modal dialog, WS_CAPTION when it
+/// goes full screen -- and changes under us during a session, so a lock and its
+/// release toggle these two against the style as it is NOW. Writing back a
+/// whole word saved earlier put a stale WS_MAXIMIZE on a window that had just
+/// been restored, and a stale WS_DISABLED on one whose dialog had since closed.
+constexpr LONG_PTR kLockedStyleBits = WS_THICKFRAME | WS_MAXIMIZEBOX;
+
 struct WindowLock {
     HWND window = nullptr;
     RECT desired{};           // client area, in virtual-desktop coordinates
-    LONG_PTR saved_style = 0;
+    /// Which of kLockedStyleBits the lock removed, and so owes back.
+    LONG_PTR removed_style = 0;
     /// Who owned this window when the agent first touched it.
     ///
     /// Windows recycles window handles, so `IsWindow` on a handle whose window
@@ -1790,21 +1716,31 @@ struct WindowLock {
     /// moment ago is still the same tenancy.
     ///
     /// The watcher copies `window` and `desired` under the lock and then lets it
-    /// go before doing the slow part -- DwmGetWindowAttribute, ShowWindow,
-    /// SetWindowPos, all of which block on another process's message pump. A
-    /// release landing in that gap leaves it holding coordinates on the virtual
-    /// capture display for a window that has just been put back on a real
-    /// monitor, and it drags it straight back to a display nobody can see. That
-    /// used to be covered by UnlockAll replaying the restore when the socket
-    /// dropped; nothing drops the socket on a window close any more.
+    /// go before doing the slow part -- ShowWindow and SetWindowPos wait on
+    /// another process's message pump. A release landing in that gap would
+    /// leave it holding coordinates on the capture display for a window that
+    /// has just been put back on a real monitor, and it would drag it straight
+    /// back to a display nobody can see.
     uint64_t generation = 0;
 };
 
 CRITICAL_SECTION g_lock_cs;
 WindowLock g_locks[kMaxLocks];
 uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
-HANDLE g_watcher = nullptr;
-volatile LONG g_watcher_stop = 0;
+
+/// Is this window's thread too busy to answer messages?
+///
+/// SetWindowPos, ShowWindow, SetWindowLongPtr and SetWindowPlacement on a window
+/// belonging to another thread wait for that thread to process the request,
+/// with no timeout. An application hung inside its message loop therefore hung
+/// whichever agent thread touched it: the watcher, the command thread, or the
+/// disconnect cleanup -- and a cleanup stuck there never released the client
+/// slot, so every later Mac was turned away until the host was restarted. So
+/// every cross-process window write below asks first, and the ones whose result
+/// nothing measures afterwards are made asynchronous as well.
+bool Unresponsive(HWND window) {
+    return IsHungAppWindow(window) != FALSE;
+}
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
                      RECT* out_client = nullptr, long long* out_error = nullptr);
@@ -1911,7 +1847,7 @@ void NotifyWindowClosed(uint64_t id) {
     }
     // Read the socket and write to it under the send lock, which the client's
     // departure also takes before clearing it. Unlike the cursor thread, this
-    // watcher is never joined before the socket closes ΓÇö so without this the
+    // watcher is never joined before the socket closes — so without this the
     // handle could be closed and reissued to the *next* client between the read
     // and the send, and this line would land on somebody else's connection.
     // A CRITICAL_SECTION is recursive, so SendLine taking it again is fine.
@@ -1933,43 +1869,93 @@ void NotifyWindowClosed(uint64_t id) {
 /// thread and read by the watcher, hence atomics rather than the lock.
 std::atomic<bool> g_window_set_dirty{false};
 std::atomic<ULONGLONG> g_window_set_touched{0};
+/// Set when a window the picker lists has only been renamed.
+///
+/// Kept apart from the set changing because titles tick: a browser playing
+/// media, a terminal running a build, a clock in a caption. Every rename used to
+/// be a `windowsChanged`, and every one of those has the Mac fetch the window
+/// list AND the application list -- a full enumeration and a Start Menu walk
+/// two and a half times a second, for as long as some title kept moving.
+std::atomic<bool> g_window_titles_dirty{false};
+/// When a rename last went out. Watcher thread only.
+ULONGLONG g_titles_pushed_at = 0;
+constexpr ULONGLONG kTitlePushIntervalMs = 5000;
+/// Wakes the watcher early, so a change waits on the debounce rather than on
+/// the idle cadence.
+HANDLE g_watcher_wake = nullptr;
+/// The windows the picker lists, as far as the hook has seen. Hook thread only:
+/// out-of-context hooks are delivered on the thread that set them.
+std::set<HWND> g_listed_windows;
 
-/// The picker's list is not a photograph.
+/// Fill g_listed_windows with what is open now, so the first event for a window
+/// that was already listed is not mistaken for it arriving.
+void SeedListedWindows() {
+    EnumWindows([](HWND window, LPARAM) -> BOOL {
+        if (IsUserWindow(window)) {
+            g_listed_windows.insert(window);
+        }
+        return TRUE;
+    }, 0);
+}
+
+/// The picker's list is not a photograph: an application quit on the PC must
+/// stop being offerable, and one started there must become pickable, without
+/// reconnecting.
 ///
-/// Nothing told the Mac that the set of open windows had changed, so the list it
-/// drew on connecting was the list it kept: quit an application and its window
-/// stayed offerable, start one and it could not be picked without reconnecting.
-///
-/// The hook fires for every object on the desktop, including menu items and
-/// individual controls, so it is filtered hard to real top-level windows and
-/// then only sets a flag. The push itself is debounced on the watcher thread —
-/// opening one application emits a burst of these, and a message per event
-/// would have the Mac rebuild its list a dozen times for one visible change.
-void CALLBACK WindowSetChanged(HWINEVENTHOOK, DWORD, HWND window,
+/// The hook fires for every object on the desktop, so it is filtered to
+/// top-level windows and then to MEMBERSHIP of the listed set -- a window
+/// becoming or ceasing to be one the picker shows. Hidden helper windows,
+/// tooltips and anything invisible change nothing the Mac draws, and used to
+/// trigger a refresh all the same. The push itself is debounced on the watcher
+/// thread, because opening one application emits a burst of these.
+void CALLBACK WindowSetChanged(HWINEVENTHOOK, DWORD event, HWND window,
                                LONG object, LONG child, DWORD, DWORD) {
     if (object != OBJID_WINDOW || child != CHILDID_SELF || !window) {
         return;
     }
-    // Top-level only. A control being created inside a window that is already
-    // open changes nothing the picker shows.
-    if (GetAncestor(window, GA_ROOT) != window) {
+    const bool was = g_listed_windows.count(window) != 0;
+    // Asked before the top-level test: a destroyed window has no ancestor left.
+    const bool is = event != EVENT_OBJECT_DESTROY
+                 && GetAncestor(window, GA_ROOT) == window && IsUserWindow(window);
+    if (was == is) {
+        if (is && event == EVENT_OBJECT_NAMECHANGE) {
+            g_window_titles_dirty.store(true);
+        }
         return;
+    }
+    if (is) {
+        g_listed_windows.insert(window);
+    } else {
+        g_listed_windows.erase(window);
     }
     g_window_set_touched.store(GetTickCount64());
     g_window_set_dirty.store(true);
+    if (g_watcher_wake) {
+        SetEvent(g_watcher_wake);
+    }
 }
 
-/// Tell the Mac the window set moved, once the burst has settled.
+/// Tell the Mac the window set moved, once the burst has settled -- or that a
+/// listed window was renamed, at most every kTitlePushIntervalMs.
 void NotifyWindowsChangedIfSettled() {
-    if (!g_window_set_dirty.load()) {
-        return;
-    }
+    const ULONGLONG now = GetTickCount64();
+    bool push = false;
     // Long enough to swallow an application's startup burst, short enough that
     // it still feels immediate to someone watching the picker.
-    if (GetTickCount64() - g_window_set_touched.load() < 400) {
+    if (g_window_set_dirty.load() && now - g_window_set_touched.load() >= 400) {
+        g_window_set_dirty.store(false);
+        push = true;
+    }
+    if (!push && g_window_titles_dirty.load()
+        && now - g_titles_pushed_at >= kTitlePushIntervalMs) {
+        push = true;
+    }
+    if (!push) {
         return;
     }
-    g_window_set_dirty.store(false);
+    // One list fetch answers both, so a rename pending alongside goes with it.
+    g_window_titles_dirty.store(false);
+    g_titles_pushed_at = now;
 
     if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
         return;
@@ -1998,7 +1984,7 @@ std::vector<HWND> g_rescued;
 /// see. False when SolStream is capturing a real monitor: what is on that is
 /// visible to the person sitting at the PC, and rearranging their windows
 /// because a dialog opened would be interference, not help.
-bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
+bool WorkOutCaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
     if (g_capture_display.empty()) {
         return false;
     }
@@ -2022,6 +2008,27 @@ bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
     capture = captured->bounds;
     rescue_to = primary->bounds;
     return true;
+}
+
+/// The same answer, cached for a few seconds. It moves only when the display
+/// layout does, and working it out enumerates every monitor and asks the
+/// display stack for each one's adapter -- which, asked on every watcher tick,
+/// was most of what an idle host spent its time on. Watcher thread only.
+bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
+    static bool known = false;
+    static bool invisible = false;
+    static RECT cached_capture{};
+    static RECT cached_rescue_to{};
+    static ULONGLONG checked_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (!known || now - checked_at >= 3000) {
+        known = true;
+        checked_at = now;
+        invisible = WorkOutCaptureDisplayIsInvisible(cached_capture, cached_rescue_to);
+    }
+    capture = cached_capture;
+    rescue_to = cached_rescue_to;
+    return invisible;
 }
 
 struct StrandedSearch {
@@ -2135,8 +2142,12 @@ void RescueStrandedWindows() {
         // No activation. A modal dialog already holds the input queue, and
         // taking the foreground out from under whatever the user is typing into
         // would be its own bug.
-        if (!SetWindowPos(window, nullptr, x, y, 0, 0,
-                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
+        // Asynchronous: the dialog belongs to another process, nothing below
+        // measures where it went, and a hung one must not hang the watcher.
+        if (Unresponsive(window)
+            || !SetWindowPos(window, nullptr, x, y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                             | SWP_ASYNCWINDOWPOS)) {
             continue;
         }
         if (g_rescued.size() < 64) {
@@ -2349,25 +2360,22 @@ void ReportForegroundThief() {
 
 /// Say which window would receive a click at the pointer.
 ///
-/// Diagnostic, and deliberately measured from here: the agent creates no window
-/// of its own, so unlike a probe launched as a scheduled task it cannot be the
-/// thing it is looking for. That mattered — a `WindowFromPoint` taken inside
-/// such a probe reported a system dim window over the stream that a second run
-/// could not find, and the probe's own console was a plausible cause of it.
-///
-/// It answers a question the streamed window cannot: keystrokes go to whatever
-/// holds the FOCUS, but clicks go to whatever is under the POINTER, so an
-/// invisible window over the tile breaks the mouse while leaving the keyboard
-/// working perfectly. Reported only on change, and only while something is
-/// being streamed.
+/// Diagnostic. Keystrokes go to whatever holds the FOCUS, but clicks go to
+/// whatever is under the POINTER, so an invisible window over the tile breaks
+/// the mouse while leaving the keyboard working perfectly. Reported only while
+/// something is being streamed, and only when the TOP-LEVEL window under the
+/// pointer changes: comparing the control under it logged a line for every
+/// button and field the pointer crossed, each one a file open and close, and
+/// rotated everything else out of the log within a session.
 void ReportPointerTarget() {
     POINT cursor{};
     if (!GetCursorPos(&cursor)) {
         return;
     }
     HWND under = WindowFromPoint(cursor);
+    HWND root = under ? GetAncestor(under, GA_ROOT) : nullptr;
     static HWND reported = nullptr;
-    if (under == reported) {
+    if (root == reported) {
         return;
     }
 
@@ -2379,9 +2387,7 @@ void ReportPointerTarget() {
             continue;
         }
         streaming = true;
-        // A control inside the streamed window is still the streamed window.
-        if (g_locks[i].window == under
-            || g_locks[i].window == GetAncestor(under, GA_ROOT)) {
+        if (g_locks[i].window == root) {
             ours = true;
         }
     }
@@ -2390,22 +2396,42 @@ void ReportPointerTarget() {
         return;
     }
 
-    reported = under;
+    reported = root;
     char cls[96] = {0};
     char title[128] = {0};
-    if (under) {
-        GetClassNameA(under, cls, sizeof(cls) - 1);
-        GetWindowTextA(GetAncestor(under, GA_ROOT), title, sizeof(title) - 1);
+    if (root) {
+        GetClassNameA(root, cls, sizeof(cls) - 1);
+        GetWindowTextA(root, title, sizeof(title) - 1);
     }
     Log("[pointer] at %ld,%ld a click would go to [%s] \"%s\"%s",
         cursor.x, cursor.y, cls[0] ? cls : "?", title[0] ? title : "(untitled)",
         ours ? "" : "  <-- NOT the streamed window");
 }
 
-/// Put a locked window back if anything moved or resized it.
+/// The watcher's two speeds. Fast while a window is held, because that is when
+/// a window moving off its tile is a broken picture; slow otherwise, because
+/// then its only jobs are carrying stranded dialogs off the capture display and
+/// the picker's change notice, and neither is worth waking the CPU eight times a
+/// second on an idle PC. A window-set change wakes it early (g_watcher_wake).
+constexpr DWORD kWatchActiveMs = 120;
+constexpr DWORD kWatchIdleMs = 1000;
+/// Stranded-window rescue walks every window on the desktop, so it runs at the
+/// idle rate even while the fast loop is running. A little under the idle
+/// interval, so tick jitter cannot make it skip every other idle wake.
+constexpr ULONGLONG kRescueIntervalMs = 900;
+
+/// Put a locked window back if anything moved or resized it, and everything
+/// else that has to notice the desktop changing. Runs for the life of the host.
 DWORD WINAPI WatcherProc(LPVOID) {
-    while (InterlockedCompareExchange(&g_watcher_stop, 0, 0) == 0) {
-        Sleep(120);
+    DWORD interval = kWatchIdleMs;
+    ULONGLONG rescued_at = 0;
+    for (;;) {
+        if (g_watcher_wake) {
+            WaitForSingleObject(g_watcher_wake, interval);
+        } else {
+            Sleep(interval);
+        }
+        bool holding = false;
         for (int i = 0; i < kMaxLocks; ++i) {
             HWND window = nullptr;
             RECT desired{};
@@ -2424,6 +2450,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
                 desired = g_locks[i].desired;
                 generation = g_locks[i].generation;
             }
+            holding = holding || g_locks[i].active;
             LeaveCriticalSection(&g_lock_cs);
             if (closed != 0) {
                 Log("[agent] tracked window %llu was closed", (unsigned long long) closed);
@@ -2435,11 +2462,15 @@ DWORD WINAPI WatcherProc(LPVOID) {
             }
             // A minimised window is the user's business; leave it alone and let it
             // settle back when they restore it.
-            if (IsIconic(window)) {
+            if (IsIconic(window) || Unresponsive(window)) {
                 continue;
             }
+            // Un-maximised asynchronously, and placed on a later tick once the
+            // restore has landed: measuring straight after an asynchronous
+            // restore would measure the maximised window.
             if (IsZoomed(window)) {
-                ShowWindow(window, SW_RESTORE);
+                ShowWindowAsync(window, SW_RESTORE);
+                continue;
             }
             const RECT now = ClientAreaInScreen(window);
             if (now.left == desired.left && now.top == desired.top
@@ -2476,21 +2507,29 @@ DWORD WINAPI WatcherProc(LPVOID) {
             PlaceClientArea(window, desired.left, desired.top,
                             desired.right - desired.left, desired.bottom - desired.top);
         }
+        // Each of these returns at once when nothing is held.
         ReportForegroundThief();
         ReportPointerTarget();
         ReportOcclusion();
-        RescueStrandedWindows();
+        const ULONGLONG now = GetTickCount64();
+        if (now - rescued_at >= kRescueIntervalMs) {
+            rescued_at = now;
+            RescueStrandedWindows();
+        }
         NotifyWindowsChangedIfSettled();
+        interval = holding || g_window_set_dirty.load() ? kWatchActiveMs : kWatchIdleMs;
     }
-    return 0;
 }
 
+/// Started once, at startup, and never stopped: binding the agent's socket is
+/// what makes Windows ask whether it may accept connections, and that prompt
+/// lands on the capture display long before any Mac connects.
 void StartWatcher() {
-    if (g_watcher) {
-        return;
+    g_watcher_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    HANDLE thread = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
+    if (thread) {
+        CloseHandle(thread);
     }
-    InterlockedExchange(&g_watcher_stop, 0);
-    g_watcher = CreateThread(nullptr, 0, WatcherProc, nullptr, 0, nullptr);
 }
 
 /// Find this window's slot, claiming a free one and recording how the window
@@ -2513,7 +2552,6 @@ int ClaimSlot(HWND window) {
         g_locks[i].window = window;
         g_locks[i].active = true;
         g_locks[i].generation = ++g_lock_generation;
-        g_locks[i].saved_style = GetWindowLongPtrW(window, GWL_STYLE);
         GetWindowThreadProcessId(window, &g_locks[i].pid);
         g_locks[i].saved_topmost =
             (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
@@ -2529,6 +2567,9 @@ int ClaimSlot(HWND window) {
 
 /// Take away a window's ability to be resized from the host side.
 bool LockWindow(HWND window) {
+    if (Unresponsive(window)) {
+        return false;
+    }
     EnterCriticalSection(&g_lock_cs);
     const int slot = ClaimSlot(window);
     LeaveCriticalSection(&g_lock_cs);
@@ -2537,60 +2578,51 @@ bool LockWindow(HWND window) {
     }
 
     // Un-maximise only now that the placement is recorded, or the restore would
-    // believe the window had always been this size.
+    // believe the window had always been this size. Synchronous, because the
+    // client area is measured next.
     if (IsZoomed(window)) {
         ShowWindow(window, SW_RESTORE);
     }
 
+    // Against the style as it is now -- after the restore above -- and only the
+    // two frame bits. See kLockedStyleBits.
+    const LONG_PTR current = GetWindowLongPtrW(window, GWL_STYLE);
+    const LONG_PTR removing = current & kLockedStyleBits;
+
     EnterCriticalSection(&g_lock_cs);
     // The lock was released across the un-maximise above, so re-establish that
-    // this slot is still this window's. Nothing reclaims slots concurrently
-    // today ΓÇö commands and the disconnect cleanup all run on the client thread ΓÇö
-    // but reviving a slot that had been cleared would restore a zeroed style
-    // onto a real window, and that is not a failure worth finding later.
+    // this slot is still this window's.
     if (!g_locks[slot].active || g_locks[slot].window != window) {
         LeaveCriticalSection(&g_lock_cs);
         return false;
     }
     g_locks[slot].geometry_locked = true;
     g_locks[slot].desired = ClientAreaInScreen(window);
-    const LONG_PTR stripped =
-        g_locks[slot].saved_style & ~static_cast<LONG_PTR>(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    g_locks[slot].removed_style |= removing;
     LeaveCriticalSection(&g_lock_cs);
 
-    SetWindowLongPtrW(window, GWL_STYLE, stripped);
-    // SWP_FRAMECHANGED makes the window recompute its non-client area; without it
-    // the border is gone in style only and still drag-resizes.
-    SetWindowPos(window, nullptr, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-    StartWatcher();
+    if (removing != 0) {
+        SetWindowLongPtrW(window, GWL_STYLE, current & ~kLockedStyleBits);
+        // SWP_FRAMECHANGED makes the window recompute its non-client area;
+        // without it the border is gone in style only and still drag-resizes.
+        SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+                     | SWP_FRAMECHANGED);
+    }
     return true;
 }
 
-void UnlockWindow(HWND window) {
-    WindowLock saved{};
-    bool found = false;
-    EnterCriticalSection(&g_lock_cs);
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && g_locks[i].window == window) {
-            saved = g_locks[i];
-            g_locks[i] = WindowLock{};
-            found = true;
-            break;
-        }
-    }
-    LeaveCriticalSection(&g_lock_cs);
-    if (!found || !IsWindow(window)) {
+/// Give one window back what the agent took: its frame bits, its z-order band
+/// and its placement. `saved` is a slot already removed from g_locks.
+void RestoreWindow(const WindowLock& saved) {
+    HWND window = saved.window;
+    if (!window || !IsWindow(window)) {
         return;
     }
-    // The same guard SlotWindowGone applies, and for the same reason: WindowLock
-    // carries a pid precisely because IsWindow can come back true for a handle
-    // Windows has since recycled onto somebody else's window. This path did not
-    // apply it, so a window that quit and had its handle reused got a dead
-    // application's saved style, topmost bit and WINDOWPLACEMENT written over
-    // it -- an unrelated program losing its resize border and jumping to the
-    // last tile of a session it was never part of. Doing nothing is the right
-    // answer: the window this slot described no longer exists to restore.
+    // WindowLock carries a pid because IsWindow can come back true for a handle
+    // Windows has since recycled onto somebody else's window, and restoring a
+    // dead application's state onto an unrelated one is worse than doing
+    // nothing.
     if (saved.pid != 0) {
         DWORD owner = 0;
         GetWindowThreadProcessId(window, &owner);
@@ -2598,36 +2630,72 @@ void UnlockWindow(HWND window) {
             return;
         }
     }
+    // A hung application would hang this thread -- which on disconnect is the
+    // cleanup that frees the client slot. Leaving its frame and placement as
+    // they are is the lesser harm, and said.
+    if (Unresponsive(window)) {
+        Log("[agent] window %llu is not responding; left as it is rather than "
+            "restored", (unsigned long long) IdFromWindow(window));
+        return;
+    }
 
-    SetWindowLongPtrW(window, GWL_STYLE, saved.saved_style);
+    if (saved.removed_style != 0) {
+        const LONG_PTR current = GetWindowLongPtrW(window, GWL_STYLE);
+        SetWindowLongPtrW(window, GWL_STYLE, current | saved.removed_style);
+    }
     // Drop back out of the always-on-top band unless the window was already in
-    // it. Leaving it set is the worst of the three things left behind here: the
-    // window floats above everything the user does next, with no visible cause
-    // and no way to fix it short of restarting the application.
+    // it: left set, the window floats above everything the user does next with
+    // no visible cause. Asynchronous, because nothing measures it.
     SetWindowPos(window, saved.saved_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
                  0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                 | SWP_ASYNCWINDOWPOS);
     // And put it back where it was. Managed windows are parked on the virtual
     // display, whose origin sits off the side of the real desktop, so a window
-    // left at those coordinates is not merely misplaced ΓÇö it is invisible, on a
+    // left at those coordinates is not merely misplaced — it is invisible, on a
     // monitor that stops existing when the session ends.
     if (saved.saved_placement.length == sizeof(WINDOWPLACEMENT)) {
         SetWindowPlacement(window, &saved.saved_placement);
     }
 }
 
-/// Give every locked window its resize border back.
-///
-/// Called when a client disconnects, so a Mac that goes away does not leave
-/// applications permanently unresizable on someone's desktop.
-void UnlockAll() {
+void UnlockWindow(HWND window) {
+    WindowLock saved{};
+    EnterCriticalSection(&g_lock_cs);
     for (int i = 0; i < kMaxLocks; ++i) {
-        EnterCriticalSection(&g_lock_cs);
-        HWND window = g_locks[i].active ? g_locks[i].window : nullptr;
-        LeaveCriticalSection(&g_lock_cs);
-        if (window) {
-            UnlockWindow(window);
+        if (g_locks[i].active && g_locks[i].window == window) {
+            saved = g_locks[i];
+            g_locks[i] = WindowLock{};
+            break;
         }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    RestoreWindow(saved);
+}
+
+/// Release every slot at once, handing back what each window is owed.
+///
+/// Separate from restoring them so the disconnect path can free the client slot
+/// in between: a new Mac then claims fresh slots of its own rather than ones a
+/// previous session's cleanup is still unwinding.
+std::vector<WindowLock> TakeAllSlots() {
+    std::vector<WindowLock> owed;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active) {
+            owed.push_back(g_locks[i]);
+            g_locks[i] = WindowLock{};
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    return owed;
+}
+
+/// Give every locked window its resize border back, so a Mac that goes away
+/// does not leave applications permanently unresizable.
+void UnlockAll() {
+    for (const WindowLock& saved : TakeAllSlots()) {
+        RestoreWindow(saved);
     }
 }
 
@@ -2643,24 +2711,12 @@ void SetLockedGeometry(HWND window, const RECT& client) {
     LeaveCriticalSection(&g_lock_cs);
 }
 
-// -- Pairing, which no longer exists --------------------------------------
-//
-// Sunshine paired by showing a PIN on the client and having a human type it into
-// a web UI on the host, behind a self-signed certificate warning and a set of
-// credentials the user had to create first. Most of the code that used to be
-// here existed to spare them that: DPAPI-encrypted web credentials, an HTTP POST
-// to a local config API, and a careful note about exactly which CSRF check it
-// was allowed to skip.
-//
-// SolStream pairs by the user typing a token once, and the agent proves it with
-// an HMAC challenge. There is nothing left here.
-
-// ΓöÇΓöÇ Placement ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Placement ────────────────────────────────────────────────────────────────
 
 /// Place a window so its CLIENT AREA lands exactly on the requested rectangle.
 ///
 /// The caller cares about the client area, because that is what gets cropped
-/// out of the stream ΓÇö but SetWindowPos positions the whole window including
+/// out of the stream — but SetWindowPos positions the whole window including
 /// its frame. So measure the current difference between the two and offset by
 /// it. Measuring beats computing from AdjustWindowRect, which does not know
 /// about DPI scaling, custom frames, or DWM's invisible borders.
@@ -2683,6 +2739,15 @@ long long PlacementError(const RECT& got, int x, int y, int width, int height) {
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
                      RECT* out_client, long long* out_error) {   // NOLINT: see declaration
+    // Synchronous below, because each attempt measures where the last one
+    // landed -- so a hung window is not attempted at all. Reported as a miss of
+    // whatever distance it is from the request.
+    if (Unresponsive(window)) {
+        const RECT client = ClientAreaInScreen(window);
+        if (out_client) { *out_client = client; }
+        if (out_error) { *out_error = PlacementError(client, x, y, width, height); }
+        return false;
+    }
     if (IsIconic(window)) {
         ShowWindow(window, SW_RESTORE);
     }
@@ -2758,7 +2823,7 @@ bool PlaceClientArea(HWND window, int x, int y, int width, int height,
     return moved;
 }
 
-// ΓöÇΓöÇ JSON output ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── JSON output ──────────────────────────────────────────────────────────────
 
 std::string DisplaysJson(const std::vector<Display>& displays) {
     std::string out = "{\"type\":\"displays\",\"displays\":[";
@@ -2872,7 +2937,7 @@ std::string AppsJson(const std::vector<AppEntry>& apps) {
 /// `alive` is the whole point: a window whose caption buttons reach the stream
 /// can be closed from inside it, and the Mac has to notice and tear the session
 /// down. It is deliberately based on the handle still existing rather than on
-/// the window being enumerable ΓÇö minimising an application must not look like
+/// the window being enumerable — minimising an application must not look like
 /// quitting it.
 std::string WindowStatusJson(uint64_t id) {
     HWND handle = WindowFromId(id);
@@ -2905,32 +2970,16 @@ std::string WindowStatusJson(uint64_t id) {
     out += ",\"h\":" + std::to_string(client.bottom - client.top);
     out += ",\"captionInset\":" + std::to_string((int) std::max(0L, client.top - frame.top));
 
-    // Whether anything is drawn over it, and by what.
-    //
-    // The crop is a rectangle on a shared display: anything covering the tile is
-    // streamed as though it were part of the application, with nothing on the
-    // Mac to say otherwise. It is not hypothetical — a Windows Firewall prompt
-    // about SolStream appeared on the virtual display mid-test and sat over half
-    // the streamed window, looking for all the world like part of it.
-    //
-    // Computed from the same top-to-bottom enumeration the window list uses,
-    // which already works this out; asked once a second per window, which is
-    // the same rate the liveness poll runs at anyway.
-    for (const WindowInfo& info : EnumerateWindows()) {
-        if (info.handle != handle) {
-            continue;
-        }
-        out += ",\"occluded\":" + std::string(info.occluded ? "true" : "false");
-        if (info.occluded) {
-            out += ",\"occludedBy\":\"" + JsonEscape(info.occluded_by) + "\"";
-        }
-        break;
-    }
+    // No occlusion here. This poll used to re-run the whole window enumeration
+    // once a second per streamed window to answer it with the rectangle
+    // heuristic -- the one ReportOcclusion's hit-test replaced for being wrong
+    // about layered dialogs and overlays. The watcher pushes `occluded` when the
+    // answer changes, and that is the Mac's source.
     out += "}";
     return out;
 }
 
-// ΓöÇΓöÇ Tiny request parsing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Tiny request parsing ─────────────────────────────────────────────────────
 //
 // The command set is small and fixed, so a full JSON parser would be more
 // surface area than the protocol itself. Extract by key instead.
@@ -2938,8 +2987,8 @@ std::string WindowStatusJson(uint64_t id) {
 /// Extract a JSON string value, honouring escapes.
 ///
 /// The escape handling is not decoration. Every string the Mac sends us is full
-/// of backslashes ΓÇö Windows device names like \\.\DISPLAY7 and shortcut paths
-/// like C:\Users\... ΓÇö and JSON doubles every one of them on the wire. Taking the
+/// of backslashes — Windows device names like \\.\DISPLAY7 and shortcut paths
+/// like C:\Users\... — and JSON doubles every one of them on the wire. Taking the
 /// raw substring gives back the doubled form, and it also stops at the first
 /// quote, so any window title containing one truncates.
 ///
@@ -3142,7 +3191,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 #endif
         out += ",\"captureDisplay\":\"" + JsonEscape(ToUtf8(g_capture_display)) + "\"";
         out += ",\"virtualDisplay\":"
-             + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
+             + std::string(solstream::HasVirtualDisplayCached() ? "true" : "false");
         out += "}";
         return out;
     }
@@ -3165,15 +3214,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 // must stay in the clear rather than have both ends read each
                 // other's bytes as the wrong thing.
 #ifdef SOLSTREAM_MEDIA
-                // Guarded, because everything it reaches for is: both
-                // `DeriveChannelKeys` and `g_pending_channel` are declared
-                // inside SOLSTREAM_MEDIA, and this block was written without a
-                // guard of its own. That made the no-media configuration stop
-                // compiling -- and with it the mingw cross-build, which is the
-                // only way to compile-check this file without the Windows
-                // machine. It failed with "'DeriveChannelKeys' is not a member
-                // of 'solstream::media'", which reads like a missing include
-                // rather than a missing guard.
+                // Guarded: DeriveChannelKeys and g_pending_channel exist only with
+                // SOLSTREAM_MEDIA, and the mingw cross-build compiles without it.
                 long long wants = 0;
                 std::string cpubHex;
                 if (FieldNumber(line, "channelCrypto", wants) && wants == 2
@@ -3196,12 +3238,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                                    g_pending_channel, g_token, challenge, cnonce,
                                    cpub, hpub, secret, hostAuth)) {
                             channel_cnonce = cnonce;
-                            static const char* hex = "0123456789abcdef";
-                            std::string hpubHex;
-                            for (unsigned char byte : hpub) {
-                                hpubHex.push_back(hex[byte >> 4]);
-                                hpubHex.push_back(hex[byte & 0x0F]);
-                            }
+                            const std::string hpubHex = ToHex(hpub);
                             return "{\"type\":\"auth\",\"ok\":true"
                                    ",\"channelCrypto\":2"
                                    ",\"hpub\":\"" + hpubHex + "\""
@@ -3211,10 +3248,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                     Log("[agent] could not agree channel keys; staying in the clear");
                 }
 #endif  // SOLSTREAM_MEDIA
-                // Said out loud. Which of the two auth paths a client took is
-                // the first question when one of them misbehaves, and until now
-                // a successful authentication left no trace at all -- only a
-                // failed one did.
+                // Logged because which auth path a client took is the first question
+                // when one misbehaves.
                 Log("[agent] client authenticated with a v2 proof");
                 return "{\"type\":\"auth\",\"ok\":true}";
             }
@@ -3224,20 +3259,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
         }
 
-        // NO v1 FALLBACK, and now on this side too.
-        //
-        // The host used to accept `{"cmd":"auth","token":"..."}` on the grounds
-        // that taking a token somebody already holds discloses nothing, while
-        // sending one does -- which is why the Mac's half was deleted. Both
-        // halves of that were true and it still had to go, for a reason the
-        // asymmetry hid: a client that authenticated this way agreed no channel
-        // keys, because `channelCrypto` is negotiated inside the v2 branch above.
-        // So it was a downgrade route that ended in a working, fully authorised
-        // session with the window titles, the application list and every
-        // clipboard transfer crossing in the clear. Nothing has ever used it --
-        // the Mac refuses to carry on unencrypted, and no spike or probe sends a
-        // token -- and docs/architecture.md has claimed for its whole life that
-        // authentication here is v2 only. It is now.
+        // No v1 fallback. Accepting a cleartext `token` would be a downgrade to
+        // an authorised session with no channel keys -- window titles, the
+        // application list and the clipboard all in the clear -- since
+        // `channelCrypto` is only negotiated in the v2 branch above.
         if (std::string ignored; FieldString(line, "token", ignored)) {
             ++auth_failures;
             Log("[agent] refused a cleartext token: this host authenticates with a "
@@ -3246,13 +3271,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             return "{\"type\":\"auth\",\"ok\":false,\"message\":\"this host needs a "
                    "v2 proof, not a token. Update SolStream on the Mac.\"}";
         }
-        // Counted rather than slept off. This is the only guess-and-check
-        // surface here, and it used to answer a wrong token a second late on the
-        // grounds that the delay cost an attacker everything and a legitimate
-        // client nothing. Both were false: the agent serves one client at a
-        // time, so the second was a second in which the paired Mac could not be
-        // served, which is the attacker's goal and not his cost. See
-        // kMaxAuthFailures.
+        // Counted, not slept off: a delay here would hold the one client slot
+        // shut against the paired Mac, which is the attacker's goal rather than
+        // his cost. See kMaxAuthFailures.
         ++auth_failures;
         Log("[agent] rejected a bad token (%d refusal%s on this connection)",
             auth_failures, auth_failures == 1 ? "" : "s");
@@ -3335,17 +3356,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // this: if it matches, both ends hold the same keys, and that is worth
         // knowing HERE rather than discovering it as every packet failing its
         // tag with nothing to say why.
-        static const char* hex = "0123456789abcdef";
-        std::string hauth;
-        for (size_t i = 80; i < 92; ++i) {
-            hauth.push_back(hex[okm[i] >> 4]);
-            hauth.push_back(hex[okm[i] & 0x0F]);
-        }
-        std::string hpubHex;
-        for (unsigned char byte : hpub) {
-            hpubHex.push_back(hex[byte >> 4]);
-            hpubHex.push_back(hex[byte & 0x0F]);
-        }
+        const std::string hauth = ToHex(okm.data() + 80, 12);
+        const std::string hpubHex = ToHex(hpub);
         // Keys agreed. Now start the media path itself, if the client named
         // something to capture. A client that only wants the keys -- the
         // handshake test does -- gets them and nothing starts, which is what
@@ -3432,11 +3444,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "apps") {
-        const std::vector<AppEntry> apps = EnumerateApps();
-        // The client launches and fetches icons from exactly this list, so seed
-        // the membership cache with it rather than walking the tree again.
-        RememberAdvertised(apps);
-        return AppsJson(apps);
+        // The same cached list `launch` and `icon` check membership against, so
+        // the client can only ever name a path it was given.
+        return AppsJson(AdvertisedApps());
     }
 
     if (command == "clipboard") {
@@ -3530,15 +3540,6 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         return buffer;
     }
 
-    // `pair` is gone with GameStream. A Mac that still sends it is running an
-    // older build, and telling it so beats a silent failure.
-    if (command == "pair") {
-        return "{\"type\":\"paired\",\"ok\":false,\"reason\":\"gone\""
-               ",\"message\":\"SolStream pairs with a token, not a PIN. "
-               "Update the Mac application.\"}";
-    }
-
-
     if (command == "window") {
         long long id = 0;
         if (!FieldNumber(line, "id", id)) {
@@ -3562,8 +3563,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         timeout = std::min<long long>(std::max<long long>(timeout, 1000), 60000);
         // This blocks until the application shows a window. The agent serves one
         // client at a time, so nothing else is waiting on it, and the alternative
-        // ΓÇö returning immediately and making the Mac poll for an unidentified
-        // new window ΓÇö just moves the same matching problem across the wire.
+        // — returning immediately and making the Mac poll for an unidentified
+        // new window — just moves the same matching problem across the wire.
         const uint64_t id = LaunchAndWaitForWindow(ToWide(path), (DWORD) timeout);
         if (id == 0) {
             return "{\"type\":\"error\",\"message\":\"launched, but no window appeared\"}";
@@ -3601,7 +3602,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 client.right - client.left, client.bottom - client.top,
                 client.left, client.top, missed);
         }
-        // The Mac asked for this, so it is the new truth ΓÇö otherwise the watcher
+        // The Mac asked for this, so it is the new truth — otherwise the watcher
         // would immediately drag the window back to the previous size.
         SetLockedGeometry(window, client);
         char buffer[320];
@@ -3653,37 +3654,28 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // covering the tile. Safe for our own tiles because they never
         // overlap each other.
         //
-        // Claim a slot even when this window is not geometry-locked, so that
-        // whatever happens to the session ΓÇö a clean disconnect or a Mac that
-        // simply vanishes ΓÇö the window is known to be owed a trip back down.
-        //
-        // And refuse the command when there is no slot to be had. ClaimSlot
-        // returns -1 once all kMaxLocks are taken, and that return used to be
-        // dropped on the floor: the ninth window was pinned into the always-on-
-        // top band with nothing recording that it had been, so neither
-        // UnlockAll on disconnect nor `topmost off` could put it back. The
-        // window stayed above everything the user did next, with no visible
-        // cause, until the application was restarted. Better to do nothing and
-        // say so.
-        EnterCriticalSection(&g_lock_cs);
-        const int slot = ClaimSlot(window);
-        LeaveCriticalSection(&g_lock_cs);
-        if (slot < 0) {
-            Log("[agent] refused topmost: all %d window slots are taken", kMaxLocks);
-            return "{\"type\":\"error\",\"message\":\"too many windows are being "
-                   "managed; close one on the Mac first\"}";
-        }
-        // And start watching from here rather than from `lock`. This is the
-        // first thing the Mac says about a window it intends to stream, and the
-        // watcher is what notices the window being closed ΓÇö an application that
-        // exits between being pinned and being locked would otherwise go
-        // unreported until the Mac next polled.
+        // Pinning claims a slot even when the window is not geometry-locked, so
+        // that whatever happens to the session — a clean disconnect or a Mac
+        // that simply vanishes — the window is known to be owed a trip back
+        // down; and it is refused when no slot is free, because a window pinned
+        // with nothing recording it stays above everything until its
+        // application restarts. The slot is also what makes the watcher report
+        // the window closing.
         if (on) {
-            StartWatcher();
+            EnterCriticalSection(&g_lock_cs);
+            const int slot = ClaimSlot(window);
+            LeaveCriticalSection(&g_lock_cs);
+            if (slot < 0) {
+                Log("[agent] refused topmost: all %d window slots are taken", kMaxLocks);
+                return "{\"type\":\"error\",\"message\":\"too many windows are being "
+                       "managed; close one on the Mac first\"}";
+            }
         }
-        const BOOL ok = SetWindowPos(window, on ? HWND_TOPMOST : HWND_NOTOPMOST,
-                                     0, 0, 0, 0,
-                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        // Asynchronous, and refused for a hung window, so an application stuck
+        // in its message loop cannot stall the command thread.
+        const BOOL ok = !Unresponsive(window)
+            && SetWindowPos(window, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         char buffer[96];
         std::snprintf(buffer, sizeof(buffer),
                       "{\"type\":\"topmost\",\"ok\":%s,\"on\":%s}",
@@ -3707,11 +3699,6 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             // looks wrong, but the user's keystrokes are going somewhere else.
             char title[128] = {0};
             GetWindowTextA(window, title, sizeof(title) - 1);
-            // Through Log, not printf. An installed host has had its stdout
-            // reopened on NUL by ReleaseUnwantedConsole, so this line -- the
-            // only trace of a session where the picture is right and the typing
-            // goes somewhere else -- was written to nowhere on every machine
-            // that was not a development box.
             Log("[focus] could not take the foreground for \"%s\";"
                 " keystrokes will go to whatever holds it", title);
         }
@@ -3726,7 +3713,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     return "{\"type\":\"error\",\"message\":\"unknown cmd\"}";
 }
 
-// ΓöÇΓöÇ Server ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+// ── Server ───────────────────────────────────────────────────────────────────
 
 // A line torn in half by another thread's send() is a protocol desync the Mac
 // cannot recover from -- it has no request ids to resynchronise against, so it
@@ -3861,23 +3848,28 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
         }
         if (current != last) {
             last = current;
-            // Under the send lock, like every other reader of it: the client
-            // thread retires this socket under the same lock, so reading it
-            // outside was a torn read away from writing to a handle that had
-            // been closed and reissued to the next connection.
+            std::string line = "{\"type\":\"cursor\",\"shape\":\"";
+            line += CursorName(current);
+            line += "\"}";
+            // Read the socket AND write to it under the send lock, which the
+            // client thread retires it under -- as NotifyWindowClosed does.
+            // Releasing the lock between the two left a window in which the
+            // socket could be closed and its value reissued to the next
+            // connection, and this line would land there. The generation is
+            // checked again inside for the same reason: a watcher that waited
+            // here past StopCursorWatcher's timeout belongs to nobody.
+            bool sent = true;
             EnterCriticalSection(&g_send_cs);
             const SOCKET client = g_push_client;
+            if (client != INVALID_SOCKET
+                && InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
+                // A failure means the client has gone; the serving thread
+                // notices that on its own recv.
+                sent = SendLine(client, line);
+            }
             LeaveCriticalSection(&g_send_cs);
-            if (client != INVALID_SOCKET) {
-                std::string line = "{\"type\":\"cursor\",\"shape\":\"";
-                line += CursorName(current);
-                line += "\"}";
-                // A failure here means the client has gone; the serving thread
-                // notices that on its own recv, so there is nothing to do but
-                // stop bothering it.
-                if (!SendLine(client, line)) {
-                    break;
-                }
+            if (!sent) {
+                break;
             }
         }
         Sleep(40);
@@ -3973,15 +3965,8 @@ constexpr ULONGLONG kPreAuthDeadlineMs = 120000;
 
 /// How many rejected proofs one connection may make before it is dropped.
 ///
-/// A wrong token used to cost the guesser a one-second Sleep and nothing else,
-/// and the comment beside it said that cost the attacker everything and a
-/// legitimate client nothing. Both halves were wrong once the connection itself
-/// became the prize: that Sleep runs on the serving thread, which is the only
-/// thread there is, so it kept the slot shut for a second per guess and the
-/// legitimate client — locked out for the duration — was the one paying. The
-/// limit replaces it. Guessing 16 random bytes is not a real attack in any case;
-/// what needed bounding was the guessing being free to go on for ever on one
-/// socket.
+/// Guessing 16 random bytes is not a real attack; what needs bounding is one
+/// socket guessing for ever while it holds the only client slot.
 ///
 /// Three, not one, because a person who mistypes a token should be told so and
 /// allowed another go on the same connection, and the Mac re-asks in place when
@@ -4076,8 +4061,8 @@ void ServeClient(SOCKET client) {
     // but to stop one socket guessing for ever while holding the slot.
     int auth_failures = 0;
     // Set once a line has outgrown the cap, and cleared at the newline that ends
-    // it. The rest of an oversized line has not arrived yet ΓÇö it comes in later
-    // recv() chunks ΓÇö so this cannot be a one-off scan of what is in hand.
+    // it. The rest of an oversized line has not arrived yet — it comes in later
+    // recv() chunks — so this cannot be a one-off scan of what is in hand.
     bool discarding = false;
     for (;;) {
         const int n = recv(client, chunk, sizeof(chunk), 0);
@@ -4190,7 +4175,7 @@ void ServeClient(SOCKET client) {
             }
         }
 
-        // A client that never sends a newline must not grow this unbounded ΓÇö
+        // A client that never sends a newline must not grow this unbounded —
         // but refuse the line, not the client. Dropping the connection is far
         // more destructive than it sounds: closing the socket runs UnlockAll(),
         // which pulls every streamed window off the virtual display and back
@@ -4229,29 +4214,6 @@ void ServeClient(SOCKET client) {
 }
 
 }  // namespace
-
-/// Read one line from stdin without echoing it, for the password prompt.
-std::string ReadLineHidden() {
-    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
-    const bool console = GetConsoleMode(input, &mode) != 0;
-    if (console) {
-        SetConsoleMode(input, mode & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
-    }
-    std::string line;
-    int ch = 0;
-    while ((ch = std::fgetc(stdin)) != EOF && ch != '\n') {
-        if (ch != '\r') {
-            line.push_back(static_cast<char>(ch));
-        }
-    }
-    if (console) {
-        SetConsoleMode(input, mode);
-        std::fputs("\n", stdout);
-    }
-    return line;
-}
-
 
 /// Answer "is anybody there" on the local network.
 ///
@@ -4378,8 +4340,9 @@ int wmain(int argc, wchar_t** argv) {
     // declaring a function it has no way to reach.
     solstream::media::SetLogger([](const char* line) { Log("%s", line); });
     unsigned short port = kDefaultPort;
-    // Loopback by default. This socket has no authentication yet, so the address
-    // it binds is the only thing limiting who can drive it.
+    // Loopback by default, where no token is asked for (see g_require_auth);
+    // an installed host switches to every interface below, with the token
+    // required.
     std::string bind_address = kLoopback;
     bool print_token = false;
     bool no_auth = false;
@@ -4402,8 +4365,8 @@ int wmain(int argc, wchar_t** argv) {
         } else if (arg == L"--install-display-driver") {
             install_driver = true;
         } else if (arg == L"--bind" && i + 1 < argc) {
-            // Prefer a single address ΓÇö a VPN interface such as Tailscale, whose
-            // peers are already device-authenticated ΓÇö over every interface.
+            // Prefer a single address — a VPN interface such as Tailscale, whose
+            // peers are already device-authenticated — over every interface.
             bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
             bind_address = "0.0.0.0";
@@ -4433,14 +4396,9 @@ int wmain(int argc, wchar_t** argv) {
     // Windows' DPI virtualisation, and windows land in the wrong place on any
     // display that is not at 100%.
     //
-    // Here, before any of the branches below, rather than down on the agent
-    // path where it used to sit. The setup window and the uninstall
-    // confirmation are created and returned from above that line, so both of
-    // them ran DPI-unaware — which made the whole per-monitor path in
-    // host_window.cpp dead code for the two windows a new user sees first, and
-    // left them bitmap-stretched and blurry on exactly the high-DPI laptop
-    // panels where it matters. Setting process DPI awareness has to happen
-    // before the first window exists; it cannot be corrected afterwards.
+    // Before any branch below, because setting process DPI awareness only
+    // works before the first window exists -- and the setup and uninstall
+    // windows are created on those branches.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     // Installing is the executable's own job. It used to be a PowerShell script,
@@ -4669,7 +4627,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     // EXCLUSIVE, not REUSEADDR. On Windows SO_REUSEADDR lets a second process
-    // bind a port that is already bound ΓÇö it does not merely permit reusing a
+    // bind a port that is already bound — it does not merely permit reusing a
     // port in TIME_WAIT as it does on unix. A second agent, in another user's
     // session, would therefore start successfully, and which of the two a given
     // connection reached would be indeterminate: the Mac could silently end up
@@ -4700,7 +4658,7 @@ int wmain(int argc, wchar_t** argv) {
     //
     // The agent starts at logon, and a VPN interface does not. Binding a Tailscale
     // address the moment the desktop appears fails with WSAEADDRNOTAVAIL, because
-    // the interface is seconds away from existing ΓÇö so the agent would exit and
+    // the interface is seconds away from existing — so the agent would exit and
     // the Mac would find nothing there until somebody started it by hand. The same
     // applies to DHCP on a slow network.
     bool bound = false;
@@ -4910,16 +4868,9 @@ int wmain(int argc, wchar_t** argv) {
             // can still tell whether the host is healthy — and so can anyone
             // diagnosing it, which is how this was noticed at all.
             //
-            // Keyed on clients that have PROVED the token, not on open sockets.
-            // g_clients_connected counts an accepted socket from the moment it
-            // is accepted and nothing frees it early, so anything that opened
-            // this port and then said nothing — a port scanner, a monitoring
-            // probe, anyone at all — was enough to have the paired Mac told that
-            // this PC was "already streaming to another Mac". The Mac treats
-            // `busy` as final and does not come back, so one connect() locked
-            // the pairing out for the whole idle timeout, and a repeated one
-            // locked it out indefinitely. A genuine second Mac has proved the
-            // token; that is what this now asks.
+            // Keyed on clients that have PROVED the token, not on open sockets: the
+            // Mac treats `busy` as final, so counting any accepted socket let a port
+            // scanner or a single stray connect() lock the paired Mac out.
             if (g_clients_authenticated.load() > 0) {
                 char name[256] = {};
                 DWORD name_size = sizeof(name);
@@ -4929,7 +4880,7 @@ int wmain(int argc, wchar_t** argv) {
                                    "another Mac. Disconnect there first.");
                 busy += "\"";
                 busy += ",\"virtualDisplay\":"
-                     + std::string(solstream::HasVirtualDisplay() ? "true" : "false");
+                     + std::string(solstream::HasVirtualDisplayCached() ? "true" : "false");
                 busy += "}";
                 Log("[agent] refused a second client: one is already connected");
                 SendLine(client, busy);
@@ -4962,12 +4913,6 @@ int wmain(int argc, wchar_t** argv) {
 
             Log("[agent] client connected");
             g_clients_connected.fetch_add(1);
-            // From here, not from `lock`. The watcher is what carries the
-            // debounced "the window set moved" push, and a Mac sitting in the
-            // application picker has locked nothing at all — which is precisely
-            // when a list that never refreshes is the thing being looked at.
-            // Idempotent, and its body does nothing while no window is held.
-            StartWatcher();
             std::thread([client]() {
                 // Loopback needs no token, so it is authorised from the start.
                 StartCursorWatcher(client, !g_require_auth);
@@ -4988,24 +4933,22 @@ int wmain(int argc, wchar_t** argv) {
                 StopCursorWatcher();
                 closesocket(client);
 #ifdef SOLSTREAM_MEDIA
-                // And stop streaming to a Mac that has gone. Nothing here did
-                // that: the only thing that ended a session was the client's own
-                // UDP BYE, which sets a flag, and a fifteen-second silence
-                // timeout for when the BYE is lost -- so a Mac that vanished
-                // left the capture, the encoder, the sender and the receive
-                // threads running, its socket and keys held, and whatever key or
-                // mouse button it was holding still down on the host. This is
-                // the backstop the close path used to get for free by dropping
-                // the socket, and it is what makes losing a client the same as
-                // ending a session cleanly.
+                // And stop streaming to a Mac that has gone, rather than leave
+                // capture, encode and send running -- and whatever key or button
+                // it was holding still down on the host -- until the media
+                // path's own silence timeout notices.
                 solstream::media::MediaSession::Instance().Stop();
 #endif
-                // Give every managed window its resize border back. A Mac that
-                // goes away must not leave applications permanently unresizable.
-                UnlockAll();
-                // A PIN nobody is waiting on any more is worse than no PIN: it
-                // is a code on screen that does nothing, for a Mac that has gone.
+                // Every managed window is owed its frame, z-order and placement
+                // back. The slots are released first and the client slot freed
+                // before the windows are touched: restoring crosses into other
+                // processes, and if one of those is hung, a cleanup stuck there
+                // must not keep every later Mac turned away.
+                const std::vector<WindowLock> owed = TakeAllSlots();
                 g_clients_connected.fetch_sub(1);
+                for (const WindowLock& saved : owed) {
+                    RestoreWindow(saved);
+                }
                 Log("[agent] client disconnected");
             }).detach();
         }
@@ -5067,7 +5010,7 @@ int wmain(int argc, wchar_t** argv) {
             status.streaming_detail = L"This build has no media path.";
 #endif
 
-            status.virtual_display = solstream::HasVirtualDisplay();
+            status.virtual_display = solstream::HasVirtualDisplayCached();
             status.display_detail = status.virtual_display
                 ? (g_capture_display.empty() ? L"ready" : g_capture_display)
                 : L"not installed";
@@ -5082,6 +5025,7 @@ int wmain(int argc, wchar_t** argv) {
     // the thread that set it, through that thread's message loop — and this is
     // the thread with one. Set from the watcher instead, the callbacks would
     // have nowhere to arrive and the picker would go on showing a stale list.
+    SeedListedWindows();
     HWINEVENTHOOK window_set_hook = SetWinEventHook(
         EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, WindowSetChanged, 0, 0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);

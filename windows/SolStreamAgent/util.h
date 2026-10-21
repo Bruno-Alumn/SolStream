@@ -1,0 +1,55 @@
+// util.h — the small helpers every part of the host needs, written once.
+//
+// Each of these used to exist two to four times over, in slightly different
+// shapes, and the copies drifted: one RunHidden learned to kill a child that
+// outlived its timeout and to stop reporting STILL_ACTIVE as an exit code, and
+// the other one did not.
+
+#pragma once
+
+#include <windows.h>
+
+#include <string>
+#include <vector>
+
+namespace solstream {
+
+/// UTF-16 <-> UTF-8. Empty in, empty out; invalid input yields empty.
+std::string ToUtf8(const std::wstring& text);
+std::wstring ToWide(const std::string& text);
+
+/// Lower-cased copy, for case-insensitive comparison and searching.
+std::wstring FoldCase(std::wstring text);
+
+/// Lowercase hex, and back. FromHex returns empty on odd length or a non-hex
+/// character.
+std::string ToHex(const unsigned char* bytes, size_t count);
+std::string ToHex(const std::vector<unsigned char>& bytes);
+std::vector<unsigned char> FromHex(const std::string& hex);
+
+/// `%LOCALAPPDATA%\SolStream\<file>`, creating the directory if needed. Empty
+/// when LOCALAPPDATA is not set. Where the token, the media counter and the
+/// host's log live.
+std::wstring LocalDataPath(const wchar_t* file);
+
+/// What RunHidden answers when there is no exit code to give: the process never
+/// started, or it was still running at the timeout and was killed. Neither value
+/// is one netsh, schtasks, pnputil or powershell answers with.
+constexpr DWORD kRunFailed = 0xFFFFFFFFu;
+constexpr DWORD kRunTimedOut = 0xFFFFFFFEu;
+
+/// Run a System32 command with no window and wait for it, returning its exit
+/// code, kRunFailed or kRunTimedOut.
+///
+/// A bare executable name is resolved to System32 first: much of this runs
+/// elevated, and CreateProcess's search order starts with the directory the
+/// process was started from, which for a setup program is wherever it was
+/// downloaded to. A child still running at the timeout is killed rather than
+/// left to change the machine behind a screen that has already reported.
+DWORD RunHidden(const std::wstring& command, DWORD timeout_ms = 60000);
+
+/// How a RunHidden answer reads in a sentence: "returned 1", "would not start",
+/// "was still running after N seconds and was stopped".
+std::string RunOutcome(DWORD code);
+
+}  // namespace solstream

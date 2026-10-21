@@ -37,6 +37,7 @@
 #include "host_theme.h"
 #include "installer.h"
 #include "ports.h"
+#include "util.h"
 #include "vdd.h"
 
 // Not in every SDK this is built against, and they are only integers.
@@ -1546,17 +1547,6 @@ void CopyToClipboard(const std::wstring& text) {
 // by posting a string, which the UI thread takes ownership of and deletes; that
 // is the whole synchronisation, and there is nothing to lock.
 
-std::wstring Widen(const std::string& text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(),
-                                           nullptr, 0);
-    std::wstring out((size_t) needed, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(), out.data(), needed);
-    return out;
-}
-
 void PostStep(HWND window, const std::wstring& text) {
     PostMessageW(window, WM_SOLSTREAM_JOB_STEP, 0, (LPARAM) new std::wstring(text));
 }
@@ -1599,7 +1589,7 @@ void StartInstallJob(HWND window) {
         PostDone(window, ok,
                  ok ? L"Open SolStream on your Mac and pick this PC. It asks for a "
                       L"pairing token once, and SolStream's window on this PC shows it."
-                    : Widen(error));
+                    : ToWide(error));
     }).detach();
 }
 
@@ -1623,7 +1613,7 @@ void StartUninstallJob(HWND window) {
         PostDone(window, ok,
                  ok ? L"Your pairing token and settings are still here, so "
                       L"installing SolStream again won't make your Mac pair twice."
-                    : Widen(error));
+                    : ToWide(error));
     }).detach();
 }
 
@@ -1646,7 +1636,7 @@ void StartDisplayJob(HWND window) {
     std::thread([window] {
         std::string error;
         if (!InstallBundledDriver(error)) {
-            PostDone(window, false, Widen(error));
+            PostDone(window, false, ToWide(error));
             return;
         }
         PostStep(window, L"Setting its size and colour up. The screen may blink.");
@@ -1656,7 +1646,7 @@ void StartDisplayJob(HWND window) {
                                                 kDefaultCanvasHeight,
                                                 kDefaultScalePercent, note,
                                                 configure_error);
-        PostDone(window, ok, Widen(ok ? note : configure_error));
+        PostDone(window, ok, ToWide(ok ? note : configure_error));
     }).detach();
 }
 
@@ -2317,9 +2307,25 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     return true;
 }
 
+static bool SameStatus(const HostStatus& a, const HostStatus& b) {
+    return a.computer_name == b.computer_name && a.address == b.address
+        && a.pairing_token == b.pairing_token && a.agent_listening == b.agent_listening
+        && a.streaming_ready == b.streaming_ready && a.virtual_display == b.virtual_display
+        && a.streaming_detail == b.streaming_detail && a.display_detail == b.display_detail
+        && a.connected_clients == b.connected_clients;
+}
+
 void UpdateHostStatus(const HostStatus& status) {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        // The agent reports once a second and almost nothing changes between
+        // reports, so an unchanged one costs nothing: no tray update through
+        // Explorer and no repaint.
+        static bool first = true;
+        if (!first && SameStatus(g_status, status)) {
+            return;
+        }
+        first = false;
         g_status = status;
     }
     if (g_window) {

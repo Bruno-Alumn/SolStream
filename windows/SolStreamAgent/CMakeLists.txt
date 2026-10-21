@@ -53,6 +53,7 @@ endif()
 
 add_executable(SolStreamAgent
     main.cpp
+    util.cpp
     # Not media-only: the host window logs through it too, and it has no
     # dependency beyond stdio.
     media/log.cpp
@@ -84,6 +85,8 @@ target_link_libraries(SolStreamAgent PRIVATE
     # interface ids (uuid) -- mingw's import libraries do not carry those unless
     # the library is named.
     ole32 uuid
+    # The logon task is registered through ITaskService, whose strings are BSTRs.
+    oleaut32
 )
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms

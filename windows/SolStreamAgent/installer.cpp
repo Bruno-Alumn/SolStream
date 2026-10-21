@@ -7,12 +7,15 @@
 #include <sddl.h>
 #include <aclapi.h>
 #include <bcrypt.h>
+#include <oleauto.h>
+#include <taskschd.h>
 
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "ports.h"
+#include "util.h"
 
 namespace solstream {
 namespace {
@@ -332,112 +335,6 @@ std::wstring DirectoryOf(const std::wstring& path) {
     return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
 }
 
-std::string Narrow(const std::wstring& text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(),
-                                           nullptr, 0, nullptr, nullptr);
-    std::string out((size_t) needed, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(), out.data(),
-                        needed, nullptr, nullptr);
-    return out;
-}
-
-/// Run a command and wait, returning its exit code. Used for netsh, schtasks
-/// and taskkill, none of which have a usable API and all of which would flash a
-/// console window on a user's desktop if started the obvious way.
-/// Turn a command whose first word is a bare executable name into one naming
-/// the copy in System32.
-///
-/// EVERYTHING HERE RUNS ELEVATED, and `CreateProcessW` with a null
-/// lpApplicationName resolves a bare name through the search order -- which
-/// begins with the directory the process was started from. A setup program is
-/// run from wherever it was downloaded to, and anyone who can write a file
-/// called `powershell.exe` beside it gets it executed as administrator, at the
-/// UAC prompt the user has just agreed to. The same goes for `netsh.exe`,
-/// `schtasks.exe` and `pnputil.exe`, all of which this file asks for by name.
-///
-/// Resolving to System32 removes the search entirely: there is exactly one
-/// path, and it is one only an administrator can write to.
-std::wstring QualifySystemCommand(const std::wstring& command) {
-    if (command.empty() || command[0] == L'"' || command.find(L':') != std::wstring::npos) {
-        return command;  // already qualified, or quoted by the caller
-    }
-    const size_t space = command.find(L' ');
-    const std::wstring exe = command.substr(0, space);
-    if (exe.find(L'\\') != std::wstring::npos) {
-        return command;
-    }
-    wchar_t system_dir[MAX_PATH] = {0};
-    if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
-        return command;
-    }
-    std::wstring qualified = L"\"" + std::wstring(system_dir) + L"\\" + exe + L"\"";
-    if (space != std::wstring::npos) {
-        qualified += command.substr(space);
-    }
-    return qualified;
-}
-
-/// The two answers RunHidden gives that are NOT exit codes.
-///
-/// A process that has not finished has no exit code, and GetExitCodeProcess says
-/// so by handing back STILL_ACTIVE — 259. RunHidden used to return that number
-/// unexamined after its wait expired, so the callers below printed it as though
-/// the command had run and answered 259: an install that was in fact still
-/// sitting at a password prompt reported "schtasks returned 259" and the number
-/// meant nothing to anybody who looked it up. So the two cases that produce no
-/// exit code get their own values — ones none of netsh, schtasks or powershell
-/// answers with — and RunOutcome turns them into words instead. Every caller
-/// that prints a number goes through it, which is what keeps them apart.
-constexpr DWORD kRunFailed = 0xFFFFFFFFu;
-constexpr DWORD kRunTimedOut = 0xFFFFFFFEu;
-
-DWORD RunHidden(const std::wstring& command) {
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION process{};
-    std::wstring mutable_command = QualifySystemCommand(command);
-    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        return kRunFailed;
-    }
-    DWORD code = kRunFailed;
-    if (WaitForSingleObject(process.hProcess, 60000) == WAIT_OBJECT_0) {
-        GetExitCodeProcess(process.hProcess, &code);
-    } else {
-        // Sixty seconds, and it is still going. The child is killed rather than
-        // left to it, deliberately. Everything started from here changes the
-        // machine — schtasks registering a task, netsh writing a firewall rule,
-        // powershell stopping processes — and it is hidden, has no window and
-        // has nobody waiting on it once this returns, so an orphan carries on
-        // rearranging things behind a setup screen that has already told the
-        // user how the install went. Nothing it has done so far is undone by
-        // this: each of these commands hands the actual change to a service and
-        // killing the client end cannot leave that service half way through one.
-        TerminateProcess(process.hProcess, 1);
-        code = kRunTimedOut;
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return code;
-}
-
-/// How a RunHidden answer reads in a sentence. "returned 1" only when there
-/// really was an exit code to return.
-std::string RunOutcome(DWORD code) {
-    if (code == kRunTimedOut) {
-        return "was still running after 60 seconds and was stopped";
-    }
-    if (code == kRunFailed) {
-        return "would not start";
-    }
-    return "returned " + std::to_string((int) code);
-}
-
 void RemoveTree(const std::wstring& path) {
     WIN32_FIND_DATAW found{};
     HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
@@ -650,7 +547,7 @@ void RemoveShortcutFile(const std::wstring& path) {
     if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) {
         return;
     }
-    InstallLog("could not remove " + Narrow(path) + " (error "
+    InstallLog("could not remove " + ToUtf8(path) + " (error "
                + std::to_string((int) code) + ")");
 }
 
@@ -816,20 +713,47 @@ std::wstring LogonTaskAccount() {
     return std::wstring(machine) + L"\\" + user;
 }
 
-/// The task is registered from XML rather than from schtasks' own switches.
-///
-/// schtasks /tr takes the whole command as one string and splits it on spaces,
-/// so "C:\Program Files\SolStream\SolStream.exe" was stored as
-/// Command="C:\Program" with the rest as arguments, and the task failed with
-/// ERROR_FILE_NOT_FOUND. Quoting does not survive the trip. XML has somewhere
-/// to put the arguments, so the question never arises.
-bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
-    const std::wstring xml_path = TempDirectory() + L"solstream-task.xml";
+/// Text safe to put between XML tags. The account comes from LookupAccountSidW
+/// and the path from the environment, and an `&` in either -- legal in a
+/// Windows user name -- made the whole definition malformed.
+std::wstring XmlEscape(const std::wstring& text) {
+    std::wstring out;
+    out.reserve(text.size());
+    for (const wchar_t c : text) {
+        switch (c) {
+            case L'&':  out += L"&amp;"; break;
+            case L'<':  out += L"&lt;"; break;
+            case L'>':  out += L"&gt;"; break;
+            case L'"':  out += L"&quot;"; break;
+            case L'\'': out += L"&apos;"; break;
+            default:    out.push_back(c);
+        }
+    }
+    return out;
+}
 
+/// The Task Scheduler's class and interface ids, spelled out here rather than
+/// taken from taskschd.lib, which the mingw cross-build does not link.
+const CLSID kClsidTaskScheduler = {0x0f87369f, 0xa4e5, 0x4cfc,
+                                   {0xbd, 0x3e, 0x73, 0xe6, 0x15, 0x45, 0x72, 0xdd}};
+const IID kIidTaskService = {0x2faba4c7, 0x4da9, 0x4013,
+                             {0x96, 0x97, 0x20, 0xcc, 0x3f, 0xd4, 0x0f, 0x85}};
+
+/// Register the logon task from an XML definition, handed to the Task
+/// Scheduler in memory.
+///
+/// XML rather than schtasks' own switches, because /tr splits the command on
+/// spaces and "C:\Program Files\..." does not survive it. In memory rather than
+/// through `schtasks /xml <file>`, because this runs elevated and the file used
+/// to sit in %TEMP% -- writable by every unelevated process of the same user,
+/// any of which could rewrite RunLevel or Command between the write and the
+/// read and come away with an elevated task that runs at every logon.
+bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
     // Whoever asked for the install, not whoever approved it: an administrator
     // setting this up for somebody else must not register a task that runs as
     // themselves. How the difference is worked out is in LogonTaskAccount.
-    const std::wstring account = LogonTaskAccount();
+    const std::wstring account = XmlEscape(LogonTaskAccount());
+    const std::wstring directory = XmlEscape(destination);
 
     const std::wstring xml =
         L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
@@ -837,13 +761,8 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
         L"  <RegistrationInfo><Description>Starts SolStream so this PC can serve a Mac.</Description></RegistrationInfo>\r\n"
         L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
         L"  <Principals><Principal id=\"Author\">\r\n"
-        // The account belongs here rather than on schtasks' /ru switch. With /ru
-        // and no /rp, schtasks asks for a password on a console nobody is
-        // watching and simply never returns — it sat there for the full two
-        // minute timeout and reported 259, STILL_ACTIVE, which is the number
-        // RunHidden no longer hands back as though it were an exit code.
-        // Declared in the XML alongside InteractiveToken, no password is wanted
-        // at all.
+        // The account is declared here, beside InteractiveToken, so no password
+        // is ever wanted for it.
         L"    <UserId>" + account + L"</UserId>\r\n"
         // Interactive and least-privilege. A process in session 0 sees a phantom
         // 1024x768 desktop and no windows at all, so it could neither show its
@@ -860,35 +779,59 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
         L"  </Settings>\r\n"
         L"  <Actions Context=\"Author\">\r\n"
         L"    <Exec>\r\n"
-        L"      <Command>" + destination + L"\\SolStream.exe</Command>\r\n"
+        L"      <Command>" + directory + L"\\SolStream.exe</Command>\r\n"
         // --listen-all because an installed host that only answers on loopback is
         // one no Mac can reach. The socket still requires the pairing token off
         // loopback; the window shows that token. That is the lock, not the address.
         L"      <Arguments>--listen-all --background</Arguments>\r\n"
-        L"      <WorkingDirectory>" + destination + L"</WorkingDirectory>\r\n"
+        L"      <WorkingDirectory>" + directory + L"</WorkingDirectory>\r\n"
         L"    </Exec>\r\n"
         L"  </Actions>\r\n"
         L"</Task>\r\n";
 
-    HANDLE file = CreateFileW(xml_path.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        error = "Could not write the scheduled task definition.";
-        return false;
-    }
-    const unsigned char bom[2] = {0xFF, 0xFE};  // UTF-16 LE, which schtasks wants
-    DWORD written = 0;
-    WriteFile(file, bom, 2, &written, nullptr);
-    WriteFile(file, xml.data(), (DWORD) (xml.size() * sizeof(wchar_t)), &written, nullptr);
-    CloseHandle(file);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ITaskService* service = nullptr;
+    ITaskFolder* root = nullptr;
+    IRegisteredTask* task = nullptr;
+    VARIANT none;
+    VariantInit(&none);
+    BSTR root_path = SysAllocString(L"\\");
+    BSTR name = SysAllocString(kTaskName);
+    BSTR text = SysAllocStringLen(xml.data(), (UINT) xml.size());
 
-    const std::wstring command = L"schtasks.exe /create /tn \"" + std::wstring(kTaskName)
-                               + L"\" /xml \"" + xml_path + L"\" /f";
-    const DWORD code = RunHidden(command);
-    DeleteFileW(xml_path.c_str());
-    if (code != 0) {
-        error = "Could not register the logon task (schtasks " + RunOutcome(code)
-              + ").";
+    const char* step = "start the Task Scheduler";
+    HRESULT hr = (root_path && name && text) ? S_OK : E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) {
+        hr = CoCreateInstance(kClsidTaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+                              kIidTaskService, (void**) &service);
+    }
+    if (SUCCEEDED(hr)) {
+        step = "connect to the Task Scheduler";
+        hr = service->Connect(none, none, none, none);
+    }
+    if (SUCCEEDED(hr)) {
+        step = "open the Task Scheduler's root folder";
+        hr = service->GetFolder(root_path, &root);
+    }
+    if (SUCCEEDED(hr)) {
+        step = "register the logon task";
+        hr = root->RegisterTask(name, text, TASK_CREATE_OR_UPDATE, none, none,
+                                TASK_LOGON_INTERACTIVE_TOKEN, none, &task);
+    }
+
+    if (task) { task->Release(); }
+    if (root) { root->Release(); }
+    if (service) { service->Release(); }
+    SysFreeString(text);
+    SysFreeString(name);
+    SysFreeString(root_path);
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
+    if (FAILED(hr)) {
+        char code[16];
+        std::snprintf(code, sizeof(code), "0x%08lX", (unsigned long) hr);
+        error = std::string("Could not ") + step + " (" + code + ").";
         return false;
     }
     return true;
@@ -1034,7 +977,7 @@ void WriteInstallResult(bool ok, const std::string& error) {
         // The window on the other side of this file is about to say "The install
         // did not run", which will be untrue. Nothing here can stop that, but the
         // log can at least say the install did run and the postbox was locked.
-        InstallLog("could not write " + Narrow(path) + " (error "
+        InstallLog("could not write " + ToUtf8(path) + " (error "
                    + std::to_string((int) code)
                    + "), so the waiting window will report no result");
         return;
@@ -1193,9 +1136,7 @@ std::wstring InstallDirectory() {
 bool RunningInstalled() {
     std::wstring here = DirectoryOf(ExePath());
     std::wstring there = InstallDirectory();
-    for (wchar_t& c : here) { c = (wchar_t) towlower(c); }
-    for (wchar_t& c : there) { c = (wchar_t) towlower(c); }
-    return here == there;
+    return FoldCase(here) == FoldCase(there);
 }
 
 bool InstallSelf(const InstallOptions& options, std::string& error) {
@@ -1220,12 +1161,12 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // tree with a sunshine\ folder beside it -- and an error message for the
     // case where neither was true, because without Sunshine there was nothing
     // to stream with. SolStream streams with itself now.
-    InstallLog("installing from " + Narrow(source) + " to " + Narrow(destination));
+    InstallLog("installing from " + ToUtf8(source) + " to " + ToUtf8(destination));
     StopInstalled(destination);
 
     if (!CreateDirectoryW(destination.c_str(), nullptr)
         && GetLastError() != ERROR_ALREADY_EXISTS) {
-        error = "Could not create " + Narrow(destination);
+        error = "Could not create " + ToUtf8(destination);
         InstallLog("copy failed: " + error);
         return false;
     }
@@ -1234,7 +1175,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // Program Files with it.
     if (!CopyFileW(ExePath().c_str(), (destination + L"\\SolStream.exe").c_str(),
                    FALSE)) {
-        error = "Could not copy SolStream into " + Narrow(destination)
+        error = "Could not copy SolStream into " + ToUtf8(destination)
               + " (error " + std::to_string(GetLastError()) + ")";
         InstallLog("copy failed: " + error);
         return false;
@@ -1395,7 +1336,7 @@ bool UninstallSelf(std::string& error) {
     InstallLog("shortcuts and the Add/Remove Programs entry removed");
     RemoveTree(destination);
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        error = "Removed what it could, but " + Narrow(destination)
+        error = "Removed what it could, but " + ToUtf8(destination)
               + " is still there — something in it was in use.";
         InstallLog("uninstall incomplete: " + error);
         return false;

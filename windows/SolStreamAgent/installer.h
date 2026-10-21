@@ -66,9 +66,9 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error);
 bool InstallSelf(const InstallOptions& options, std::string& error);
 
 /// Undo InstallSelf. Settings in %LOCALAPPDATA%\SolStream are deliberately kept:
-/// they hold the pairing token and the generated Sunshine credentials, and
-/// making every Mac pair again after a reinstall is a worse default than leaving
-/// a few kilobytes behind.
+/// they hold the pairing token and the media session counter, and making every
+/// Mac pair again after a reinstall is a worse default than leaving a few
+/// kilobytes behind.
 bool UninstallSelf(std::string& error);
 
 /// Where an install lives.

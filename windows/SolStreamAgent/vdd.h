@@ -39,6 +39,11 @@ std::vector<VirtualDisplay> FindVirtualDisplays();
 /// Is there a usable virtual display?
 bool HasVirtualDisplay();
 
+/// The same answer, re-scanned at most every ten seconds. For anything that asks
+/// repeatedly -- the window's status, the `status` command -- where a device
+/// scan per question would cost more than the answer is worth.
+bool HasVirtualDisplayCached();
+
 /// Is this the driver SolStream sets up — the Virtual Display Driver, under any
 /// of the names it has shipped as — rather than some other product's?
 ///

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "util.h"
 #include "vdd.h"
 
 namespace solstream {
@@ -96,65 +97,11 @@ constexpr Mode kLadder[] = {
     {3840, 2160},  // 4K panel at 100%
 };
 
-std::string Narrow(const std::wstring& text) {
-    if (text.empty()) {
-        return {};
-    }
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(),
-                                           nullptr, 0, nullptr, nullptr);
-    std::string out((size_t) needed, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), (int) text.size(), out.data(),
-                        needed, nullptr, nullptr);
-    return out;
-}
-
 void Add(std::string& note, const std::string& line) {
     if (!note.empty()) {
         note += "\n";
     }
     note += line;
-}
-
-/// See the note beside the copy in installer.cpp: a bare executable name is
-/// resolved through a search order that begins with the current directory, and
-/// this file runs pnputil.exe elevated.
-std::wstring QualifySystemCommand(const std::wstring& command) {
-    if (command.empty() || command[0] == L'"' || command.find(L':') != std::wstring::npos) {
-        return command;
-    }
-    const size_t space = command.find(L' ');
-    const std::wstring exe = command.substr(0, space);
-    if (exe.find(L'\\') != std::wstring::npos) {
-        return command;
-    }
-    wchar_t system_dir[MAX_PATH] = {0};
-    if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
-        return command;
-    }
-    std::wstring qualified = L"\"" + std::wstring(system_dir) + L"\\" + exe + L"\"";
-    if (space != std::wstring::npos) {
-        qualified += command.substr(space);
-    }
-    return qualified;
-}
-
-DWORD RunHidden(const std::wstring& command) {
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION process{};
-    std::wstring mutable_command = QualifySystemCommand(command);
-    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
-        return 0xFFFFFFFF;
-    }
-    WaitForSingleObject(process.hProcess, 120000);
-    DWORD code = 0xFFFFFFFF;
-    GetExitCodeProcess(process.hProcess, &code);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-    return code;
 }
 
 // ── The driver's settings file ───────────────────────────────────────────────
@@ -271,7 +218,7 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
                       std::string& note, std::string& error) {
     std::string xml;
     if (!ReadFileText(path, xml)) {
-        error = "Could not read " + Narrow(path);
+        error = "Could not read " + ToUtf8(path);
         return false;
     }
     const std::string original = xml;
@@ -328,7 +275,7 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
     // machine with no virtual display and no way back to the file that caused it.
     CopyFileW(path.c_str(), (path + L".solstream-backup").c_str(), TRUE);
     if (!WriteFileText(path, xml)) {
-        error = "Could not write " + Narrow(path)
+        error = "Could not write " + ToUtf8(path)
               + ". Installing the display driver needs administrator rights.";
         return false;
     }
@@ -367,14 +314,12 @@ bool FindVirtualAdapter(Adapter& out) {
     DISPLAY_DEVICEW device{};
     device.cb = sizeof(device);
     for (DWORD n = 0; EnumDisplayDevicesW(nullptr, n, &device, 0); ++n) {
-        std::wstring id = device.DeviceID;
-        std::wstring name = device.DeviceString;
-        for (wchar_t& c : id) { c = (wchar_t) towupper(c); }
-        std::wstring upper_name = name;
-        for (wchar_t& c : upper_name) { c = (wchar_t) towupper(c); }
-        const bool root = id.rfind(L"ROOT\\DISPLAY", 0) == 0;
-        const bool named = upper_name.find(L"VIRTUAL DISPLAY") != std::wstring::npos
-                        || upper_name.find(L"IDDSAMPLE") != std::wstring::npos;
+        const std::wstring id = FoldCase(device.DeviceID);
+        const std::wstring name = device.DeviceString;
+        const std::wstring folded_name = FoldCase(name);
+        const bool root = id.rfind(L"root\\display", 0) == 0;
+        const bool named = folded_name.find(L"virtual display") != std::wstring::npos
+                        || folded_name.find(L"iddsample") != std::wstring::npos;
         if (root || named) {
             const bool attached =
                 (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
@@ -439,13 +384,15 @@ int RightOfEverythingElse(const std::wstring& skip) {
     return right;
 }
 
-/// Already attached, at exactly this size? Then leave it alone.
+/// Already attached at a size SolStream streams? Then leave it alone.
 ///
-/// This runs at every logon, and re-applying a mode that is already set costs a
-/// display reconfiguration — every window on the machine gets moved and every
-/// full-screen application blinks. Doing that once is setup; doing it every time
-/// somebody logs in is a fault.
-bool AlreadyAt(const std::wstring& gdi_name, int width, int height) {
+/// This runs at every logon, and re-applying a mode costs a display
+/// reconfiguration -- every window on the machine gets moved and every
+/// full-screen application blinks. Any ladder size counts, not only the
+/// default: the Mac's `canvas` request switches the display to the Mac's own
+/// size and persists it, and comparing against the default here undid that at
+/// every logon, only for the Mac to put it back on connecting.
+bool AlreadyAttachedAtLadderMode(const std::wstring& gdi_name) {
     DISPLAY_DEVICEW device{};
     device.cb = sizeof(device);
     bool attached = false;
@@ -462,8 +409,33 @@ bool AlreadyAt(const std::wstring& gdi_name, int width, int height) {
     }
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
-    return EnumDisplaySettingsW(gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &mode)
-           && (int) mode.dmPelsWidth == width && (int) mode.dmPelsHeight == height;
+    if (!EnumDisplaySettingsW(gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &mode)) {
+        return false;
+    }
+    for (const Mode& ladder : kLadder) {
+        if ((int) mode.dmPelsWidth == ladder.width && (int) mode.dmPelsHeight == ladder.height) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The highest refresh rate the display offers at this size, or 0 when it
+/// offers none. The same choice the agent's `canvas` makes, so attaching and
+/// resizing do not disagree about the rate.
+DWORD BestRefreshAt(const std::wstring& gdi_name, int width, int height) {
+    DWORD best = 0;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    for (DWORD i = 0; EnumDisplaySettingsW(gdi_name.c_str(), i, &mode); ++i) {
+        if ((int) mode.dmPelsWidth == width && (int) mode.dmPelsHeight == height
+            && mode.dmBitsPerPel == 32 && mode.dmDisplayFrequency > best) {
+            best = mode.dmDisplayFrequency;
+        }
+        mode = DEVMODEW{};
+        mode.dmSize = sizeof(mode);
+    }
+    return best;
 }
 
 bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& error) {
@@ -473,11 +445,13 @@ bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& 
     mode.dmPelsWidth = (DWORD) width;
     mode.dmPelsHeight = (DWORD) height;
     mode.dmBitsPerPel = 32;
-    mode.dmDisplayFrequency = 60;
     mode.dmPosition.x = RightOfEverythingElse(gdi_name);
     mode.dmPosition.y = 0;
-    mode.dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT
-                  | DM_DISPLAYFREQUENCY;
+    mode.dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
+    if (const DWORD hz = BestRefreshAt(gdi_name, width, height); hz != 0) {
+        mode.dmDisplayFrequency = hz;
+        mode.dmFields |= DM_DISPLAYFREQUENCY;
+    }
 
     // Staged, then applied in one go. CDS_NORESET is 0x10000000 — 0x10000 is not
     // a valid flag and comes back DISP_CHANGE_BADFLAGS.
@@ -717,19 +691,16 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                 continue;
             }
             const DWORD code = RunHidden(L"pnputil.exe /restart-device \""
-                                         + display.instance_id + L"\"");
+                                         + display.instance_id + L"\"", 120000);
             if (code == 0) {
                 restarted = true;
                 continue;
             }
-            char detail[96];
-            std::snprintf(detail, sizeof(detail), " (pnputil exit code %lu)",
-                          (unsigned long) code);
             Add(note, "Could not restart "
-                      + Narrow(display.friendly_name.empty() ? display.instance_id
+                      + ToUtf8(display.friendly_name.empty() ? display.instance_id
                                                              : display.friendly_name)
-                      + detail + ", so its new mode list takes effect after "
-                        "restarting this PC.");
+                      + " (pnputil " + RunOutcome(code) + "), so its new mode list "
+                        "takes effect after restarting this PC.");
         }
         if (restarted) {
             Sleep(6000);
@@ -800,7 +771,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     }
 
     // 4. Attach it.
-    if (!AlreadyAt(adapter.gdi_name, width, height)) {
+    if (!AlreadyAttachedAtLadderMode(adapter.gdi_name)) {
         if (!AttachAt(adapter.gdi_name, width, height, error)) {
             return false;
         }
