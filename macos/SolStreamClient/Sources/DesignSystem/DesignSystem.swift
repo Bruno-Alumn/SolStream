@@ -356,6 +356,14 @@ public enum DS {
                 label.centerXAnchor.constraint(equalTo: centerXAnchor),
                 label.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
+            configure(name: name, key: key)
+        }
+
+        /// Point a tile at another application, as a reused table cell does.
+        public func configure(name: String, key: String) {
+            label.stringValue = Self.initials(from: name)
+            label.isHidden = false
+            iconLayer.contents = nil
             apply(step: Self.step(for: key))
         }
 

@@ -3,7 +3,7 @@ import Carbon
 import MediaSession
 import SolStreamLogging
 
-/// Turns local macOS keyboard and mouse events into GameStream input packets.
+/// Turns local macOS keyboard and mouse events into SMT/1 input events.
 ///
 /// Uses ONLY local NSView monitoring (`addLocalMonitorForEvents`), never a
 /// CGEventTap, which means no Accessibility permission is required and events
@@ -177,6 +177,15 @@ public final class InputCapture {
     /// "delivered but rejected", which are otherwise indistinguishable.
     public private(set) var mouseMovedSeen = 0
     public private(set) var positionsSent = 0
+    /// Pointer events that landed outside the picture — the title bar, the
+    /// letterbox, or anywhere else the key window hears about — and so were
+    /// not sent. Without it "moved but nothing sent" reads as a fault.
+    public private(set) var positionsOutside = 0
+
+    /// What a scroll left over after rounding to whole Windows units, per
+    /// axis. A trackpad reports fractions of a point, and rounding each event
+    /// on its own threw slow scrolls away entirely.
+    private var scrollResidual = CGPoint.zero
 
     /// Non-modifier keys currently held, so they can be released on focus loss.
     /// The host hands key-down straight to SendInput, and Windows auto-repeats a
@@ -219,6 +228,7 @@ public final class InputCapture {
         guard !isCapturing else { return }
         isCapturing = true
         installMonitors()
+        syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
     }
 
     /// Disable capture. Called when the window resigns key.
@@ -227,6 +237,7 @@ public final class InputCapture {
         isCapturing = false
         releaseHeldInput()
         removeMonitors()
+        scrollResidual = .zero
     }
 
     // MARK: - Monitors
@@ -315,6 +326,9 @@ public final class InputCapture {
             // exact key, not the shared .shift/.control/... flag.
             let flags = event.modifierFlags
             let deviceFlags = flags.rawValue
+            if event.keyCode == Self.capsLockKeyCode {
+                syncCapsLock(to: flags.contains(.capsLock))
+            }
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
                !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
                 let isDown = (deviceFlags & key.deviceMask) != 0
@@ -353,6 +367,28 @@ public final class InputCapture {
         let hex = String(keyCode, radix: 16, uppercase: true)
         Log.warning("[input] macOS key code 0x\(hex) is not in the US-layout key map,"
                     + " so it was not sent to the host")
+    }
+
+    static let capsLockKeyCode: UInt16 = 0x39
+    static let windowsCapsLock: UInt16 = 0x14  // VK_CAPITAL
+
+    /// What this Mac last told the host its Caps Lock is. Shared by every
+    /// window, because the host has one keyboard state. Windows starts with
+    /// it off, which is the assumption until something is sent.
+    static var hostCapsLock = false
+
+    /// Bring the host's Caps Lock to `on`.
+    ///
+    /// Caps Lock is a toggle on Windows — one press and release flips it — and
+    /// the letters are sent as plain key codes, so without this a Mac typing
+    /// with Caps Lock on produced lower case on the PC. Called from the Caps
+    /// Lock `.flagsChanged` and when capture starts, which covers it being
+    /// switched while another application had the keyboard.
+    func syncCapsLock(to on: Bool) {
+        guard on != Self.hostCapsLock, let send = onInput else { return }
+        Self.hostCapsLock = on
+        send(SMTInput.key(code: Self.windowsCapsLock, pressed: true, modifiers: []))
+        send(SMTInput.key(code: Self.windowsCapsLock, pressed: false, modifiers: []))
     }
 
     /// Let go of anything pressed during a ⌘ chord, now that ⌘ itself is up.
@@ -441,10 +477,8 @@ public final class InputCapture {
     /// Emit one absolute pointer position from a unit point inside the picture,
     /// through the same crop, guard and canvas mapping a real mouse move uses.
     ///
-    /// For `--test-input`. Only the whole-desktop mirror could be driven before
-    /// this, and that is not the path anyone uses — so the application-window
-    /// path, which is every real session, had never once had its pointer proven
-    /// end to end.
+    /// For `--test-input`, which proves the pointer end to end on the path every
+    /// real session uses.
     @discardableResult
     public func sendUnitPosition(x: Double, y: Double) -> Bool {
         guard let source = sourceRect, let canvas = canvasSize,
@@ -522,21 +556,42 @@ public final class InputCapture {
             // is under the cursor, so the pointer has to be where the wheel was
             // turned before the wheel arrives.
             guard sendPosition(for: event, in: view) else { return }
-            // Windows counts a wheel click as 120 units, and macOS reports the
-            // two kinds of scroll in different units: a trackpad gives points,
-            // a wheel mouse gives lines, one line per detent. Sending both at
-            // the trackpad's scale meant a real mouse wheel moved the host a
-            // tenth of a notch per click -- technically scrolling, in practice
-            // a wheel that does nothing.
-            let unit: CGFloat = event.hasPreciseScrollingDeltas ? 12 : 120
-            let vertical = Int((event.scrollingDeltaY * unit).rounded())
-            let horizontal = Int((event.scrollingDeltaX * unit).rounded())
-            if vertical != 0 { onInput?(SMTInput.scroll(amount: vertical)) }
-            if horizontal != 0 { onInput?(SMTInput.horizontalScroll(amount: horizontal)) }
+            let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
+                                        deltaY: event.scrollingDeltaY,
+                                        precise: event.hasPreciseScrollingDeltas,
+                                        residual: scrollResidual)
+            scrollResidual = wheel.residual
+            if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
+            if wheel.horizontal != 0 {
+                onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal))
+            }
 
         default:
             break
         }
+    }
+
+    /// A scroll event in Windows wheel units, carrying what rounding left over.
+    ///
+    /// Windows counts a wheel click as 120 units. macOS reports a wheel mouse
+    /// in lines, one per detent, and a trackpad in points, so the two get
+    /// different scales.
+    ///
+    /// The axes do not share a sign convention. AppKit's positive deltaY is
+    /// up and its positive deltaX is LEFT (NSEvent.h: "-1 for swipe right and
+    /// 1 for swipe left"); Windows' positive WHEEL is up and its positive
+    /// HWHEEL is right. So vertical passes straight through and horizontal is
+    /// negated — sending both unchanged scrolled sideways the wrong way.
+    static func wheelUnits(deltaX: CGFloat, deltaY: CGFloat, precise: Bool,
+                           residual: CGPoint)
+        -> (horizontal: Int, vertical: Int, residual: CGPoint) {
+        let unit: CGFloat = precise ? 12 : 120
+        let x = residual.x - deltaX * unit
+        let y = residual.y + deltaY * unit
+        let horizontal = Int(x.rounded(.towardZero))
+        let vertical = Int(y.rounded(.towardZero))
+        return (horizontal, vertical,
+                CGPoint(x: x - CGFloat(horizontal), y: y - CGFloat(vertical)))
     }
 
     /// Send the pointer position in the view's own coordinate space.
@@ -573,7 +628,10 @@ public final class InputCapture {
                                     source: source, isFlipped: view.isFlipped)
             : Self.unitPoint(viewPoint: point, viewSize: bounds.size,
                              source: source, isFlipped: view.isFlipped)
-        guard let unit = mapped else { return false }
+        guard let unit = mapped else {
+            positionsOutside += 1
+            return false
+        }
 
         let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
         let x = Int(target.x.rounded())

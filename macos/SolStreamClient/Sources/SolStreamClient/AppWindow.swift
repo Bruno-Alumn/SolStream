@@ -41,6 +41,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// Watches for the application being closed on the host.
     private var lifeTimer: Timer?
+    private var statusInFlight = false
     private var isClosing = false
     /// Set while this window is being resized to match the host, so the resize
     /// handler does not bounce the request straight back at it.
@@ -138,18 +139,28 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// reports a closure the moment its watcher sees it, and this catches the
     /// case where that notice never arrives — a push sent while the socket was
     /// being replaced, or an agent old enough not to send one at all.
+    ///
+    /// Every five seconds, and never more than one in flight: the push covers
+    /// the common case, and a host stuck on a slow request must not have a
+    /// queue of these building up behind it.
     private func startWatchingForExit() {
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self, !self.isClosing else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self, !self.isClosing, !self.statusInFlight else { return }
+            self.statusInFlight = true
             self.agent.windowStatus(id: self.remoteWindowID) { [weak self] status in
-                // A dropped agent connection reports nil, not death. Closing the
-                // window on a transient failure would be worse than doing nothing.
-                guard let status else { return }
-                guard status.isAlive else {
-                    DispatchQueue.main.async { self?.hostWindowClosed(noticedBy: "poll") }
-                    return
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.statusInFlight = false
+                    // A dropped agent connection reports nil, not death. Closing
+                    // the window on a transient failure would be worse than
+                    // doing nothing.
+                    guard let status else { return }
+                    if status.isAlive {
+                        self.reportOcclusion(status)
+                    } else {
+                        self.hostWindowClosed(noticedBy: "poll")
+                    }
                 }
-                DispatchQueue.main.async { self?.reportOcclusion(status) }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -222,23 +233,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Say when something on the PC is covering the streamed window.
     ///
     /// The crop is a rectangle on a shared display, so anything drawn over the
-    /// tile arrives looking exactly like part of the application. A Windows
-    /// firewall prompt did precisely that during testing: half the streamed
-    /// window became a dialog about Sunshine, with nothing on this end to say it
-    /// was not the application's own.
+    /// tile — a firewall prompt, say — arrives looking exactly like part of the
+    /// application.
     ///
-    /// Said in the title bar rather than on the status overlay, and that is the
-    /// whole reason this works at all. The overlay is for a window with no
-    /// picture in it: `MetalView.present()` hides it on every frame it draws,
-    /// unconditionally. Being covered on the host is the opposite situation —
-    /// the covering window is inside the captured rectangle, so frames go on
-    /// arriving at sixty a second for the entire time the warning is true — and
-    /// the warning was therefore wiped about sixteen milliseconds after it was
-    /// put up, every time, on a window that was still busily drawing. Nobody
-    /// ever saw one. The subtitle is not touched by the video path and stays
-    /// until this method takes it down, which is what a condition that persists
-    /// needs; it is also where the host's own `occluded` push already says the
-    /// same thing, so the two routes no longer contradict each other.
+    /// Said in the title bar, not on the status overlay: `MetalView.present()`
+    /// hides the overlay on every frame, and a covered window goes on
+    /// delivering frames. The subtitle is also where the host's own `occluded`
+    /// push says it, so the two routes agree.
     private func reportOcclusion(_ status: RemoteWindowStatus) {
         guard !isClosing, status.isOccluded != wasOccluded else { return }
         wasOccluded = status.isOccluded
@@ -281,27 +282,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     private func build(title: String, naturalSize: CGSize) {
         // Open at the size the application already is, not at the size of the
-        // tile it is allowed to grow into.
-        //
-        // The tile for a single application is the whole capture display, so
-        // sizing from it stretched every launched application to fill a 3600px
-        // screen — Character Map opened at 940x761 and was immediately blown up
-        // to 3600x2196, where it drew its grid in one corner and left the rest
-        // grey. The window still resizes to anything; it just starts where the
-        // application put itself.
-        //
-        // Host pixels to points is the backing scale, not a hardcoded 2.
-        //
-        // Then capped well short of the screen rather than at it. Clamping each
-        // axis to the visible frame meant any application that happened to be
-        // maximised on the PC — and one parked on a 3600x2338 virtual display
-        // usually is — opened edge to edge on the Mac. That reads as full screen,
-        // which is not what opening a window should do: it covers everything
-        // else, and there is nowhere left to drag it by.
-        //
-        // Shrunk by one factor on both axes, so a window that has to come down
-        // keeps the application's proportions instead of being squashed on
-        // whichever axis was the tighter fit.
+        // tile it may grow into (for one application that is the whole capture
+        // display), converted by the backing scale and capped well short of
+        // the screen — see `openingSize`.
         let screen = NSScreen.main
         let scale = screen?.backingScaleFactor ?? 2
         let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
@@ -314,35 +297,14 @@ final class AppWindow: NSObject, NSWindowDelegate {
                               backing: .buffered, defer: false)
         window.title = title
         window.titlebarAppearsTransparent = true
-        // NSWindow created directly defaults to releasing itself on close, which
-        // is a hangover from manual retain/release: ARC then releases it again
-        // from the property below and the process dies in objc_release at the next
-        // autorelease-pool drain. Only invisible while windows were closed solely
-        // at app termination, when the process exits before that drain happens.
+        // An NSWindow created directly releases itself on close, which ARC then
+        // releases again from the property below: a crash at the next drain.
         window.isReleasedWhenClosed = false
-        // Solar's `ground`, so the strip above the application is the same
-        // graphite as every other SolStream window rather than a black of its
-        // own. It resolves to the dark value, because of the appearance below.
+        // Solar's `ground` behind a transparent title bar, held in the dark
+        // appearance whatever the Mac's: a video frame belongs in a dark frame,
+        // and in the light appearance AppKit would draw the title black on
+        // near-black and the pill grey on grey.
         window.backgroundColor = DS.ground
-        // Say out loud that this chrome is dark, because the line above made it
-        // so without telling anyone.
-        //
-        // `titlebarAppearsTransparent` stops the title bar drawing its own
-        // material, so the ground above shows through the whole strip.
-        // In the dark appearance that is invisible — AppKit picks a light
-        // `labelColor` and the title reads fine. In the LIGHT appearance it
-        // picks black, and draws the title in black on near-black: the window came up
-        // with traffic lights, a quality pill, and no name at all. Verified on
-        // the running client, twice in each direction — switching the Mac to
-        // Dark made "Character Map" appear and switching back made it vanish.
-        //
-        // Deliberately not fixed by dropping the dark background. That would
-        // hand the strip back to the system material, which is the lighter fix
-        // on paper but leaves a video window in a light frame and risks a pale
-        // flash during a live resize drag. Naming the appearance keeps the
-        // chrome exactly as designed and costs nothing: it also resolves the
-        // pill's design tokens to their dark variants, which is what belongs on
-        // a dark bar — in light mode the pill was grey on grey.
         window.appearance = NSAppearance(named: .darkAqua)
         window.collectionBehavior = [.fullScreenPrimary]
         window.minSize = NSSize(width: 320, height: 200)
@@ -393,12 +355,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowDidResize(_ notification: Notification) {
-        // Resizing the macOS window resizes the real Windows window, and it does
-        // it *while* the drag is happening rather than after it. This used to be
-        // debounced by 200ms, which meant the host only caught up once the drag
-        // ended: until then the window showed the last frame stretched to a shape
-        // it was never rendered at, which is exactly the moment the illusion is
-        // most obviously an illusion.
+        // Resizing the macOS window resizes the real Windows window while the
+        // drag is happening, not after it, at whatever rate the host keeps up
+        // with — see `requestResize`.
         guard !isMatchingHostSize else { return }
         requestResize()
     }
@@ -632,11 +591,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     /// The stats line reports whichever window is actually taking input.
+    ///
+    /// The capture is held strongly, not reached through `self`: the session
+    /// is stopped after the last window has been released, and through a weak
+    /// `self` every normal close logged "pointer 0 sent of 0 moves" whatever
+    /// the hand had done. No cycle — the capture holds this window weakly.
     private func installPointerStats() {
-        session.setPointerStats { [weak self] in
-            guard let capture = self?.inputCapture else { return (0, 0, 0) }
-            return (capture.mouseMovedSeen, capture.positionsSent,
-                    capture.droppedWhileResizing)
+        guard let capture = inputCapture else { return }
+        session.setPointerStats {
+            (capture.mouseMovedSeen, capture.positionsSent, capture.droppedWhileResizing)
         }
     }
 
@@ -675,11 +638,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         isClosing = true
         lifeTimer?.invalidate()
         lifeTimer = nil
-        // The quality poll was stepped straight past here. Its block captures
-        // [weak self], so the window itself still went away and the leak never
-        // showed up as a retain cycle — but RunLoop.main kept the timer forever
-        // and went on waking the main thread once a second, per closed window,
-        // for the rest of the process's life.
+        // RunLoop.main keeps a repeating timer until it is invalidated.
         qualityTimer?.invalidate()
         qualityTimer = nil
         // Nothing to cancel: a resize in flight completes into a closing window
@@ -690,8 +649,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // UnlockWindow on the host, which puts back the window style, the
         // topmost bit, and the placement that carries the window off the virtual
         // capture display and on to the monitor it came from -- then frees the
-        // slot. It is what used to happen only when the socket dropped, and it
-        // is why closing a window no longer needs to drop it.
+        // slot, which is why closing a window does not need to drop the socket.
         //
         // `topmost off` goes FIRST because the host's topmost handler claims a
         // slot before it looks at what it was asked for: sent afterwards it
@@ -704,6 +662,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
             session.detach(metalView)
         }
         inputCapture?.disableCapture()
+        if let capture = inputCapture {
+            Log.info("[input] \"\(window?.title ?? "")\": \(capture.mouseMovedSeen) moves, "
+                     + "\(capture.positionsSent) positions sent, "
+                     + "\(capture.positionsOutside) outside the picture, "
+                     + "\(capture.droppedWhileResizing) dropped mid-resize")
+        }
 
         // Deferred, and capturing the closure rather than self: onClose drops
         // this object's last strong reference, because the owner removes it from
@@ -725,12 +689,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func setError(_ title: String, detail: String? = nil) {
         metalView?.setError(title, detail: detail)
     }
-
-    // There was a `setPairingPin(_:host:reason:)` here, the last thing in this
-    // application that could put the words "Enter this PIN in Sunshine" and a
-    // link to port 47990 on screen. Nothing calls it: SolStream pairs with a
-    // token the host shows in its own window, and there is no PIN and no web UI
-    // to send anybody to. See the note where `brokerPairing` used to be.
 
     func hideStatus() {
         metalView?.hideStatus()

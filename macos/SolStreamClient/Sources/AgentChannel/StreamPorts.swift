@@ -1,12 +1,6 @@
 import Foundation
 
-/// Where the host listens.
-///
-/// This used to be a table of GameStream offsets — https, http, web UI, video,
-/// control, audio, rtsp — all derived from a Sunshine base port by adding a
-/// fixed number, because those offsets belong to the protocol rather than to
-/// any particular host. None of them exist any more. SolStream speaks to
-/// SolStream, and there are three ports in the whole system.
+/// Where the host listens. There are three ports in the whole system.
 public enum StreamPorts {
     /// The agent's control socket: newline-JSON, token-authenticated, sixteen
     /// commands. Everything starts here, including the media session's keys.

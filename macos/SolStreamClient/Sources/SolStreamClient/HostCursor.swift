@@ -3,18 +3,9 @@ import Foundation
 
 /// Which macOS cursor stands in for the Windows one.
 ///
-/// This file used to be about something else entirely: hiding the HOST's
-/// cursor. Sunshine composited the Windows pointer into the video, so two
-/// cursors were on screen at once and one of them was a round trip behind. It
-/// had no setting for it and no way to report its current state — the only
-/// control was a Ctrl+Alt+Shift+N shortcut that FLIPPED a process-global — so
-/// this file carried a per-host belief about what the host was probably doing,
-/// and a menu item to correct the belief when it drifted.
-///
-/// All of that is gone. SolStream's capture session is created with
-/// IsCursorCaptureEnabled(false), so the host's pointer is never in the picture,
-/// and the agent pushes the cursor's SHAPE so this Mac can draw a real one. What
-/// is left is the shape mapping.
+/// The host captures without its pointer (IsCursorCaptureEnabled(false)) and
+/// pushes the cursor's shape instead, so this Mac draws a real, local cursor
+/// with no round trip behind it.
 enum HostCursor {
 
     // MARK: - Shape

@@ -21,16 +21,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         var address: String
         var name: String?
         /// Whether the agent's port answered. Nil while unknown.
-        ///
-        /// There was a second flag beside this, `hasAgent`, for the case where the
-        /// PC was reachable for streaming but had nothing to take SolStream's
-        /// commands — Sunshine bound every interface and the agent bound one, so
-        /// the two genuinely disagreed. Both are gone: there is one port, and the
-        /// two probes had been reduced to two TCP connects to the same number, so
-        /// `hasAgent` could no longer differ from this and the branches that
-        /// reported the difference were unreachable. It also cost the agent two
-        /// connections per debounced keystroke, on a socket that serves one client
-        /// and logs every arrival it turns away.
         var isReachable: Bool?
         var isPaired: Bool
         var latency: TimeInterval?
@@ -52,6 +42,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// show is only what was remembered from last time, and discovery is allowed
     /// to replace it with a better one; after it, nothing replaces a choice.
     private var hostChosenHere = false
+    /// Set while the other paired addresses are being tried, so a second
+    /// failed probe does not start a second search.
+    private var searchingRoutes = false
 
     private let onConnect: (String) -> Void
 
@@ -197,10 +190,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Everything the row and the button say is derived from one state, so they
     /// can never disagree with each other.
     private func refresh() {
-        // "Paired" now means one thing: this Mac holds the host's agent
-        // token. There is no certificate, no PIN and no TLS key to pin --
-        // the token is the whole relationship.
-        state.isPaired = AgentConnection.storedToken(for: state.address) != nil
+        // "Paired" means one thing: this Mac holds the host's agent token.
+        state.isPaired = AgentConnection.hasStoredToken(for: state.address)
 
         var dotState: DS.Dot.State = .idle
         var parts: [HostDropdown.Detail] = []
@@ -231,11 +222,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
         switch (state.isReachable, state.needsPairing) {
         case (.some(true), true):
-            // What the person will actually be asked for. It used to say the PC
-            // "approves it for you, or shows a PIN", which described GameStream's
-            // flow: there is no PIN anywhere in SolStream, and nothing on the PC
-            // approves anything — the token is on SolStream's own window there,
-            // and this Mac proves it.
+            // What the person will actually be asked for: the token on
+            // SolStream's own window on the PC.
             hintLabel.stringValue = "Pairing needed — SolStream on the PC shows a token to type in."
             connectButton.title = "Pair & Connect"
         case (.some(true), false):
@@ -255,8 +243,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 .map { HostBrowser.baseName(of: $0.name) ?? $0.name }
                 .joined(separator: ", ")
             hintLabel.stringValue = discovered.isEmpty
-                // Not the GameStream line it replaced ("First connection shows a
-                // PIN…"): there is no PIN, only the token on the PC's window.
                 ? "The first connection asks for the token shown on the PC."
                 : "Found \(names) on this network."
             connectButton.title = "Connect"
@@ -269,11 +255,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// is whether the thing we need is listening, not whether the machine replies
     /// to ICMP.
     ///
-    /// ONE probe, not two. There were two, back when a PC could answer for
-    /// streaming on a port Sunshine bound and have nothing on the agent's — that
-    /// is what `hasAgent` recorded. Once the second base port went, both calls
-    /// were connecting to 47630 and comparing the answer against itself, which
-    /// cost the agent a spare connection per keystroke and could only ever agree.
+    /// One probe per debounced keystroke: each is a connection the agent sees.
     private func scheduleProbe() {
         probe?.cancel()
         let address = state.address
@@ -291,6 +273,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 self.state.isReachable = reachable
                 self.state.latency = reachable ? elapsed : nil
                 if !reachable, self.preferDiscoveredHost() { return }
+                if !reachable, self.preferAnotherRoute() { return }
                 // Remember it here rather than on Connect. Typing an address and
                 // then not connecting -- because the stream was for later, or the
                 // window was closed, or connecting failed once -- meant typing the
@@ -309,7 +292,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    private static func canReach(host: String, port: UInt16) -> Bool {
+    /// Open the port, with a hard deadline. Non-blocking, because a blocking
+    /// connect ignores SO_SNDTIMEO here: an address on somebody else's network
+    /// that silently drops the SYN held each probe for the kernel's full
+    /// connect timeout, far longer than anybody looks at this window.
+    private static func canReach(host: String, port: UInt16,
+                                 timeoutMs: Int32 = 1500) -> Bool {
         var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
@@ -320,9 +308,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
         guard fd >= 0 else { return false }
         defer { Darwin.close(fd) }
-        var timeout = timeval(tv_sec: 2, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        return connect(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        if connect(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 { return true }
+        guard errno == EINPROGRESS else { return false }
+        var waiting = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        guard poll(&waiting, 1, timeoutMs) == 1 else { return false }
+        var failure: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &failure, &length)
+        return failure == 0
     }
 
     // MARK: - Discovery
@@ -370,7 +364,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         guard !hostChosenHere, state.isReachable != true,
               !discovered.contains(where: { $0.connectTarget == state.address }),
               let paired = discovered.first(where: {
-                  AgentConnection.storedToken(for: $0.connectTarget) != nil
+                  AgentConnection.hasStoredToken(for: $0.connectTarget)
               }) else { return false }
         Log.info("[connect] \(state.address) has not answered; preferring \(paired.connectTarget), "
                  + "found on the network and already paired")
@@ -380,6 +374,71 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.latency = nil
         refresh()
         scheduleProbe()
+        return true
+    }
+
+    /// The same PC by another road. Returns true when a search was started.
+    ///
+    /// A PC has more than one address -- its home-network one and its Tailscale
+    /// one -- and which answers depends on where the Mac is. Away from home the
+    /// remembered 192.168.1.x is somebody else's network: it refuses, or it is
+    /// a different machine altogether. The window used to sit on it saying "Not
+    /// answering" while the Tailscale address that works from anywhere was one
+    /// click away in the list. So the other addresses this Mac is paired with
+    /// are tried, quietly, and the first that answers is shown instead.
+    ///
+    /// The same rules as `preferDiscoveredHost`: never after a choice was made
+    /// in this window, and only paired addresses, so the switch never lands on
+    /// one that would ask for a token.
+    private func preferAnotherRoute() -> Bool {
+        guard !hostChosenHere, !searchingRoutes else { return false }
+        let failed = state.address
+        let candidates = Self.recentHosts.filter {
+            $0 != failed && AgentConnection.hasStoredToken(for: $0)
+        }
+        guard !candidates.isEmpty else { return false }
+        searchingRoutes = true
+        // All at once, not one after another: a dead address costs its whole
+        // timeout, and a `.local` name that will not resolve costs five
+        // seconds before the next one is even tried. The most recently used
+        // address that answers wins, so at home the home-network one is kept.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resultsLock = NSLock()
+            var answered: [String: TimeInterval] = [:]
+            let group = DispatchGroup()
+            for candidate in candidates {
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let started = Date()
+                    if Self.canReach(host: candidate, port: StreamPorts.agent) {
+                        resultsLock.lock()
+                        answered[candidate] = Date().timeIntervalSince(started)
+                        resultsLock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            _ = group.wait(timeout: .now() + 2)
+            resultsLock.lock()
+            let found = candidates.first { answered[$0] != nil }
+                .map { (address: $0, latency: answered[$0]!) }
+            resultsLock.unlock()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.searchingRoutes = false
+                // Only if nothing moved meanwhile: a pick, or discovery winning.
+                guard !self.hostChosenHere, self.state.address == failed,
+                      let found else { return }
+                Log.info("[connect] \(failed) is not answering from this network; "
+                         + "\(found.address) is, and is paired")
+                self.state.address = found.address
+                self.state.name = nil
+                self.state.isReachable = true
+                self.state.latency = found.latency
+                Self.remember(host: found.address)
+                self.refresh()
+            }
+        }
         return true
     }
 
@@ -428,7 +487,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         var items = discovered.map { host in
             HostDropdown.Item(address: host.connectTarget, name: host.name,
                               detail: [.data(host.connectTarget),
-                                       .words(AgentConnection.storedToken(for: host.connectTarget) != nil
+                                       .words(AgentConnection.hasStoredToken(for: host.connectTarget)
                                               ? "Paired" : "Not paired")],
                               dotState: .live, kind: .discovered)
         }
@@ -436,7 +495,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                                  discovered: discovered).map { address in
             HostDropdown.Item(address: address, name: nil,
                               detail: [.words("Used before"),
-                                       .words(AgentConnection.storedToken(for: address) != nil
+                                       .words(AgentConnection.hasStoredToken(for: address)
                                               ? "Paired" : "Not paired")],
                               dotState: .idle, kind: .recent)
         }

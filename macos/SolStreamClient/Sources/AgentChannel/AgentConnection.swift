@@ -164,7 +164,37 @@ public final class AgentConnection {
     private var buffer = Data()
     /// Replies arrive in request order, so a FIFO of continuations is enough —
     /// no request ids needed in the protocol.
-    private var pending: [(Result<[String: Any], Error>) -> Void] = []
+    private var pending: [Pending] = []
+    private var nextRequestID: UInt64 = 0
+
+    private struct Pending {
+        let id: UInt64
+        let command: String
+        /// Counted from when this request reaches the head of the queue: the
+        /// host answers one at a time and in order, so a quick question behind
+        /// a slow launch is not late until the launch is done.
+        let timeout: TimeInterval
+        let completion: (Result<[String: Any], Error>) -> Void
+    }
+
+    /// How long the host gets to answer, by command. A reply that never comes
+    /// otherwise wedges everything queued behind it — with no request ids the
+    /// FIFO cannot skip one — so running out drops the connection, which fails
+    /// every waiter once and lets the reconnect start clean.
+    private static func timeout(for request: [String: Any]) -> TimeInterval {
+        switch request["cmd"] as? String {
+        case "launch":
+            let asked = (request["timeoutMs"] as? Int).map { Double($0) / 1000 } ?? 25
+            return max(30, asked + 5)
+        case "apps": return 30
+        case "media" where request["op"] as? String == "open": return 15
+        default: return 10
+        }
+    }
+
+    /// The auth reply gets the same bound: everything sent meanwhile is held
+    /// behind it.
+    private static let authTimeout: TimeInterval = 10
 
     /// Set while the auth proof is on the wire and its reply has not come back.
     ///
@@ -175,15 +205,9 @@ public final class AgentConnection {
     /// sealed record, the tag fails, and it drops the connection, which is
     /// exactly what it should do about bytes it cannot authenticate.
     ///
-    /// A first connection never notices: there is nothing to say yet. A
-    /// RECONNECT is what walked into it, because `onReconnected` re-applies
-    /// every window's placement — which is how a reconnect loop that handshakes
-    /// perfectly and then dies twenty milliseconds later came to look like a
-    /// crypto bug. `onReconnected` no longer fires the instant the socket is
-    /// ready; it waits for the auth reply, so what it sends now arrives after
-    /// this window rather than into it. The hold still earns its keep: the
-    /// heartbeat runs on a timer, and anyone already holding this connection can
-    /// ask it something while the proof is on the wire.
+    /// The heartbeat runs on a timer, and anyone already holding this
+    /// connection can ask it something while the proof is on the wire, so
+    /// those requests are held here and sent once the reply has landed.
     private var authInFlight = false
     private var heldWhileAuthenticating: [(request: [String: Any],
                                            completion: (Result<[String: Any], Error>) -> Void)] = []
@@ -257,22 +281,23 @@ public final class AgentConnection {
     private var pendingChallenge: String?
     private var pendingClientNonce: String?
 
-    private static func tokenKey(for host: String) -> String {
-        "SolStream.agentToken.\(host)"
+    public static func storedToken(for host: String) -> String? {
+        TokenStore.token(for: host)
     }
 
-    public static func storedToken(for host: String) -> String? {
-        UserDefaults.standard.string(forKey: tokenKey(for: host))
+    /// Whether a token is held for `host`, without reading it.
+    public static func hasStoredToken(for host: String) -> Bool {
+        TokenStore.hasToken(for: host)
     }
 
     public static func rememberToken(_ token: String, for host: String) {
-        UserDefaults.standard.set(token, forKey: tokenKey(for: host))
+        TokenStore.set(token, for: host)
     }
 
     /// Drop a token the host refused, so the next connection asks for a new one
     /// rather than silently retrying something already known to be wrong.
     public static func forgetToken(for host: String) {
-        UserDefaults.standard.removeObject(forKey: tokenKey(for: host))
+        TokenStore.remove(for: host)
     }
 
     /// Answer a `needsToken` with what the user typed.
@@ -339,11 +364,30 @@ public final class AgentConnection {
         connection?.cancel()
     }
 
-    /// Set between `connect()` and `disconnect()`.
+    /// Set between `connect()` and `disconnect()`, and cleared when the host
+    /// refuses us for good.
     ///
     /// The difference between a socket that closed and a socket we closed. Only
-    /// the first is worth reconnecting.
-    private var wantsConnection = false
+    /// the first is worth reconnecting. Mirrored under `stateLock` for
+    /// `willReconnect`.
+    private var wantsConnection = false {
+        didSet {
+            stateLock.lock()
+            wantsConnectionMirror = wantsConnection
+            stateLock.unlock()
+        }
+    }
+    private var wantsConnectionMirror = false
+
+    /// Whether this connection is up or will come back by itself. False once
+    /// it has been disconnected, or the host has refused it in a way a retry
+    /// cannot fix (busy, impersonation, downgrade) — a caller waiting for it
+    /// should then say so rather than wait.
+    public var willReconnect: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return wantsConnectionMirror
+    }
     private var heartbeat: DispatchSourceTimer?
     private var reconnectAttempt = 0
     private var reconnectPending = false
@@ -366,13 +410,11 @@ public final class AgentConnection {
 
     /// Say the connection is carrying commands again, once.
     ///
-    /// Deliberately not at `.ready`. Everything `onReconnected` does is a
-    /// command, and at `.ready` not one byte has been read: no greeting, no
-    /// challenge, nothing sent to prove the token, so `authInFlight` is still
-    /// false and the hold that exists for precisely this cannot hold anything.
-    /// The re-placement of every window went out ahead of the proof and came
-    /// back "unauthenticated", so a reconnect handshook perfectly and left every
-    /// window where it was.
+    /// Called when the greeting's `displays` arrives, which the host sends only
+    /// once it is satisfied — not at `.ready`, where nothing has been proved
+    /// yet and every command `onReconnected` sends would come back
+    /// "unauthenticated". By then `displays` is current too, which is what the
+    /// stream's recovery compares its capture display against.
     private func announceReconnection() {
         guard reconnectedNeedsAnnouncing else { return }
         reconnectedNeedsAnnouncing = false
@@ -449,8 +491,8 @@ public final class AgentConnection {
                 if reconnected {
                     // Noted, not announced: TCP being up is not the same as the
                     // connection being able to carry a command. See
-                    // `announceReconnection`, which is called once the host has
-                    // said who it is and taken our proof.
+                    // `announceReconnection`, which is called once the greeting
+                    // is complete.
                     self.reconnectedNeedsAnnouncing = true
                 }
             case .failed(let error):
@@ -702,7 +744,24 @@ public final class AgentConnection {
         connection.send(content: payload, completion: .contentProcessed { error in
             if let error { Log.error("[agent] could not send the auth proof: \(error)") }
         })
+        queue.asyncAfter(deadline: .now() + Self.authTimeout) { [weak self, weak connection] in
+            guard let self, let connection, self.connection === connection,
+                  self.authInFlight else { return }
+            Log.error("[agent] \(self.host) did not answer the auth proof; dropping the connection")
+            self.dropConnection(AgentError.timedOut)
+        }
         return true
+    }
+
+    /// Give the request at the head of the queue its time to be answered.
+    private func armHeadTimeout() {
+        guard let head = pending.first else { return }
+        queue.asyncAfter(deadline: .now() + head.timeout) { [weak self] in
+            guard let self, self.pending.first?.id == head.id else { return }
+            Log.error("[agent] \(self.host) did not answer \(head.command) within "
+                      + "\(Int(head.timeout))s; dropping the connection")
+            self.dropConnection(AgentError.timedOut)
+        }
     }
 
     /// Send everything that was held while the proof was in flight, now that the
@@ -735,24 +794,10 @@ public final class AgentConnection {
         return out
     }
 
-    /// Open a media session: ephemeral ECDH over the channel that already
-    /// authenticated us.
-    ///
-    /// This replaces GameStream's entire setup -- HTTP pairing, HTTPS /launch and
-    /// seven RTSP round trips -- with one command, because two programs that
-    /// have already proved who they are to each other do not need introducing
-    /// again.
-    ///
-    /// Returns nil if the host's `hostAuth` does not match what this Mac
-    /// derived. That check is the whole point of doing it here: without it the
-    /// first sign of a key mismatch is every packet failing its authentication
-    /// tag, which is indistinguishable from a broken network.
     /// What the host should capture, and how.
     public struct MediaRequest: Sendable {
         /// `\\.\DISPLAYn`, as the `displays` command names it.
         public var display: String?
-        /// A window id from the `windows` command, if a single window is wanted.
-        public var window: UInt64?
         public var fps: Int = 60
         public var bitrate: Int = 20_000_000
         public var audio: Bool = true
@@ -767,11 +812,10 @@ public final class AgentConnection {
         public var width: Int?
         public var height: Int?
 
-        public init(display: String? = nil, window: UInt64? = nil,
+        public init(display: String? = nil,
                     fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true,
                     width: Int? = nil, height: Int? = nil) {
             self.display = display
-            self.window = window
             self.fps = fps
             self.bitrate = bitrate
             self.audio = audio
@@ -793,15 +837,13 @@ public final class AgentConnection {
         send(["cmd": "media", "op": "stop"]) { _ in }
     }
 
-    /// Point the running session at something else. Costs one keyframe and no
-    /// renegotiation: the keys, the socket and the counter all survive.
-    public func retargetMedia(window: UInt64?, display: String?) {
-        var message: [String: Any] = ["cmd": "media", "op": "retarget"]
-        if let window { message["window"] = window }
-        if let display { message["display"] = display }
-        send(message) { _ in }
-    }
-
+    /// Open a media session: ephemeral ECDH over the channel that already
+    /// authenticated us.
+    ///
+    /// Returns nil if the host's `hostAuth` does not match what this Mac
+    /// derived. That check is the whole point of doing it here: without it the
+    /// first sign of a key mismatch is every packet failing its authentication
+    /// tag, which is indistinguishable from a broken network.
     public func openMediaSession(_ request: MediaRequest = .init()) async -> MediaSession? {
         // Read on `queue`, where the token is written: this runs on the main
         // actor, and a token typed or cleared mid-read is a data race.
@@ -821,18 +863,6 @@ public final class AgentConnection {
                                       "fps": request.fps, "bitrate": request.bitrate,
                                       "audio": request.audio ? 1 : 0]
         if let display = request.display { message["display"] = display }
-        // The window id goes out as a JSON number, because the agent reads it
-        // with FieldNumber, which wants digits straight after the colon: a
-        // quoted id is not found at all, and what the host does then is capture
-        // whatever display was named instead — a whole desktop where a window
-        // was asked for, with nothing anywhere saying so. A UInt64 bridges to an
-        // NSNumber that JSONSerialization writes in decimal, and an HWND is a
-        // user-mode pointer well inside what fits, so nothing here rounds.
-        //
-        // Worth stating because this line has never run: every caller so far has
-        // named a display and cropped a window out of it on the Mac, so the
-        // field existed on both sides with nothing ever putting a value in it.
-        if let window = request.window { message["window"] = window }
         // Absent means "host decides", which is what every earlier build did by
         // having nothing to send. Only sent when set, so a host that predates
         // these fields sees the same open command it always saw.
@@ -914,19 +944,6 @@ public final class AgentConnection {
             completion?(displays)
         }
     }
-
-    // There was a `pair(pin:clientName:)` here, and a `PairingResult` beside it.
-    //
-    // It brokered GameStream's PIN: the agent would post the client's PIN to
-    // Sunshine's local web API so the user never had to get past a self-signed
-    // certificate warning to type it in. SolStream has no PIN — the Mac proves an
-    // HMAC over a per-connection challenge, and the host's `pair` handler answers
-    // `{"reason":"gone"}` to anything that still asks. So this could only ever
-    // report a failure, and its one caller reported that failure by putting a PIN
-    // on screen for a handshake that does not have one.
-    //
-    // `sunshineInstance` went the same way: nothing has put that field in a
-    // greeting since the agent stopped launching Sunshine.
 
     public struct RemoteClipboard: Sendable, Equatable {
         public let text: String
@@ -1252,11 +1269,23 @@ public final class AgentConnection {
                 line.append(0x0A)  // the agent splits on newlines
             }
 
-            self.pending.append(completion)
-            connection.send(content: line, completion: .contentProcessed { error in
-                if let error {
-                    Log.error("[agent] send failed: \(error)")
-                    self.queue.async { self.failPending(error) }
+            self.nextRequestID &+= 1
+            self.pending.append(Pending(id: self.nextRequestID,
+                                        command: request["cmd"] as? String ?? "?",
+                                        timeout: Self.timeout(for: request),
+                                        completion: completion))
+            if self.pending.count == 1 { self.armHeadTimeout() }
+            connection.send(content: line, completion: .contentProcessed {
+                [weak self, weak connection] error in
+                guard let error else { return }
+                Log.error("[agent] send failed: \(error)")
+                // Dropped, not just failed: a request the host may still answer
+                // would otherwise hand its reply to whatever is asked next. Only
+                // if this is still the current socket — a late error from the
+                // last one must not take down its replacement.
+                self?.queue.async {
+                    guard let self, let connection, self.connection === connection else { return }
+                    self.dropConnection(error)
                 }
             })
         }
@@ -1397,18 +1426,6 @@ public final class AgentConnection {
                 // there is no way to tell them apart -- so the only safe
                 // response to both is to refuse. Falling back to sending the
                 // token would hand it to whichever of the two it was.
-                // A hook for measuring the media handshake against a real
-                // host, because a bare CLI binary cannot: macOS local-network
-                // privacy grants the signed .app and denies an unsigned
-                // executable, silently, and the symptom is a connection that
-                // reports "connecting" forever. Removed once the session is
-                // opened as a matter of course rather than on request.
-                if ProcessInfo.processInfo.environment["SOLSTREAM_MEDIA_TEST"] == "1" {
-                    Task { [weak self] in
-                        try? await Task.sleep(nanoseconds: 400_000_000)
-                        _ = await self?.openMediaSession()
-                    }
-                }
                 guard authenticate(with: token) else {
                     Log.error("[agent] \(host) did not offer an auth challenge")
                     report(.failed("\(host) is running an older version of SolStream, "
@@ -1421,19 +1438,12 @@ public final class AgentConnection {
                 // A stored token means the real agent on this host asks for one.
                 // Something answering here that says it does not is either a
                 // different machine at this address or an impersonator hoping we
-                // will just carry on — and what we carry on to do is hand it the
-                // pairing PIN, which is the one secret that makes every proof in
-                // the pairing handshake meaningful.
+                // will just carry on in the clear, with every window title,
+                // application name and clipboard transfer readable to it.
                 Log.error("[agent] \(host) did not ask for the token this Mac holds for it")
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
-            } else {
-                // Nothing to prove in either direction, so the greeting is the
-                // whole handshake and the connection can carry commands from
-                // here. This is where a reconnect to a host that wants no token
-                // gets its windows put back.
-                announceReconnection()
             }
             return
         case "auth":
@@ -1519,11 +1529,6 @@ public final class AgentConnection {
             }
             // Whichever way it went, the framing is now settled on both ends.
             releaseHeldRequests()
-            // Only a connection that got this far can carry a command, which is
-            // exactly what a reconnect's window re-placement is made of. A
-            // refused token leaves us waiting for another one instead, so there
-            // is nothing to announce yet.
-            if accepted { announceReconnection() }
             return
         case "cursor":
             // Unsolicited, like hello: the host pushes it when the Windows
@@ -1586,6 +1591,10 @@ public final class AgentConnection {
             Log.info("[agent] \(snapshot.count) display(s): "
                      + snapshot.map { "\($0.name) \($0.width)x\($0.height)" }.joined(separator: ", "))
             DispatchQueue.main.async { [weak self] in self?.onDisplays?(snapshot) }
+            // The greeting is complete — the host sends this only once it is
+            // satisfied — so a reconnect can be announced, with `displays`
+            // already current for whoever checks the capture display.
+            announceReconnection()
             return
         default:
             break
@@ -1595,8 +1604,9 @@ public final class AgentConnection {
             Log.debug("[agent] unsolicited \(type) message")
             return
         }
-        let completion = pending.removeFirst()
-        completion(.success(message))
+        let answered = pending.removeFirst()
+        armHeadTimeout()
+        answered.completion(.success(message))
     }
 
     private func failPending(_ error: Error) {
@@ -1608,8 +1618,8 @@ public final class AgentConnection {
         let held = heldWhileAuthenticating
         heldWhileAuthenticating.removeAll()
         authInFlight = false
-        for completion in waiting {
-            completion(.failure(error))
+        for item in waiting {
+            item.completion(.failure(error))
         }
         for item in held {
             item.completion(.failure(error))
@@ -1667,4 +1677,6 @@ public enum AgentError: Error {
     /// and one media socket on that PC, so this is a fact about the host rather
     /// than a transient failure.
     case hostBusy
+    /// The host did not answer in time. The connection is dropped and rebuilt.
+    case timedOut
 }

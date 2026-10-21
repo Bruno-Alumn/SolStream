@@ -14,33 +14,36 @@ public enum Logger {
         case error = "ERROR"
     }
 
-    public static func info(_ msg: String,
-                            file: String = #file,
-                            function: String = #function,
+    public static func info(_ msg: @autoclosure () -> String, file: String = #fileID,
                             line: Int = #line) {
-        emit(.info, msg, file, line)
+        emit(.info, msg(), file, line)
     }
 
-    public static func debug(_ msg: String,
-                             file: String = #file,
-                             function: String = #function,
+    /// Dropped unless this is a debug build or SOLSTREAM_DEBUG is set, and
+    /// then without building the message: debug lines sit on per-frame paths.
+    public static func debug(_ msg: @autoclosure () -> String, file: String = #fileID,
                              line: Int = #line) {
-        emit(.debug, msg, file, line)
+        guard debugEnabled else { return }
+        emit(.debug, msg(), file, line)
     }
 
-    public static func error(_ msg: String,
-                             file: String = #file,
-                             function: String = #function,
+    public static func error(_ msg: @autoclosure () -> String, file: String = #fileID,
                              line: Int = #line) {
-        emit(.error, msg, file, line)
+        emit(.error, msg(), file, line)
     }
 
-    public static func warning(_ msg: String,
-                               file: String = #file,
-                               function: String = #function,
+    public static func warning(_ msg: @autoclosure () -> String, file: String = #fileID,
                                line: Int = #line) {
-        emit(.warning, msg, file, line)
+        emit(.warning, msg(), file, line)
     }
+
+    public static let debugEnabled: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return ProcessInfo.processInfo.environment["SOLSTREAM_DEBUG"] != nil
+        #endif
+    }()
 
     /// The file the log is being written to, for a "Reveal Log in Finder" item.
     /// Nil only if the log directory could not be created.
@@ -58,7 +61,8 @@ public enum Logger {
     }
 
     private static func emit(_ level: Level, _ message: String, _ file: String, _ line: Int) {
-        let source = URL(fileURLWithPath: file).lastPathComponent
+        // `#fileID` is "Module/File.swift"; the log has always shown the file.
+        let source = file.split(separator: "/").last.map(String.init) ?? file
         LogFile.shared.write(level: level, message: message, source: source, line: line)
     }
 }

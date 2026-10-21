@@ -406,7 +406,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                    row: Int) -> NSView? {
         let entry = rows[row]
 
-        let monogram = DS.Monogram(name: entry.title, key: entry.key)
+        let cell = tableView.makeView(withIdentifier: PickerCell.reuseIdentifier, owner: self)
+            as? PickerCell ?? PickerCell()
+        let monogram = cell.tile
+        monogram.configure(name: entry.title, key: entry.key)
         // Cached across reloads: the list redraws on every keystroke, and asking
         // the host again each time would make typing hit the network.
         if let cached = iconCache[entry.key] {
@@ -436,22 +439,19 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         }
 
         let busy = row == busyRow
-        let cell = PickerCell(title: entry.title,
-                              subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
-                              // Installed applications get no dot at all rather
-                              // than a grey one: the dot means "this is live", and
-                              // an absent one is quieter than a dim one. A launch
-                              // under way is the amber working dot.
-                              note: busy ? nil : entry.note,
-                              dot: busy ? .working : (entry.isRunning ? .live : nil),
-                              action: entry.isRunning ? "Attach" : "Launch",
-                              tile: monogram)
+        cell.configure(title: entry.title,
+                       subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
+                       // Installed applications get no dot at all rather than a
+                       // grey one: the dot means "this is live". A launch under
+                       // way is the amber working dot.
+                       note: busy ? nil : entry.note,
+                       dot: busy ? .working : (entry.isRunning ? .live : nil),
+                       action: entry.isRunning ? "Attach" : "Launch")
         // The longer story behind "own window buttons", for anybody who
         // wonders: these keep their own minimise and close inside the picture.
-        if entry.drawsOwnControls {
-            cell.toolTip = "This app draws its own window buttons, so they appear "
-                + "inside the streamed window."
-        }
+        cell.toolTip = entry.drawsOwnControls
+            ? "This app draws its own window buttons, so they appear inside the streamed window."
+            : nil
         return cell
     }
 
@@ -540,30 +540,28 @@ private final class PickerRowView: NSTableRowView {
 /// thirty rows each ending "Launch" is thirty times the same word. On the
 /// selected row it says what Return will do, which is the one place it helps.
 private final class PickerCell: NSTableCellView {
-    private let subtitleLabel: NSTextField
-    private let actionLabel: NSTextField
-    private let action: String
-    private let subtitle: String
-    private let note: String?
+    static let reuseIdentifier = NSUserInterfaceItemIdentifier("PickerCell")
 
-    init(title: String, subtitle: String, note: String?, dot: DS.Dot.State?, action: String,
-         tile: NSView) {
-        self.action = action
-        self.subtitle = subtitle
-        self.note = note
-        subtitleLabel = DS.label(subtitle, font: DS.caption, colour: DS.textMuted)
-        actionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
+    let tile = DS.Monogram(name: "", key: "")
+    private let titleLabel = DS.label("")
+    private let subtitleLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
+    private let actionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
+    private let dotView = DS.Dot()
+    private var action = ""
+    private var subtitle = ""
+    private var note: String?
+
+    /// Built once and reused by the table: the list reloads on every keystroke
+    /// and every window opened on the PC.
+    init() {
         super.init(frame: .zero)
-
-        let titleLabel = DS.label(title)
+        identifier = Self.reuseIdentifier
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        var second: [NSView] = [subtitleLabel]
-        if let dot {
-            second.insert(DS.Dot(state: dot), at: 0)
-        }
-        let secondLine = NSStackView(views: second)
+        // A hidden dot is detached by the stack view, so a row without one
+        // does not keep its slot.
+        let secondLine = NSStackView(views: [dotView, subtitleLabel])
         secondLine.orientation = .horizontal
         secondLine.alignment = .centerY
         secondLine.spacing = 6
@@ -591,11 +589,23 @@ private final class PickerCell: NSTableCellView {
             labels.trailingAnchor.constraint(lessThanOrEqualTo: actionLabel.leadingAnchor,
                                              constant: -DS.Space.x3),
         ])
-        setAccessibilityLabel("\(title), \(subtitle)")
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    func configure(title: String, subtitle: String, note: String?, dot: DS.Dot.State?,
+                   action: String) {
+        titleLabel.stringValue = title
+        self.subtitle = subtitle
+        self.note = note
+        self.action = action
+        dotView.isHidden = dot == nil
+        if let dot { dotView.state = dot }
+        setAccessibilityLabel("\(title), \(subtitle)")
+        // The row view sets the real state when the cell lands in it.
+        setState(selected: false, hovered: false)
+    }
 
     func setState(selected: Bool, hovered: Bool) {
         subtitleLabel.textColor = selected ? DS.accentTintInk : DS.textMuted

@@ -251,4 +251,47 @@ final class KeyboardMappingTests: XCTestCase {
                                  deviceFlags: controlFlag | commandFlag),
                        "⌃⌘W was swallowed, so the window cannot be closed")
     }
+
+    // MARK: - Caps Lock
+
+    /// Caps Lock is a toggle on Windows, so each change on the Mac is one
+    /// press and release of VK_CAPITAL — and a repeat of the same state is
+    /// nothing at all.
+    func testCapsLockTogglesTheHost() {
+        InputCapture.hostCapsLock = false
+        defer { InputCapture.hostCapsLock = false }
+        let wire = Wire()
+        let capsFlag = NSEvent.ModifierFlags.capsLock.rawValue
+
+        wire.send(.flagsChanged, keyCode: InputCapture.capsLockKeyCode, deviceFlags: capsFlag)
+        XCTAssertEqual(wire.packets.map(\.code), [0x14, 0x14])
+        XCTAssertEqual(wire.packets.map(\.pressed), [true, false])
+
+        wire.send(.flagsChanged, keyCode: InputCapture.capsLockKeyCode, deviceFlags: capsFlag)
+        XCTAssertEqual(wire.packets.count, 2, "the same state toggled the host again")
+
+        wire.send(.flagsChanged, keyCode: InputCapture.capsLockKeyCode, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.map(\.code), [0x14, 0x14, 0x14, 0x14])
+        XCTAssertFalse(InputCapture.hostCapsLock)
+    }
+
+    /// Switched while another application had the keyboard: the next window to
+    /// take capture brings the host into line.
+    func testCapsLockSyncsWhenCaptureStarts() {
+        InputCapture.hostCapsLock = false
+        defer { InputCapture.hostCapsLock = false }
+        let capture = InputCapture()
+        var codes: [UInt16] = []
+        capture.onInput = { data in
+            let bytes = [UInt8](data)
+            if bytes.count >= 6, bytes[0] == SMTInput.Kind.key.rawValue {
+                codes.append(UInt16(bytes[2]) << 8 | UInt16(bytes[3]))
+            }
+        }
+        capture.syncCapsLock(to: true)
+        XCTAssertEqual(codes, [0x14, 0x14])
+        XCTAssertTrue(InputCapture.hostCapsLock)
+        capture.syncCapsLock(to: true)
+        XCTAssertEqual(codes.count, 2)
+    }
 }

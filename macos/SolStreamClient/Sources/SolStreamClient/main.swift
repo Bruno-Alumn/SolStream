@@ -17,7 +17,6 @@ struct SolStreamApp {
 SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var streamWindows: [StreamWindow] = []
     private var connectWindow: ConnectWindow?
     private var agent: AgentConnection?
     private var session: StreamSession?
@@ -52,97 +51,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.startSession(version: "v0.3")
 
         let arguments = CommandLine.arguments
+        func value(after flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else {
+                return nil
+            }
+            return arguments[index + 1]
+        }
         testMode = arguments.contains("--test-screenshot")
 
         // --screenshot-after <seconds> waits long enough for real frames to
         // arrive before capturing, which is how a live stream gets verified.
         var captureDelay: TimeInterval = 2.0
-        if let index = arguments.firstIndex(of: "--screenshot-after"),
-           index + 1 < arguments.count,
-           let seconds = TimeInterval(arguments[index + 1]) {
+        if let seconds = value(after: "--screenshot-after").flatMap(TimeInterval.init) {
             captureDelay = seconds
             testMode = true
         }
 
         var config = StreamConfig()
-        // --bitrate is the only stream knob left. The packet size is fixed by
-        // the MTU and the header, and there is no separate streaming port to aim at.
-        if let index = arguments.firstIndex(of: "--bitrate"),
-           index + 1 < arguments.count,
-           let kbps = Int(arguments[index + 1]) {
+        if let kbps = value(after: "--bitrate").flatMap(Int.init) {
             config.bitrateKbps = kbps
             Log.info("[stream] bitrate \(kbps) kbit/s")
         }
 
-        let host = arguments.firstIndex(of: "--host").flatMap { index in
-            index + 1 < arguments.count ? arguments[index + 1] : nil
-        }
-        let appWindowQuery = arguments.firstIndex(of: "--app-window").flatMap { index in
-            index + 1 < arguments.count ? arguments[index + 1] : nil
-        }
+        let host = value(after: "--host")
         // The agent may be reached somewhere other than the stream host — over
-        // an SSH port forward during development, for instance, which avoids
-        // opening an inbound firewall port on the Windows box.
-        let agentHost = arguments.firstIndex(of: "--agent-host").flatMap { index in
-            index + 1 < arguments.count ? arguments[index + 1] : nil
-        }
+        // an SSH port forward during development, for instance.
+        let agentHost = value(after: "--agent-host")
 
         // --agent-token supplies the host's shared secret once; it is remembered
         // per host afterwards. It is shown on SolStream's own window on the
-        // host, under "Pairing token", with a Copy button beside it.
-        if let index = arguments.firstIndex(of: "--agent-token"),
-           index + 1 < arguments.count {
-            let host = arguments.firstIndex(of: "--host").flatMap { hostIndex in
-                hostIndex + 1 < arguments.count ? arguments[hostIndex + 1] : nil
-            }
-            let target = (arguments.firstIndex(of: "--agent-host").flatMap { agentIndex in
-                agentIndex + 1 < arguments.count ? arguments[agentIndex + 1] : nil
-            }) ?? host
-            if let target {
-                AgentConnection.rememberToken(arguments[index + 1], for: target)
-                Log.info("[agent] token stored for \(target)")
-            }
-        }
-
-        // --launch starts an installed application by name, skipping the picker.
-        let launchQuery = arguments.firstIndex(of: "--launch").flatMap { index in
-            index + 1 < arguments.count ? arguments[index + 1] : nil
-        }
-
-        // --display picks which host display to park applications on, by device
-        // name or adapter substring. Without it a virtual display wins, because
-        // that is the one nothing else can be dragged across.
-        let displayQuery = arguments.firstIndex(of: "--display").flatMap { index in
-            index + 1 < arguments.count ? arguments[index + 1] : nil
+        // host, under "Pairing token".
+        if let token = value(after: "--agent-token"), let target = agentHost ?? host {
+            AgentConnection.rememberToken(token, for: target)
+            Log.info("[agent] token stored for \(target)")
         }
 
         self.agentHostOverride = agentHost
-        self.displayQuery = displayQuery
+        // --display picks which host display to park applications on, by device
+        // name or adapter substring.
+        self.displayQuery = value(after: "--display")
         self.baseConfig = config
 
-        // --desktop is the old whole-screen mirror, kept for diagnosing the
-        // stream itself. It shows the task bar and everything else on the
-        // display, which is exactly what single-application mode exists to avoid,
-        // so it is not the default any more.
-        if let host, arguments.contains("--desktop") {
-            // Ask for a canvas shaped like this Mac. A mismatched aspect ratio is
-            // where the black bars come from: the host encodes the capture display
-            // as it is, and this window then letterboxes what it cannot fill.
-            var desktop = config
-            if let screen = NSScreen.main {
-                let scale = screen.backingScaleFactor
-                desktop.width = Int((screen.frame.width * scale).rounded())
-                desktop.height = Int((screen.frame.height * scale).rounded())
-                Log.info("[desktop] requesting \(desktop.width)x\(desktop.height) to match this Mac")
-            }
-            startStreaming(host: host, agentHost: agentHost ?? host,
-                           displayQuery: displayQuery, config: desktop)
-        } else if let host, let launchQuery {
+        if let host, let launchQuery = value(after: "--launch") {
+            // Starts an installed application by name, skipping the picker.
             startLaunching(host: host, agentHost: agentHost ?? host, matching: launchQuery)
-        } else if let host, let appWindowQuery {
-            startSingleApp(host: host, agentHost: agentHost ?? host,
-                           matching: appWindowQuery, displayQuery: displayQuery,
-                           config: config)
+        } else if let host, let appWindowQuery = value(after: "--app-window") {
+            startSingleApp(host: host, agentHost: agentHost ?? host, matching: appWindowQuery)
         } else if let host {
             showPicker(host: host)
         } else {
@@ -154,10 +108,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // input reached the host.
         if arguments.contains("--test-input") {
             DispatchQueue.main.asyncAfter(deadline: .now() + max(1, captureDelay - 2)) { [weak self] in
-                // Both kinds of window. `--launch` builds an AppWindow, which is
-                // what every real session uses, and driving only the mirror left
-                // that path's pointer unverified from the day it was written.
-                self?.streamWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
                 self?.appWindows.first?.sendTestPointer(normalizedX: 0.75, normalizedY: 0.75)
             }
         }
@@ -168,9 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // follows can be read. Driving the real button needs accessibility
         // permission and a synthetic click; this is the same code path without
         // either, and the path is the whole point of the test.
-        if let index = arguments.firstIndex(of: "--test-close-after"),
-           index + 1 < arguments.count,
-           let after = Double(arguments[index + 1]) {
+        if let after = value(after: "--test-close-after").flatMap(Double.init) {
             DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
                 Log.info("[test] closing the streamed window")
                 self?.appWindows.first?.close()
@@ -197,7 +145,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Synchronous: the process is about to exit and the host needs to see
         // us go, or it stays busy for every other client.
-        streamWindows.forEach { $0.stopStreaming() }
         session?.stop()
     }
 
@@ -248,32 +195,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker.show()
 
         // [weak agent] throughout: `agent` stores these closures, so a strong
-        // capture makes it retain itself — deinit never runs, the socket is never
-        // cancelled, and in onDisplays below the AppPicker and its icon cache
-        // (raw BGRA, one entry per window and per Start Menu app scrolled past)
-        // are pinned to it as well.
-        agent.onState = { [weak picker, weak agent] state in
+        // capture makes it retain itself — and pins the picker and its icon
+        // cache with it. Delivered on the main thread.
+        agent.onState = { [weak self, weak picker, weak agent] state in
             switch state {
             case .failed(let message):
-                DispatchQueue.main.async {
-                    // No prefix: `explain` already names the host and says what
-                    // to do about it, and prefixing produced "Can't reach the
-                    // SolStream agent on X: No answer from X."
-                    picker?.showFailure(message)
-                }
+                // `explain` already names the host and says what to do.
+                picker?.showFailure(message)
             case .needsToken(let host, let rejected):
-                DispatchQueue.main.async {
-                    // Over the picker, so it arrives as a sheet on the window
-                    // the person is already looking at rather than as a panel
-                    // from nowhere.
-                    TokenPrompt.present(host: host, rejected: rejected,
-                                        over: picker?.window) { token in
-                        guard let token else {
-                            picker?.showFailure("\(host) needs a pairing token to go any further.")
-                            return
-                        }
-                        agent?.supplyToken(token)
-                    }
+                // A sheet on the picker the person is already looking at.
+                // `report` delivers on the main queue.
+                MainActor.assumeIsolated {
+                    self?.promptForToken(host: host, rejected: rejected, over: picker?.window,
+                                         agent: agent) { picker?.showFailure($0) }
                 }
             default:
                 break
@@ -281,73 +215,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Both lists, then show them together — a half-populated picker that
-        // grows under the cursor is worse than a moment's wait.
-        let fill: () -> Void = { [weak self, weak agent, weak picker] in
+        // grows under the cursor is worse than a moment's wait. The Start Menu
+        // is fetched when the picker opens and then reused: it rarely changes
+        // and it is the expensive half, while the host's `windowsChanged` push
+        // fires for every window opened or closed anywhere on the PC.
+        var cachedApps: [RemoteApp]?
+        let fill: (_ includeApps: Bool) -> Void = { [weak self, weak agent, weak picker] includeApps in
             guard let agent else { return }
+            let reuse = includeApps ? nil : cachedApps
             agent.windows { windows in
-                agent.apps { apps in
+                let present: ([RemoteApp]) -> Void = { apps in
                     DispatchQueue.main.async {
                         guard self != nil else { return }
+                        cachedApps = apps
                         picker?.present(windows: windows, apps: apps)
                     }
                 }
+                if let reuse { present(reuse) } else { agent.apps(completion: present) }
             }
         }
-        agent.onDisplays = { _ in fill() }
-        // The same fill, driven by the host noticing a window come or go. Without
-        // it the list is whatever was open at the moment of connecting: an
-        // application quit on the PC stays offerable and one started there cannot
-        // be picked at all.
-        agent.onWindowsChanged = fill
+        agent.onDisplays = { _ in fill(true) }
+        agent.onWindowsChanged = { fill(false) }
         if existing == nil {
             agent.connect()
         } else if agent.isConnected {
             // A reused socket produces no second `hello`, so the unprompted
             // `displays` push that normally drives the first fill never comes.
-            fill()
+            fill(true)
+        } else if !agent.willReconnect {
+            // Refused for good (busy, impersonation) or already closed: nothing
+            // is coming, so do not leave the spinner up.
+            picker.showFailure("The connection to \(host) was lost. Go back and connect again.")
         }
-        // The third case is deliberate: a connection handed over while it is in
-        // its reconnect backoff cannot answer, and `windows`/`apps` report
-        // failure as an empty list — which the picker would draw as "0 windows
-        // open · 0 apps installed", a confident and wrong answer. Leaving the
-        // spinner up means the reconnect's own `hello` fills it a moment later,
-        // and `onState` above still puts a real failure on screen.
+        // Otherwise the connection is in its reconnect backoff: the spinner
+        // stays, the reconnect's own greeting fills the list, and `onState`
+        // puts a real failure on screen. Asking now would get empty lists,
+        // which the picker would draw as a confident "0 windows open".
+    }
+
+    /// Ask for the pairing token over `parent`, or report that there is none.
+    @MainActor
+    private func promptForToken(host: String, rejected: Bool, over parent: NSWindow?,
+                                agent: AgentConnection?,
+                                onRefused: @escaping (String) -> Void) {
+        TokenPrompt.present(host: host, rejected: rejected, over: parent) { token in
+            guard let token else {
+                onRefused("\(host) needs a pairing token to go any further.")
+                return
+            }
+            agent?.supplyToken(token)
+        }
+    }
+
+    /// For the command-line paths, which have no window to ask in.
+    private static func logAgentState(_ state: AgentConnection.State) {
+        switch state {
+        case .failed(let message):
+            Log.error("[app] \(message)")
+        case .needsToken(let host, _):
+            Log.error("[app] \(host) needs a pairing token. It is on SolStream's own window "
+                      + "on that PC, under \"Pairing token\"; start SolStream here once with "
+                      + "--agent-token <token>.")
+        default:
+            break
+        }
     }
 
     /// The picker's launch path without the picker, for `--launch` and tests.
     private func startLaunching(host: String, agentHost: String, matching query: String) {
         let agent = AgentConnection(host: agentHost)
         self.agent = agent
-
-        agent.onState = { state in
-            switch state {
-            case .failed(let message):
-                // No suffix: `explain` already says what to do about a genuine
-                // unreachable host, and a refusal is not unreachability — a
-                // hint to check the agent is running reads as nonsense when the
-                // agent answered and was turned down for impersonation.
-                Log.error("[app] \(message)")
-            case .needsToken(let host, _):
-                // No window to ask in on this path, so say what to do instead of
-                // waiting for an answer that cannot arrive.
-                Log.error("[app] \(host) needs a pairing token. It is on "
-                          + "SolStream's own window on that PC, under \"Pairing "
-                          + "token\"; start SolStream here once with "
-                          + "--agent-token <token>.")
-            default:
-                break
-            }
-        }
+        agent.onState = Self.logAgentState
         agent.onDisplays = { [weak self, weak agent] _ in
             guard let agent else { return }
-            // Once only, from here on. The other two entry points that hang the
-            // whole open flow off this push clear it and say why; this one did
-            // not, and it is the path `--launch` and every launch test take. The
-            // host greets EVERY connection with `displays` unprompted, including
-            // the one after a reconnect — so a dropped socket launched the
-            // application a second time and opened a second window over the first.
-            // Cleared before the work rather than after it: `apps` is a round trip
-            // and a second push can land inside it.
+            // Once only. The host greets EVERY connection with `displays`,
+            // including the one after a reconnect, and this is the entry point
+            // to the whole open flow. Cleared before the work: `apps` is a
+            // round trip and a second push can land inside it.
             agent.onDisplays = nil
             agent.apps { apps in
                 guard let match = apps.first(where: {
@@ -443,14 +387,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Stream one window, keeping the picker up until there is one to look at.
     ///
-    /// The picker used to be closed and released on this line, before anything
-    /// at all was known about the session. Everything downstream of here gives
-    /// up by logging and returning — no display to capture, a host that refuses
-    /// the media session, a host that agrees keys and then does not start — and
-    /// each of those left the screen with no picker, no window and not one word
-    /// about why. It is closed in `presentApps` now, at the point a window is
-    /// about to appear, and each of those three failures puts its reason back on
-    /// the picker the person is still looking at.
+    /// The picker is closed in `presentApps`, as a window is about to appear, so
+    /// every failure on the way — no display, a refused or dead media session —
+    /// puts its reason on the picker the person is still looking at.
     private func attach(_ window: RemoteWindow, host: String, agent: AgentConnection) {
         picker?.showBusy("Opening \(window.title) on \(host)…")
         start(host: host, agent: agent, targets: [window])
@@ -466,19 +405,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the same canvas rather than at two that merely resemble each other.
     private static let encoderLimit = 4096
 
-    /// The canvas this Mac wants the host to render at.
-    ///
-    /// Its screen in points times the backing scale factor: that is exactly how
-    /// many pixels a full-screen window here can show, so anything larger is
-    /// bitrate spent on pixels that get thrown away and anything smaller is
-    /// upscaled. Clamped to NVENC's H.264 maximum, above which a session
-    /// negotiates fine and then never delivers a frame.
-    private static func desiredCanvas() -> CGSize? {
+    static func clampedToEncoder(width: Int, height: Int) -> (width: Int, height: Int) {
+        (min(width, encoderLimit), min(height, encoderLimit))
+    }
+
+    /// How many pixels a full-screen window on this Mac can show: its screen in
+    /// points times the backing scale factor.
+    private static func screenPixels() -> (width: Int, height: Int)? {
         guard let screen = NSScreen.main else { return nil }
         let scale = screen.backingScaleFactor
-        let limit = CGFloat(encoderLimit)
-        return CGSize(width: min((screen.frame.width * scale).rounded(), limit),
-                      height: min((screen.frame.height * scale).rounded(), limit))
+        return (Int((screen.frame.width * scale).rounded()),
+                Int((screen.frame.height * scale).rounded()))
+    }
+
+    /// The canvas this Mac wants the host to render at: anything larger is
+    /// bitrate spent on pixels that get thrown away and anything smaller is
+    /// upscaled. Clamped to the encoder's maximum.
+    private static func desiredCanvas() -> CGSize? {
+        guard let pixels = screenPixels() else { return nil }
+        let clamped = clampedToEncoder(width: pixels.width, height: pixels.height)
+        return CGSize(width: clamped.width, height: clamped.height)
     }
 
     /// Resolve the capture display, size it to this Mac, then open the windows.
@@ -492,10 +438,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("[app] capture display \(capture.name) "
                  + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                  + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
-        // No "Sunshine's output_name must resolve to …" line here any more. There
-        // is no separate configuration that could disagree: the media session
-        // names the display it wants captured, and the host captures that one.
-
         // Only ever resize a virtual display. A physical monitor is somebody's
         // actual screen, and changing its mode to suit a remote client would be
         // rude at best.
@@ -533,135 +475,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// `--desktop`: the whole-screen mirror, kept for diagnosing the stream
-    /// itself rather than for daily use.
-    ///
-    /// It goes through the agent like everything else now. There is no path to
-    /// a picture that does not start with the agent agreeing a key, which is
-    /// the point: the media socket has no authentication of its own to fall
-    /// back on, by design.
-    private func startStreaming(host: String, agentHost: String,
-                                displayQuery: String?, config: StreamConfig = .init()) {
-        let agent = AgentConnection(host: agentHost)
-        self.agent = agent
-        agent.onState = { state in
-            if case .failed(let message) = state { Log.error("[desktop] \(message)") }
-        }
-        agent.onDisplays = { [weak self, weak agent] displays in
-            guard let self, let agent,
-                  let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
-                Log.error("[desktop] host reported no displays")
-                return
-            }
-            // Once only, from here on. This closure is not a notification that
-            // the displays changed, it is the entry point to the whole open
-            // flow — and the host greets every connection with `displays`
-            // unprompted, including the one it sends after a reconnect. Left
-            // installed it opened a second media session and a second window
-            // over the top of the first, every time the agent channel came
-            // back. Cleared after the guard rather than before it, so a push
-            // that carried no usable display still leaves a way in.
-            agent.onDisplays = nil
-            var sized = config
-            // Clamped, and then the clamped figures are what the host is asked
-            // for. Both ends clamp per axis to the same number, so what this
-            // window is shaped for and what the encoder produces are the same
-            // rectangle rather than two that differ on one side.
-            sized.width = min(capture.width, Self.encoderLimit)
-            sized.height = min(capture.height, Self.encoderLimit)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                var request = AgentConnection.MediaRequest(
-                    display: capture.name, fps: sized.frameRate,
-                    bitrate: sized.bitrateKbps * 1000, audio: sized.audio)
-                request.width = sized.width
-                request.height = sized.height
-                guard let media = await agent.openMediaSession(request), media.streaming else {
-                    Log.error("[desktop] \(host) would not start streaming")
-                    return
-                }
-                let session = StreamSession(host: host, config: sized, session: media)
-                self.session = session
-                let streamWindow = StreamWindow(host: host, config: sized, session: session)
-                streamWindow.onClose = { [weak self, weak streamWindow] in
-                    guard let self else { return }
-                    self.streamWindows.removeAll { $0 === streamWindow }
-                    self.session = nil
-                    // End the media session by asking, exactly as the application
-                    // path does — this line was only ever on that path. The UDP
-                    // BYE that `stop()` has just sent sets `running = false` on
-                    // the host and nothing else: its capture, encoder, sender and
-                    // receive threads, its socket and its keys all survive until
-                    // somebody starts another session, so closing the mirror left
-                    // the host busy with a stream nobody was watching.
-                    agent.closeMediaSession()
-                    if self.streamWindows.isEmpty && !self.testMode {
-                        self.showConnectWindow()
-                    }
-                }
-                self.streamWindows.append(streamWindow)
-                streamWindow.show()
-                streamWindow.startStreaming()
-            }
-        }
-        agent.connect()
-    }
-
     /// Stream one or more Windows applications, each in its own native window.
     ///
     /// The agent is consulted BEFORE the stream launches, because the encode
     /// canvas has to match the capture display exactly: when it does, the
     /// scale factor is 1.0 and every crop is pixel-exact rather than resampled.
-    private func startSingleApp(host: String, agentHost: String, matching query: String,
-                                displayQuery: String?, config: StreamConfig) {
+    private func startSingleApp(host: String, agentHost: String, matching query: String) {
         let queries = query.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespaces)
         }.filter { !$0.isEmpty }
 
         let agent = AgentConnection(host: agentHost)
         self.agent = agent
-
-        agent.onState = { state in
-            switch state {
-            case .failed(let message):
-                // No suffix: `explain` already says what to do about a genuine
-                // unreachable host, and a refusal is not unreachability — a
-                // hint to check the agent is running reads as nonsense when the
-                // agent answered and was turned down for impersonation.
-                Log.error("[app] \(message)")
-            case .needsToken(let host, _):
-                // No window to ask in on this path, so say what to do instead of
-                // waiting for an answer that cannot arrive.
-                Log.error("[app] \(host) needs a pairing token. It is on "
-                          + "SolStream's own window on that PC, under \"Pairing "
-                          + "token\"; start SolStream here once with "
-                          + "--agent-token <token>.")
-            default:
-                break
-            }
-        }
+        agent.onState = Self.logAgentState
 
         agent.onDisplays = { [weak self, weak agent] displays in
             guard let self, let agent,
-                  let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
+                  let capture = Self.selectDisplay(from: displays,
+                                                   preferring: self.displayQuery) else {
                 Log.error("[app] host reported no displays")
                 return
             }
-            // Once only, from here on — see the same line in `startStreaming`.
-            // The host greets every connection with `displays` unprompted, this
-            // closure is the entry point to the whole open flow, and leaving it
-            // installed meant a reconnect ran the flow again: another media
-            // session, another window per application, over the top of the ones
-            // already there. Cleared after the guard rather than before it, so a
+            // Once only — see `startLaunching`. Cleared after the guard, so a
             // push that carried no usable display still leaves a way in.
             agent.onDisplays = nil
             Log.info("[app] capture display \(capture.name) "
                      + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
                      + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
-            // The host encodes exactly this display, because the media session
-            // names it. There is no separate configuration that could disagree
-            // with where the windows are being placed -- which is what the line
-            // that used to be here existed to warn about.
 
             agent.windows { [weak self] windows in
                 guard let self else { return }
@@ -681,7 +521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 DispatchQueue.main.async {
                     self.openApps(host: host, agent: agent, targets: targets,
-                                  display: capture, config: config)
+                                  display: capture, config: self.baseConfig)
                 }
             }
         }
@@ -772,11 +612,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and a new parameter set. Resizing a window therefore resizes the
         // WINDOW within a fixed canvas — no mode change, no reconnect, no black
         // frame.
-        // Clamped to NVENC's H.264 maximum; see `encoderLimit`. The clamp is
-        // also sent now, where before it stayed on this Mac and the host went on
-        // encoding the raw source size.
-        config.width = min(display.width, Self.encoderLimit)
-        config.height = min(display.height, Self.encoderLimit)
+        // Clamped to the encoder's maximum; see `encoderLimit`.
+        (config.width, config.height) = Self.clampedToEncoder(width: display.width,
+                                                              height: display.height)
         if config.width != display.width || config.height != display.height {
             Log.info("[canvas] capture display is \(display.width)x\(display.height); "
                      + "clamped to \(config.width)x\(config.height) for the encoder")
@@ -784,11 +622,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Self.reportIdealCanvas(display: display)
 
-        // The media session is agreed on the agent channel before any window is
-        // shown. There is no PIN, no certificate exchange and no RTSP: two
-        // programs that ship together and have already authenticated each other
-        // do not need introducing again, so the only thing that can fail here is
-        // the host declining to capture.
+        // The media session is agreed on the agent channel, which has already
+        // authenticated both ends, before any window is shown — so the only
+        // thing that can fail here is the host declining to capture.
         Task { @MainActor [weak self] in
             guard let self else { return }
             var request = AgentConnection.MediaRequest(
@@ -796,12 +632,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fps: config.frameRate,
                 bitrate: config.bitrateKbps * 1000,
                 audio: config.audio)
-            // The canvas, said out loud. The clamp above was computed here and
-            // then kept here: the host encoded whatever size the source happened
-            // to be, so a capture display past the encoder's limit negotiated
-            // perfectly, reported itself as streaming, and produced no video at
-            // all. It is also the size every crop below is expressed in, so the
-            // two must be the same number and not merely usually equal.
+            // The canvas, said out loud: it is the size every crop is expressed
+            // in, so the host must encode exactly this and not the raw source.
             request.width = config.width
             request.height = config.height
             guard let media = await agent.openMediaSession(request) else {
@@ -839,9 +671,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.onDisplays = nil
         agent.onWindowsChanged = nil
 
-        // Only while something is actually streamed: syncing a clipboard with a
-        // machine the user is not looking at would be surprising.
-        let bridge = ClipboardBridge(agent: agent)
+        // Only while something is actually streamed, and Mac-to-PC only while
+        // one of these windows has the keyboard: copying a password in another
+        // application must not send it to the PC.
+        let bridge = ClipboardBridge(agent: agent) { [weak self] in
+            self?.appWindows.contains { $0.window?.isKeyWindow == true } ?? false
+        }
         clipboard = bridge
         bridge.start()
 
@@ -875,22 +710,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.closeMediaSession()
                 self.clipboard?.stop()
                 self.clipboard = nil
-                // KEEP THE AGENT CONNECTION. This used to disconnect and then,
-                // in the same turn, build a fresh one for the picker -- and the
-                // host's one-client gate cannot tell "a client is connected"
-                // from "the last client's teardown is still running". It counts
-                // down only after joining the cursor watcher, closing the socket
-                // and running UnlockAll, whose cross-process SetWindowPlacement
-                // blocks on the streamed application's message pump. The new
-                // connection arrived about thirty milliseconds into that quarter
-                // of a second and was told the host was already streaming to
-                // another Mac -- which the client treats as final, so the picker
-                // sat there with a message about a Mac that did not exist.
-                //
-                // Nothing needed the disconnect: the socket drop was only ever a
-                // way to reach UnlockAll, and the close path already sends
-                // `lock off` for the window it is closing, which restores that
-                // window on its own.
+                // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
+                // tell a new connection from the last one's teardown still
+                // running, and answers "busy". Nothing needs the disconnect: the
+                // close path already sent `lock off`, which restores the window.
                 if !self.testMode {
                     self.showPicker(host: host, reusing: agent)
                 }
@@ -920,10 +743,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         wire(session, host: host, agent: agent)
 
-        // Not on `.streaming`: that only means video is arriving. A resumed
-        // session is already sending it, so the first frame can land before PLAY
-        // returns and the control stream exists — and synthetic keys sent then
-        // go nowhere at all.
         // The host pushes this whenever its cursor changes shape. Applied to
         // every window: the cursor is global to the host, and only the one the
         // pointer is actually over can show it anyway.
@@ -934,7 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Closing the application on the Windows side ends the stream, without
-        // waiting for the once-a-second poll to catch up. Closing the last
+        // waiting for the poll to catch up. Closing the last
         // window stops the session and returns to the picker, which is the same
         // path as closing it from this end — quitting one application is not a
         // reason to disconnect from the host.
@@ -950,6 +769,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .setOccludedBy(name.isEmpty ? nil : name)
         }
 
+        // The picker's state handler went with it; a stream needs its own. A
+        // token the host stops accepting is asked for over the windows, and a
+        // refusal no retry can fix is said rather than waited on.
+        agent.onState = { [weak self, weak agent] state in
+            guard let self else { return }
+            switch state {
+            case .needsToken(let host, let rejected):
+                let parent = self.appWindows.first { $0.window?.isKeyWindow == true }?.window
+                    ?? self.appWindows.first?.window
+                MainActor.assumeIsolated {
+                    self.promptForToken(host: host, rejected: rejected, over: parent,
+                                        agent: agent) { reason in
+                        self.appWindows.forEach { $0.setError("Can't reconnect", detail: reason) }
+                    }
+                }
+            case .failed(let message) where agent?.willReconnect == false:
+                self.appWindows.forEach { $0.setError("Lost the connection", detail: message) }
+            default:
+                break
+            }
+        }
+
         // The host forgets every window it was managing when the socket drops,
         // so a reconnect has to say it all again.
         agent.onReconnected = { [weak self, weak agent] in
@@ -961,12 +802,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.mediaRecoveryAttempts = 0
             self.recoverMedia(host: host, agent: agent)
         }
-
-        // No host-cursor toggle any more. The capture session is created with
-        // IsCursorCaptureEnabled(false), so the host's pointer is never in the
-        // picture at all -- and this Mac draws a real cursor from the shape the
-        // agent pushes. The Sunshine keyboard shortcut that used to flip it, and
-        // the belief tracking that went with it, are gone with the protocol.
 
         // STARTED LAST, AND THAT IS THE POINT. `start()` calls `onPhase`
         // synchronously — `.waitingForVideo`, and `.failed` when the socket
@@ -1018,6 +853,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch phase {
             case .streaming:
+                // A session that reaches its first frame has recovered, so the
+                // next loss starts counting from zero. Only `.live` reset this
+                // before, and a fresh session never reports `.live`, so three
+                // recoveries over a long stream used up every retry it had.
+                self.mediaRecoveryAttempts = 0
                 self.appWindows.forEach { $0.hideStatus() }
             case .failed(let message):
                 if let agent, agent.isConnected, self.mediaRecoveryAttempts < 3 {
@@ -1057,7 +897,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A host that came back from a restart may have a different display
         // under the same name, or none. The crops and tiles are in the old
         // display's pixels, so streaming the new one would show the wrong part
-        // of it: back to the picker instead.
+        // of it: back to the picker instead. Current after a reconnect, because
+        // `onReconnected` fires only once the greeting's display list is in.
         let displays = agent.displays
         if !displays.isEmpty, !displays.contains(where: {
             $0.name == display.name && $0.width == display.width && $0.height == display.height
@@ -1117,16 +958,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // There was a `brokerPairing(pin:host:agent:)` here.
-    //
-    // It was the last of GameStream's pairing flow on this side: a PIN, posted to
-    // Sunshine's local web API by the agent so the user never had to get past a
-    // certificate warning to type it in. SolStream has no PIN, nothing called
-    // this, and the one thing it could still do was put a five-digit code on
-    // screen and tell the user to run a `--set-sunshine-credentials` switch that
-    // no longer exists. `AgentConnection.pair` and `AppWindow.setPairingPin` went
-    // with it.
-
     /// Choose which host display to stream.
     ///
     /// A virtual display wins by default. It is the only one that can be sized
@@ -1179,20 +1010,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A fixed-EDID dummy plug cannot offer arbitrary modes, which is the real
     /// argument for a virtual display over a dongle.
     private static func reportIdealCanvas(display: RemoteDisplay) {
-        guard let screen = NSScreen.main else { return }
-        let scale = screen.backingScaleFactor
-        let physical = CGSize(width: (screen.frame.width * scale).rounded(),
-                              height: (screen.frame.height * scale).rounded())
-        Log.info("""
-            [canvas] host display \(display.width)x\(display.height); this Mac is \
-            \(Int(screen.frame.width))x\(Int(screen.frame.height)) points @\(scale)x \
-            = \(Int(physical.width))x\(Int(physical.height)) physical
-            """)
-        if display.width < Int(physical.width) || display.height < Int(physical.height) {
-            Log.info("""
-                [canvas] a full-screen window would be upscaled. For 1:1, set the \
-                capture display to \(Int(physical.width))x\(Int(physical.height)).
-                """)
+        guard let physical = screenPixels() else { return }
+        Log.info("[canvas] host display \(display.width)x\(display.height); this Mac "
+                 + "shows \(physical.width)x\(physical.height) physical")
+        if display.width < physical.width || display.height < physical.height {
+            Log.info("[canvas] a full-screen window would be upscaled. For 1:1, set the "
+                     + "capture display to \(physical.width)x\(physical.height).")
         } else {
             Log.info("[canvas] capture display covers this Mac; full-screen is 1:1")
         }
@@ -1245,8 +1068,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Reveal Log in Finder",
                         action: #selector(revealLog), keyEquivalent: "")
-        appMenu.addItem(withTitle: "Forget Paired PCs…",
-                        action: #selector(forgetHosts), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit SolStream",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -1289,7 +1110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.reserve(hostMenu.addItem(withTitle: "Disconnect",
                                       action: #selector(disconnectHost), keyEquivalent: "d"))
         hostMenu.addItem(.separator())
-        hostMenu.addItem(withTitle: "Forget Paired Hosts…",
+        hostMenu.addItem(withTitle: "Forget Paired PCs…",
                          action: #selector(forgetHosts), keyEquivalent: "")
         hostMenuItem.submenu = hostMenu
         mainMenu.addItem(hostMenuItem)
@@ -1361,11 +1182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
     }
 
-    // "Hide the PC's Cursor" is gone. The capture session is created with
-    // IsCursorCaptureEnabled(false), so the host's pointer is never in the
-    // picture and this Mac draws a real one from the shape the agent pushes.
-    // There is nothing left for the menu item to toggle.
-
     @objc private func forgetHosts() {
         let alert = NSAlert()
         alert.messageText = "Forget paired PCs?"
@@ -1377,10 +1193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        for key in UserDefaults.standard.dictionaryRepresentation().keys
-        where key.hasPrefix("SolStream.agentToken.") {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
+        TokenStore.removeAll()
         Log.info("[agent] every stored pairing token forgotten")
     }
 
@@ -1390,7 +1203,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Prefer a stream window; fall back to whatever window is on screen so
         // the connect window can be captured too.
         guard let window = dropdownWindow
-                ?? streamWindows.first?.window
                 ?? appWindows.first?.window
                 ?? NSApp.windows.first(where: { $0.isVisible }) else {
             Log.error("No window to capture")

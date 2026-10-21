@@ -19,13 +19,8 @@ public struct DiscoveredHost: Sendable, Equatable, Identifiable, Hashable {
 
 /// Finds SolStream hosts, so nobody has to type an IP address.
 ///
-/// This used to browse Bonjour for `_nvstream._tcp`, the record Sunshine
-/// advertises and Moonlight looks for. Nothing advertises that any more, so it
-/// found nothing — a feature that had quietly stopped working rather than one
-/// that had been removed.
-///
-/// What replaces it is smaller than what it replaces: one UDP datagram to the
-/// broadcast address, and a host that answers with its name. No mDNS responder,
+/// One UDP datagram to the broadcast address, and a host that answers with
+/// its name. No mDNS responder,
 /// no service registration, and nothing to install on the Windows side beyond
 /// the agent that is already running.
 ///
@@ -44,19 +39,20 @@ public final class HostBrowser {
 
     private var fd: Int32 = -1
     private var thread: Thread?
-    /// Signalled by the receive thread as it leaves, so `stop()` can be sure
-    /// nothing is inside `recvfrom` before the descriptor is closed.
-    private let receiveFinished = DispatchSemaphore(value: 0)
     private var timer: DispatchSourceTimer?
     private var found: [String: DiscoveredHost] = [:]
     /// When each host last answered, on the monotonic clock. Same keys as
     /// `found`, and guarded by the same lock.
     private var lastHeard: [String: UInt64] = [:]
     private let lock = NSLock()
-    /// Guarded by `lock`. The receive thread reads it once per iteration and
-    /// `stop()` writes it, and the whole of `stop()`'s ability to join depends
-    /// on the thread actually seeing the write.
+    /// Guarded by `lock`. Which run of discovery is current: a receive thread
+    /// keeps going only while its own generation is, so a thread still inside
+    /// `recvfrom` when the list is closed and reopened cannot carry on into the
+    /// next run.
     private var running = false
+    private var generation = 0
+    /// Signalled by the current run's receive thread as it leaves.
+    private var finished: DispatchSemaphore?
 
     /// How long a host may stay on the list without answering.
     ///
@@ -81,37 +77,36 @@ public final class HostBrowser {
 
     public func start() {
         guard !isRunning else { return }
-        fd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else {
+        let descriptor = socket(AF_INET, SOCK_DGRAM, 0)
+        guard descriptor >= 0 else {
             Log.error("[browse] no UDP socket: \(String(cString: strerror(errno)))")
             return
         }
         var yes: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
-        // A quarter of a second, not a whole one. This timeout is the only thing
-        // that gets the receive thread back out to look at `running`, and
-        // `stop()` waits for that to happen before it closes the socket — so it
-        // is also how long closing the host list can stall whoever called
-        // `stop()`, which is the main thread.
+        setsockopt(descriptor, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        // The receive timeout is what gets the thread back out to look at
+        // whether its run is still current; `stop()` closes the socket only
+        // once it has left, and waits for that off the main thread.
         var timeout = timeval(tv_sec: 0, tv_usec: 250_000)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
                    socklen_t(MemoryLayout<timeval>.size))
 
+        let done = DispatchSemaphore(value: 0)
         lock.lock()
+        generation += 1
+        let run = generation
         running = true
+        fd = descriptor
+        finished = done
         lock.unlock()
-        // A `stop()` that timed out leaves its thread to signal later, and that
-        // stray signal would satisfy the NEXT stop()'s wait without any thread
-        // having left — which is the whole hazard again, one run removed. The
-        // drain does not block: it takes whatever is already there and no more.
-        while receiveFinished.wait(timeout: .now()) == .success {}
-        // The descriptor is handed to the thread by value rather than read from
-        // `fd` on every pass. A thread that is slow to retire would otherwise
-        // pick up whatever number a later `start()` had put there and read a
-        // socket belonging to the next run of discovery.
-        let descriptor = fd
-        let thread = Thread { [weak self] in self?.receiveLoop(fd: descriptor) }
+
+        // The descriptor and generation are handed over by value, so a thread
+        // slow to retire never reads a socket belonging to a later run.
+        let thread = Thread { [weak self] in
+            defer { done.signal() }
+            self?.receiveLoop(fd: descriptor, run: run)
+        }
         thread.name = "solstream.discovery"
         thread.start()
         self.thread = thread
@@ -128,59 +123,49 @@ public final class HostBrowser {
         Log.info("[browse] asking for SolStream hosts on the local network")
     }
 
-    /// Stop discovery, in an order that cannot hand a live descriptor to
-    /// somebody else.
+    /// Stop discovery without blocking the caller, in an order that cannot
+    /// hand a live descriptor to somebody else.
     ///
-    /// This used to be `close(fd)` from the main thread while the receive thread
-    /// sat in `recvfrom` on that same number — the hazard the media client had,
-    /// and it is worse here because the browser is started and stopped every
-    /// time the host list opens and closes. A closed descriptor number goes
-    /// straight back into the kernel's pool, this process opens sockets
-    /// constantly while the picker is up, and the loser of that race does not
-    /// get an error: it reads somebody else's socket.
-    ///
-    /// There is no `shutdown` first, and that is not an oversight. The media
-    /// client can wake its thread that way because its socket is `connect`ed;
-    /// this one is not — it broadcasts and hears from anyone — and on Darwin
-    /// `shutdown` on a socket with no peer returns ENOTCONN and wakes nobody.
-    /// What retires the thread here is the receive timeout set in `start()`:
-    /// `recvfrom` gives up, the loop re-reads `running` under the lock, and
-    /// leaves.
+    /// The receive thread may be sitting in `recvfrom` on this descriptor, and
+    /// a number closed under it goes straight back into the kernel's pool — the
+    /// loser of that race reads somebody else's socket. `shutdown` cannot wake
+    /// it (the socket is not connected; Darwin returns ENOTCONN), so the receive
+    /// timeout does. The close therefore waits for the thread to leave, on a
+    /// background queue: this is called from the main thread every time the
+    /// host list closes. A thread that never leaves costs one leaked
+    /// descriptor, which is the safe direction.
     public func stop() {
         lock.lock()
         guard running else { lock.unlock(); return }
         running = false
-        lock.unlock()
-
-        timer?.cancel()
-        timer = nil
-
-        // Bounded: the receive timeout is 250 ms, so a second is several
-        // chances to notice. Leaking one descriptor beats hanging the main
-        // thread on a socket that will not wake, and leaking is the safe
-        // direction — a number this process never gives back is a number
-        // nothing else can be handed.
-        var joined = true
-        if thread != nil {
-            joined = receiveFinished.wait(timeout: .now() + 1.0) == .success
-            thread = nil
-        }
-
-        // Under the lock, which is what stands between this close and an ask
-        // handler that started before `cancel()` and is still inside `sendto`.
-        lock.lock()
-        if joined, fd >= 0 {
-            close(fd)
-        }
+        // Under the lock, which is what stands between this and an ask handler
+        // that started before `cancel()` and is still inside `sendto`.
+        let descriptor = fd
         fd = -1
+        let done = finished
+        finished = nil
         found.removeAll()
         lastHeard.removeAll()
         lock.unlock()
 
-        if !joined {
-            Log.error("[browse] the discovery thread did not stop; leaving its socket "
-                      + "open rather than handing the number back")
+        timer?.cancel()
+        timer = nil
+        thread = nil
+
+        DispatchQueue.global(qos: .utility).async {
+            if done?.wait(timeout: .now() + 1.0) == .success {
+                close(descriptor)
+            } else {
+                Log.error("[browse] the discovery thread did not stop; leaving its socket "
+                          + "open rather than handing the number back")
+            }
         }
+    }
+
+    private func isCurrent(_ run: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return running && generation == run
     }
 
     private func ask() {
@@ -236,11 +221,9 @@ public final class HostBrowser {
         DispatchQueue.main.async { [weak self] in self?.onChange?(snapshot) }
     }
 
-    private func receiveLoop(fd: Int32) {
-        // However this loop leaves, `stop()` is waiting to hear that it has.
-        defer { receiveFinished.signal() }
+    private func receiveLoop(fd: Int32, run: Int) {
         var buffer = [UInt8](repeating: 0, count: 512)
-        while isRunning {
+        while isCurrent(run) {
             var from = sockaddr_in()
             var fromLength = socklen_t(MemoryLayout<sockaddr_in>.size)
             let n = withUnsafeMutablePointer(to: &from) { pointer in
@@ -262,6 +245,7 @@ public final class HostBrowser {
                   let address = String(validatingUTF8: addressText) else { continue }
 
             lock.lock()
+            guard running, generation == run else { lock.unlock(); return }
             let host = DiscoveredHost(name: name, address: address)
             let changed = found[address] != host
             found[address] = host
