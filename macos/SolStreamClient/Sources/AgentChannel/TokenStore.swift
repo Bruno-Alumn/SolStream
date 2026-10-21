@@ -121,11 +121,41 @@ public enum TokenStore {
         var add = baseQuery(host)
         add[kSecValueData as String] = data
         add[kSecAttrLabel as String] = "SolStream pairing token (\(host))"
+        if let access = openAccess("SolStream pairing token (\(host))") {
+            add[kSecAttrAccess as String] = access
+        }
         let status = SecItemAdd(add as CFDictionary, nil)
         if status != errSecSuccess {
             Log.error("[agent] keychain add for \(host) failed (\(status))")
         }
         return status == errSecSuccess
+    }
+
+    /// An access list that lets SolStream read the item without asking.
+    ///
+    /// The default trusts only the exact executable that created the item, and
+    /// every ad-hoc build is a new executable as far as the keychain knows, so
+    /// each update put up "SolStream wants to use your confidential
+    /// information" before it could connect -- an interruption on every
+    /// upgrade, for a token that until this month sat in a plain preferences
+    /// file. Readable by this user's applications without a prompt, the token
+    /// is still encrypted at rest in the login keychain and still out of
+    /// backups and `defaults read`, which is what moving it here was for.
+    ///
+    /// The SecAccess API is deprecated in favour of the data-protection
+    /// keychain, which needs an entitlement an ad-hoc or unbundled build
+    /// cannot carry. Nil on failure, and the item is then stored with the
+    /// default access instead.
+    private static func openAccess(_ label: String) -> SecAccess? {
+        var access: SecAccess?
+        guard SecAccessCreate(label as CFString, nil, &access) == errSecSuccess,
+              let access else { return nil }
+        let decrypt = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt)
+        for case let acl as SecACL in (decrypt as? [Any]) ?? [] {
+            // A nil application list means any application.
+            SecACLSetContents(acl, nil, label as CFString, [])
+        }
+        return access
     }
 
     /// Move a token stored by an older build into the keychain. The old entry

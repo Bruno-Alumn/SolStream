@@ -286,18 +286,22 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 // not a host anyone wants offered back to them.
                 if reachable { Self.remember(host: address) }
                 self.refresh()
+                if !reachable { self.recheckLater(address) }
             }
         }
         probe = work
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    /// Open the port, with a hard deadline. Non-blocking, because a blocking
+    /// Open the port, with a hard deadline: three seconds, because the first
+    /// connection over Tailscale after a quiet spell has to wake the tunnel,
+    /// and through a relay that took longer than 1.5 s -- the address that
+    /// worked was reported as not answering. Non-blocking, because a blocking
     /// connect ignores SO_SNDTIMEO here: an address on somebody else's network
     /// that silently drops the SYN held each probe for the kernel's full
     /// connect timeout, far longer than anybody looks at this window.
     private static func canReach(host: String, port: UInt16,
-                                 timeoutMs: Int32 = 1500) -> Bool {
+                                 timeoutMs: Int32 = 3000) -> Bool {
         var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
@@ -418,7 +422,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                     group.leave()
                 }
             }
-            _ = group.wait(timeout: .now() + 2)
+            _ = group.wait(timeout: .now() + 3.5)
             resultsLock.lock()
             let found = candidates.first { answered[$0] != nil }
                 .map { (address: $0, latency: answered[$0]!) }
@@ -427,8 +431,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 self.searchingRoutes = false
                 // Only if nothing moved meanwhile: a pick, or discovery winning.
-                guard !self.hostChosenHere, self.state.address == failed,
-                      let found else { return }
+                guard !self.hostChosenHere, self.state.address == failed else { return }
+                guard let found else {
+                    // Nothing else answered either. Say so -- the search started
+                    // from a failed probe that had not refreshed the window, and
+                    // returning here without one left it on "Checking…" for good
+                    // -- and try the shown address again shortly, since the
+                    // likeliest cause is a network that is still coming up.
+                    self.refresh()
+                    self.recheckLater(failed)
+                    return
+                }
                 Log.info("[connect] \(failed) is not answering from this network; "
                          + "\(found.address) is, and is paired")
                 self.state.address = found.address
@@ -440,6 +453,18 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             }
         }
         return true
+    }
+
+    /// Probe the shown address again in a few seconds, if it is still the one
+    /// shown and still not answering. A Mac that just woke, or a tunnel still
+    /// coming up, answers a moment later; the window should notice rather than
+    /// wait for somebody to reopen it.
+    private func recheckLater(_ address: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.window.isVisible, self.state.address == address,
+                  self.state.isReachable != true, !self.searchingRoutes else { return }
+            self.scheduleProbe()
+        }
     }
 
     // MARK: - Actions
