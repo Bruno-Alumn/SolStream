@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run per branch at a time; a newer push supersedes an older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks (full history)
+        env:
+          GITLEAKS_VERSION: 8.21.2
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
+          ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
+
+  macos:
+    name: macOS client
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build
+        working-directory: macos/SolStreamClient
+        run: swift build
+      - name: Test
+        working-directory: macos/SolStreamClient
+        # The UI tests launch the app and need a logged-in session; the unit
+        # tests cover the protocol, input, audio and layout logic headlessly.
+        run: swift test --skip SolStreamClientUITests
+
+  windows:
+    name: Windows host (MSVC)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=OFF
+      - name: Build
+        run: cmake --build build --target SolStreamAgent --config Release
+
+  windows-cross:
+    name: Windows host (mingw syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix
+      - name: Cross-compile
+        env:
+          CXX: x86_64-w64-mingw32-g++-posix
+        run: sh windows/SolStreamAgent/build-cross.sh

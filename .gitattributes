@@ -1,0 +1,13 @@
+# Normalise text to LF in the repository; each checkout uses its platform's
+# native endings. The Windows build compiles LF sources without complaint.
+* text=auto
+
+# Batch files must keep CRLF or cmd.exe misreads labels and line continuations.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries: never touched by line-ending conversion or textual diff.
+*.png binary
+*.ico binary
+*.icns binary
+*.pdf binary

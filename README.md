@@ -90,10 +90,9 @@ logon, asking for administrator rights once, visibly. `--uninstall` undoes it.
 
 ## Licensing
 
-SolStream's own code has **no licence yet**; without one, default copyright
-applies and nobody else may copy, modify or distribute it. That is a decision for
-the project owner, not an oversight to be papered over — pick one before
-publishing this anywhere.
+**All rights reserved.** SolStream has no open-source licence: you may read this
+code if you have access to the repository, but not copy, modify or distribute it
+without the owner's permission.
 
 **There are no third-party dependencies.** There used to be three:
 

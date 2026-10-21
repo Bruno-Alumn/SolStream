@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Keep the CI actions current; there are no package dependencies to track.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

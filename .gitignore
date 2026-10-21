@@ -13,6 +13,17 @@ macos/SolStreamClient/.build/
 
 # Sync metadata
 .stfolder/
+.stignore
+.stversions/
+
+# Local tool and editor state -- never part of the project
+.claude/
+.pytest_cache/
+.vscode/
+.idea/
+*.swp
+*.log
+CMakeUserPresets.json
 
 # Binary
 solstream

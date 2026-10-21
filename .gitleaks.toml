@@ -1,0 +1,12 @@
+# Secret scanning for this repository (run by CI and locally with
+# `gitleaks git --config .gitleaks.toml`). Extends the default rule set.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixed test vectors, not credentials"
+# The pairing token used by the unit tests and an early protocol experiment:
+# a made-up byte sequence, deliberately obvious.
+regexes = [
+  '''00112233445566778899aabbccddee(ff|f0)''',
+]
