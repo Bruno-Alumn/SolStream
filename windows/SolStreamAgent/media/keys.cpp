@@ -127,4 +127,41 @@ void BuildCapsLockToggle(INPUT out[2]) {
     out[1].ki.dwFlags = KEYEVENTF_KEYUP;
 }
 
+uint32_t HoldTarget(unsigned char kind, const unsigned char* body, size_t length) {
+    // kInputButton, kInputKey and kInputKeyScan in input.h, which this file
+    // does not include so the tests can build it alone.
+    switch (kind) {
+        case 3:
+            return length >= 2 ? (uint32_t) kind << 16 | body[0] : 0;
+        case 6:
+        case 8:
+            return length >= 3 ? (uint32_t) kind << 16 | (uint32_t) body[0] << 8 | body[1] : 0;
+        default:
+            return 0;
+    }
+}
+
+bool HoldEventIsNewest(HoldOrder& order, uint32_t target, uint32_t seq) {
+    if (target == 0) {
+        return true;
+    }
+    int oldest = 0;
+    for (int i = 0; i < order.count; ++i) {
+        if (order.target[i] == target) {
+            if (seq < order.seq[i]) {
+                return false;
+            }
+            order.seq[i] = seq;
+            return true;
+        }
+        if (order.seq[i] < order.seq[oldest]) {
+            oldest = i;
+        }
+    }
+    const int slot = order.count < kHoldOrderSlots ? order.count++ : oldest;
+    order.target[slot] = target;
+    order.seq[slot] = seq;
+    return true;
+}
+
 }  // namespace solstream::media

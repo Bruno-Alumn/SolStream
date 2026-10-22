@@ -22,6 +22,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -117,5 +118,40 @@ bool CapsLockPressNeeded(CapsLockBelief& belief,
 /// the key at that place is 英数, which switches the IME and leaves Caps Lock
 /// as it was, and every key typed would go on trying to fix it.
 void BuildCapsLockToggle(INPUT out[2]);
+
+// ── One key's events in order ────────────────────────────────────────────────
+//
+// The host applies an event the first time any copy of it arrives, whatever
+// came before, so two datagrams that swap places on the way -- a Wi-Fi roam,
+// a relay switch -- can put a key's events in the wrong order. The Mac carries
+// a release for up to five seconds while the PC has not acknowledged it, and
+// stops as soon as the key is pressed again; a datagram from before that press
+// arriving after it let go of the key the hand had gone back to. So each key
+// and button keeps the sequence of its newest event applied, and an older one
+// for the same key or button is passed over: it has been overtaken.
+
+/// What a key or button event presses or lets go of: its kind in the high
+/// half and its key or button in the low, so a key by virtual key and the
+/// same key by scan code differ, as they do on the Mac. Zero for an event
+/// that holds nothing -- a move, a scroll, text -- or one too short to say.
+uint32_t HoldTarget(unsigned char kind, const unsigned char* body, size_t length);
+
+/// How many keys and buttons have their order kept. More than every key a
+/// keyboard has, by virtual key and by scan code, and every button.
+constexpr int kHoldOrderSlots = 512;
+
+/// The sequence of the newest event applied for each key and button. Bounded:
+/// a key not seen for longest makes way when it is full. Cleared each session,
+/// with the sequence numbers.
+struct HoldOrder {
+    uint32_t target[kHoldOrderSlots] = {};
+    uint32_t seq[kHoldOrderSlots] = {};
+    int count = 0;
+};
+
+/// Whether the event with sequence `seq` for `target` is newer than any
+/// applied for it, which notes it as the newest; false for one overtaken.
+/// True for an event that holds nothing (`target` zero), which is not noted.
+bool HoldEventIsNewest(HoldOrder& order, uint32_t target, uint32_t seq);
 
 }  // namespace solstream::media

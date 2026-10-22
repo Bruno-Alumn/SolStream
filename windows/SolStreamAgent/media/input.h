@@ -132,6 +132,9 @@ private:
     uint64_t seen_[16] = {};
     uint32_t highest_ = 0;
     bool started_ = false;
+    /// Each key's and button's newest event applied, so an older one that
+    /// arrives after it is passed over. See keys.h; cleared with the above.
+    HoldOrder holdOrder_;
 
     /// Note a key going down or up, so ReleaseAll can let go of it.
     void TrackKey(uint32_t key, bool down);

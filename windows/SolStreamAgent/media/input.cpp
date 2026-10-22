@@ -10,6 +10,9 @@
 namespace solstream::media {
 namespace {
 
+static_assert(kInputButton == 3 && kInputKey == 6 && kInputKeyScan == 8,
+              "HoldTarget in keys.cpp names the kinds by number");
+
 uint32_t ReadBE32(const unsigned char* p) {
     return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16)
          | ((uint32_t) p[2] << 8) | (uint32_t) p[3];
@@ -302,7 +305,12 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
         // every later event was repeated until the Mac's 300 ms give-up, for
         // ever. The retry it bought was at most those same 300 ms. Counted, so
         // the stats line says when input is being dropped on the floor.
-        if (ApplyOne(kind, body, bodyLen)) {
+        //
+        // An event overtaken by a newer one for the same key or button is
+        // recorded too, and counted with the duplicates: see keys.h.
+        if (!HoldEventIsNewest(holdOrder_, HoldTarget(kind, body, bodyLen), seq)) {
+            duplicates_.fetch_add(1);
+        } else if (ApplyOne(kind, body, bodyLen)) {
             applied_.fetch_add(1);
         } else {
             failed_.fetch_add(1);
@@ -363,6 +371,7 @@ void InputInjector::Reset() {
     duplicates_.store(0);
     failed_.store(0);
     std::memset(seen_, 0, sizeof(seen_));
+    holdOrder_ = HoldOrder{};
     // Asked afresh each session: the PC's Caps Lock may have been changed at
     // the PC since the last one.
     capsLock_ = CapsLockBelief{};

@@ -1998,6 +1998,58 @@ void TestCapsLock() {
     static_assert((kModifierCapsLock & 0x0F) == 0);
 }
 
+/// A key's events are applied in the order they were made, whatever order
+/// their datagrams arrive in: an old release that turns up after a newer press
+/// of the same key is passed over, or it lets go of a key the hand is on.
+void TestHoldOrder() {
+    using namespace media;
+    const unsigned char wDown[] = {0x00, 0x11, 1, 0};
+    const unsigned char wUp[] = {0x00, 0x11, 0, 0};
+    const unsigned char leftUp[] = {1, 0};
+    const unsigned char move[] = {0, 3, 0, 1};
+
+    // A key by scan code, the same by virtual key, and a button are three.
+    const uint32_t w = HoldTarget(8, wDown, sizeof(wDown));
+    CHECK(w != 0 && w == HoldTarget(8, wUp, sizeof(wUp)));
+    CHECK(HoldTarget(6, wDown, sizeof(wDown)) != w);
+    CHECK(HoldTarget(3, leftUp, sizeof(leftUp)) != 0);
+    CHECK(HoldTarget(3, leftUp, sizeof(leftUp)) != HoldTarget(3, wDown, 2));
+    // Nothing held by a move, a scroll or text, nor by an event too short.
+    CHECK(HoldTarget(2, move, sizeof(move)) == 0);
+    CHECK(HoldTarget(4, move, 2) == 0);
+    CHECK(HoldTarget(7, wDown, sizeof(wDown)) == 0);
+    CHECK(HoldTarget(8, wDown, 2) == 0);
+    CHECK(HoldTarget(3, leftUp, 1) == 0);
+
+    // The case it is for: W-up (2), carried ahead of the newest, then W
+    // pressed again (22) and applied first; the older datagram lands last.
+    HoldOrder order;
+    CHECK(HoldEventIsNewest(order, w, 22));
+    CHECK(!HoldEventIsNewest(order, w, 2));
+    // And the key's own next event still goes.
+    CHECK(HoldEventIsNewest(order, w, 30));
+    // Other keys and buttons are not held back by it.
+    const uint32_t left = HoldTarget(3, leftUp, sizeof(leftUp));
+    CHECK(HoldEventIsNewest(order, left, 5));
+    // Nor is anything that holds nothing.
+    CHECK(HoldEventIsNewest(order, 0, 1));
+    CHECK(order.count == 2);
+
+    // Bounded: full, the key not seen for longest makes way. The fillers
+    // are of no kind, so none of them is W.
+    order = HoldOrder{};
+    for (int i = 0; i < kHoldOrderSlots; ++i) {
+        HoldEventIsNewest(order, 0x1000000u + (uint32_t) i, 100u + (uint32_t) i);
+    }
+    CHECK(order.count == kHoldOrderSlots);
+    CHECK(HoldEventIsNewest(order, w, 5000));
+    CHECK(order.count == kHoldOrderSlots);
+    CHECK(!HoldEventIsNewest(order, w, 4999));
+    CHECK(!HoldEventIsNewest(order, 0x1000001u, 100));  // still kept
+    // The one that made way is a stranger again.
+    CHECK(HoldEventIsNewest(order, 0x1000000u, 1));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2072,6 +2124,7 @@ int wmain(int argc, wchar_t** argv) {
     TestHolderHearing();
     TestScanKeys();
     TestCapsLock();
+    TestHoldOrder();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
