@@ -107,6 +107,13 @@ struct KeyframeHold {
         return ask(now) ? .holdAndAsk : .hold
     }
 
+    /// The decoder lost the pictures the next ones refer to: a session that
+    /// failed and had to be rebuilt. Nothing short of an IDR helps it.
+    mutating func lostReference(now: UInt64) -> Verdict {
+        holding = true
+        return ask(now) ? .holdAndAsk : .hold
+    }
+
     /// A fragment of an IDR. While the hold is on, that is the answer to the
     /// request arriving, and it counts as progress.
     mutating func idrArriving(frameId: UInt32, now: UInt64) {

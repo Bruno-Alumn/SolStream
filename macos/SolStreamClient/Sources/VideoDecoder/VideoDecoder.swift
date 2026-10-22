@@ -49,7 +49,13 @@ public final class VideoDecoder {
     private let failureLock = NSLock()
     private var pendingAsyncFailure: OSStatus = noErr
 
-    /// Called when the decoder needs a keyframe (no parameter sets yet).
+    /// Whether a failure has cost the session its reference pictures, so that
+    /// nothing but an IDR can be decoded. Guarded by `lock`.
+    private var recovery = SessionRecovery()
+
+    /// Called when the decoder needs a keyframe: no parameter sets yet, or a
+    /// failure that cost it the pictures the next ones refer to. Pictures that
+    /// are not IDRs are of no use to it until one arrives.
     public var onKeyframeNeeded: (() -> Void)?
 
     public typealias FrameCallback = (CVPixelBuffer) -> Void
@@ -83,24 +89,13 @@ public final class VideoDecoder {
         defer { lock.unlock() }
         guard !isShutDown else { return }
 
-        // Anything the output callback failed on since the last frame. It is
-        // handled here, on the thread that owns the session, rather than there:
-        // see `noteAsyncDecodeFailure`. The session may be dropped by this, in
-        // which case the `session == nil` test further down rebuilds it from
-        // this frame's parameter sets.
-        failureLock.lock()
-        let asyncFailure = pendingAsyncFailure
-        pendingAsyncFailure = noErr
-        failureLock.unlock()
-        if asyncFailure != noErr {
-            noteDecodeFailure(asyncFailure)
-        }
-
         let nalUnits = Self.splitAnnexB(annexB)
         guard !nalUnits.isEmpty else { return }
 
         var pictureNALs: [Data] = []
         var parameterSetsChanged = false
+        // The host's flag, or an IDR slice in the picture itself.
+        var startsOver = isIDR
 
         for nal in nalUnits {
             guard let first = nal.first else { continue }
@@ -111,9 +106,33 @@ public final class VideoDecoder {
                 if pps != nal { pps = nal; parameterSetsChanged = true }
             case 6, 9, 12:  // SEI, access unit delimiter, filler — not needed
                 continue
+            case 5:  // a slice of an IDR picture
+                startsOver = true
+                pictureNALs.append(nal)
             default:
                 pictureNALs.append(nal)
             }
+        }
+
+        // Anything the output callback failed on since the last frame. It is
+        // handled here, on the thread that owns the session, rather than there:
+        // see `noteAsyncDecodeFailure`. The session may be dropped by this, in
+        // which case the `session == nil` test further down rebuilds it from
+        // this frame's parameter sets -- if this frame is an IDR, which is then
+        // the repair rather than a reason to ask for another one.
+        failureLock.lock()
+        let asyncFailure = pendingAsyncFailure
+        pendingAsyncFailure = noErr
+        failureLock.unlock()
+        if asyncFailure != noErr {
+            noteDecodeFailure(asyncFailure, beforeIdr: startsOver)
+        }
+
+        // A session dropped by a failure is rebuilt by an IDR and nothing
+        // else. See `SessionRecovery`.
+        guard recovery.admit(isIdr: startsOver) else {
+            requestKeyframeNow(throttled: true)
+            return
         }
 
         // Rebuild when the parameter sets change, and also when the session
@@ -130,11 +149,8 @@ public final class VideoDecoder {
             // fire once: joining an in-progress session (/resume) drops us
             // mid-GOP, and the control channel we send the request on isn't
             // even connected until after PLAY, so the first attempts are lost.
-            let now = Date()
-            if now.timeIntervalSince(lastKeyframeRequest) >= Self.keyframeRequestInterval {
-                lastKeyframeRequest = now
+            if requestKeyframeNow(throttled: true) {
                 Log.info("[decode] no parameter sets yet — requesting an IDR frame")
-                onKeyframeNeeded?()
             }
             return
         }
@@ -254,8 +270,11 @@ public final class VideoDecoder {
     /// decoder that malfunctioned once stayed wedged for the rest of the
     /// connection, showing a frozen picture that no keyframe could repair.
     ///
+    /// `beforeIdr` says the failure was an earlier frame's, found waiting just
+    /// as an IDR is about to be decoded.
+    ///
     /// Call with `lock` held.
-    func noteDecodeFailure(_ status: OSStatus) {
+    func noteDecodeFailure(_ status: OSStatus, beforeIdr: Bool = false) {
         // A wedged decoder fails on every frame, 60 times a second. Unthrottled
         // that is the log file's whole budget spent on one repeated line.
         let now = Date()
@@ -265,15 +284,28 @@ public final class VideoDecoder {
             lastDecodeErrorLog = now
         }
 
-        switch status {
-        case kVTInvalidSessionErr, kVTVideoDecoderMalfunctionErr, kVTVideoDecoderBadDataErr:
-            invalidateSession()
-            // The next frame carrying SPS/PPS rebuilds it; ask for one now
-            // rather than waiting for the host's own keyframe interval.
-            onKeyframeNeeded?()
-        default:
-            break
+        guard SessionRecovery.dropsSession(status) else { return }
+        invalidateSession()
+        // The next IDR rebuilds it; ask for one now rather than waiting for
+        // the host's own keyframe interval. Unless that IDR is the frame in
+        // hand, in which case it is already here.
+        if recovery.sessionDropped(beforeIdr: beforeIdr) {
+            requestKeyframeNow(throttled: false)
         }
+    }
+
+    /// Ask the host for an IDR, at most every `keyframeRequestInterval` when
+    /// `throttled`. Returns whether it asked. Call with `lock` held.
+    @discardableResult
+    private func requestKeyframeNow(throttled: Bool) -> Bool {
+        let now = Date()
+        if throttled,
+           now.timeIntervalSince(lastKeyframeRequest) < Self.keyframeRequestInterval {
+            return false
+        }
+        lastKeyframeRequest = now
+        onKeyframeNeeded?()
+        return true
     }
 
     // MARK: - Session
@@ -418,5 +450,47 @@ public final class VideoDecoder {
             return nil
         }
         return sampleBuffer
+    }
+}
+
+/// What `decode()` does after a failure that cost it its session, kept apart
+/// from VideoToolbox so it can be tested with statuses and keyframe flags.
+///
+/// A session rebuilt after a failure has no reference pictures, so every
+/// P-frame decoded into it fails -- asynchronously, with
+/// kVTVideoDecoderBadDataErr. Each of those failures used to drop the session
+/// and the next P-frame to build another: a VTDecompressionSessionCreate and an
+/// invalidate, 8-11 ms together, on the media thread for every frame until the
+/// IDR arrived. And when it did, the last P-frame's failure was found waiting,
+/// dropped the session once more and asked for a second IDR that the host then
+/// sent for nothing.
+struct SessionRecovery {
+    /// A failure dropped the session, and only an IDR can start the next one.
+    private(set) var awaitingIdr = false
+
+    /// The statuses Apple documents as recoverable only by a new session.
+    static func dropsSession(_ status: OSStatus) -> Bool {
+        status == kVTInvalidSessionErr
+            || status == kVTVideoDecoderMalfunctionErr
+            || status == kVTVideoDecoderBadDataErr
+    }
+
+    /// The session has been dropped. Returns whether to ask the host for an
+    /// IDR: not when the failure was an earlier frame's found just as an IDR
+    /// is about to be decoded, because that IDR starts the new session itself.
+    mutating func sessionDropped(beforeIdr: Bool) -> Bool {
+        if beforeIdr { return false }
+        awaitingIdr = true
+        return true
+    }
+
+    /// Whether a picture may go to the session. An IDR always may, and ends
+    /// the wait; anything else waits with it.
+    mutating func admit(isIdr: Bool) -> Bool {
+        if isIdr {
+            awaitingIdr = false
+            return true
+        }
+        return !awaitingIdr
     }
 }

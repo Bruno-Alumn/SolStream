@@ -226,8 +226,10 @@ final class StreamSession {
                 self?.onPhase?(.failed("The host stopped answering."))
             }
         }
+        // Holding as well as asking: until the IDR, every P-frame would only
+        // fail in a decoder that has lost what it refers to.
         decoder.onKeyframeNeeded = { [weak self] in
-            self?.media.requestKeyframe()
+            self?.media.holdUntilKeyframe()
         }
     }
 

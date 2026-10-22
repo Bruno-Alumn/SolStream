@@ -414,6 +414,21 @@ public final class MediaClient {
         stateLock.unlock()
     }
 
+    /// The decoder can do nothing until an IDR: it has no parameter sets, or a
+    /// failure took its reference pictures with it. Hold P-frames back from it
+    /// as for damage, and ask now.
+    ///
+    /// `requestKeyframe` used to be all it had. That set a flag for the next
+    /// feedback tick and held nothing back, so every P-frame until the IDR went
+    /// on into a decoder that could only fail on it.
+    public func holdUntilKeyframe() {
+        stateLock.lock()
+        let verdict = hold.lostReference(now: DispatchTime.now().uptimeNanoseconds)
+        needKeyframe = true
+        stateLock.unlock()
+        if verdict == .holdAndAsk { sendFeedback() }
+    }
+
     // MARK: - Sending
 
     /// Seal and send, with the descriptor held for the whole of it.
