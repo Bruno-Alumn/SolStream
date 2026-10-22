@@ -95,14 +95,24 @@ final class LogFile {
     private let echoToTerminal = isatty(STDOUT_FILENO) != 0
     private let formatter: DateFormatter
 
+    /// XCTest is loaded into the test runner and never into the app.
+    static let isTestRun = NSClassFromString("XCTestCase") != nil
+
     private init() {
         formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone.current
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
 
-        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Logs/SolStream", isDirectory: true)
+        // A test run writes to the temporary folder instead. The updater's
+        // tests walk through a relaunch, and their lines in the real log read
+        // as things this Mac did: "relaunching into 1.1.0" on a Mac that has
+        // never seen 1.1.0.
+        let logs = Self.isTestRun
+            ? FileManager.default.temporaryDirectory
+                .appendingPathComponent("SolStreamTests", isDirectory: true)
+            : FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("Logs/SolStream", isDirectory: true)
         guard let logs else {
             url = nil
             return
