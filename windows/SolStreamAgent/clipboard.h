@@ -65,4 +65,14 @@ std::optional<DWORD> ClipboardDword(HANDLE data);
 /// Read the markers off the clipboard. The caller must have it open.
 ClipboardMarkers ReadClipboardMarkers();
 
+/// Global memory holding one DWORD, as a marker's data is handed to
+/// SetClipboardData; null when it cannot be had.
+HGLOBAL ClipboardDwordData(DWORD value);
+
+/// Mark what is on the clipboard the way a password manager does: not for
+/// clipboard tools -- this host's own sync to the Mac among them -- nor for
+/// Windows' clipboard history or its cloud clipboard. The caller must have the
+/// clipboard open and own it, having emptied it.
+void MarkClipboardPrivate();
+
 }  // namespace solstream

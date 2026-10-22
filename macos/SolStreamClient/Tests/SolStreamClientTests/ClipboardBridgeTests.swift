@@ -59,8 +59,13 @@ final class ClipboardBridgeTests: XCTestCase {
         fake = FakeHost()
         pasteboard = NSPasteboard(name: NSPasteboard.Name("SolStream.tests.\(UUID().uuidString)"))
         streamHasKeyboard = false
-        bridge = ClipboardBridge(host: fake.host, pasteboard: pasteboard) { [unowned self] in
-            self.streamHasKeyboard
+        // A copy that need not settle: the tests about settling build their own.
+        bridge = makeBridge(settleTime: 0)
+    }
+
+    private func makeBridge(settleTime: TimeInterval) -> ClipboardBridge {
+        ClipboardBridge(host: fake.host, pasteboard: pasteboard, settleTime: settleTime) {
+            [unowned self] in self.streamHasKeyboard
         }
     }
 
@@ -78,6 +83,12 @@ final class ClipboardBridgeTests: XCTestCase {
         let drained = expectation(description: "main queue drained")
         DispatchQueue.main.async { drained.fulfill() }
         wait(for: [drained], timeout: 2)
+    }
+
+    /// Let time pass with the main run loop turning, so the bridge's timers
+    /// fire.
+    private func letTimePass(_ seconds: TimeInterval) {
+        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
     private func copyOnTheMac(_ text: String) {
@@ -156,6 +167,55 @@ final class ClipboardBridgeTests: XCTestCase {
         copyAPasswordOnTheMac("hunter2")
         bridge.syncNow()
         XCTAssertEqual(fake.writes, [])
+    }
+
+    // MARK: - A copy settling
+
+    /// Not sent the moment it is first seen, but once it has kept its change
+    /// count for the settle time — and then at once, not at the next tick.
+    func testAMacCopyGoesOnceItHasSettled() {
+        bridge = makeBridge(settleTime: 0.05)
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("settled")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, [], "sent the moment it was seen")
+        letTimePass(0.15)
+        XCTAssertEqual(fake.writes, ["settled"])
+    }
+
+    /// A password manager writes the text, then the marker, and the change
+    /// count moves only at the first. Seen in between, a password looked like
+    /// any other copy and went to the PC.
+    func testAPasswordMarkedAMomentAfterItsTextIsNeverSent() {
+        bridge = makeBridge(settleTime: 0.05)
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        pasteboard.clearContents()
+        pasteboard.setString("hunter2", forType: .string)
+        let changeCount = pasteboard.changeCount
+        bridge.syncNow()
+
+        pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        XCTAssertEqual(pasteboard.changeCount, changeCount, "the marker moved the change count")
+        letTimePass(0.15)
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, [])
+    }
+
+    /// A copy seen before the stream had the keyboard has settled by the time
+    /// it does, and goes the moment the stream takes it.
+    func testASettledCopyGoesTheMomentTheStreamTakesTheKeyboard() {
+        bridge = makeBridge(settleTime: 0.05)
+        bridge.start(resuming: false)
+        copyOnTheMac("copied in Safari")
+        bridge.syncNow()
+        letTimePass(0.1)
+        XCTAssertEqual(fake.writes, [])
+
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["copied in Safari"])
     }
 
     /// The host's sequence number after our own write is adopted, so the next

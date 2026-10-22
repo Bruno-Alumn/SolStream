@@ -1340,6 +1340,8 @@ void TestClipboardMarkers() {
 
     // What KeePass puts beside every password it copies.
     CHECK(ClipboardIsPrivate(Markers(true, true, refuse, refuse)));
+    // What the host puts beside the pairing token (MarkClipboardPrivate).
+    CHECK(ClipboardIsPrivate(Markers(true, false, refuse, refuse)));
 
     // Reading the DWORD out of a format's data.
     const DWORD zero = 0;
@@ -1359,6 +1361,17 @@ void TestClipboardMarkers() {
     CHECK(!ClipboardDword(nullptr).has_value());
     data = GlobalAlloc(GMEM_MOVEABLE, 0);
     CHECK(!ClipboardDword(data).has_value());
+    GlobalFree(data);
+
+    // What the host hands the clipboard beside the pairing token reads back
+    // as the refusal it means: a DWORD, holding 0.
+    data = ClipboardDwordData(0);
+    CHECK(data != nullptr);
+    CHECK(GlobalSize(data) >= sizeof(DWORD));
+    CHECK(ClipboardDword(data) == DWORD{0});
+    GlobalFree(data);
+    data = ClipboardDwordData(1);
+    CHECK(ClipboardDword(data) == DWORD{1});
     GlobalFree(data);
 }
 

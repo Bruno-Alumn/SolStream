@@ -1,8 +1,27 @@
 #include "clipboard.h"
 
 #include <cstring>
+#include <initializer_list>
 
 namespace solstream {
+
+namespace {
+
+/// Registered once: the same name always answers the same format for the life
+/// of the session, and registering is a trip to the atom table.
+struct MarkerFormats {
+    UINT exclude = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+    UINT ignore = RegisterClipboardFormatW(L"Clipboard Viewer Ignore");
+    UINT history = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
+    UINT cloud = RegisterClipboardFormatW(L"CanUploadToCloudClipboard");
+};
+
+const MarkerFormats& Formats() {
+    static const MarkerFormats formats;
+    return formats;
+}
+
+}  // namespace
 
 // Both work on UTF-8 bytes. CR and LF are ASCII, and no byte of a multi-byte
 // UTF-8 sequence falls in the ASCII range, so neither can be found inside a
@@ -56,24 +75,49 @@ std::optional<DWORD> ClipboardDword(HANDLE data) {
 }
 
 ClipboardMarkers ReadClipboardMarkers() {
-    // Registered once: the same name always answers the same format for the
-    // life of the session, and registering is a trip to the atom table.
-    static const UINT exclude =
-        RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
-    static const UINT ignore = RegisterClipboardFormatW(L"Clipboard Viewer Ignore");
-    static const UINT history = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
-    static const UINT cloud = RegisterClipboardFormatW(L"CanUploadToCloudClipboard");
-
+    const MarkerFormats& formats = Formats();
     ClipboardMarkers markers;
-    markers.exclude_from_monitors = exclude != 0 && IsClipboardFormatAvailable(exclude);
-    markers.viewer_ignore = ignore != 0 && IsClipboardFormatAvailable(ignore);
-    if (history != 0 && IsClipboardFormatAvailable(history)) {
-        markers.history = ClipboardDword(GetClipboardData(history));
+    markers.exclude_from_monitors =
+        formats.exclude != 0 && IsClipboardFormatAvailable(formats.exclude);
+    markers.viewer_ignore = formats.ignore != 0 && IsClipboardFormatAvailable(formats.ignore);
+    if (formats.history != 0 && IsClipboardFormatAvailable(formats.history)) {
+        markers.history = ClipboardDword(GetClipboardData(formats.history));
     }
-    if (cloud != 0 && IsClipboardFormatAvailable(cloud)) {
-        markers.cloud = ClipboardDword(GetClipboardData(cloud));
+    if (formats.cloud != 0 && IsClipboardFormatAvailable(formats.cloud)) {
+        markers.cloud = ClipboardDword(GetClipboardData(formats.cloud));
     }
     return markers;
+}
+
+HGLOBAL ClipboardDwordData(DWORD value) {
+    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, sizeof(value));
+    if (!data) {
+        return nullptr;
+    }
+    void* bytes = GlobalLock(data);
+    if (!bytes) {
+        GlobalFree(data);
+        return nullptr;
+    }
+    std::memcpy(bytes, &value, sizeof(value));
+    GlobalUnlock(data);
+    return data;
+}
+
+void MarkClipboardPrivate() {
+    const MarkerFormats& formats = Formats();
+    // 0 refuses history and the cloud. The first format says what it says by
+    // being there at all, so its 0 is only there to be some data.
+    for (const UINT format : {formats.exclude, formats.history, formats.cloud}) {
+        if (format == 0) {
+            continue;
+        }
+        HGLOBAL data = ClipboardDwordData(0);
+        if (data && !SetClipboardData(format, data)) {
+            // Ownership only transfers on success; on failure it is still ours.
+            GlobalFree(data);
+        }
+    }
 }
 
 }  // namespace solstream

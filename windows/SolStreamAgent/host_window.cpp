@@ -36,6 +36,7 @@
 #include <thread>
 #include <vector>
 
+#include "clipboard.h"
 #include "display_setup.h"
 #include "driver_install.h"
 #include "host_theme.h"
@@ -2012,6 +2013,11 @@ void SetEditFont() {
 
 // ── Window ───────────────────────────────────────────────────────────────────
 
+/// Only ever the pairing token, which is as good as a password to this PC. So
+/// it is marked as a password manager marks one: the host's own sync leaves it
+/// here rather than carrying it to the Mac, its clipboard history and the
+/// user's other Apple devices, and Windows keeps it out of clipboard history
+/// and the cloud clipboard.
 void CopyToClipboard(const std::wstring& text) {
     if (text.empty() || !OpenClipboard(g_window)) {
         return;
@@ -2022,7 +2028,11 @@ void CopyToClipboard(const std::wstring& text) {
         if (void* target = GlobalLock(handle)) {
             memcpy(target, text.c_str(), bytes);
             GlobalUnlock(handle);
-            SetClipboardData(CF_UNICODETEXT, handle);
+            if (SetClipboardData(CF_UNICODETEXT, handle)) {
+                MarkClipboardPrivate();
+            } else {
+                GlobalFree(handle);
+            }
         } else {
             GlobalFree(handle);
         }
