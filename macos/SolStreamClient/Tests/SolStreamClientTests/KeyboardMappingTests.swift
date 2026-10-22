@@ -287,15 +287,30 @@ final class KeyboardMappingTests: XCTestCase {
     func testAKeyLetGoOfUnderCommandIsReleasedWithIt() {
         for stillHeld in [false, true] {
             let wire = Wire()
-            wire.capture.isKeyPhysicallyDown = { $0 == self.wKey && stillHeld }
+            var down: Set<UInt16> = []
+            wire.capture.isKeyPhysicallyDown = { down.contains($0) }
+            down.insert(wKey)
             wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
             wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: commandFlag | leftCommandBit)
-            // No key-up for W at all.
+            // W let go of, or not -- and no key-up for it either way.
+            if !stillHeld { down.remove(wKey) }
             wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: 0)
             let w = wire.packets.filter { $0.code == 0x57 }
             XCTAssertEqual(w.map(\.pressed), stillHeld ? [true] : [true, false],
                            stillHeld ? "a key still held was released" : "W was left held on the host")
         }
+    }
+
+    /// A keyboard state that never once said a key was down -- a macOS that
+    /// keeps it behind a permission -- is not believed when it says one is up.
+    func testAKeyboardStateThatNeverAnswersIsNotBelieved() {
+        let wire = Wire()
+        wire.capture.isKeyPhysicallyDown = { _ in false }
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: commandFlag | leftCommandBit)
+        wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.filter { $0.code == 0x57 }.map(\.pressed), [true],
+                       "a key the hand may still be holding was let go of")
     }
 
     // MARK: - Modifiers put right by the next event

@@ -376,6 +376,14 @@ public final class InputCapture {
         CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code))
     }
 
+    /// `isKeyPhysicallyDown` has been seen to answer: it said a key was down
+    /// while that key's own press was being handled. Until then its "up" is
+    /// not taken at its word, because a macOS that puts the question behind
+    /// a permission this app does not ask for answers "up" for every key --
+    /// and believed, that would let go on the PC of keys the hand is still
+    /// holding.
+    private var keyStateAnswers = false
+
     /// Buttons currently down, for exactly the reason above. Capture stops the
     /// moment the window resigns key, so the matching mouse-up is never seen and
     /// the host is left holding the button — which on a desktop means a
@@ -513,6 +521,9 @@ public final class InputCapture {
             syncModifiers(to: event.modifierFlags)
             let pressed = event.type == .keyDown
             if pressed {
+                if !keyStateAnswers, isKeyPhysicallyDown(event.keyCode) {
+                    keyStateAnswers = true
+                }
                 heldKeys[event.keyCode] = key
                 // macOS does not reliably deliver the key-up for a key released
                 // while ⌘ is still held, and a key-down the host never sees
@@ -674,7 +685,8 @@ public final class InputCapture {
     ///
     /// The same goes for a key pressed BEFORE ⌘ and let go of while it was
     /// held, which is not a chord key: so any other key the host still has
-    /// down that this Mac's keyboard says is up is let go of too. One still
+    /// down that this Mac's keyboard says is up is let go of too -- once the
+    /// keyboard has been seen to say, see `keyStateAnswers`. One still
     /// physically held is left alone, and its own release will follow.
     private func releaseChordKeys() {
         for code in chordKeys {
@@ -682,6 +694,7 @@ public final class InputCapture {
             onInput?(keyPacket(key, pressed: false, modifiers: []))
         }
         chordKeys.removeAll()
+        guard keyStateAnswers else { return }
         for code in heldKeys.keys.sorted() where !isKeyPhysicallyDown(code) {
             guard let key = heldKeys.removeValue(forKey: code) else { continue }
             onInput?(keyPacket(key, pressed: false, modifiers: []))
