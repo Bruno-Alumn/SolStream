@@ -204,6 +204,26 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
     }
 
+    /// Tailscale going down with the window still key -- switched off from
+    /// its menu-bar item, or dropped by itself -- changes the network, and a
+    /// Tailscale address that answered through it is asked again.
+    func testTailscaleGoingDownIsNoticedWithoutTheWindowComingForward() throws {
+        let world = World(tailscale: .connected(address: "100.88.1.4"), answering: ["100.101.102.103"])
+        let (connect, window) = try makeWindow(world)
+        try pick("100.101.102.103", in: window)
+        waitUntil { self.shown(in: window).contains("Reachable and paired") }
+        XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
+
+        world.tailscale = .installedButOff
+        world.answering = []
+        let before = world.probes
+        connect.networkChanged()
+        XCTAssertFalse(shown(in: window).contains("Reachable"), "the old answer is not kept")
+        waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
+        XCTAssertGreaterThan(world.probes, before)
+        XCTAssertTrue(shown(in: window).contains("Tailscale is off on this Mac"))
+    }
+
     /// A probe already under way when Tailscale came up answers for the
     /// tunnel as it was, after the fresh probe has answered for it as it is.
     /// The older answer is dropped.

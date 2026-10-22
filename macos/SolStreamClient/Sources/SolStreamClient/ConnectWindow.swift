@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import DesignSystem
 import SolStreamLogging
 import MediaSession
@@ -59,6 +60,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var tailscale: TailscaleStatus
     /// When `tailscale` was read. Nil has the next refresh read it again.
     private var tailscaleCheckedAt: Date?
+    /// This Mac's network, watched while the window is up; see
+    /// `networkChanged`.
+    private var pathMonitor: NWPathMonitor?
     /// Whether the Tailscale line's words are up. Remembered rather than
     /// worked out afresh each time, because "Checking…" says nothing either
     /// way and the words should neither appear nor go while a probe is out.
@@ -139,6 +143,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         if let updateObserver { NotificationCenter.default.removeObserver(updateObserver) }
         // A window replaced while showing is never closed first.
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        pathMonitor?.cancel()
     }
 
     private func build() {
@@ -295,6 +300,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         startDiscovery()
+        watchNetwork()
         scheduleProbe()
     }
 
@@ -307,6 +313,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     func close() {
         removeEscapeToQuit()
         browser.stop()
+        stopWatchingNetwork()
         probe?.cancel()
         window.orderOut(nil)
     }
@@ -411,7 +418,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Whether this Mac is on Tailscale, asked at most every few seconds.
     /// Turning Tailscale on is noticed sooner than that when it matters:
     /// coming back from its app makes this window key, which asks again
-    /// (`windowDidBecomeKey`), and every probe asks afresh (`scheduleProbe`).
+    /// (`windowDidBecomeKey`), so does a change to the network
+    /// (`networkChanged`), and every probe asks afresh (`scheduleProbe`).
     private func readTailscaleIfDue() {
         guard tailscaleCheckedAt.map({ Date().timeIntervalSince($0) > 3 }) ?? true else { return }
         tailscale = readTailscale()
@@ -806,9 +814,40 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         refresh()
     }
 
+    /// Tailscale coming up or going down is a tunnel coming or going, which
+    /// changes this Mac's network -- and nothing else tells this window.
+    /// Switched from its menu-bar item, Tailscale leaves the window key, and
+    /// a tunnel that drops by itself touches nothing at all. A PC that had
+    /// answered through it stayed "Reachable and paired" until Connect
+    /// failed.
+    ///
+    /// Watched on a queue of its own, and answered on the main thread.
+    private func watchNetwork() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            DispatchQueue.main.async { self?.networkChanged() }
+        }
+        monitor.start(queue: DispatchQueue(label: "SolStream.connect.network"))
+        pathMonitor = monitor
+    }
+
+    private func stopWatchingNetwork() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+    }
+
+    /// The network changed: Tailscale is read again now, not once the last
+    /// reading is a few seconds old, and the window says what that changes.
+    func networkChanged() {
+        tailscaleCheckedAt = nil
+        refresh()
+    }
+
     func windowWillClose(_ notification: Notification) {
         removeEscapeToQuit()
         browser.stop()
+        stopWatchingNetwork()
         probe?.cancel()
         if NSApp.windows.allSatisfy({ !$0.isVisible || $0 === window }) {
             NSApp.terminate(nil)
