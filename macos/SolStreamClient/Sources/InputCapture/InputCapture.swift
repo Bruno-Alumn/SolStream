@@ -707,8 +707,15 @@ public final class InputCapture {
     /// down that this Mac's keyboard says is up is let go of too -- once the
     /// keyboard has been seen to say, see `keyStateAnswers`. One still
     /// physically held is left alone, and its own release will follow.
+    ///
+    /// A chord key the keyboard says is still held is left alone as well.
+    /// They were all let go of, which in a game that crouches on ⌘ stopped
+    /// the character walking: hold ⌘, hold W, let go of ⌘ while still
+    /// walking, and W was up on the PC until macOS repeated it -- or for good,
+    /// with key repeat off.
     private func releaseChordKeys() {
-        for code in chordKeys {
+        for code in chordKeys.sorted() {
+            if keyStateAnswers, isKeyPhysicallyDown(code) { continue }
             guard let key = heldKeys.removeValue(forKey: code) else { continue }
             onInput?(keyPacket(key, pressed: false, modifiers: []))
         }

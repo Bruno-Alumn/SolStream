@@ -301,6 +301,28 @@ final class KeyboardMappingTests: XCTestCase {
         }
     }
 
+    /// A key pressed during ⌘ and still held when ⌘ comes up stays down on the
+    /// host -- crouch on ⌘, walk on W, stand up -- and its own release lets
+    /// go of it. One the keyboard says is up is let go of with ⌘, as before.
+    func testAChordKeyStillHeldIsKeptWhenCommandComesUp() {
+        for stillHeld in [false, true] {
+            let wire = Wire()
+            var down: Set<UInt16> = [wKey]
+            wire.capture.isKeyPhysicallyDown = { down.contains($0) }
+            wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: commandFlag | leftCommandBit)
+            wire.send(.keyDown, keyCode: wKey, deviceFlags: commandFlag | leftCommandBit)
+            if !stillHeld { down.remove(wKey) }
+            wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: 0)
+            XCTAssertEqual(wire.packets.filter { $0.code == 0x57 }.map(\.pressed),
+                           stillHeld ? [true] : [true, false],
+                           stillHeld ? "a key still held was released" : "W was left held on the host")
+            guard stillHeld else { continue }
+            down.remove(wKey)
+            wire.send(.keyUp, keyCode: wKey, deviceFlags: 0)
+            XCTAssertEqual(wire.packets.filter { $0.code == 0x57 }.map(\.pressed), [true, false])
+        }
+    }
+
     /// A keyboard state that never once said a key was down -- a macOS that
     /// keeps it behind a permission -- is not believed when it says one is up.
     func testAKeyboardStateThatNeverAnswersIsNotBelieved() {
