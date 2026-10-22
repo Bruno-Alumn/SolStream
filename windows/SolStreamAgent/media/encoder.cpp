@@ -808,6 +808,19 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     gop.vt = VT_UI4;
     gop.ulVal = (s.fps ? s.fps : 60) * 3600;
     s.codec->SetValue(&CODECAPI_AVEncMPVGOPSize, &gop);
+    // No B-frames, said rather than left to low latency mode to imply. A
+    // picture's frame id comes back from its sample time, and output arrives in
+    // decoding order, so a B-frame reaches the Mac after the picture that
+    // follows it: 1, 3, 2. The Mac takes 2 for lost when 3 arrives, holds the
+    // picture and asks for a keyframe, and then drops the real 2 as a
+    // straggler -- once every few frames, for as long as the encoder does it.
+    // The dev box's encoder happens not to; an encoder that ignores low
+    // latency mode, as the NVIDIA one ignored everything set at the wrong time,
+    // might.
+    VARIANT bFrames{};
+    bFrames.vt = VT_UI4;
+    bFrames.ulVal = 0;
+    s.codec->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &bFrames);
 }
 
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
@@ -1004,13 +1017,20 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                 default: return -2;
             }
         };
+        const long long bFrames = setting(CODECAPI_AVEncMPVDefaultBPictureCount);
         Log("[media] encoder settings: low latency %lld, rate mode %lld, gop %lld,"
             " b-frames %lld, vbv %lld bits",
             setting(CODECAPI_AVLowLatencyMode),
             setting(CODECAPI_AVEncCommonRateControlMode),
             setting(CODECAPI_AVEncMPVGOPSize),
-            setting(CODECAPI_AVEncMPVDefaultBPictureCount),
+            bFrames,
             setting(CODECAPI_AVEncCommonBufferSize));
+        if (bFrames > 0) {
+            // Said on a line of its own, because it explains a symptom that
+            // otherwise points at the network: see ApplyCodecSettings.
+            Log("[media] the encoder kept %lld B-frames despite being asked for none;"
+                " the Mac will take each one for a lost picture", bFrames);
+        }
         // SLICES ARE LEFT ALONE. spike/mf-encode asked for four per frame and
         // got 1.5, and a packetizer that assumes one output sample is one
         // picture is correct only when it is. The Drain above counts every
