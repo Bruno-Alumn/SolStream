@@ -29,6 +29,32 @@ long long Now() {
     return now.QuadPart;
 }
 
+/// What the frame-arrived handler checks before it touches anything of the
+/// capture's, owned jointly with that handler, the way `itemClosed` is.
+///
+/// revoke() unhooks the handler but does not wait for an invocation already
+/// under way. One that had entered the handler and not yet taken the mutex
+/// could be held off across the whole of Stop, the Teardown that drops the
+/// last reference to the Capture, and ~Impl -- and then lock a mutex that
+/// lived inside the freed Impl. Here the mutex and the flag live as long as
+/// the handler's own copy of the pointer, so the handler can always take the
+/// one and read the other, and touches the Impl only when the flag says it is
+/// still there.
+struct ArrivalGate {
+    /// Held by the handler for the whole of OnFrame, and taken by Stop and by
+    /// RecreatePoolIfNeeded. See Stop for what goes wrong without it. It is
+    /// always taken BEFORE the Impl's `lock`.
+    std::mutex callback;
+    /// Atomic because the readers do not agree on a mutex: the handler and
+    /// Stop go through `callback`, Acquire's wait predicate goes through the
+    /// Impl's `lock`, and Running() holds neither. As a plain bool that was a
+    /// data race whatever the mutexes did. The atomic makes the reads defined;
+    /// it is still cleared with `callback` held, and that -- not the atomic --
+    /// is what makes Stop wait for an arrival that is already running, and
+    /// what keeps a late one off an Impl that has gone.
+    std::atomic<bool> running{false};
+};
+
 }  // namespace
 
 struct Capture::Impl {
@@ -68,23 +94,16 @@ struct Capture::Impl {
     bool poolStale = false;
 
     std::mutex lock;
-    /// Held by OnFrame for the whole of its body, and taken by Stop and by
-    /// RecreatePoolIfNeeded. See Stop for what goes wrong without it. It is
-    /// always taken BEFORE `lock`.
-    std::mutex callback;
     std::condition_variable arrived;
     uint64_t serial = 0;
     long long capturedAt = 0;
     uint64_t delivered = 0;
-    /// Atomic because the readers do not agree on a mutex: OnFrame and Stop go
-    /// through `callback`, Acquire's wait predicate goes through `lock`, and
-    /// Running() holds neither. As a plain bool that was a data race whatever
-    /// the mutexes did. The atomic makes the reads defined; it is still cleared
-    /// with `callback` held, and that -- not the atomic -- is what makes Stop
-    /// wait for an arrival that is already running.
-    std::atomic<bool> running{false};
+    /// The handler's mutex and the running flag. See ArrivalGate.
+    std::shared_ptr<ArrivalGate> gate = std::make_shared<ArrivalGate>();
 
     bool Begin(GraphicsCaptureItem newItem);
+    /// Called by the handler with `gate->callback` held and `gate->running`
+    /// set, and only then.
     void OnFrame(Direct3D11CaptureFramePool const& sender);
     void RecreatePoolIfNeeded();
 };
@@ -139,8 +158,16 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
     } catch (hresult_error const&) {
     }
 
+    // The gate first, through the handler's own copy of it, and the Impl only
+    // once the gate says it is still running: see ArrivalGate.
     frameArrived = pool.FrameArrived(auto_revoke,
-        [this](Direct3D11CaptureFramePool const& sender, auto&&) { OnFrame(sender); });
+        [this, shared = gate](Direct3D11CaptureFramePool const& sender, auto&&) {
+            std::lock_guard<std::mutex> alive(shared->callback);
+            if (!shared->running.load()) {
+                return;
+            }
+            OnFrame(sender);
+        });
     itemClosed->store(false);
     itemClosedEvent = item.Closed(auto_revoke,
         [closed = itemClosed](GraphicsCaptureItem const&, auto&&) {
@@ -151,21 +178,17 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
     height = (UINT) size.Height;
     poolWidth = (UINT) size.Width;
     poolHeight = (UINT) size.Height;
-    running.store(true);
+    gate->running.store(true);
     session.StartCapture();
     return true;
 }
 
 void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
-    // Taken for the whole body, including the device work below, so that Stop
-    // can wait for an invocation that is already running instead of freeing the
-    // device underneath it. `running` is read under the same mutex Stop clears
-    // it under, so an arrival that gets in after Stop touches neither the device
-    // nor the retained texture.
-    std::lock_guard<std::mutex> alive(callback);
-    if (!running.load()) {
-        return;
-    }
+    // The handler holds `gate->callback` across the whole of this, including
+    // the device work below, so that Stop can wait for an invocation that is
+    // already running instead of freeing the device underneath it. It reads
+    // `gate->running` under that same mutex, which Stop clears it under, so an
+    // arrival that gets in after Stop never gets here at all.
     auto frame = sender.TryGetNextFrame();
     if (!frame) {
         return;
@@ -246,10 +269,11 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
 /// which is as far from the cause as a report can get. A C++ `catch` does not
 /// help: an access violation is not a C++ exception.
 ///
-/// `callback` is taken first and held across the Recreate, which is what makes
-/// "no arrival is inside the pool" true rather than likely: OnFrame holds it for
-/// its whole body. The lock order is the same as everywhere else -- `callback`
-/// before `lock` -- and `lock` is released before `callback` is taken.
+/// `gate->callback` is taken first and held across the Recreate, which is what
+/// makes "no arrival is inside the pool" true rather than likely: the handler
+/// holds it for the whole of OnFrame. The lock order is the same as everywhere
+/// else -- `callback` before `lock` -- and `lock` is released before `callback`
+/// is taken.
 void Capture::Impl::RecreatePoolIfNeeded() {
     UINT wantWidth = 0, wantHeight = 0;
     {
@@ -260,8 +284,8 @@ void Capture::Impl::RecreatePoolIfNeeded() {
         wantWidth = pendingWidth;
         wantHeight = pendingHeight;
     }
-    std::lock_guard<std::mutex> alive(callback);
-    if (!running.load() || !pool) {
+    std::lock_guard<std::mutex> alive(gate->callback);
+    if (!gate->running.load() || !pool) {
         return;
     }
     try {
@@ -332,19 +356,22 @@ bool Capture::StartMonitor(HMONITOR monitor) {
 }
 
 void Capture::Stop() {
-    if (!impl_ || !impl_->running.load()) {
+    if (!impl_ || !impl_->gate->running.load()) {
         return;
     }
     // The frame pool is created free-threaded, so OnFrame runs on a thread-pool
     // thread that this one knows nothing about, and revoke() only unhooks the
     // handler -- it does not wait for an invocation that has already started.
-    // Clearing `running` under the mutex OnFrame holds for its whole body is
+    // Clearing `running` under the mutex the handler holds across OnFrame is
     // what waits: without it Stop went straight on to close the pool, and the
     // destructor that calls Stop then freed the device, the context and the
-    // retained texture out from under a CopyResource still in progress.
+    // retained texture out from under a CopyResource still in progress. An
+    // invocation that has not taken the mutex yet finds the flag cleared when
+    // it does, in the gate its own copy keeps alive, and leaves without
+    // touching the Impl, which by then may be gone.
     {
-        std::lock_guard<std::mutex> alive(impl_->callback);
-        impl_->running.store(false);
+        std::lock_guard<std::mutex> alive(impl_->gate->callback);
+        impl_->gate->running.store(false);
     }
     impl_->frameArrived.revoke();
     impl_->itemClosedEvent.revoke();
@@ -360,7 +387,7 @@ void Capture::Stop() {
 }
 
 bool Capture::Running() const {
-    return impl_ && impl_->running.load() && !impl_->itemClosed->load();
+    return impl_ && impl_->gate->running.load() && !impl_->itemClosed->load();
 }
 
 ID3D11Device* Capture::Device() const { return impl_ ? impl_->device.get() : nullptr; }
@@ -382,7 +409,7 @@ bool Capture::Acquire(Frame& out, uint64_t sinceSerial, int timeoutMs) {
         impl_->arrived.wait_for(guard, std::chrono::milliseconds(timeoutMs),
                                 [&] {
                                     return impl_->serial > sinceSerial
-                                           || !impl_->running.load();
+                                           || !impl_->gate->running.load();
                                 });
     }
     if (!impl_->retained) {
