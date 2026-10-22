@@ -32,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamHost: String?
     private var recoveringMedia = false
     private var mediaRecoveryAttempts = 0
+    /// The agent channel's final failure is on the stream windows, and the
+    /// picture's own troubles must not paint over it. See `notice(for:)`.
+    private var connectionLostShown = false
 
     /// Fields a command-line flag set, which the Settings window does not
     /// override; see `StreamSettings.apply`.
@@ -880,6 +883,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The picker's state handler went with it; a stream needs its own. A
         // token the host stops accepting is asked for over the windows, and a
         // refusal no retry can fix is said rather than waited on.
+        connectionLostShown = false
         agent.onState = { [weak self, weak agent] state in
             guard let self else { return }
             switch state {
@@ -893,6 +897,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             case .failed(let message) where agent?.willReconnect == false:
+                self.connectionLostShown = true
                 self.appWindows.forEach { $0.setError("Lost the connection", detail: message) }
             case .waiting(let message):
                 // The host is still holding the connection this Mac lost; the
@@ -957,10 +962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.mediaRecoveryAttempts = 0
                 self.appWindows.forEach { $0.hideStatus() }
             case .stalled(let seconds):
-                self.appWindows.forEach {
-                    $0.setStatus("Reconnecting…",
-                                 detail: "No picture for \(seconds)s — asking \(host) for a new frame")
-                }
+                self.show(self.notice(for: .stalled(seconds: seconds), agent: agent, host: host))
             case .lost:
                 if self.mediaRecoveryAttempts >= 3 {
                     // Three restarts in a row and not one picture from any of
@@ -972,13 +974,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         $0.setError("Lost the stream",
                                     detail: "No picture from \(host) after three restarts.")
                     }
-                } else if let agent, agent.isConnected {
+                    return
+                }
+                // With the agent channel down too, `onReconnected` recovers.
+                let notice = self.notice(for: .lost, agent: agent, host: host)
+                if case .restart = notice, let agent {
                     self.recoverMedia(host: host, agent: agent)
                 } else {
-                    // The agent channel is down too; `onReconnected` recovers.
-                    self.appWindows.forEach {
-                        $0.setStatus("Reconnecting…", detail: "Waiting for \(host) to answer")
-                    }
+                    self.show(notice)
                 }
             }
         }
@@ -994,7 +997,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.mediaRecoveryAttempts = 0
                 self.appWindows.forEach { $0.hideStatus() }
             case .failed(let message):
-                if let agent, agent.isConnected, self.mediaRecoveryAttempts < 3 {
+                let notice = self.notice(for: .failed(message), agent: agent, host: host)
+                if case .restart = notice, let agent {
                     Log.info("[app] stream failed (\(message)); restarting it")
                     // On the next turn: `start()` reports a socket that will not
                     // open synchronously, from inside itself, and tearing the
@@ -1003,13 +1007,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self?.recoverMedia(host: host, agent: agent)
                     }
                 } else {
-                    self.appWindows.forEach { $0.setError("Stream failed", detail: message) }
+                    // Not "Stream failed" while the channel is coming back by
+                    // itself: its Try Again closes the windows that
+                    // `onReconnected` is about to restore.
+                    self.show(notice)
                 }
             case .waitingForVideo:
                 self.appWindows.forEach { $0.setStatus("Waiting for video") }
             default:
                 break
             }
+        }
+    }
+
+    /// `AppDelegate.notice(for:channel:...)`, with what this stream knows put in.
+    /// - Parameter canRestart: in place of whether the recovery has tries left.
+    private func notice(for trouble: StreamTrouble, agent: AgentConnection?, host: String,
+                        canRestart: Bool? = nil) -> StreamNotice {
+        let channel = agent.map {
+            Self.outlook(isConnected: $0.isConnected, willReconnect: $0.willReconnect)
+        } ?? .gone
+        return Self.notice(for: trouble, channel: channel, host: host,
+                           canRestart: canRestart ?? (mediaRecoveryAttempts < 3),
+                           finalErrorShown: connectionLostShown)
+    }
+
+    /// Put a notice on every stream window. `.restart` is for the caller to act
+    /// on, and shows nothing here.
+    private func show(_ notice: StreamNotice) {
+        switch notice {
+        case .status(let title, let detail):
+            appWindows.forEach { $0.setStatus(title, detail: detail) }
+        case .error(let title, let detail):
+            appWindows.forEach { $0.setError(title, detail: detail) }
+        case .restart, .keep:
+            break
         }
     }
 
@@ -1074,17 +1106,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The windows may all have closed during the wait.
             guard !self.appWindows.isEmpty, self.session == nil else { return }
             guard let media, media.streaming else {
-                if attempt < 3, agent.isConnected {
+                // The channel dropping under the open is the usual reason it
+                // failed, and then `onReconnected` tries again with a fresh
+                // count: say so, rather than offer a Try Again that would
+                // close these windows first.
+                let notice = self.notice(for: .restartFailed(media?.message), agent: agent,
+                                         host: host, canRestart: attempt < 3)
+                if case .restart = notice {
                     let delay = Double(1 << attempt)
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak agent] in
                         guard let self, let agent, self.session == nil else { return }
                         self.recoverMedia(host: host, agent: agent)
                     }
                 } else {
-                    self.appWindows.forEach {
-                        $0.setError("Lost the stream",
-                                    detail: media?.message ?? "\(host) did not start streaming again.")
-                    }
+                    self.show(notice)
                 }
                 return
             }
