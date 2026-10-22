@@ -1438,19 +1438,27 @@ public final class AgentConnection {
                 buffer.removeSubrange(buffer.startIndex...newline)
             }
             if line.isEmpty { continue }
-            guard let message = try? JSONSerialization.jsonObject(with: Data(line))
-                    as? [String: Any] else {
-                // Skipping an unparseable line leaves the reply queue one short
-                // for the rest of the session: `handle` pops one waiting
-                // completion per reply, so from here on every answer would go to
-                // the caller before it. There are no request ids to resynchronise
-                // with, so the only honest recovery is to drop the connection.
+            switch Self.read(line: line) {
+            case .message(let message, let repaired):
+                if repaired {
+                    Log.info("[agent] a \(message["type"] as? String ?? "?") message "
+                             + "was not UTF-8; read it with replacement characters")
+                }
+                handle(message)
+            case .unreadablePush(let type):
+                Log.error("[agent] skipped a \(type) message that would not parse")
+            case .unreadable:
+                // A reply, or a line that cannot be told from one. Skipping it
+                // leaves the reply queue one short for the rest of the session:
+                // `handle` pops one waiting completion per reply, so from here
+                // on every answer would go to the caller before it. There are
+                // no request ids to resynchronise with, so the only honest
+                // recovery is to drop the connection.
                 Log.error("[agent] unparseable line — dropping the connection "
                           + "rather than misrouting every later reply")
                 dropConnection(AgentError.protocolDesync)
                 return
             }
-            handle(message)
         }
 
         // A peer that never sends a newline must not grow this without bound.
@@ -1736,6 +1744,60 @@ public final class AgentConnection {
     }
 
     // MARK: - Parsing
+
+    /// What one line from the host turned out to be.
+    enum LineReading {
+        /// A message to handle. `repaired` when it could only be read once the
+        /// bytes in it that are not UTF-8 had been replaced.
+        case message([String: Any], repaired: Bool)
+        /// A push that would not parse, of a kind that can be passed over.
+        case unreadablePush(String)
+        /// Anything else that would not parse.
+        case unreadable
+    }
+
+    /// The pushes a line that will not parse may be skipped for: unprompted,
+    /// answering no request, and carrying nothing the connection depends on.
+    /// Missing one costs a cursor shape or a warning, where dropping the
+    /// connection over it costs the session -- and its reconnect re-locks the
+    /// same windows under the same covering window, so the push comes again.
+    ///
+    /// Not `hello` or `auth`, which carry the handshake; not `displays`, which
+    /// is a reply as often as it is the greeting's push; and not `busy`, after
+    /// which the host closes the socket whatever is done with it.
+    static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged"]
+
+    static func read(line: Data) -> LineReading {
+        if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+            return .message(message, repaired: false)
+        }
+        // An older host reads the PC's name and a covering window's title with
+        // Windows' ANSI calls, so they arrive in the PC's code page: an é from
+        // code page 1252 is a lone 0xE9, and JSONSerialization refuses the
+        // whole line over it. The rest of the line is sound, so read it again
+        // with what is not UTF-8 replaced. A name shown with a U+FFFD in it
+        // beats a PC that can never be connected to.
+        let repaired = Data(String(decoding: line, as: UTF8.self).utf8)
+        if repaired != line,
+           let message = try? JSONSerialization.jsonObject(with: repaired) as? [String: Any] {
+            return .message(message, repaired: true)
+        }
+        if let type = leadingType(of: line), skippablePushes.contains(type) {
+            return .unreadablePush(type)
+        }
+        return .unreadable
+    }
+
+    /// The `type` a line names in its first bytes, for a line that will not
+    /// parse. The host starts every line it writes with `{"type":"`.
+    static func leadingType(of line: Data) -> String? {
+        let opening = Array(#"{"type":""#.utf8)
+        let head = [UInt8](line.prefix(64))
+        guard head.starts(with: opening) else { return nil }
+        let rest = head.dropFirst(opening.count)
+        guard let close = rest.firstIndex(of: UInt8(ascii: "\"")) else { return nil }
+        return String(decoding: rest[..<close], as: UTF8.self)
+    }
 
     private static func parseDisplays(_ message: [String: Any]) -> [RemoteDisplay] {
         guard let raw = message["displays"] as? [[String: Any]] else { return [] }
