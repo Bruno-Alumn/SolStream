@@ -315,8 +315,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         removeEscapeToQuit()
         browser.stop()
         stopWatchingNetwork()
-        probe?.cancel()
+        stopProbing()
         window.orderOut(nil)
+    }
+
+    /// Cancelling the probe does not stop one already connecting, and its
+    /// answer, or a recheck already asked for, would otherwise go on
+    /// refreshing a window that is gone -- and could probe the PC again
+    /// just as the picker connects to it.
+    private func stopProbing() {
+        probe?.cancel()
+        probeGeneration += 1
     }
 
     // MARK: - State
@@ -830,12 +839,18 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// answered through it stayed "Reachable and paired" until Connect
     /// failed.
     ///
-    /// Watched on a queue of its own, and answered on the main thread.
+    /// Watched on a queue of its own, and answered on the main thread --
+    /// only while this monitor is still the window's. Cancelling it does
+    /// not take back a change already on its way to the main thread, which
+    /// would refresh the window after it closed and could probe the PC.
     private func watchNetwork() {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] _ in
-            DispatchQueue.main.async { self?.networkChanged() }
+        monitor.pathUpdateHandler = { [weak self, weak monitor] _ in
+            DispatchQueue.main.async {
+                guard let self, let monitor, self.pathMonitor === monitor else { return }
+                self.networkChanged()
+            }
         }
         monitor.start(queue: DispatchQueue(label: "SolStream.connect.network"))
         pathMonitor = monitor
@@ -857,7 +872,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         removeEscapeToQuit()
         browser.stop()
         stopWatchingNetwork()
-        probe?.cancel()
+        stopProbing()
         if NSApp.windows.allSatisfy({ !$0.isVisible || $0 === window }) {
             NSApp.terminate(nil)
         }

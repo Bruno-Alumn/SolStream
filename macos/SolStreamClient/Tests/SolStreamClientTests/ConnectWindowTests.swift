@@ -296,6 +296,21 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertEqual(world.probes, 1)
     }
 
+    /// Closed -- Connect pressed, say -- the window takes no more answers:
+    /// one already on its way is dropped, and the address is not
+    /// remembered by it.
+    func testAClosedWindowTakesNoAnswer() throws {
+        let world = World(tailscale: .connected(address: "100.88.1.4"), answering: ["100.101.102.103"])
+        let (connect, window) = try makeWindow(world)
+        world.delayNext("100.101.102.103", by: 0.4)
+        try pick("100.101.102.103", in: window)
+        waitUntil { world.probes > 0 }
+        connect.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        XCTAssertFalse(shown(in: window).contains("Reachable"))
+        XCTAssertNil(UserDefaults.standard.object(forKey: "SolStream.recentHosts"))
+    }
+
     /// Tailscale changing under an address on the home network says nothing
     /// new about it once it has answered, so it is not asked again.
     func testAHomeAddressThatAnsweredIsNotAskedAgain() throws {
