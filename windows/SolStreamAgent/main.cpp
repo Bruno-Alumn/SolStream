@@ -4904,12 +4904,28 @@ std::string SameMacMessage() {
 /// quiet, or sent more -- this side is about to hand the socket to
 /// ServeClient, which starts with an empty buffer, so a byte read past the
 /// line here would be a byte lost.
+///
+/// Each wait is for what is left of the budget, not the whole of it again. A
+/// receive timeout is per recv(), so a peer that sent one byte just inside
+/// the budget used to be given a second budget to send the next, and held a
+/// listener for twice as long as it was meant to.
 bool ReadOnlyLine(SOCKET socket, DWORD budget_ms, size_t max_bytes, std::string& line) {
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, (const char*) &budget_ms, sizeof(budget_ms));
     const ULONGLONG started = GetTickCount64();
     std::string buffer;
     char chunk[512];
     for (;;) {
+        const ULONGLONG elapsed = GetTickCount64() - started;
+        if (elapsed >= budget_ms) {
+            return false;
+        }
+        const ULONGLONG left_ms = budget_ms - elapsed;
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(socket, &readable);
+        timeval left{static_cast<long>(left_ms / 1000), static_cast<long>((left_ms % 1000) * 1000)};
+        if (select(0, &readable, nullptr, nullptr, &left) <= 0) {
+            return false;
+        }
         const int n = recv(socket, chunk, sizeof(chunk), 0);
         if (n <= 0) {
             return false;
@@ -4926,7 +4942,7 @@ bool ReadOnlyLine(SOCKET socket, DWORD budget_ms, size_t max_bytes, std::string&
             }
             return true;
         }
-        if (buffer.size() > max_bytes || GetTickCount64() - started >= budget_ms) {
+        if (buffer.size() > max_bytes) {
             return false;
         }
     }
