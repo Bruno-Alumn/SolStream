@@ -156,7 +156,16 @@ below runs from the repository root, checked out at the tag.
    `scripts\package-windows.ps1` on Windows each write theirs to `dist/`, and
    the three versioned files go into `dist/release/`. Those are not the bytes
    CI built and tested, and the Mac build number counts your checkout's
-   commits, so build from a full clone of the tag.
+   commits, so build from a full clone of the tag. They also carry the path
+   they were built at: the Mac binary keeps its source files' full paths,
+   your user name with them, and a release hands that to everyone who
+   downloads it. So clone to a path that names nobody, such as
+   `/tmp/SolStream`, and check before publishing; this must print 0:
+
+   ```bash
+   unzip -p dist/release/SolStream-*-macOS.zip 'SolStream.app/Contents/MacOS/SolStream' \
+       | strings | grep -c "$HOME"
+   ```
 
 2. Make sure both programs carry the key in this commit's `docs/updates.md`;
    each line must end in `:1`:

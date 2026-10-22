@@ -206,8 +206,8 @@ void Log(const char* fmt, ...) {
 /// A Windows PC has more addresses than it has networks. Hyper-V, WSL and
 /// Docker each add a virtual switch with its own private range, and on this
 /// project's own test machine the highest-ranked address by any sensible
-/// heuristic was 172.x.x.x — a Hyper-V switch that no Mac anywhere can
-/// reach, printed under "Address" as though it were the answer.
+/// heuristic was a 172.x.x.x address on a Hyper-V switch that no Mac
+/// anywhere can reach, printed under "Address" as though it were the answer.
 ///
 /// Connecting a UDP socket sends nothing; it only makes Windows choose the
 /// interface it would use to reach the outside world, which is the interface a
