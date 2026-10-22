@@ -323,6 +323,29 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "SolStream.recentHosts"))
     }
 
+    /// A search of the other paired addresses, still out when the window
+    /// closes -- Connect pressed meanwhile -- takes no answer: the address
+    /// last used stays the one remembered, and nothing more is sent.
+    func testARouteSearchOutAtCloseTakesNoAnswer() throws {
+        defaults.set("192.168.1.21", forKey: "SolStream.lastHost")
+        defaults.set(["192.168.1.21", "100.101.102.103"], forKey: "SolStream.recentHosts")
+        let world = World(tailscale: .connected(address: "100.88.1.4"), answering: ["100.101.102.103"])
+        world.delayNext("100.101.102.103", by: 0.5)
+        let (connect, window) = try makeWindow(world)
+        connect.probeForTesting()
+        // The remembered address fails, and the search for another is out.
+        waitUntil { world.probes >= 2 }
+        XCTAssertEqual(world.probes, 2)
+
+        connect.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(defaults.string(forKey: "SolStream.lastHost"), "192.168.1.21")
+        XCTAssertEqual(defaults.stringArray(forKey: "SolStream.recentHosts"),
+                       ["192.168.1.21", "100.101.102.103"])
+        XCTAssertFalse(shown(in: window).contains("Reachable"))
+        XCTAssertEqual(world.probes, 2)
+    }
+
     /// Tailscale changing under an address on the home network says nothing
     /// new about it once it has answered, so it is not asked again.
     func testAHomeAddressThatAnsweredIsNotAskedAgain() throws {

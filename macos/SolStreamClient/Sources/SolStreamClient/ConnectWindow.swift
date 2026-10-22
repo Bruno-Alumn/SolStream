@@ -318,6 +318,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         return hostDropdown.listWindow
     }
 
+    /// Ask the PC on show, as `show()` does, without showing the window.
+    func probeForTesting() {
+        scheduleProbe()
+    }
+
     func close() {
         removeEscapeToQuit()
         browser.stop()
@@ -664,7 +669,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         guard !candidates.isEmpty else { return false }
         searchingRoutes = true
-        // The probe that failed, whose recheck this search may ask for.
+        // The probe that failed. The search answers for it, and asks for its
+        // recheck, only while it is the latest (`probeGeneration`).
         let generation = probeGeneration
         let reach = self.reach
         let askedUnderTailscale = state.askedUnderTailscale
@@ -696,8 +702,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.searchingRoutes = false
-                // Only if nothing moved meanwhile: a pick, or discovery winning.
-                guard !self.hostChosenHere, self.state.address == failed else { return }
+                // Only if nothing moved meanwhile: a pick, discovery winning, a
+                // newer probe, or the window closing. Closed by Connect, the
+                // window took the answer all the same, remembered the other
+                // address as the one last used, and could probe the PC again.
+                guard self.probeGeneration == generation, !self.hostChosenHere,
+                      self.state.address == failed else { return }
                 guard let found else {
                     // Nothing else answered either. Say so -- the search started
                     // from a failed probe that had not refreshed the window, and
