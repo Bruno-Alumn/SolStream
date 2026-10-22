@@ -2038,6 +2038,24 @@ std::string ProgramName(HWND window) {
     return ToUtf8(name ? name + 1 : path);
 }
 
+/// A window's title for the log, read wide and converted like the one the
+/// occlusion push sends the Mac. The ANSI call answers in the PC's code page,
+/// and a log holding both encodings garbles one or the other in whatever it is
+/// opened with -- while its focus, pointer and occlusion lines are read side by
+/// side to explain one fault.
+std::string WindowTitleForLog(HWND window) {
+    wchar_t title[128] = {};
+    GetWindowTextW(window, title, 128);
+    return ToUtf8(title);
+}
+
+/// A window's class name for the log, read the same way for the same reason.
+std::string WindowClassForLog(HWND window) {
+    wchar_t cls[96] = {};
+    GetClassNameW(window, cls, 96);
+    return ToUtf8(cls);
+}
+
 
 /// Has this slot's window gone?
 ///
@@ -2431,10 +2449,9 @@ void RescueStrandedWindows() {
         if (g_rescued.size() < 64) {
             g_rescued.push_back(window);
         }
-        char title[128] = {0};
-        GetWindowTextA(window, title, sizeof(title) - 1);
+        const std::string title = WindowTitleForLog(window);
         Log("[rescue] \"%s\" opened on the capture display, where no monitor shows "
-            "it; moved it to the main display", title[0] ? title : "(untitled)");
+            "it; moved it to the main display", title.empty() ? "(untitled)" : title.c_str());
     }
 }
 
@@ -2633,15 +2650,15 @@ void ReportForegroundThief() {
         return;
     }
 
-    char cls[96] = {0};
-    char title[128] = {0};
+    std::string cls;
+    std::string title;
     if (foreground) {
-        GetClassNameA(foreground, cls, sizeof(cls) - 1);
-        GetWindowTextA(foreground, title, sizeof(title) - 1);
+        cls = WindowClassForLog(foreground);
+        title = WindowTitleForLog(foreground);
     }
     Log("[focus] \"%s\" [%s] took the keyboard from the streamed window;"
         " typing at the Mac is going there instead",
-        title[0] ? title : "(untitled)", cls[0] ? cls : "?");
+        title.empty() ? "(untitled)" : title.c_str(), cls.empty() ? "?" : cls.c_str());
 }
 
 /// Say which window would receive a click at the pointer.
@@ -2683,14 +2700,15 @@ void ReportPointerTarget() {
     }
 
     reported = root;
-    char cls[96] = {0};
-    char title[128] = {0};
+    std::string cls;
+    std::string title;
     if (root) {
-        GetClassNameA(root, cls, sizeof(cls) - 1);
-        GetWindowTextA(root, title, sizeof(title) - 1);
+        cls = WindowClassForLog(root);
+        title = WindowTitleForLog(root);
     }
     Log("[pointer] at %ld,%ld a click would go to [%s] \"%s\"%s",
-        cursor.x, cursor.y, cls[0] ? cls : "?", title[0] ? title : "(untitled)",
+        cursor.x, cursor.y, cls.empty() ? "?" : cls.c_str(),
+        title.empty() ? "(untitled)" : title.c_str(),
         ours ? "" : "  <-- NOT the streamed window");
 }
 
@@ -3968,11 +3986,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // now nothing anywhere recorded which of the two had happened. Only when
         // it is large enough to see -- an off-by-one on a rounded axis is not news.
         if (missed > 2) {
-            char title[96] = {0};
-            GetWindowTextA(window, title, sizeof(title) - 1);
+            const std::string title = WindowTitleForLog(window);
             Log("[place] \"%s\" asked for %lldx%lld at %lld,%lld and settled at "
                 "%ldx%ld at %ld,%ld (%lld px out)",
-                title[0] ? title : "(untitled)", w, h, x, y,
+                title.empty() ? "(untitled)" : title.c_str(), w, h, x, y,
                 client.right - client.left, client.bottom - client.top,
                 client.left, client.top, missed);
         }
@@ -4081,10 +4098,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!foreground) {
             // Worth a log line of its own: the window still streams, so nothing
             // looks wrong, but the user's keystrokes are going somewhere else.
-            char title[128] = {0};
-            GetWindowTextA(window, title, sizeof(title) - 1);
+            const std::string title = WindowTitleForLog(window);
             Log("[focus] could not take the foreground for \"%s\";"
-                " keystrokes will go to whatever holds it", title);
+                " keystrokes will go to whatever holds it", title.c_str());
         }
 
         char buffer[128];
