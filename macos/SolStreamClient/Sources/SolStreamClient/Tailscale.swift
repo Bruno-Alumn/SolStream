@@ -11,9 +11,9 @@ import Darwin
 /// a first run, and when the PC on show is not answering.
 ///
 /// The decision is a pure function of two facts -- the addresses on each of
-/// this Mac's tunnels, and whether the Tailscale app is installed -- so it
-/// can be tested without either; `current()` is the one place that reads
-/// the real ones.
+/// this Mac's tunnels, and whether Tailscale is installed -- so it can be
+/// tested without either; `current()` is the one place that reads the real
+/// ones.
 enum TailscaleStatus: Equatable {
     /// On, with this address on the tailnet.
     case connected(address: String)
@@ -29,10 +29,19 @@ enum TailscaleStatus: Equatable {
     /// is asked first.
     static let bundleIdentifiers = ["io.tailscale.ipn.macos", "io.tailscale.ipn.macsys"]
 
+    /// Tailscale with no app: Homebrew's `tailscale` formula, on Apple
+    /// silicon and on Intel, or a daemon that is running from wherever it
+    /// was put, which leaves its socket here.
+    static let commandLinePaths = ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale",
+                                   "/var/run/tailscaled.socket"]
+
     // MARK: - The decision
 
-    /// - Parameter tunnels: the addresses on each tunnel interface, one list
-    ///   per interface, IPv4 and IPv6 together.
+    /// - Parameters:
+    ///   - tunnels: the addresses on each tunnel interface, one list per
+    ///     interface, IPv4 and IPv6 together.
+    ///   - installed: whether Tailscale is on this Mac at all, the app or
+    ///     only its command line.
     ///
     /// An address in Tailscale's range is not enough by itself. Other
     /// overlay VPNs hand out the same range on a tunnel of their own --
@@ -50,11 +59,14 @@ enum TailscaleStatus: Equatable {
         }
         // A tailnet can be set to give out no IPv6 addresses, which leaves a
         // tunnel with the range and no IPv6 address of its own beside it --
-        // but so does NetBird. Taken as Tailscale where Tailscale is
-        // installed, which is the likelier of the two there. A tunnel with
-        // some other IPv6 address of its own is somebody else's.
+        // but so does NetBird. And a Headscale server can be set to give out
+        // another unique local prefix than Tailscale's. Either is taken as
+        // Tailscale where Tailscale is installed, which is the likelier
+        // there. A tunnel with a global IPv6 address of its own, as WARP's
+        // is, is somebody else's.
         if installed {
-            for addresses in tunnels where !addresses.contains(where: isOwnIPv6) {
+            for addresses in tunnels
+            where addresses.filter(isOwnIPv6).allSatisfy(isUniqueLocalIPv6) {
                 if let address = addresses.first(where: isTailscaleAddress) {
                     return .connected(address: address)
                 }
@@ -89,6 +101,14 @@ enum TailscaleStatus: Equatable {
         return bytes.prefix(6).elementsEqual([0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0])
     }
 
+    /// A unique local IPv6 address, fc00::/7: one a private network gives
+    /// out, as Tailscale's own prefix is, where a global one is routed on
+    /// the internet.
+    static func isUniqueLocalIPv6(_ address: String) -> Bool {
+        guard let bytes = ipv6Bytes(address) else { return false }
+        return bytes[0] & 0xFE == 0xFC
+    }
+
     /// An IPv6 address the tunnel was given, as against the link-local one
     /// (fe80::/10) macOS puts on every tunnel by itself.
     static func isOwnIPv6(_ address: String) -> Bool {
@@ -109,11 +129,11 @@ enum TailscaleStatus: Equatable {
 
     // MARK: - What the Mac says
 
-    /// What this Mac is now. Cheap -- one `getifaddrs` and a Launch Services
-    /// lookup -- but not free, so the connect window asks every few seconds
-    /// at most rather than on every refresh.
+    /// What this Mac is now. Cheap -- one `getifaddrs`, a Launch Services
+    /// lookup and a few file checks -- but not free, so the connect window
+    /// asks every few seconds at most rather than on every refresh.
     static func current() -> TailscaleStatus {
-        decide(tunnels: tunnels(), installed: applicationURL() != nil)
+        decide(tunnels: tunnels(), installed: applicationURL() != nil || hasCommandLine())
     }
 
     /// The addresses on each of this Mac's tunnel interfaces that are up,
@@ -145,6 +165,15 @@ enum TailscaleStatus: Equatable {
             found[name, default: []].append(String(cString: host))
         }
         return names.compactMap { found[$0] }
+    }
+
+    /// Whether Tailscale's command line is here without the app. Files only,
+    /// not `tailscale status`: this is asked on the main thread, and a
+    /// process started there would hold up the window.
+    static func hasCommandLine(fileExists: (String) -> Bool = {
+        FileManager.default.fileExists(atPath: $0)
+    }) -> Bool {
+        commandLinePaths.contains(where: fileExists)
     }
 
     /// Where the Tailscale app is, if it is anywhere.
