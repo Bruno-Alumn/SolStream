@@ -106,16 +106,20 @@ final class TailscaleTests: XCTestCase {
     }
 
     /// Homebrew's `tailscale` formula has no app, and is Tailscale all the
-    /// same: the command line, or its daemon running, counts as installed.
-    /// The app counts first wherever it is.
+    /// same: the command line, or its daemon running, counts as installed,
+    /// and the daemon's socket says whether it runs. The app counts first
+    /// wherever it is.
     func testTheCommandLineAloneCountsAsInstalled() {
         let noApp: () -> URL? = { nil }
+        let socket = "/var/run/tailscaled.socket"
         XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/opt/homebrew/bin/tailscale" },
-                       .commandLine)
+                       .commandLine(daemonRunning: false))
         XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/usr/local/bin/tailscale" },
-                       .commandLine)
-        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/var/run/tailscaled.socket" },
-                       .commandLine, "a daemon running from anywhere")
+                       .commandLine(daemonRunning: false))
+        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { [socket, "/opt/homebrew/bin/tailscale"].contains($0) },
+                       .commandLine(daemonRunning: true))
+        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == socket },
+                       .commandLine(daemonRunning: true), "a daemon running from anywhere")
         XCTAssertNil(TailscaleStatus.installation(app: noApp) { _ in false })
         XCTAssertNil(TailscaleStatus.installation(app: noApp) { $0 == "/opt/homebrew/bin/netbird" })
 
@@ -128,17 +132,31 @@ final class TailscaleTests: XCTestCase {
     /// and off is off without the app: there is nothing to open, so the
     /// line says what to run and has no link.
     func testTheCommandLineAloneOnAndOff() throws {
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun4", "100.88.1.4"]],
-                                              installed: .commandLine),
+        let running = TailscaleStatus.Installation.commandLine(daemonRunning: true)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun4", "100.88.1.4"]], installed: running),
                        .connected(address: "100.88.1.4"))
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: .commandLine), .commandLineButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: running),
+                       .commandLineButOff(daemonRunning: true))
         let netBird = [["fe80::1%utun100", "100.64.114.31", "fd00:1234:5678::1f"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: .commandLine), .commandLineButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: running),
+                       .commandLineButOff(daemonRunning: true))
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: .commandLine(daemonRunning: false)),
+                       .commandLineButOff(daemonRunning: false))
+    }
 
-        let advice = try XCTUnwrap(TailscaleStatus.commandLineButOff.advice)
-        XCTAssertNil(advice.action)
-        XCTAssertEqual(advice.words,
+    /// With the daemon running, Tailscale is only down, and "tailscale up"
+    /// brings it up. With it stopped, that command has nothing to talk to,
+    /// so the daemon is started first. Neither has a link.
+    func testWhatTheCommandLineIsToldToRun() throws {
+        let down = try XCTUnwrap(TailscaleStatus.commandLineButOff(daemonRunning: true).advice)
+        XCTAssertNil(down.action)
+        XCTAssertEqual(down.words,
                        "Tailscale is installed but off. Run “sudo tailscale up” to reach your PC away from home.")
+        let stopped = try XCTUnwrap(TailscaleStatus.commandLineButOff(daemonRunning: false).advice)
+        XCTAssertNil(stopped.action)
+        XCTAssertEqual(stopped.words,
+                       "Tailscale is installed but not running. Run “sudo brew services start tailscale”, "
+                       + "then “sudo tailscale up”.")
     }
 
     /// Tailscale's own tunnel wins over a guess at another one, wherever it

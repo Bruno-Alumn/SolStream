@@ -21,15 +21,17 @@ enum TailscaleStatus: Equatable {
     /// signed out.
     case installedButOff
     /// Only the command line is here -- Homebrew's formula, say -- and
-    /// nothing is on the tailnet. There is no app to open.
-    case commandLineButOff
+    /// nothing is on the tailnet. There is no app to open, and what to run
+    /// depends on whether its daemon is running.
+    case commandLineButOff(daemonRunning: Bool)
     case missing
 
     /// How Tailscale is on this Mac.
     enum Installation: Equatable {
         case app
-        /// The command line and its daemon, without the app.
-        case commandLine
+        /// The command line without the app, and whether its daemon is
+        /// running: `tailscale up` cannot reach a daemon that is not.
+        case commandLine(daemonRunning: Bool)
     }
 
     static let downloadURL = URL(string: "https://tailscale.com/download")!
@@ -40,10 +42,13 @@ enum TailscaleStatus: Equatable {
     static let bundleIdentifiers = ["io.tailscale.ipn.macos", "io.tailscale.ipn.macsys"]
 
     /// Tailscale with no app: Homebrew's `tailscale` formula, on Apple
-    /// silicon and on Intel, or a daemon that is running from wherever it
-    /// was put, which leaves its socket here.
-    static let commandLinePaths = ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale",
-                                   "/var/run/tailscaled.socket"]
+    /// silicon and on Intel.
+    static let commandLinePaths = ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
+
+    /// Where Tailscale's daemon listens while it runs, from wherever it was
+    /// put. Gone while it is stopped, as it is until the formula's service
+    /// is started.
+    static let daemonSocket = "/var/run/tailscaled.socket"
 
     // MARK: - The decision
 
@@ -82,7 +87,7 @@ enum TailscaleStatus: Equatable {
         }
         switch installed {
         case .app: return .installedButOff
-        case .commandLine: return .commandLineButOff
+        case .commandLine(let running): return .commandLineButOff(daemonRunning: running)
         }
     }
 
@@ -179,7 +184,8 @@ enum TailscaleStatus: Equatable {
                                  FileManager.default.fileExists(atPath: $0)
                              }) -> Installation? {
         if app() != nil { return .app }
-        return commandLinePaths.contains(where: fileExists) ? .commandLine : nil
+        if fileExists(daemonSocket) { return .commandLine(daemonRunning: true) }
+        return commandLinePaths.contains(where: fileExists) ? .commandLine(daemonRunning: false) : nil
     }
 
     /// Where the Tailscale app is, if it is anywhere.
@@ -209,9 +215,14 @@ enum TailscaleStatus: Equatable {
         case .installedButOff:
             return ("Tailscale is installed but off. Turn it on to reach your PC away from home.",
                     "Open Tailscale")
-        case .commandLineButOff:
+        case .commandLineButOff(daemonRunning: true):
             return ("Tailscale is installed but off. Run “sudo tailscale up” to reach your PC away from home.",
                     nil)
+        case .commandLineButOff(daemonRunning: false):
+            // "tailscale up" alone fails while the daemon is stopped: it has
+            // nothing to talk to.
+            return ("Tailscale is installed but not running. Run “sudo brew services start tailscale”, "
+                    + "then “sudo tailscale up”.", nil)
         case .missing:
             return ("Away from home? Tailscale connects this Mac and your PC from anywhere, free.",
                     "Get Tailscale")

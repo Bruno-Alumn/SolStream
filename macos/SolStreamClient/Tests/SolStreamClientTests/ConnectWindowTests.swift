@@ -163,7 +163,7 @@ final class ConnectWindowTests: XCTestCase {
     /// With only Tailscale's command line there is no app to open, so the
     /// line says what to run and offers no link.
     func testTheCommandLineAloneGetsWordsAndNoLink() throws {
-        let world = World(tailscale: .commandLineButOff, answering: [])
+        let world = World(tailscale: .commandLineButOff(daemonRunning: true), answering: [])
         let (_, window) = try makeWindow(world)
         try pick("192.168.1.20", in: window)
         waitUntil { self.shown(in: window).contains("Not answering") }
