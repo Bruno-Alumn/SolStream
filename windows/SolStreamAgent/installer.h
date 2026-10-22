@@ -81,10 +81,11 @@ bool InstallSelf(const InstallOptions& options, std::string& error);
 /// choice. True when it cannot tell.
 bool StartsAtLogon();
 
-/// Undo InstallSelf. Settings in %LOCALAPPDATA%\SolStream are deliberately kept:
-/// they hold the pairing token and the media session counter, and making every
-/// Mac pair again after a reinstall is a worse default than leaving a few
-/// kilobytes behind.
+/// Undo InstallSelf, and take the virtual display back too if SolStream
+/// installed it (RemoveInstalledDriver). Settings in %LOCALAPPDATA%\SolStream
+/// are deliberately kept: they hold the pairing token and the media session
+/// counter, and making every Mac pair again after a reinstall is a worse
+/// default than leaving a few kilobytes behind.
 bool UninstallSelf(std::string& error);
 
 /// Where an install lives.

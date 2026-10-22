@@ -5589,13 +5589,6 @@ int wmain(int argc, wchar_t** argv) {
             }
             return 0;
         }
-        // The virtual display first, and only if SolStream put it here: one
-        // somebody installed for themselves is theirs.
-        std::string driver_note;
-        solstream::RemoveInstalledDriver(driver_note);
-        for (const std::string& line : SplitLines(driver_note)) {
-            Log("[uninstall] %s", line.c_str());
-        }
         std::string error;
         const bool ok = solstream::UninstallSelf(error);
         solstream::WriteInstallResult(ok, error);

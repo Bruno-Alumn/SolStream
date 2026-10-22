@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "driver_install.h"
 #include "host_window.h"
 #include "ports.h"
 #include "util.h"
@@ -1685,6 +1686,24 @@ bool UninstallSelf(std::string& error) {
                    "Host\" in Task Scheduler");
     } else {
         InstallLog("logon task removed");
+    }
+    // The virtual display, and only if SolStream put it here: one somebody
+    // installed for themselves is theirs. After the host has quit, so nothing
+    // of SolStream's is holding it -- something that is makes Windows put the
+    // removal off to the restart. And here, not beside the calls, so every
+    // way into an uninstall does it: the window's own, already elevated,
+    // called only this and left the display on the PC.
+    std::string driver_note;
+    RemoveInstalledDriver(driver_note);
+    for (size_t start = 0; start < driver_note.size();) {
+        size_t end = driver_note.find('\n', start);
+        if (end == std::string::npos) {
+            end = driver_note.size();
+        }
+        if (end > start) {
+            InstallLog(driver_note.substr(start, end - start));
+        }
+        start = end + 1;
     }
     // By program first, which catches every rule whatever it is called --
     // including the ones Windows writes itself when someone clicks Allow.
