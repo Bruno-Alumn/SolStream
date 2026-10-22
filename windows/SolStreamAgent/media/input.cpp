@@ -323,8 +323,9 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     // end of the window, the ack stops there and stays there.
     //
     // A stuck acknowledgement costs repetition, which is cheap -- the client
-    // resends at most eight events every 10 ms, and every one of them is still
-    // applied here exactly once. A wrong one costs an event that both ends have
+    // resends its eight newest events every 10 ms, with the releases it still
+    // owes for up to five seconds, and every one of them is still applied here
+    // exactly once. A wrong one costs an event that both ends have
     // forgotten and neither applied, which for a key-up means a key held down
     // until the session ends.
     uint32_t acked = acked_.load();

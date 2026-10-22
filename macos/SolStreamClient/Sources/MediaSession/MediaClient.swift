@@ -93,8 +93,9 @@ public final class MediaClient {
     private var unacked: [(seq: UInt32, blob: Data)] = []
     private var inputAck: UInt32 = 0
     private var lastInputSentAt: UInt64 = 0
-    /// When each release kept past a give-up was first kept, by sequence; see
-    /// `keptPastGivingUp`. Guarded by `stateLock`.
+    /// When each release still owed was first kept beyond the newest events,
+    /// or past a give-up, by sequence; see `inputBatch`. Guarded by
+    /// `stateLock`.
     private var releasesKeptSince: [UInt32: UInt64] = [:]
 
     private var needKeyframe = false
@@ -476,18 +477,96 @@ public final class MediaClient {
     }
 
     /// Queue one input event. The datagram carries it plus the unacknowledged
-    /// tail, so a single loss costs nothing.
+    /// tail, so a single loss costs nothing; see `inputBatch`.
     public func sendInput(_ blob: Data) {
         guard isRunning, blob.count >= 2 else { return }
         stateLock.lock()
         let seq = nextSeq
         nextSeq &+= 1
         unacked.append((seq, blob))
-        if unacked.count > 32 { unacked.removeFirst(unacked.count - 32) }
-        let batch = unacked.suffix(8)
-        lastInputSentAt = DispatchTime.now().uptimeNanoseconds
+        let now = DispatchTime.now().uptimeNanoseconds
+        let out = Self.inputBatch(unacked, keptSince: releasesKeptSince, now: now)
+        unacked = out.unacked
+        releasesKeptSince = out.keptSince
+        lastInputSentAt = now
         stateLock.unlock()
-        sendInputBatch(Array(batch))
+        sendInputBatch(out.batch)
+    }
+
+    /// How many of the newest events every input datagram carries.
+    static let inputWindow = 8
+    /// How many of the newest events are kept for the host to acknowledge,
+    /// beside the releases still owed.
+    static let inputTail = 32
+
+    /// What an input datagram carries, and what of the unacknowledged input
+    /// is kept for the next one.
+    ///
+    /// The newest `inputWindow` events, behind every release still owed from
+    /// before them -- see `SMTInput.releasesStillOwed`. A release used to be
+    /// carried only while it was among the newest eight, and kept only while
+    /// it was among the newest thirty-two, and a mouse sends a hundred moves a
+    /// second: let go of W in a network gap while still aiming, and W-up was
+    /// gone from every datagram, then from this Mac, before the gap was over.
+    /// The host never heard it, and the character walked on until W was
+    /// pressed again. Now each is carried for `releaseKeepNanos` from when it
+    /// first fell behind the newest events -- not for ever, because a release
+    /// the host already has goes unacknowledged for as long as some older
+    /// event it never got holds its acknowledgement back -- and is kept until
+    /// then, however much input comes after it.
+    ///
+    /// In sequence order, and cut to one datagram; see `fitted`. Pure, so the
+    /// rule can be tested without a session or a clock.
+    static func inputBatch(_ pending: [(seq: UInt32, blob: Data)],
+                           keptSince: [UInt32: UInt64], now: UInt64)
+        -> (batch: [(seq: UInt32, blob: Data)], unacked: [(seq: UInt32, blob: Data)],
+            keptSince: [UInt32: UInt64]) {
+        let owed = Set(SMTInput.releasesStillOwed(pending).map(\.seq))
+        let windowStart = max(0, pending.count - inputWindow)
+        let tailStart = max(0, pending.count - inputTail)
+        var batch: [(seq: UInt32, blob: Data)] = []
+        var kept: [(seq: UInt32, blob: Data)] = []
+        var since: [UInt32: UInt64] = [:]
+        for (index, event) in pending.enumerated() {
+            let isOwed = owed.contains(event.seq)
+            if index >= windowStart {
+                // Among the newest, so carried anyway. One kept past a
+                // give-up keeps its time, for when it falls behind again.
+                if isOwed, let first = keptSince[event.seq] { since[event.seq] = first }
+                batch.append(event)
+                kept.append(event)
+                continue
+            }
+            var carried = false
+            if isOwed {
+                let first = keptSince[event.seq] ?? now
+                carried = now <= first || now - first < releaseKeepNanos
+                // An expired one still in the tail keeps its time too, or
+                // the next datagram would start its five seconds again.
+                if carried || index >= tailStart { since[event.seq] = first }
+            }
+            if carried { batch.append(event) }
+            if carried || index >= tailStart { kept.append(event) }
+        }
+        return (fitted(batch, owed: owed), kept, since)
+    }
+
+    /// `batch`, cut to what one datagram holds. It fits with room to spare:
+    /// the newest eight events are under a hundred bytes, and a release for
+    /// every key on a keyboard about a thousand more. Should it ever not -- a
+    /// text event can be 260 bytes -- the oldest of what is not a release
+    /// still owed goes first, then the oldest release, and never the newest
+    /// event; `sendInputBatch` would otherwise send none of it.
+    static func fitted(_ batch: [(seq: UInt32, blob: Data)],
+                       owed: Set<UInt32>) -> [(seq: UInt32, blob: Data)] {
+        var events = batch
+        var size = 4 + events.reduce(0) { $0 + 4 + $1.blob.count }
+        while size > SMT.maxPlaintext && events.count > 1 {
+            let oldest = events.indices.dropLast().first { !owed.contains(events[$0].seq) } ?? 0
+            size -= 4 + events[oldest].blob.count
+            events.remove(at: oldest)
+        }
+        return events
     }
 
     /// How long a release is kept, and repeated, once the host has stopped
@@ -514,6 +593,33 @@ public final class MediaClient {
             since[event.seq] = first
         }
         return (events, since)
+    }
+
+    /// One tick of the repeat timer: what is sent again, and what of the
+    /// unacknowledged input is kept.
+    ///
+    /// Within 300 ms of the last new event, the datagram that event went in
+    /// is sent again, every tick. After that, a host that will not
+    /// acknowledge is a host that is not listening, and holding the events
+    /// forever would repeat them into a session that has moved on -- all but
+    /// the releases still owed, which are sent every tenth tick, every one of
+    /// them, until the host has them or they are five seconds old. Pure, so
+    /// the timer's rule can be tested without a timer.
+    static func repeatStep(_ unacked: [(seq: UInt32, blob: Data)], inputAck: UInt32,
+                           sinceSentMs: Double, keptSince: [UInt32: UInt64],
+                           tick: Int, now: UInt64)
+        -> (unacked: [(seq: UInt32, blob: Data)], keptSince: [UInt32: UInt64],
+            repeats: [(seq: UInt32, blob: Data)]) {
+        let pending = unacked.filter { $0.seq > inputAck }
+        guard !pending.isEmpty else { return (unacked, keptSince, []) }
+        guard sinceSentMs > 300 else {
+            let out = inputBatch(pending, keptSince: keptSince, now: now)
+            return (out.unacked, out.keptSince, out.batch)
+        }
+        let kept = keptPastGivingUp(pending, keptSince: keptSince, now: now)
+        let repeats = tick % 10 == 0
+            ? inputBatch(kept.events, keptSince: kept.keptSince, now: now).batch : []
+        return (kept.events, kept.keptSince, repeats)
     }
 
     private func sendInputBatch(_ events: [(seq: UInt32, blob: Data)]) {
@@ -578,27 +684,18 @@ public final class MediaClient {
             // the user stops typing there are none -- so a lost final key-up is
             // a key that stays down, and auto-repeats, until something else is
             // typed. This timer is the thing that makes that impossible.
+            //
+            // And gives up 300 ms after the last new event, keeping only the
+            // releases still owed: see `repeatStep`.
             self.stateLock.lock()
-            let pending = self.unacked.filter { $0.seq > self.inputAck }
-            let sinceSent = Self.millis(since: self.lastInputSentAt)
-            let giveUp = sinceSent > 300
-            var repeats: [(seq: UInt32, blob: Data)] = []
-            if !pending.isEmpty && !giveUp {
-                repeats = Array(pending.suffix(8))
-            } else if giveUp && !pending.isEmpty {
-                // 300 ms of a host that will not acknowledge is a host that
-                // is not listening. Holding the events forever would repeat
-                // them into a session that has moved on -- all but the
-                // releases still owed, which are repeated ten times a second
-                // until the host has them or they are five seconds old.
-                let kept = Self.keptPastGivingUp(pending, keptSince: self.releasesKeptSince,
-                                                 now: DispatchTime.now().uptimeNanoseconds)
-                self.unacked = kept.events
-                self.releasesKeptSince = kept.keptSince
-                if ticks % 10 == 0 { repeats = Array(kept.events.suffix(8)) }
-            }
+            let step = Self.repeatStep(self.unacked, inputAck: self.inputAck,
+                                       sinceSentMs: Self.millis(since: self.lastInputSentAt),
+                                       keptSince: self.releasesKeptSince, tick: ticks,
+                                       now: DispatchTime.now().uptimeNanoseconds)
+            self.unacked = step.unacked
+            self.releasesKeptSince = step.keptSince
             self.stateLock.unlock()
-            if !repeats.isEmpty { self.sendInputBatch(repeats) }
+            if !step.repeats.isEmpty { self.sendInputBatch(step.repeats) }
 
             // Still holding for a keyframe a quarter-second after asking, with
             // none of it arriving: the request or the IDR was lost. Ask again
