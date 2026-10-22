@@ -2,6 +2,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 
 #include "capture.h"
 #include "encoder.h"
@@ -10,6 +11,16 @@
 #include "audio.h"
 #include "log.h"
 #include "overflow_gate.h"
+#include "receive_errors.h"
+
+// The Windows SDK's mstcpip.h has it; mingw's, which only checks the syntax
+// here, does not.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+static_assert(solstream::media::kWsaMessageTooBig == WSAEMSGSIZE);
+static_assert(solstream::media::kWsaConnectionReset == WSAECONNRESET);
+static_assert(solstream::media::kWsaTimedOut == WSAETIMEDOUT);
 
 #include <mfapi.h>
 #include <timeapi.h>
@@ -715,7 +726,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
 
 void MediaSession::Impl::ReceiveLoop() {
     unsigned char buffer[2048];
-    bool complained = false;
+    ComplaintLimiter complaints;
     for (;;) {
         if (!running.load()) { break; }
         sockaddr_in from{};
@@ -727,24 +738,33 @@ void MediaSession::Impl::ReceiveLoop() {
             // this loop notice `running` going false. Everything else has to be
             // told apart from it: an error that does NOT block returns here
             // immediately, and a bare `continue` then spins this thread at the
-            // speed of the system call. WSAECONNRESET is the one that actually
-            // happens -- Windows reports an ICMP port-unreachable on the next
-            // recvfrom of an unconnected UDP socket -- and a Mac that has gone
-            // is precisely when it arrives. One core at 100% for the fifteen
+            // speed of the system call: one core at 100% for the fifteen
             // seconds until the silence timeout fires, on a machine whose owner
-            // is not watching.
+            // is not watching. But a failure about ONE datagram -- too big, or
+            // an ICMP report about something sent -- is passed over at once,
+            // since sleeping on each let a stream of oversized datagrams hold
+            // up the Mac's input; see receive_errors.h.
             const int error = n < 0 ? WSAGetLastError() : 0;
-            if (error != 0 && error != WSAETIMEDOUT) {
-                if (!complained) {
-                    complained = true;
-                    Log("[media] recvfrom failed with %d; pacing the receive loop",
-                        error);
+            switch (ClassifyReceiveFailure(error)) {
+                case ReceiveFailure::None:
+                case ReceiveFailure::Reset:
+                    break;
+                case ReceiveFailure::Oversized:
+                    rejected.fetch_add(1);
+                    break;
+                case ReceiveFailure::Persistent: {
+                    uint64_t unsaid = 0;
+                    if (complaints.Allow(GetTickCount64(), unsaid)) {
+                        Log("[media] recvfrom failed with %d (%llu more since the last "
+                            "report); pacing the receive loop",
+                            error, (unsigned long long) unsaid);
+                    }
+                    Sleep(5);
+                    break;
                 }
-                Sleep(5);
             }
             continue;
         }
-        complained = false;
         datagramsReceived.fetch_add(1);
         unsigned char* plaintext = nullptr;
         size_t plaintextLen = 0;
@@ -875,6 +895,13 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     setsockopt(s.socket, SOL_SOCKET, SO_RCVBUF, (const char*) &rcvbuf, sizeof(rcvbuf));
     DWORD timeout = 200;
     setsockopt(s.socket, SOL_SOCKET, SO_RCVTIMEO, (const char*) &timeout, sizeof(timeout));
+    // Not told about ICMP port-unreachables. Windows turns each into a failed
+    // recvfrom, and they say only that something this socket sent went
+    // nowhere -- which the silence timeout says better.
+    BOOL reportResets = FALSE;
+    DWORD returned = 0;
+    WSAIoctl(s.socket, SIO_UDP_CONNRESET, &reportResets, sizeof(reportResets), nullptr, 0,
+             &returned, nullptr, nullptr);
     // Exclusive, as the agent's TCP port is and for the same reason: without it
     // Windows lets another process that asks for SO_REUSEADDR bind this port on
     // top of this one, and which of the two then receives the Mac's input

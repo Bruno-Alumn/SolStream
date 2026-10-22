@@ -43,6 +43,7 @@
 #include "media/audio_source.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
+#include "media/receive_errors.h"
 #include "session_takeover.h"
 #include "stranded.h"
 #include "media/keys.h"
@@ -2582,6 +2583,39 @@ void TestAudioSource() {
     CHECK(std::strcmp(AudioSourceReply(false, false), "system") == 0);
 }
 
+void TestReceiveFailures() {
+    using namespace media;
+    CHECK(kWsaMessageTooBig == WSAEMSGSIZE);
+    CHECK(kWsaConnectionReset == WSAECONNRESET);
+    CHECK(kWsaTimedOut == WSAETIMEDOUT);
+    // The timeout and an empty datagram are nothing.
+    CHECK(ClassifyReceiveFailure(0) == ReceiveFailure::None);
+    CHECK(ClassifyReceiveFailure(WSAETIMEDOUT) == ReceiveFailure::None);
+    // One datagram's trouble is passed over at once.
+    CHECK(ClassifyReceiveFailure(WSAEMSGSIZE) == ReceiveFailure::Oversized);
+    CHECK(ClassifyReceiveFailure(WSAECONNRESET) == ReceiveFailure::Reset);
+    // The socket's is not.
+    CHECK(ClassifyReceiveFailure(WSAENOBUFS) == ReceiveFailure::Persistent);
+    CHECK(ClassifyReceiveFailure(WSAENOTSOCK) == ReceiveFailure::Persistent);
+
+    // Said the first time, then once every ten seconds with what went unsaid.
+    ComplaintLimiter limiter;
+    uint64_t unsaid = 99;
+    CHECK(limiter.Allow(1000, unsaid));
+    CHECK(unsaid == 0);
+    CHECK(!limiter.Allow(1001, unsaid));
+    CHECK(!limiter.Allow(1000 + ComplaintLimiter::kQuietMs - 1, unsaid));
+    CHECK(limiter.Allow(1000 + ComplaintLimiter::kQuietMs, unsaid));
+    CHECK(unsaid == 2);
+    CHECK(!limiter.Allow(1000 + ComplaintLimiter::kQuietMs + 1, unsaid));
+    CHECK(limiter.Allow(1000 + 5 * ComplaintLimiter::kQuietMs, unsaid));
+    CHECK(unsaid == 1);
+    // A clock that starts at zero is said at once as well.
+    ComplaintLimiter early;
+    CHECK(early.Allow(0, unsaid));
+    CHECK(!early.Allow(5, unsaid));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2665,6 +2699,7 @@ int wmain(int argc, wchar_t** argv) {
     TestStrandedWindows();
     TestForegroundBound();
     TestAudioSource();
+    TestReceiveFailures();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
