@@ -88,29 +88,21 @@ final class TailscaleTests: XCTestCase {
         XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: false), .missing)
     }
 
-    /// fc00::/7, and nothing either side of it.
-    func testUniqueLocalAddresses() {
-        XCTAssertTrue(TailscaleStatus.isUniqueLocalIPv6("fc00::1"), "the start of fc00::/7")
-        XCTAssertTrue(TailscaleStatus.isUniqueLocalIPv6("fd7a:115c:a1e0::1"))
-        XCTAssertTrue(TailscaleStatus.isUniqueLocalIPv6("fdff:ffff:ffff::1"), "the end of it")
-        XCTAssertFalse(TailscaleStatus.isUniqueLocalIPv6("fbff::1"), "just below")
-        XCTAssertFalse(TailscaleStatus.isUniqueLocalIPv6("fe80::1%utun4"), "link-local")
-        XCTAssertFalse(TailscaleStatus.isUniqueLocalIPv6("2606:4700:110:8a36::2"))
-        XCTAssertFalse(TailscaleStatus.isUniqueLocalIPv6("100.88.1.4"))
+    /// Headscale's prefix has to lie inside Tailscale's, so its tunnels are
+    /// Tailscale's by their prefix alone, installed or not.
+    func testAHeadscalePrefixInsideTailscalesCounts() {
+        let headscale = [["fe80::1%utun4", "100.64.0.7", "fd7a:115c:a1e0:ab12::7"]]
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: headscale, installed: false),
+                       .connected(address: "100.64.0.7"))
     }
 
-    /// Headscale can be set to give out another unique local prefix than
-    /// Tailscale's. Beside the range, on a Mac with Tailscale installed,
-    /// that is still Tailscale; a global address beside it, as WARP has, is
-    /// still not.
-    func testAnotherUniqueLocalPrefixCountsWhereTailscaleIsInstalled() {
-        let headscale = [["fe80::1%utun4", "100.88.1.4", "fd12:3456:789a::1"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: headscale, installed: true),
-                       .connected(address: "100.88.1.4"))
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: headscale, installed: false), .missing)
-        let withAGlobalOne = [["100.88.1.4", "fd12:3456:789a::1", "2606:4700:110:8a36::2"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: withAGlobalOne, installed: true),
-                       .installedButOff)
+    /// NetBird gives each peer a unique local IPv6 address of its own since
+    /// 0.71. Beside the range, that is still not Tailscale, even where
+    /// Tailscale is installed.
+    func testNetBirdsOwnIPv6AddressIsNotTailscales() {
+        let netBird = [["fe80::1%utun100", "100.64.114.31", "fd00:1234:5678::1f"]]
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: true), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: false), .missing)
     }
 
     /// Homebrew's `tailscale` formula has no app, and is Tailscale all the

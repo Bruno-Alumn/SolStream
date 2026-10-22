@@ -59,14 +59,14 @@ enum TailscaleStatus: Equatable {
         }
         // A tailnet can be set to give out no IPv6 addresses, which leaves a
         // tunnel with the range and no IPv6 address of its own beside it --
-        // but so does NetBird. And a Headscale server can be set to give out
-        // another unique local prefix than Tailscale's. Either is taken as
-        // Tailscale where Tailscale is installed, which is the likelier
-        // there. A tunnel with a global IPv6 address of its own, as WARP's
-        // is, is somebody else's.
+        // but so does NetBird before 0.71. Taken as Tailscale where Tailscale
+        // is installed, which is the likelier of the two there. A tunnel with
+        // some other IPv6 address of its own is somebody else's, a unique
+        // local one included: NetBird gives each peer one of those by default
+        // since 0.71. A Headscale server's prefix has to lie inside
+        // Tailscale's, so the loop above has already found it.
         if installed {
-            for addresses in tunnels
-            where addresses.filter(isOwnIPv6).allSatisfy(isUniqueLocalIPv6) {
+            for addresses in tunnels where !addresses.contains(where: isOwnIPv6) {
                 if let address = addresses.first(where: isTailscaleAddress) {
                     return .connected(address: address)
                 }
@@ -99,14 +99,6 @@ enum TailscaleStatus: Equatable {
     static func isTailscaleIPv6(_ address: String) -> Bool {
         guard let bytes = ipv6Bytes(address) else { return false }
         return bytes.prefix(6).elementsEqual([0xFD, 0x7A, 0x11, 0x5C, 0xA1, 0xE0])
-    }
-
-    /// A unique local IPv6 address, fc00::/7: one a private network gives
-    /// out, as Tailscale's own prefix is, where a global one is routed on
-    /// the internet.
-    static func isUniqueLocalIPv6(_ address: String) -> Bool {
-        guard let bytes = ipv6Bytes(address) else { return false }
-        return bytes[0] & 0xFE == 0xFC
     }
 
     /// An IPv6 address the tunnel was given, as against the link-local one
