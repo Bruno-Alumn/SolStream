@@ -1100,7 +1100,7 @@ float DrawSummaryCard(const std::vector<SummaryLine>& lines, float pad, float to
         detail_h.push_back(MeasureHeight(line.detail,
                                          line.mono_detail ? g_fmt_mono : g_fmt_caption,
                                          text_w.back()));
-        height += std::max(title_h + (line.detail.empty() ? 0.0f : 2.0f + detail_h.back()),
+        height += (std::max)(title_h + (line.detail.empty() ? 0.0f : 2.0f + detail_h.back()),
                            line.button ? metric::kButtonH : 0.0f);
         if (i + 1 < lines.size()) {
             height += space::kMd * 2.0f + 1.0f;
@@ -1112,7 +1112,7 @@ float DrawSummaryCard(const std::vector<SummaryLine>& lines, float pad, float to
     float y = top + inset;
     for (size_t i = 0; i < lines.size(); ++i) {
         const SummaryLine& line = lines[i];
-        const float block = std::max(
+        const float block = (std::max)(
             title_h + (line.detail.empty() ? 0.0f : 2.0f + detail_h[i]),
             line.button ? metric::kButtonH : 0.0f);
         const float lead_cx = pad + inset + lead_w / 2.0f;
