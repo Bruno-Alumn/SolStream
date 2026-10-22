@@ -1027,6 +1027,10 @@ public final class AgentConnection {
         public let sequence: Int
         public let isUnchanged: Bool
         public let wasTruncated: Bool
+        /// The application that put it there marked it as not for clipboard
+        /// tools, as password managers do, so the host did not send it. The
+        /// text is empty, which is all a host from before this flag says.
+        public let isPrivate: Bool
     }
 
     /// Read the host's clipboard, skipping the transfer if it has not changed.
@@ -1047,7 +1051,8 @@ public final class AgentConnection {
             completion(RemoteClipboard(text: message["text"] as? String ?? "",
                                        sequence: sequence,
                                        isUnchanged: message["unchanged"] as? Bool ?? false,
-                                       wasTruncated: message["truncated"] as? Bool ?? false))
+                                       wasTruncated: message["truncated"] as? Bool ?? false,
+                                       isPrivate: message["private"] as? Bool ?? false))
         }
     }
 

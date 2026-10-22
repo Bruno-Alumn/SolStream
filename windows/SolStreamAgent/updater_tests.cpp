@@ -16,7 +16,8 @@
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
 // takes of the virtual display's settings, when its device is waiting for a
-// restart, and which adapter is Tailscale's.
+// restart, which adapter is Tailscale's, and the clipboard's privacy
+// markers and line endings.
 
 #include "updater.cpp"
 
@@ -27,6 +28,7 @@
 
 #include <cstdio>
 
+#include "clipboard.h"
 #include "driver_install.h"
 #include "tailscale.h"
 #include "vdd.h"
@@ -1242,6 +1244,79 @@ void TestPickTailscaleAddress() {
           == L"100.127.255.254");
 }
 
+// ── The clipboard ────────────────────────────────────────────────────────────
+//
+// Here because this is the one C++ test program. Nothing below touches the real
+// clipboard: under Wine on a Mac, that is the Mac's own.
+
+/// Global memory holding `size` bytes copied from `bytes`, the way an
+/// application hands a format's data to SetClipboardData.
+HGLOBAL GlobalBytes(const void* bytes, size_t size) {
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (memory && size > 0) {
+        if (void* target = GlobalLock(memory)) {
+            std::memcpy(target, bytes, size);
+            GlobalUnlock(memory);
+        }
+    }
+    return memory;
+}
+
+ClipboardMarkers Markers(bool exclude_from_monitors, bool viewer_ignore,
+                         std::optional<DWORD> history, std::optional<DWORD> cloud) {
+    ClipboardMarkers markers;
+    markers.exclude_from_monitors = exclude_from_monitors;
+    markers.viewer_ignore = viewer_ignore;
+    markers.history = history;
+    markers.cloud = cloud;
+    return markers;
+}
+
+void TestClipboardMarkers() {
+    constexpr std::optional<DWORD> absent;
+    constexpr DWORD refuse = 0;
+    constexpr DWORD allow = 1;
+
+    // An ordinary copy, marked with nothing, crosses to the Mac.
+    CHECK(!ClipboardIsPrivate(ClipboardMarkers{}));
+
+    // Either of the two presence formats keeps it here on its own.
+    CHECK(ClipboardIsPrivate(Markers(true, false, absent, absent)));
+    CHECK(ClipboardIsPrivate(Markers(false, true, absent, absent)));
+
+    // The two DWORD formats keep it here only when they hold 0. 1 is an
+    // application saying, explicitly, that history and the cloud are welcome.
+    CHECK(ClipboardIsPrivate(Markers(false, false, refuse, absent)));
+    CHECK(ClipboardIsPrivate(Markers(false, false, absent, refuse)));
+    CHECK(!ClipboardIsPrivate(Markers(false, false, allow, allow)));
+    // Out of history but allowed to the cloud is still not for the Mac: the
+    // history refusal is what a password manager sets.
+    CHECK(ClipboardIsPrivate(Markers(false, false, refuse, allow)));
+
+    // What KeePass puts beside every password it copies.
+    CHECK(ClipboardIsPrivate(Markers(true, true, refuse, refuse)));
+
+    // Reading the DWORD out of a format's data.
+    const DWORD zero = 0;
+    const DWORD one = 1;
+    HGLOBAL data = GlobalBytes(&zero, sizeof(zero));
+    CHECK(ClipboardDword(data) == DWORD{0});
+    GlobalFree(data);
+    data = GlobalBytes(&one, sizeof(one));
+    CHECK(ClipboardDword(data) == DWORD{1});
+    GlobalFree(data);
+    // Only the first four bytes are the value.
+    const unsigned char longer[8] = {1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF};
+    data = GlobalBytes(longer, sizeof(longer));
+    CHECK(ClipboardDword(data) == DWORD{1});
+    GlobalFree(data);
+    // Nothing to read is no answer, not a 0 -- which would read as a refusal.
+    CHECK(!ClipboardDword(nullptr).has_value());
+    data = GlobalAlloc(GMEM_MOVEABLE, 0);
+    CHECK(!ClipboardDword(data).has_value());
+    GlobalFree(data);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1303,6 +1378,7 @@ int wmain(int argc, wchar_t** argv) {
     TestWaitsForRestart();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();
+    TestClipboardMarkers();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

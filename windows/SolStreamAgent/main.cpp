@@ -59,6 +59,7 @@
 #include <thread>
 #include <vector>
 
+#include "clipboard.h"
 #include "display_setup.h"
 #include "driver_install.h"
 #include "tailscale.h"
@@ -1113,6 +1114,16 @@ std::string ClipboardGetJson() {
     ClipboardLock lock;
     if (!lock.held()) {
         return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
+    }
+    // A password manager marks what it copies as not for clipboard tools, and
+    // this sync is one. On the Mac a password would go on into clipboard
+    // history and across to the user's other Apple devices, and nothing would
+    // clear it when the password manager clears this clipboard. Said as no
+    // text, which every Mac already leaves alone, with "private" for one that
+    // wants to say why.
+    if (solstream::ClipboardIsPrivate(solstream::ReadClipboardMarkers())) {
+        return "{\"type\":\"clipboard\",\"ok\":true,\"private\":true,\"text\":\"\",\"seq\":"
+             + std::to_string(ClipboardSequence()) + "}";
     }
     HANDLE handle = GetClipboardData(CF_UNICODETEXT);
     if (!handle) {
