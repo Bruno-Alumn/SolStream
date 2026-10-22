@@ -34,6 +34,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <map>
 
 #include "clipboard.h"
 #include "driver_install.h"
@@ -1244,11 +1245,54 @@ void TestRemovalClassification() {
     CHECK(ClassifyRemoval({}) == DeviceRemoval::Failed);
 }
 
-/// Uninstall lets the device's records go only once the device is gone. One
-/// Windows refused to remove, or removes only when the PC restarts, is still
-/// there and still using its driver and its settings: its record, the
-/// package's and the settings' all stay, and so do the package and the
-/// settings themselves. In a key of this test's own, as for the settings.
+/// Whose the device at a recorded instance ID is. The ID alone is not enough:
+/// once SolStream's device is gone, Windows gives it to the next device made,
+/// often somebody's own of the same driver, and uninstall removed that one, its
+/// package and its settings as SolStream's. The mark SolStream gave its device
+/// is what says it is the same one.
+void TestRecordedDevice() {
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                               .device_mark = L"m1"})
+          == RecordedDevice::Ours);
+    // Another device at the ID: a different mark, or none at all.
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                               .device_mark = L"m2"})
+          == RecordedDevice::Somebodys);
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .recorded_mark = L"m1"})
+          == RecordedDevice::Somebodys);
+    // A record from before marks is taken at its word, as it always was.
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true}) == RecordedDevice::Ours);
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .device_mark = L"m2"})
+          == RecordedDevice::Ours);
+    // Not the driver's, whatever the marks.
+    CHECK(JudgeRecordedDevice({.opened = true, .recorded_mark = L"m1", .device_mark = L"m1"})
+          == RecordedDevice::Somebodys);
+    // Absent, or unknown.
+    CHECK(JudgeRecordedDevice({.open_error = ERROR_NO_SUCH_DEVINST, .recorded_mark = L"m1"})
+          == RecordedDevice::Gone);
+    CHECK(JudgeRecordedDevice({.open_error = ERROR_ACCESS_DENIED, .recorded_mark = L"m1"})
+          == RecordedDevice::Unknown);
+
+    // And what uninstall makes of it: only its own device is removed.
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                           .device_mark = L"m1", .removed = true})
+          == DeviceRemoval::Removed);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                           .device_mark = L"m2"})
+          == DeviceRemoval::NotDrivers);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .recorded_mark = L"m1"})
+          == DeviceRemoval::NotDrivers);
+}
+
+/// Uninstall lets the device's records go only once the device is gone, and
+/// takes a device for SolStream's only while it carries SolStream's mark. One
+/// Windows refused to remove is still there and still using its driver and its
+/// settings: its record, the package's and the settings' all stay. One removed
+/// only at the restart keeps its package and settings the same way, but not
+/// its instance ID, which the restart hands to the next device. And the
+/// settings never go from under another device of the driver's, which reads
+/// the same folder. Against a PC made of devices in a map, in a key of this
+/// test's own, as for the settings.
 void TestDriverRecords(const std::wstring& scratch) {
     const std::wstring key =
         L"Software\\SolStreamUpdaterTests-" + std::to_wstring(GetCurrentProcessId());
@@ -1267,76 +1311,209 @@ void TestDriverRecords(const std::wstring& scratch) {
         return RegQueryValueExW(records, name, nullptr, nullptr, nullptr, nullptr)
             == ERROR_SUCCESS;
     };
+    auto value = [records](const wchar_t* name) {
+        wchar_t text[MAX_PATH] = {0};
+        DWORD size = sizeof(text) - sizeof(wchar_t);
+        RegQueryValueExW(records, name, nullptr, nullptr, (BYTE*) text, &size);
+        return std::wstring(text);
+    };
 
-    // What an install that made all three leaves: the device, the package
-    // and a settings folder with the driver's file in it.
-    const std::wstring instance = L"ROOT\\DISPLAY\\0001";
+    // The PC: the present devices of the driver's, by instance ID, each with
+    // its mark (none when empty) and the package it was installed from.
+    struct Device {
+        std::wstring mark;
+        std::wstring package;
+    };
+    std::map<std::wstring, Device> present;
+    bool refuse = false;    // Windows won't remove anything
+    bool postpone = false;  // Windows removes it only at the restart
+    std::vector<std::wstring> removed;
+    std::vector<std::wstring> uninstalled;
+    int looked_up = 0;
+    DriverRemovalSteps steps;
+    steps.remove = [&](const std::wstring& device, const std::wstring& mark, DWORD& code) {
+        RemovalAnswers answers;
+        answers.recorded_mark = mark;
+        const auto found = present.find(device);
+        answers.opened = found != present.end();
+        if (!answers.opened) {
+            answers.open_error = ERROR_NO_SUCH_DEVINST;
+        } else {
+            answers.drivers = true;
+            answers.device_mark = found->second.mark;
+        }
+        code = 0;
+        if (JudgeRecordedDevice(answers) == RecordedDevice::Ours && !refuse) {
+            answers.removed = true;
+            removed.push_back(device);
+            if (postpone) {
+                answers.install_flags = DI_NEEDREBOOT;
+            } else {
+                present.erase(found);
+            }
+        } else if (refuse) {
+            code = ERROR_ACCESS_DENIED;
+        }
+        return ClassifyRemoval(answers);
+    };
+    // Unforced: refused while a device uses it.
+    steps.uninstall = [&](const std::wstring& package) {
+        for (const auto& [id, device] : present) {
+            if (device.package == package) {
+                return false;
+            }
+        }
+        uninstalled.push_back(package);
+        return true;
+    };
+    steps.devices_using = [&](const std::wstring& package) {
+        ++looked_up;
+        std::vector<std::wstring> using_package;
+        for (const auto& [id, device] : present) {
+            if (device.package == package) {
+                using_package.push_back(id);
+            }
+        }
+        return using_package;
+    };
+    steps.other_device_present = [&](const std::wstring& except) {
+        for (const auto& [id, device] : present) {
+            if (id != except) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // What an install that made all three leaves: the device, marked; the
+    // package; and a settings folder with the driver's file in it.
+    const std::wstring instance = L"ROOT\\DISPLAY\\0000";
     const std::wstring folder = scratch + L"\\DeviceSettings";
-    auto install = [&] {
+    const std::wstring settings = folder + L"\\vdd_settings.xml";
+    auto install = [&](const std::wstring& mark) {
+        present.clear();
+        present[instance] = {mark, L"oem42.inf"};
         CreateDirectoryW(folder.c_str(), nullptr);
-        CHECK(WriteAll(folder + L"\\vdd_settings.xml", "x"));
+        CHECK(WriteAll(settings, "x"));
         record(L"DisplayDriverDevice", instance);
+        if (!mark.empty()) {
+            record(L"DisplayDriverDeviceMark", mark);
+        }
         record(L"DisplayDriverInf", L"oem42.inf");
         record(L"DisplayDriverSettingsFolder", folder);
+        refuse = postpone = false;
     };
-    std::vector<std::wstring> asked;
-    std::vector<std::wstring> uninstalled;
     std::string note;
     bool all_gone = false;
-    auto uninstall = [&](DeviceRemoval outcome, bool package_goes = true) {
-        asked.clear();
+    auto uninstall = [&] {
+        removed.clear();
         uninstalled.clear();
         note.clear();
-        all_gone = RemoveRecordedDriver(
-            HKEY_CURRENT_USER, key.c_str(), instance,
-            [&asked, outcome](const std::wstring& device, DWORD& code) {
-                asked.push_back(device);
-                code = outcome == DeviceRemoval::Failed ? ERROR_ACCESS_DENIED : 0;
-                return outcome;
-            },
-            [&uninstalled, package_goes](const std::wstring& package) {
-                uninstalled.push_back(package);
-                return package_goes;
-            },
-            note);
+        looked_up = 0;
+        all_gone = RemoveRecordedDriver(HKEY_CURRENT_USER, key.c_str(), steps, note);
     };
 
-    for (const DeviceRemoval still_there :
-         {DeviceRemoval::Failed, DeviceRemoval::RemovedAtRestart}) {
-        install();
-        uninstall(still_there);
-        CHECK(asked.size() == 1 && asked.front() == instance);
-        CHECK(recorded(L"DisplayDriverDevice"));
-        CHECK(recorded(L"DisplayDriverInf"));
-        CHECK(recorded(L"DisplayDriverSettingsFolder"));
-        CHECK(uninstalled.empty());
-        CHECK(Exists(folder + L"\\vdd_settings.xml"));
-        CHECK(note.find("still recorded as SolStream's") != std::string::npos);
-        // What the uninstall window then says, in place of "removed".
-        CHECK(!all_gone);
-    }
-    // The restart is what finishes it, and the note says so.
-    CHECK(note.find("restarts") != std::string::npos);
+    // Its own, by its mark: removed, and everything with it.
+    install(L"m1");
+    uninstall();
+    CHECK(removed.size() == 1 && removed.front() == instance);
+    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverDeviceMark"));
+    CHECK(!recorded(L"DisplayDriverInf") && !recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(uninstalled.size() == 1 && uninstalled.front() == L"oem42.inf");
+    CHECK(!Exists(folder));
+    CHECK(all_gone);
 
-    for (const DeviceRemoval gone :
-         {DeviceRemoval::Removed, DeviceRemoval::Gone, DeviceRemoval::NotDrivers}) {
-        install();
-        uninstall(gone);
-        CHECK(!recorded(L"DisplayDriverDevice"));
-        CHECK(!recorded(L"DisplayDriverInf"));
-        CHECK(!recorded(L"DisplayDriverSettingsFolder"));
-        CHECK(uninstalled.size() == 1 && uninstalled.front() == L"oem42.inf");
-        CHECK(!Exists(folder));
-        CHECK(all_gone);
-    }
+    // A record from before marks: taken at its word, as it always was.
+    install(L"");
+    uninstall();
+    CHECK(removed.size() == 1);
+    CHECK(!recorded(L"DisplayDriverDevice"));
+    CHECK(all_gone);
+
+    // Refused: everything stays, its record and mark included.
+    install(L"m1");
+    refuse = true;
+    uninstall();
+    CHECK(value(L"DisplayDriverDevice") == instance);
+    CHECK(value(L"DisplayDriverDeviceMark") == L"m1");
+    CHECK(recorded(L"DisplayDriverInf") && recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(uninstalled.empty());
+    CHECK(Exists(settings));
+    CHECK(note.find("still recorded as SolStream's") != std::string::npos);
+    CHECK(!all_gone);
+
+    // Removed at the restart: the package and the settings stay, recorded,
+    // with a way to finish -- but the ID is let go.
+    install(L"m1");
+    postpone = true;
+    uninstall();
+    CHECK(removed.size() == 1);
+    CHECK(recorded(L"DisplayDriverDevice") && value(L"DisplayDriverDevice").empty());
+    CHECK(!recorded(L"DisplayDriverDeviceMark"));
+    CHECK(recorded(L"DisplayDriverInf") && recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(uninstalled.empty());
+    CHECK(Exists(settings));
+    CHECK(note.find("restarts") != std::string::npos);
+    CHECK(note.find("pnputil /delete-driver oem42.inf") != std::string::npos);
+    CHECK(!all_gone);
+
+    // The restart, and then somebody installs the driver for themselves: the
+    // same ID, the same package, their own settings in the same folder. They
+    // set SolStream up again, which records nothing, and remove it again.
+    present.clear();
+    present[instance] = {L"", L"oem42.inf"};
+    postpone = false;
+    uninstall();
+    CHECK(removed.empty());
+    CHECK(looked_up == 0);
+    CHECK(present.count(instance) == 1);
+    CHECK(uninstalled.empty());
+    CHECK(Exists(settings));
+    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverInf")
+          && !recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(!all_gone);
+
+    // The same, with the mark still recorded -- a record a set-up kept: the ID
+    // is another device's now, which stays, and so do its package and settings.
+    install(L"m1");
+    present[instance] = {L"", L"oem42.inf"};
+    uninstall();
+    CHECK(removed.empty());
+    CHECK(present.count(instance) == 1);
+    CHECK(Exists(settings));
+    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverDeviceMark"));
+    CHECK(!recorded(L"DisplayDriverSettingsFolder"));
+
+    // Absent, with nothing else of the driver's here: the rest goes.
+    install(L"m1");
+    present.clear();
+    uninstall();
+    CHECK(removed.empty());
+    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverDeviceMark"));
+    CHECK(uninstalled.size() == 1 && uninstalled.front() == L"oem42.inf");
+    CHECK(!Exists(folder));
+    CHECK(all_gone);
+
+    // An earlier build's records, the package and no device record at all:
+    // its device is the one installed from that package.
+    install(L"");
+    CHECK(RegDeleteValueW(records, L"DisplayDriverDevice") == ERROR_SUCCESS);
+    uninstall();
+    CHECK(looked_up == 1);
+    CHECK(removed.size() == 1 && removed.front() == instance);
 
     // A package Windows keeps -- some other device uses it -- is somebody's
     // now: its record goes, and the window says it stayed.
-    install();
-    uninstall(DeviceRemoval::Removed, false);
+    install(L"m1");
+    present[L"ROOT\\DISPLAY\\0001"] = {L"", L"oem42.inf"};
+    uninstall();
+    CHECK(removed.size() == 1);
     CHECK(!recorded(L"DisplayDriverInf"));
     CHECK(note.find("Windows kept the virtual display driver package (oem42.inf)")
           != std::string::npos);
+    // And that device reads the settings, which stay.
+    CHECK(Exists(settings));
+    CHECK(note.find("another virtual display on this PC uses them") != std::string::npos);
     CHECK(!all_gone);
 
     RegCloseKey(records);
@@ -2329,6 +2506,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsJunction(scratch);
     TestDriverSettingsRecords(scratch);
     TestRemovalClassification();
+    TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
     TestSwitchedOff();

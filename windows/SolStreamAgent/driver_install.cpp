@@ -11,6 +11,15 @@
 #include <devguid.h>
 // The device property keys too, defined here for the same reason.
 #include <devpkey.h>
+// mingw's setupapi.h has the device property getter and not its setter,
+// though its import library and every Windows since Vista have both. The
+// SDK's header declares it already.
+#if defined(__MINGW32__) && !defined(SetupDiSetDeviceProperty)
+extern "C" WINSETUPAPI WINBOOL WINAPI SetupDiSetDevicePropertyW(
+    HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData, const DEVPROPKEY* PropertyKey,
+    DEVPROPTYPE PropertyType, const PBYTE PropertyBuffer, DWORD PropertyBufferSize,
+    DWORD Flags);
+#endif
 #include <sddl.h>
 #include <shlobj.h>
 #include <bcrypt.h>
@@ -50,6 +59,12 @@ constexpr wchar_t kStateKey[] = L"SOFTWARE\\SolStream";
 /// folder. Something that was already there is somebody else's.
 constexpr wchar_t kInfValue[] = L"DisplayDriverInf";
 constexpr wchar_t kDeviceValue[] = L"DisplayDriverDevice";
+/// The mark SolStream gave that device (kDeviceMarkKey). The instance ID alone
+/// does not name one device for good: once it is gone, Windows hands the same
+/// ID to the next device made -- often one of this same driver's, installed by
+/// hand -- and uninstall took that one for SolStream's. A device record that
+/// is there but empty says SolStream's device is gone and its ID let go.
+constexpr wchar_t kDeviceMarkValue[] = L"DisplayDriverDeviceMark";
 constexpr wchar_t kSettingsValue[] = L"DisplayDriverSettingsFolder";
 /// When the settings folder was already there, it is somebody else's, but the
 /// settings file this install wrote into it is not, nor the copy
@@ -80,16 +95,28 @@ std::wstring ReadState(const wchar_t* name) {
     return ReadStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
 }
 
-void WriteState(const wchar_t* name, const std::wstring& value) {
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kStateKey, 0, nullptr, 0,
-                        KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr, &key, nullptr)
+/// Whether `root`\`key` has the record at all, empty or not.
+bool HasStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
+    return RegGetValueW(root, key, name, RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr,
+                        nullptr, nullptr)
+        == ERROR_SUCCESS;
+}
+
+void WriteStateIn(HKEY root, const wchar_t* key, const wchar_t* name,
+                  const std::wstring& value) {
+    HKEY opened = nullptr;
+    if (RegCreateKeyExW(root, key, 0, nullptr, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, nullptr,
+                        &opened, nullptr)
         != ERROR_SUCCESS) {
         return;
     }
-    RegSetValueExW(key, name, 0, REG_SZ, (const BYTE*) value.c_str(),
+    RegSetValueExW(opened, name, 0, REG_SZ, (const BYTE*) value.c_str(),
                    (DWORD) ((value.size() + 1) * sizeof(wchar_t)));
-    RegCloseKey(key);
+    RegCloseKey(opened);
+}
+
+void WriteState(const wchar_t* name, const std::wstring& value) {
+    WriteStateIn(HKEY_LOCAL_MACHINE, kStateKey, name, value);
 }
 
 void DeleteStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
@@ -271,9 +298,77 @@ bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::wstring& instanc
     return true;
 }
 
-/// Remove one device by its instance ID. Nothing else with the same hardware
-/// ID is touched. `code` is Windows' reason when it fails.
-DeviceRemoval RemoveDevice(const std::wstring& instance, DWORD& code) {
+/// The property SolStream marks the device it creates with: a key of its own,
+/// holding a random token that is also recorded (kDeviceMarkValue). It lives
+/// and goes with the device; a device made later at the same instance ID does
+/// not have it.
+constexpr DEVPROPKEY kDeviceMarkKey = {
+    {0x600109e1, 0xa35f, 0x4210, {0xbe, 0xa4, 0x29, 0x6a, 0x1b, 0x94, 0xf7, 0x38}}, 2};
+
+/// A new mark, or empty when there is no randomness to make one from.
+std::wstring NewDeviceMark() {
+    unsigned char bytes[16] = {0};
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        return {};
+    }
+    return ToWide(ToHex(bytes, sizeof(bytes)));
+}
+
+bool MarkDevice(HDEVINFO set, SP_DEVINFO_DATA& device, const std::wstring& mark) {
+    return SetupDiSetDevicePropertyW(set, &device, &kDeviceMarkKey, DEVPROP_TYPE_STRING,
+                                     (PBYTE) mark.c_str(),
+                                     (DWORD) ((mark.size() + 1) * sizeof(wchar_t)), 0)
+        != FALSE;
+}
+
+/// The device's mark, or empty when it has none.
+std::wstring DeviceMark(HDEVINFO set, SP_DEVINFO_DATA& device) {
+    DEVPROPTYPE type = 0;
+    wchar_t mark[64] = {0};
+    if (!SetupDiGetDevicePropertyW(set, &device, &kDeviceMarkKey, &type, (PBYTE) mark,
+                                   sizeof(mark) - sizeof(wchar_t), nullptr, 0)
+        || type != DEVPROP_TYPE_STRING) {
+        return {};
+    }
+    return mark;
+}
+
+/// What Windows says of the device at a recorded instance ID before anything
+/// is asked of it, with `device` opened in `set` when it is there.
+RemovalAnswers AskAboutDevice(HDEVINFO set, SP_DEVINFO_DATA& device,
+                              const std::wstring& instance, const std::wstring& mark) {
+    RemovalAnswers answers;
+    answers.recorded_mark = mark;
+    answers.opened = SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &device)
+                     != FALSE;
+    if (!answers.opened) {
+        answers.open_error = GetLastError();
+    } else {
+        answers.drivers = HasDriverHardwareId(set, device);
+        answers.device_mark = DeviceMark(set, device);
+    }
+    return answers;
+}
+
+/// Whose the device at a recorded instance ID is now, asking nothing of it.
+RecordedDevice FindRecordedDevice(const std::wstring& instance, const std::wstring& mark) {
+    HDEVINFO set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
+    if (set == INVALID_HANDLE_VALUE) {
+        return RecordedDevice::Unknown;
+    }
+    SP_DEVINFO_DATA device{};
+    device.cbSize = sizeof(device);
+    const RecordedDevice found = JudgeRecordedDevice(AskAboutDevice(set, device, instance, mark));
+    SetupDiDestroyDeviceInfoList(set);
+    return found;
+}
+
+/// Remove one device by its instance ID, and only while it carries the mark
+/// recorded beside it. Nothing else with the same hardware ID is touched.
+/// `code` is Windows' reason when it fails.
+DeviceRemoval RemoveDevice(const std::wstring& instance, const std::wstring& mark,
+                           DWORD& code) {
     code = 0;
     HDEVINFO set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
     if (set == INVALID_HANDLE_VALUE) {
@@ -282,15 +377,11 @@ DeviceRemoval RemoveDevice(const std::wstring& instance, DWORD& code) {
     }
     SP_DEVINFO_DATA device{};
     device.cbSize = sizeof(device);
-    RemovalAnswers answers;
-    answers.opened = SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &device)
-                     != FALSE;
+    RemovalAnswers answers = AskAboutDevice(set, device, instance, mark);
     if (!answers.opened) {
-        code = answers.open_error = GetLastError();
-    } else {
-        answers.drivers = HasDriverHardwareId(set, device);
+        code = answers.open_error;
     }
-    if (answers.drivers) {
+    if (JudgeRecordedDevice(answers) == RecordedDevice::Ours) {
         answers.removed = SetupDiCallClassInstaller(DIF_REMOVE, set, &device) != FALSE;
         if (!answers.removed) {
             code = GetLastError();
@@ -334,6 +425,39 @@ std::vector<std::wstring> DevicesUsingPackage(const std::wstring& oem_name) {
         }
     });
     return found;
+}
+
+/// Is a device of the driver's present other than `except` (any, when it is
+/// empty)? One whose ID can't be read counts: it may read the settings too.
+bool OtherDriverDevicePresent(const std::wstring& except) {
+    bool found = false;
+    const std::wstring skipped = FoldCase(except);
+    ForEachDriverDevice([&](HDEVINFO set, SP_DEVINFO_DATA& device) {
+        wchar_t id[MAX_DEVICE_ID_LEN] = {0};
+        if (except.empty()
+            || !SetupDiGetDeviceInstanceIdW(set, &device, id, MAX_DEVICE_ID_LEN, nullptr)
+            || FoldCase(id) != skipped) {
+            found = true;
+        }
+    });
+    return found;
+}
+
+/// The recorded device, at setup: one that is gone, or whose instance ID
+/// another device has now, is SolStream's no longer, and its ID is let go
+/// before anything could take that other device for it. The emptied record
+/// keeps saying there was one, so nothing goes looking for SolStream's device
+/// by the package it used either.
+void ForgetGoneDevice() {
+    const std::wstring instance = ReadState(kDeviceValue);
+    if (instance.empty()) {
+        return;
+    }
+    const RecordedDevice found = FindRecordedDevice(instance, ReadState(kDeviceMarkValue));
+    if (found == RecordedDevice::Gone || found == RecordedDevice::Somebodys) {
+        WriteState(kDeviceValue, L"");
+        DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, kDeviceMarkValue);
+    }
 }
 
 /// The settings folder, made the way an elevated writer's folder at the root of C:
@@ -439,6 +563,7 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                           bool& already, bool& restart, std::string& note,
                           std::string& error) {
     restart = false;
+    ForgetGoneDevice();
     const DriverState state = CurrentDriverState();
     already = state == DriverState::Ready;
     // The settings file's backup, when this run wrote the file into a folder
@@ -606,9 +731,18 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             error = InstallProblem("install the driver", code);
             return false;
         }
+        // Marked as well as recorded: see kDeviceMarkValue. Without a mark
+        // the record is taken at its word, as one from before marks is.
+        const std::wstring mark = NewDeviceMark();
+        const bool marked = !mark.empty() && MarkDevice(created_set, created, mark);
         SetupDiDestroyDeviceInfoList(created_set);
         if (!instance.empty()) {
             WriteState(kDeviceValue, instance);
+            if (marked) {
+                WriteState(kDeviceMarkValue, mark);
+            } else {
+                DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, kDeviceMarkValue);
+            }
         }
         if (staged_here && !staged.empty()) {
             WriteState(kInfValue, staged);
@@ -671,51 +805,53 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
 }
 
 bool RemoveInstalledDriver(std::string& note) {
-    std::wstring instance = ReadState(kDeviceValue);
-    const std::wstring staged = ReadState(kInfValue);
-
-    // A PC set up by an earlier build has the package recorded and not the
-    // device: that build took every device of the driver's away instead. Its
-    // device is the one Windows installed from that package -- when exactly
-    // one is. With two or more, which is SolStream's would be a guess, so the
-    // devices, the package they use, their settings and the record all stay.
-    if (instance.empty() && IsOemInfName(staged)) {
-        const std::vector<std::wstring> using_package = DevicesUsingPackage(staged);
-        if (using_package.size() > 1) {
-            note += std::to_string(using_package.size())
-                  + " virtual displays use the driver package an earlier SolStream "
-                    "installed (" + ToUtf8(staged) + "), and it didn't record which one "
-                    "it added, so SolStream left them, the package and their settings as "
-                    "they are.\n";
-            return false;
-        }
-        if (using_package.size() == 1) {
-            instance = using_package.front();
-        }
-    }
-
+    DriverRemovalSteps steps;
+    steps.remove = RemoveDevice;
     // No force: if some other device is using the package, it stays.
-    return RemoveRecordedDriver(
-        HKEY_LOCAL_MACHINE, kStateKey, instance, RemoveDevice,
-        [](const std::wstring& package) {
-            return SetupUninstallOEMInfW(package.c_str(), 0, nullptr) != FALSE;
-        },
-        note);
+    steps.uninstall = [](const std::wstring& package) {
+        return SetupUninstallOEMInfW(package.c_str(), 0, nullptr) != FALSE;
+    };
+    steps.devices_using = DevicesUsingPackage;
+    steps.other_device_present = OtherDriverDevicePresent;
+    return RemoveRecordedDriver(HKEY_LOCAL_MACHINE, kStateKey, steps, note);
+}
+
+RecordedDevice JudgeRecordedDevice(const RemovalAnswers& answers) {
+    if (!answers.opened) {
+        // Only a definite "no such device" is gone. Anything else -- access
+        // denied, say -- leaves the device's fate unknown.
+        if (answers.open_error == ERROR_NO_SUCH_DEVINST
+            || answers.open_error == ERROR_INVALID_DEVINST_NAME) {
+            return RecordedDevice::Gone;
+        }
+        return answers.open_error == ERROR_CLASS_MISMATCH ? RecordedDevice::Somebodys
+                                                          : RecordedDevice::Unknown;
+    }
+    if (!answers.drivers) {
+        return RecordedDevice::Somebodys;
+    }
+    // The same driver at the same ID is not yet the same device: the mark
+    // says so. A record from before marks has none and is taken at its word,
+    // as it always was -- uninstall let such a record go with its device, and
+    // the one case that now keeps records past it, a removal at the restart,
+    // keeps no ID.
+    if (!answers.recorded_mark.empty() && answers.device_mark != answers.recorded_mark) {
+        return RecordedDevice::Somebodys;
+    }
+    return RecordedDevice::Ours;
 }
 
 DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
-    if (!answers.opened) {
-        // Only a definite "no such device" is gone. Anything else -- access
-        // denied, say -- leaves the device's fate unknown, and so a failure.
-        if (answers.open_error == ERROR_NO_SUCH_DEVINST
-            || answers.open_error == ERROR_INVALID_DEVINST_NAME) {
+    switch (JudgeRecordedDevice(answers)) {
+        case RecordedDevice::Gone:
             return DeviceRemoval::Gone;
-        }
-        return answers.open_error == ERROR_CLASS_MISMATCH ? DeviceRemoval::NotDrivers
-                                                          : DeviceRemoval::Failed;
-    }
-    if (!answers.drivers) {
-        return DeviceRemoval::NotDrivers;
+        case RecordedDevice::Somebodys:
+            return DeviceRemoval::NotDrivers;
+        case RecordedDevice::Unknown:
+            // Its fate unknown, and so a failure.
+            return DeviceRemoval::Failed;
+        case RecordedDevice::Ours:
+            break;
     }
     if (!answers.removed) {
         return DeviceRemoval::Failed;
@@ -730,15 +866,42 @@ DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
     return DeviceRemoval::Removed;
 }
 
-bool RemoveRecordedDriver(
-    HKEY root, const wchar_t* key, const std::wstring& instance,
-    const std::function<DeviceRemoval(const std::wstring& instance, DWORD& code)>& remove,
-    const std::function<bool(const std::wstring& package)>& uninstall, std::string& note) {
+bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalSteps& steps,
+                          std::string& note) {
+    std::wstring instance = ReadStateIn(root, key, kDeviceValue);
+    const std::wstring mark = ReadStateIn(root, key, kDeviceMarkValue);
+    const std::wstring staged = ReadStateIn(root, key, kInfValue);
+
+    // A PC set up by an earlier build has the package recorded and no device
+    // record at all: that build took every device of the driver's away
+    // instead. Its device is the one Windows installed from that package --
+    // when exactly one is. With two or more, which is SolStream's would be a
+    // guess, so the devices, the package they use, their settings and the
+    // record all stay. An emptied device record is not that: SolStream's
+    // device is gone, and one using the package now is somebody's own, made
+    // from the same driver.
+    if (!HasStateIn(root, key, kDeviceValue) && IsOemInfName(staged)) {
+        const std::vector<std::wstring> using_package = steps.devices_using(staged);
+        if (using_package.size() > 1) {
+            note += std::to_string(using_package.size())
+                  + " virtual displays use the driver package an earlier SolStream "
+                    "installed (" + ToUtf8(staged) + "), and it didn't record which one "
+                    "it added, so SolStream left them, the package and their settings as "
+                    "they are.\n";
+            return false;
+        }
+        if (using_package.size() == 1) {
+            instance = using_package.front();
+        }
+    }
+
     // The device first, and only the one SolStream created: a device of the
-    // same driver somebody added themselves stays.
+    // same driver somebody added themselves stays, even at the same ID.
+    DeviceRemoval outcome = DeviceRemoval::Gone;
     if (!instance.empty()) {
         DWORD code = 0;
-        switch (remove(instance, code)) {
+        outcome = steps.remove(instance, mark, code);
+        switch (outcome) {
             case DeviceRemoval::Removed:
                 note += "Removed the virtual display SolStream added.\n";
                 break;
@@ -747,16 +910,25 @@ bool RemoveRecordedDriver(
                 note += "The virtual display SolStream added was already gone.\n";
                 break;
             case DeviceRemoval::RemovedAtRestart:
-                // Still here until the restart, so kept as a refusal is,
-                // below. The package would not have gone anyway while the
-                // device uses it, and with its record let go nothing would say
-                // again that it was SolStream's: a later install finds it in
-                // the store, takes it for somebody else's, and no uninstall
-                // ever takes it.
+                // Still here until the restart, so its package and settings
+                // are kept as a refusal keeps them, below. The package would
+                // not have gone anyway while the device uses it, and with its
+                // record let go nothing would say again that it was
+                // SolStream's: a later install finds it in the store, takes it
+                // for somebody else's, and no uninstall ever takes it. The ID
+                // is let go now, though: the restart frees it for the next
+                // device made, which may be somebody's own of the same driver.
+                WriteStateIn(root, key, kDeviceValue, L"");
+                DeleteStateIn(root, key, kDeviceMarkValue);
                 note += "Windows finishes removing the virtual display SolStream added when "
                         "this PC restarts. Until then the display still uses its driver and "
                         "its settings, so SolStream left them in place, still recorded as "
-                        "SolStream's.\n";
+                        "SolStream's.";
+                if (IsOemInfName(staged)) {
+                    note += " After the restart, \"pnputil /delete-driver " + ToUtf8(staged)
+                          + "\" in an administrator prompt removes the driver too.";
+                }
+                note += "\n";
                 return false;
             case DeviceRemoval::Failed:
                 // Still here, and still SolStream's. Its records stay, so a
@@ -768,13 +940,14 @@ bool RemoveRecordedDriver(
                         "settings in place, still recorded as SolStream's.\n";
                 return false;
         }
-        DeleteStateIn(root, key, kDeviceValue);
     }
+    DeleteStateIn(root, key, kDeviceValue);
+    DeleteStateIn(root, key, kDeviceMarkValue);
+
     // Then the package, and only one this install put in the store.
     bool all_gone = true;
-    const std::wstring staged = ReadStateIn(root, key, kInfValue);
     if (!staged.empty()) {
-        if (IsOemInfName(staged) && uninstall(staged)) {
+        if (IsOemInfName(staged) && steps.uninstall(staged)) {
             note += "Removed the virtual display driver SolStream installed.\n";
         } else {
             note += "Windows kept the virtual display driver package (" + ToUtf8(staged)
@@ -784,6 +957,23 @@ bool RemoveRecordedDriver(
         DeleteStateIn(root, key, kInfValue);
     }
 
+    // The settings last, and only when no other device of the driver's is
+    // here: every one of them reads the same folder, so deleting it took
+    // somebody's own display's settings from under it. Theirs now, so the
+    // records go and the files stay.
+    if (steps.other_device_present(outcome == DeviceRemoval::Removed ? instance
+                                                                     : std::wstring())) {
+        for (const wchar_t* value : {kSettingsValue, kSettingsFileValue, kSettingsBackupValue}) {
+            const std::wstring path = ReadStateIn(root, key, value);
+            if (!path.empty()) {
+                note += "Left the display driver's settings, " + ToUtf8(path)
+                      + ", because another virtual display on this PC uses them.\n";
+                all_gone = false;
+            }
+            DeleteStateIn(root, key, value);
+        }
+        return all_gone;
+    }
     return RemoveRecordedDriverSettings(root, key, note) && all_gone;
 }
 

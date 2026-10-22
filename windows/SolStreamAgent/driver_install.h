@@ -19,6 +19,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace solstream {
 
@@ -90,13 +91,15 @@ bool InstalledDriverHere();
 
 /// Undo InstallDisplayDriver: the device it created, the package it added and
 /// the settings folder it made or the settings file it wrote -- each only if
-/// recorded, and nothing else with the same driver. A device Windows won't
-/// remove stays recorded, and its package and settings stay with it; so does
-/// one Windows removes only when the PC restarts, which uses them until then.
-/// A settings record is let go only once what it names is gone. Needs
-/// administrator rights. What was done goes to `note`, a line each. True when
-/// nothing it installed is left, or it installed nothing; false when something
-/// stays on the PC, which `note` then says.
+/// recorded, and nothing else with the same driver. The device only while it
+/// is the one SolStream made, by the mark it gave it, not just by its
+/// instance ID, which Windows hands to the next device once this one is gone.
+/// A device Windows won't remove stays recorded, and its package and settings
+/// stay with it; so do those of one Windows removes only when the PC restarts,
+/// which uses them until then. A settings record is let go only once what it
+/// names is gone. Needs administrator rights. What was done goes to `note`, a
+/// line each. True when nothing it installed is left, or it installed nothing;
+/// false when something stays on the PC, which `note` then says.
 bool RemoveInstalledDriver(std::string& note);
 
 /// What became of a recorded device that uninstall asked to remove.
@@ -108,34 +111,67 @@ enum class DeviceRemoval {
     Failed,            ///< it is there and the driver's, and Windows would not remove it
 };
 
-/// What Windows answered, step by step, when asked to remove one device: did
-/// SetupDiOpenDeviceInfoW find its instance ID (`opened`), and if not, why not
-/// (`open_error`); is what it found the driver's (`drivers`); did DIF_REMOVE
-/// go through (`removed`); and the device's install flags after it
-/// (`install_flags`), which say when the removal waits for a restart.
+/// What Windows answered, step by step, about a recorded device and when
+/// asked to remove it: did SetupDiOpenDeviceInfoW find its instance ID
+/// (`opened`), and if not, why not (`open_error`); is what it found the
+/// driver's (`drivers`); the mark recorded beside the ID (`recorded_mark`,
+/// empty in a record from before marks) and the one the device carries
+/// (`device_mark`, empty when it has none); did DIF_REMOVE go through
+/// (`removed`); and the device's install flags after it (`install_flags`),
+/// which say when the removal waits for a restart.
 struct RemovalAnswers {
     bool opened = false;
     DWORD open_error = 0;
     bool drivers = false;
+    std::wstring recorded_mark = {};
+    std::wstring device_mark = {};
     bool removed = false;
     DWORD install_flags = 0;
 };
 
-/// What those answers come to. Exposed for its tests.
+/// Whose the device at a recorded instance ID is now.
+enum class RecordedDevice {
+    Ours,       ///< the driver's, with the mark SolStream recorded (or a record from before marks)
+    Gone,       ///< nothing has that instance ID any more
+    Somebodys,  ///< another device has the ID now: not the driver's, or not marked as recorded
+    Unknown,    ///< Windows wouldn't say, so it may still be SolStream's
+};
+
+/// What the first answers -- before any removal -- say of the recorded
+/// device. Only one that is Ours is ever removed. Exposed for its tests.
+RecordedDevice JudgeRecordedDevice(const RemovalAnswers& answers);
+
+/// What all the answers come to. Exposed for its tests.
 DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers);
 
-/// RemoveInstalledDriver once it knows which device is SolStream's
-/// (`instance`, empty when none is): `remove` asks Windows to remove that
-/// device, and `uninstall` the store package recorded in `root`\`key`; the
-/// settings follow, as RemoveRecordedDriverSettings says. What became of the
-/// device decides the rest: one that is still there -- refused, or removed
-/// only at the restart -- keeps its record, its package and its settings, and
-/// their records. True when nothing recorded is left. Exposed, with the two
-/// Windows steps as parameters, for its tests.
-bool RemoveRecordedDriver(
-    HKEY root, const wchar_t* key, const std::wstring& instance,
-    const std::function<DeviceRemoval(const std::wstring& instance, DWORD& code)>& remove,
-    const std::function<bool(const std::wstring& package)>& uninstall, std::string& note);
+/// The steps RemoveRecordedDriver asks of Windows, as parameters so the tests
+/// can stand in for them.
+struct DriverRemovalSteps {
+    /// Remove the device at this instance ID if it carries this mark (or the
+    /// record has none), as RemoveDevice does. `code` is Windows' reason when
+    /// it would not.
+    std::function<DeviceRemoval(const std::wstring& device, const std::wstring& mark,
+                                DWORD& code)>
+        remove;
+    /// Take this oemNN.inf out of the driver store, unless a device uses it.
+    std::function<bool(const std::wstring& package)> uninstall;
+    /// The present devices Windows installed from this package, by instance ID.
+    std::function<std::vector<std::wstring>(const std::wstring& package)> devices_using;
+    /// Whether a device of the driver's other than this instance ID (none when
+    /// empty) is present: one that reads the settings folder too.
+    std::function<bool(const std::wstring& except)> other_device_present;
+};
+
+/// RemoveInstalledDriver on the records in `root`\`key`, with `steps`
+/// standing in for Windows. What became of the device decides the rest: one
+/// that is still there -- refused, or removed only at the restart -- keeps
+/// its package, its settings, and their records; a refused one keeps its own
+/// record too. One removed at the restart frees its instance ID for the next
+/// device, so its record keeps only that there was one. The settings go only
+/// when no other device of the driver's is there to read them. True when
+/// nothing recorded is left. Exposed for its tests.
+bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalSteps& steps,
+                          std::string& note);
 
 /// The settings part of that: the folder SolStream made, or the settings file
 /// it wrote into somebody else's and its backup, each record let go only once
