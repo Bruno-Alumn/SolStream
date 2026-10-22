@@ -89,9 +89,10 @@ bool InstalledDriverHere();
 
 /// Undo InstallDisplayDriver: the device it created, the package it added and
 /// the settings folder it made or the settings file it wrote -- each only if
-/// recorded, and nothing else with the same driver. A record is let go only
-/// once what it names is gone. Needs administrator rights. What could not be
-/// done goes to `note`.
+/// recorded, and nothing else with the same driver. A device Windows won't
+/// remove stays recorded, and its package and settings stay with it. A
+/// settings record is let go only once what it names is gone. Needs
+/// administrator rights. What could not be done goes to `note`.
 void RemoveInstalledDriver(std::string& note);
 
 /// The settings folder's part of that, for a folder SolStream made: the files

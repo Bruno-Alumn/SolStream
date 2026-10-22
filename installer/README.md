@@ -108,11 +108,13 @@ protected access list (administrators and SYSTEM write, everyone else reads),
 and nothing elevated writes or deletes through a junction or link there. A
 failed or declined install takes those pieces back at once. Uninstalling
 removes exactly the recorded pieces, without forcing: another device with the
-same driver, or a package something else is using, stays. A settings record is
-kept until what it names is gone, so a folder that still holds somebody else's
-files is left, and still known to be SolStream's. A PC set up by an earlier
-build, which recorded only the package, has its device found by the package
-it was installed from, and only when exactly one device was.
+same driver, or a package something else is using, stays. A device Windows
+won't remove stays recorded, and its package and settings stay with it rather
+than being deleted from under it. A settings record is kept until what it
+names is gone, so a folder that still holds somebody else's files is left, and
+still known to be SolStream's. A PC set up by an earlier build, which recorded
+only the package, has its device found by the package it was installed from,
+and only when exactly one device was.
 
 ARM PCs aren't offered the tick box at all. The project's ARM64 build needs
 test signing, which is not something to switch on for somebody, so setup and
