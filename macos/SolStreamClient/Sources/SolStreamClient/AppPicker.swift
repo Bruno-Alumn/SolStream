@@ -126,10 +126,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // highlight, and Return opens it.
         tableView.action = #selector(rowClicked)
         tableView.onReturn = { [weak self] in self?.openTapped() }
-        tableView.onEscape = { [weak self] in self?.backTapped() }
+        tableView.onEscape = { [weak self] isRepeat in self?.backOnEscape(isRepeat: isRepeat) }
         // Typing with the list focused goes on searching, as it would if the
         // focus had never left the field.
-        tableView.onTyping = { [weak self] text in self?.continueSearch(with: text) }
+        tableView.onTyping = { [weak self] event in self?.continueSearch(with: event) }
         tableView.backgroundColor = .clear
         tableView.style = .plain
         tableView.selectionHighlightStyle = .regular
@@ -414,13 +414,40 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     /// Typing that reached the list, back into the search field.
-    private func continueSearch(with text: String) {
+    ///
+    /// The key itself, not the characters it made. The list has no input
+    /// method, so what it was handed had been through none: with Japanese
+    /// input on, "ka" came out as a raw "k" followed by "あ" rather than
+    /// "か", and the accent of a dead key was simply lost. Handed to the
+    /// field's editor, the key goes through the input method as if it had
+    /// been typed there.
+    private func continueSearch(with event: NSEvent) {
         window.makeFirstResponder(searchField)
+        guard let editor = searchField.currentEditor() else { return }
         // Taking the focus selects the whole query; typing would replace it.
-        if let editor = searchField.currentEditor() {
-            editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
-            editor.insertText(text)
+        editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
+        editor.keyDown(with: event)
+    }
+
+    /// Whether a key is typing, for the search field to take, rather than one
+    /// the list moves by.
+    ///
+    /// Command and Control make shortcuts; Option makes letters -- "å", or
+    /// the accent of a dead key. A dead key makes no characters of its own,
+    /// since its accent waits for the next letter, so it is known by the key
+    /// it is on. Delete takes back the last letter typed, as it would in the
+    /// field.
+    static func isTyping(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection([.command, .control]).isEmpty else { return false }
+        if event.keyCode == 51 { return true }  // Delete
+        guard let text = event.characters else { return false }
+        guard let scalar = text.unicodeScalars.first else {
+            return !(event.charactersIgnoringModifiers ?? "").isEmpty
         }
+        // Not a control character -- Tab, Escape -- and not an arrow or a
+        // function key, which AppKit reports in the private-use range.
+        return !CharacterSet.controlCharacters.contains(scalar)
+            && !(0xF700...0xF8FF).contains(scalar.value)
     }
 
     /// Move the highlighted row, keeping it on screen. Clamped rather than
@@ -439,6 +466,25 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     @objc private func backTapped() {
         close()
         onCancel()
+    }
+
+    /// Escape that would go back: a fresh press does, the key repeating does
+    /// not.
+    ///
+    /// Going back disconnects from the PC, and Escape held down to close
+    /// Settings or the token sheet over this window repeats into it the
+    /// moment it is in front again. A repeat may still clear what was typed
+    /// in the search field, which costs nothing to type again.
+    private func backOnEscape(isRepeat: Bool) {
+        guard !isRepeat else { return }
+        backTapped()
+    }
+
+    /// Whether the key being handled is the keyboard repeating a held key.
+    /// Asked of a key event only: anything else raises.
+    private static var keyIsRepeating: Bool {
+        guard let event = NSApp.currentEvent, event.type == .keyDown else { return false }
+        return event.isARepeat
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -702,7 +748,7 @@ extension AppPicker: NSTextFieldDelegate {
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             if searchField.stringValue.isEmpty {
-                backTapped()
+                backOnEscape(isRepeat: Self.keyIsRepeating)
             } else {
                 searchField.stringValue = ""
                 applyFilter()
@@ -720,22 +766,19 @@ extension AppPicker: NSTextFieldDelegate {
 /// Anything typed goes back to the search.
 private final class PickerTableView: NSTableView {
     var onReturn: (() -> Void)?
-    var onEscape: (() -> Void)?
-    var onTyping: ((String) -> Void)?
+    /// Told whether the press is the key repeating.
+    var onEscape: ((_ isRepeat: Bool) -> Void)?
+    var onTyping: ((NSEvent) -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
         switch event.keyCode {
         case 36, 76:  // Return, keypad Enter
             onReturn?()
         case 53:      // Escape
-            onEscape?()
+            onEscape?(event.isARepeat)
         default:
-            if modifiers.isEmpty, let text = event.characters,
-               let scalar = text.unicodeScalars.first,
-               !CharacterSet.controlCharacters.contains(scalar),
-               scalar.value < 0xF700 || scalar.value > 0xF8FF {  // not an arrow or function key
-                onTyping?(text)
+            if AppPicker.isTyping(event) {
+                onTyping?(event)
             } else {
                 super.keyDown(with: event)
             }
