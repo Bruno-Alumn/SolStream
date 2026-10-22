@@ -1,5 +1,6 @@
 #include "encoder.h"
 
+#include "feed_ledger.h"
 #include "log.h"
 
 #include <mfapi.h>
@@ -175,8 +176,9 @@ struct Encoder::Impl {
     long long pendingCapturedAt = 0;
     bool pendingIdr = false;
     int needInput = 0;
-    uint32_t nextFrameId = 1;
-    std::atomic<bool> idrWanted{false};
+    /// Frame ids and keyframe requests, spent only on a frame the encoder
+    /// takes. See feed_ledger.h.
+    FeedLedger ledger;
 
     struct Meta {
         long long capturedAt = 0;
@@ -473,7 +475,8 @@ bool Encoder::Impl::FeedLocked() {
     if (!havePending) { return false; }
     havePending = false;
 
-    const uint32_t frameId = nextFrameId++;
+    // Not spent until ProcessInput has taken the frame: see feed_ledger.h.
+    const uint32_t frameId = ledger.NextFrameId();
     meta[frameId % kMetaRing].capturedAt = pendingCapturedAt;
     meta[frameId % kMetaRing].emitted = false;
 
@@ -532,7 +535,8 @@ bool Encoder::Impl::FeedLocked() {
     sample->SetSampleTime((LONGLONG) frameId * ticksPerFrame);
     sample->SetSampleDuration(ticksPerFrame);
 
-    if (pendingIdr || idrWanted.exchange(false)) {
+    const bool idr = ledger.TakeIdr(pendingIdr);
+    if (idr) {
         VARIANT on{};
         on.vt = VT_UI4;
         on.ulVal = 1;
@@ -548,8 +552,10 @@ bool Encoder::Impl::FeedLocked() {
     Release(sample);
     Release(buffer);
     if (FAILED(fed)) {
+        ledger.Refused(idr);
         return false;
     }
+    ledger.Accepted();
     submitted.fetch_add(1);
     return true;
 }
@@ -1164,9 +1170,9 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     return true;
 }
 
-void Encoder::RequestIdr() { impl_->idrWanted.store(true); }
+void Encoder::RequestIdr() { impl_->ledger.RequestIdr(); }
 
-bool Encoder::IdrPending() const { return impl_->idrWanted.load(); }
+bool Encoder::IdrPending() const { return impl_->ledger.IdrPending(); }
 
 void Encoder::SetBitrate(UINT bitrateBps) {
     Impl& s = *impl_;

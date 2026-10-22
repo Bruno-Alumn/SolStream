@@ -17,8 +17,8 @@
 // hardware: how commands are started, the install options, what uninstall
 // takes of the virtual display's settings, when its device is waiting for a
 // restart, which adapter is Tailscale's, the clipboard's privacy
-// markers and line endings, and when the sound capture opens its device
-// again.
+// markers and line endings, when the sound capture opens its device
+// again, and when the encoder spends a frame id.
 
 #include "updater.cpp"
 
@@ -32,6 +32,7 @@
 #include "clipboard.h"
 #include "driver_install.h"
 #include "media/audio_reopen.h"
+#include "media/feed_ledger.h"
 #include "tailscale.h"
 #include "vdd.h"
 
@@ -1521,6 +1522,58 @@ void TestSoundDefaultDevice() {
     CHECK(!DefaultDeviceMoved(L"", headset));
 }
 
+// ── The encoder's frame ids ──────────────────────────────────────────────────
+
+/// The Mac reads a jump in frame ids as a picture lost whole and freezes for a
+/// keyframe, so an id may only be spent on a frame the encoder took, and a
+/// keyframe request a refused feed was carrying must not be lost with it.
+void TestFeedLedger() {
+    media::FeedLedger ledger;
+    CHECK(ledger.NextFrameId() == 1);
+    CHECK(!ledger.IdrPending());
+
+    // Accepted: the id is spent.
+    CHECK(!ledger.TakeIdr(false));
+    ledger.Accepted();
+    CHECK(ledger.NextFrameId() == 2);
+
+    // Refused: the next feed carries the same id, so the ids the Mac sees stay
+    // consecutive.
+    CHECK(!ledger.TakeIdr(false));
+    ledger.Refused(false);
+    CHECK(ledger.NextFrameId() == 2);
+    CHECK(!ledger.IdrPending());
+    ledger.Accepted();
+    CHECK(ledger.NextFrameId() == 3);
+
+    // A requested keyframe is taken by one feed only...
+    ledger.RequestIdr();
+    CHECK(ledger.IdrPending());
+    CHECK(ledger.TakeIdr(false));
+    CHECK(!ledger.IdrPending());
+    // ...and handed back when that feed is refused, so the next one is it.
+    ledger.Refused(true);
+    CHECK(ledger.IdrPending());
+    CHECK(ledger.NextFrameId() == 3);
+    CHECK(ledger.TakeIdr(false));
+    ledger.Accepted();
+    CHECK(!ledger.IdrPending());
+    CHECK(ledger.NextFrameId() == 4);
+
+    // A keyframe the caller forces is one too, and owed again if refused.
+    CHECK(ledger.TakeIdr(true));
+    ledger.Refused(true);
+    CHECK(ledger.TakeIdr(false));
+    ledger.Accepted();
+
+    // Accepted, a keyframe is not owed again.
+    ledger.RequestIdr();
+    CHECK(ledger.TakeIdr(false));
+    ledger.Accepted();
+    CHECK(!ledger.IdrPending());
+    CHECK(!ledger.TakeIdr(false));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1587,6 +1640,7 @@ int wmain(int argc, wchar_t** argv) {
     TestSoundReadTrouble();
     TestSoundReopener();
     TestSoundDefaultDevice();
+    TestFeedLedger();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
