@@ -188,6 +188,23 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertEqual(repeats(&hold, from: 150, to: 600, rttMs: 0), [260, 520])
     }
 
+    /// But with no IDR since the earlier request, that request may have been
+    /// lost, and the later one is then the one the host acts on. Over a 300 ms
+    /// round trip its IDR cannot begin to arrive before about 466 ms, and a
+    /// repeat counted from the lost request -- at 410 -- reached the host past
+    /// its limit and brought a second full IDR.
+    func testARequestAfterOneThatWasLostIsNotRepeatedEarly() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)   // lost
+        XCTAssertEqual(hold.damaged(frameId: 5, now: ms(150)), .holdAndAsk)
+        XCTAssertEqual(repeats(&hold, from: 160, to: 465, rttMs: 300), [])
+        hold.idrArriving(frameId: 9, now: ms(466))
+        XCTAssertEqual(repeats(&hold, from: 470, to: 860, rttMs: 300), [],
+                       "and not while its IDR is arriving")
+        XCTAssertEqual(hold.picture(frameId: 9, isIdr: true, now: ms(560)), .decode)
+    }
+
     /// Damage older than an IDR that is already arriving needs no request of
     /// its own; the IDR repairs it.
     func testDamageOlderThanAnArrivingIdrIsIgnored() {

@@ -66,13 +66,15 @@ struct KeyframeHold {
     private(set) var lastIdr: UInt32?
     /// The last picture handed to the decoder.
     private(set) var lastDecoded: UInt32?
-    /// When the host was last sent a keyframe request it can have acted on --
-    /// one more than its 200 ms limit after the one before -- in uptime
-    /// nanoseconds, or nil before the first request. The repeat is counted
-    /// from this.
+    /// When the host was last sent a keyframe request it acted on, as far as
+    /// this side can tell, in uptime nanoseconds, or nil before the first
+    /// request. The repeat is counted from this. See `sent`.
     private var askedAt: UInt64?
     /// When the last request of any kind went out, for one per burst.
     private var sentAt: UInt64?
+    /// When an IDR, or a fragment of one, last arrived: the sign that the host
+    /// acted on a request sent before it.
+    private var idrSeenAt: UInt64?
     /// The IDR whose fragments are arriving while the hold is on, and when the
     /// latest of them came.
     private var arrivingIdr: (frameId: UInt32, at: UInt64)?
@@ -80,6 +82,7 @@ struct KeyframeHold {
     /// A complete picture.
     mutating func picture(frameId: UInt32, isIdr: Bool, now: UInt64) -> Verdict {
         if isIdr {
+            idrSeenAt = now
             holding = false
             lastIdr = frameId
             lastDecoded = frameId
@@ -137,6 +140,7 @@ struct KeyframeHold {
     mutating func idrArriving(frameId: UInt32, now: UInt64) {
         guard holding else { return }
         if let lastDecoded, frameId <= lastDecoded { return }
+        idrSeenAt = now
         arrivingIdr = (frameId, now)
     }
 
@@ -179,15 +183,25 @@ struct KeyframeHold {
     ///
     /// One inside the host's limit still goes: it is one datagram, and if the
     /// request before it was lost on the way, it is the one the host acts on.
-    /// But it no longer restarts the repeat. It used to, and the host had all
-    /// but certainly ignored it: on a LAN a requested IDR that breaks on the
-    /// way is reported damaged 100-170 ms after the request that brought it,
-    /// and the repeat then came a quarter-second after the request the host
-    /// ignored rather than the one it acted on -- about 150 ms more of a
-    /// frozen picture. The same for fresh damage soon after a repair.
+    /// But once an IDR has arrived since the request before it, the host
+    /// acted on that one and has all but certainly ignored this, so it does
+    /// not restart the repeat. It used to: on a LAN a requested IDR that
+    /// breaks on the way is reported damaged 100-170 ms after the request that
+    /// brought it, and the repeat then came a quarter-second after the request
+    /// the host ignored rather than the one it acted on -- about 150 ms more
+    /// of a frozen picture. The same for fresh damage soon after a repair.
+    ///
+    /// With no IDR since, the request before may never have reached the host,
+    /// and this one is then the one it acts on. Counting the repeat from the
+    /// lost one brought it up to 200 ms early: over a 300 ms round trip,
+    /// before the IDR could begin to arrive and past the host's limit, so a
+    /// second full IDR; on a LAN, inside the limit, so one the host ignored.
     private mutating func sent(_ now: UInt64) {
         sentAt = now
-        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.hostLimitMs { return }
+        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.hostLimitMs,
+           let idrSeenAt, idrSeenAt > askedAt {
+            return
+        }
         askedAt = now
     }
 
