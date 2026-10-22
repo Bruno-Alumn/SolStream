@@ -53,7 +53,7 @@ final class ConnectWindowTests: XCTestCase {
         private var _tailscale: TailscaleStatus
         private var _answering: Set<String>
         private var _delays: [String: TimeInterval] = [:]
-        private(set) var probes = 0
+        private var _probes = 0
 
         init(tailscale: TailscaleStatus, answering: Set<String>) {
             _tailscale = tailscale
@@ -70,6 +70,12 @@ final class ConnectWindowTests: XCTestCase {
             set { lock.lock(); _answering = newValue; lock.unlock() }
         }
 
+        /// How many probes have been sent. Counted off the main thread, where
+        /// the probes run, and read on it.
+        var probes: Int {
+            lock.lock(); defer { lock.unlock() }; return _probes
+        }
+
         /// The next probe of `host` takes this long, as a probe through a
         /// tunnel still waking does.
         func delayNext(_ host: String, by seconds: TimeInterval) {
@@ -78,7 +84,7 @@ final class ConnectWindowTests: XCTestCase {
 
         func reach(_ host: String) -> Bool {
             lock.lock()
-            probes += 1
+            _probes += 1
             let answers = _answering.contains(host)
             let delay = _delays.removeValue(forKey: host)
             lock.unlock()
