@@ -96,6 +96,12 @@ final class ClipboardBridgeTests: XCTestCase {
         pasteboard.setString(text, forType: .string)
     }
 
+    /// An image, which has no text on the pasteboard at all.
+    private func copyAnImageOnTheMac() {
+        pasteboard.clearContents()
+        pasteboard.setData(Data([0x89, 0x50, 0x4E, 0x47]), forType: .png)
+    }
+
     /// Copied the way a password manager copies: marked concealed.
     private func copyAPasswordOnTheMac(_ text: String) {
         pasteboard.clearContents()
@@ -344,6 +350,63 @@ final class ClipboardBridgeTests: XCTestCase {
         fake.answerRead(text: "make deploy", sequence: 3)
         settle()
         XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+    }
+
+    /// The same once the Mac holds an image: the PC copying the text that
+    /// crossed last brings it back, or ⌘V on the Mac would paste the image.
+    func testThePCsCopyReplacesAnImageOnTheMacEvenWhenItCrossedBefore() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("make deploy")
+        bridge.syncNow()
+        fake.answerWrite(sequence: 10)
+        settle()
+
+        copyAnImageOnTheMac()
+        bridge.syncNow()
+        fake.answerRead(sequence: 10, unchanged: true)
+        settle()
+
+        bridge.syncNow()
+        fake.answerRead(text: "make deploy", sequence: 11)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+        XCTAssertEqual(fake.writes, ["make deploy"], "the image was sent as text")
+    }
+
+    /// And once the Mac's clipboard has been emptied, here after a copy that
+    /// came from the PC.
+    func testThePCsCopyReplacesAnEmptiedMacClipboardEvenWhenItCrossedBefore() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(text: "make deploy", sequence: 2)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+
+        pasteboard.clearContents()
+        pasteboard.setString("", forType: .string)
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.last, 2)
+        fake.answerRead(text: "make deploy", sequence: 3)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+        XCTAssertEqual(fake.writes, [], "the empty clipboard was sent")
+    }
+
+    /// A copy the host did not take — another program held the PC's
+    /// clipboard open — is not on the PC, so copying it again sends it again.
+    func testTheSameTextCopiedAgainGoesAfterTheHostDidNotTakeIt() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        fake.answerWrite(sequence: nil)
+        settle()
+
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
     }
 
     /// Turned on mid-stream, sync starts from nothing having crossed: either

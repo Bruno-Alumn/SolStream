@@ -355,18 +355,31 @@ final class ClipboardBridge {
                 if local.truncated {
                     Log.info("[clipboard] trimmed to \(local.text.utf8.count) bytes for the host")
                 }
-                lastSyncedText = local.text
+                let sent = local.text
+                lastSyncedText = sent
                 inFlight = true
-                host.write(Self.windowsLineEndings(local.text)) { [weak self] sequence in
+                host.write(Self.windowsLineEndings(sent)) { [weak self] sequence in
                     DispatchQueue.main.async {
                         guard let self else { return }
-                        // Adopt the sequence our own write produced, so it is not
-                        // read back as a remote change on the next tick.
-                        if let sequence { self.lastRemoteSequence = sequence }
+                        if let sequence {
+                            // Adopt the sequence our own write produced, so it is
+                            // not read back as a remote change on the next tick.
+                            self.lastRemoteSequence = sequence
+                        } else if self.lastSyncedText == sent {
+                            // Not taken — most often another program holding
+                            // the PC's clipboard open — so the PC does not hold
+                            // it, and the same text copied again goes again.
+                            self.lastSyncedText = nil
+                        }
                         self.settle()
                     }
                 }
                 return
+            }
+            if local.map({ $0.text.isEmpty }) ?? true {
+                // An image, or nothing: either way the Mac no longer holds
+                // what crossed last.
+                lastSyncedText = nil
             }
         }
 
