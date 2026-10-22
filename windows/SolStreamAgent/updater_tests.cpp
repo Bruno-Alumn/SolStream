@@ -12,8 +12,8 @@
 // is not covered here.
 //
 // It also carries the tests of a few pieces outside the updater that need no
-// hardware: how commands are started, the install options, and what
-// uninstall takes of the virtual display's settings.
+// hardware: how commands are started, the install options, what uninstall
+// takes of the virtual display's settings, and which adapter is Tailscale's.
 
 #include "updater.cpp"
 
@@ -23,6 +23,7 @@
 #include <cstdio>
 
 #include "driver_install.h"
+#include "tailscale.h"
 
 namespace {
 
@@ -786,6 +787,32 @@ void TestDriverSettingsJunction(const std::wstring& scratch) {
     RemoveTree(elsewhere);
 }
 
+// ── Tailscale ────────────────────────────────────────────────────────────────
+
+/// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
+/// addresses there too; only Tailscale's own adapter counts.
+void TestTailscaleAdapter() {
+    CHECK(IsTailscaleAdapter(L"Tailscale", L"Tailscale Tunnel", false));
+    // Renamed, but still described as itself.
+    CHECK(IsTailscaleAdapter(L"Ethernet 4", L"Tailscale Tunnel", false));
+    // Named nothing like it, but carrying one of its addresses.
+    CHECK(IsTailscaleAdapter(L"vpn", L"Wintun Userspace Tunnel", true));
+    CHECK(!IsTailscaleAdapter(L"CloudflareWARP", L"Cloudflare WARP Interface Tunnel", false));
+    CHECK(!IsTailscaleAdapter(L"wt0", L"WireGuard Tunnel", false));
+    CHECK(!IsTailscaleAdapter(L"Ethernet", L"Realtek PCIe GbE Family Controller", false));
+
+    unsigned char address[16] = {0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0, 0xab, 0x12,
+                                 0, 0, 0, 0, 0, 0, 0, 1};
+    CHECK(IsTailscaleIpv6(address));
+    // The next /48 along.
+    address[5] = 0xe1;
+    CHECK(!IsTailscaleIpv6(address));
+    // Any other unique-local address.
+    const unsigned char other[16] = {0xfd, 0x12, 0x34, 0x56, 0x78, 0x9a, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 1};
+    CHECK(!IsTailscaleIpv6(other));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -835,6 +862,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsFolder(scratch);
     TestDriverSettingsFile(scratch);
     TestDriverSettingsJunction(scratch);
+    TestTailscaleAdapter();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
