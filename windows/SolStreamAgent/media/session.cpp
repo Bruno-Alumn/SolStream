@@ -134,7 +134,11 @@ struct MediaSession::Impl {
     /// non-atomic 64-bit value written and read at once is undefined behaviour
     /// whatever the hardware happens to do with it.
     std::atomic<long long> lastHeardAt{0};
-    long long lastIdrAt = 0;
+    /// When the encoder was last asked for a keyframe, which the client's
+    /// requests are limited against. The receive thread reads and writes it,
+    /// and a send-queue overflow writes it from an encoder work-queue thread,
+    /// so it is atomic for the reason lastHeardAt is.
+    std::atomic<long long> lastIdrAt{0};
     long long nextSlot = 0;
     double ticksPerByte = 0;
 
@@ -435,7 +439,13 @@ void MediaSession::Impl::RunCapture() {
                 // The sender cannot keep up, so the queue is full of pictures
                 // that will be stale before they leave. Throwing them away and
                 // asking for a keyframe recovers in one frame; sending them
-                // recovers in however long the backlog takes.
+                // recovers in however long the backlog takes. The keyframe
+                // counts against the client's request limit, as the
+                // first-contact one does: the client sees the pictures thrown
+                // away as lost and rightly asks for one, and on any path slower
+                // than a frame that request used to arrive after this keyframe
+                // was made and bring a second, into the sender that had just
+                // fallen behind.
                 queue.clear();
                 picturesDropped.fetch_add(1);
                 wantIdr = true;
@@ -453,7 +463,10 @@ void MediaSession::Impl::RunCapture() {
                 std::lock_guard<std::mutex> guard(mediaLock);
                 encoderPtr = encoder;
             }
-            if (encoderPtr) { encoderPtr->RequestIdr(); }
+            if (encoderPtr) {
+                lastIdrAt.store(Now());
+                encoderPtr->RequestIdr();
+            }
         }
     });
 
@@ -668,8 +681,8 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
                 // Rate-limited, because a client that lost a fragment of an IDR
                 // asks for another IDR, which is bigger, which loses more.
                 const long long now = Now();
-                if (MillisBetween(lastIdrAt, now) > 200.0) {
-                    lastIdrAt = now;
+                if (MillisBetween(lastIdrAt.load(), now) > 200.0) {
+                    lastIdrAt.store(now);
                     idrRequests.fetch_add(1);
                     // Through a copy, for the same reason as everywhere else:
                     // this is the receive thread, and the pass it is asking for
@@ -760,7 +773,7 @@ void MediaSession::Impl::ReceiveLoop() {
             // 250 ms refresh. One is asked for here instead, and the request
             // limit is started from it, so a client that asks as it opens is
             // not sent a second one.
-            lastIdrAt = Now();
+            lastIdrAt.store(Now());
             std::shared_ptr<Encoder> encoderPtr;
             {
                 std::lock_guard<std::mutex> guard(mediaLock);
@@ -886,7 +899,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
 
     s.startedAt = Now();
     s.lastHeardAt.store(0);
-    s.lastIdrAt = 0;
+    s.lastIdrAt.store(0);
     s.nextSlot = s.startedAt;
     // Pace at twice the encoder's target. Metering at exactly the bitrate makes
     // every IDR late by construction, and metering at line rate is what loses
