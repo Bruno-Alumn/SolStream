@@ -347,6 +347,42 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(host.connections, knocks, "no more knocking after giving up")
     }
 
+    // MARK: - Asking for the displays again
+
+    /// An answer with no display in it -- one that did not parse -- leaves the
+    /// greeting's list alone; a real one replaces it.
+    func testAnEmptyDisplayAnswerDoesNotWipeTheList() throws {
+        let seen = Observations()
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            seen.set("first", ScriptedHost.json(connection.readLine(timeout: 5))?["cmd"])
+            connection.send(#"{"type":"displays","displays":[]}"#)
+            _ = connection.readLine(timeout: 5)
+            connection.send(ScriptedHost.displays.replacingOccurrences(of: "1920", with: "2560"))
+            Thread.sleep(forTimeInterval: 2)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+        XCTAssertEqual(agent.displays.map(\.width), [1920])
+
+        let empty = expectation(description: "empty answer")
+        agent.refreshDisplays { displays in
+            XCTAssertEqual(displays, [], "the caller is told what came")
+            empty.fulfill()
+        }
+        wait(for: [empty], timeout: 5)
+        XCTAssertEqual(seen.get("first") as? String, "displays")
+        XCTAssertEqual(agent.displays.map(\.width), [1920], "the greeting's list is kept")
+
+        let real = expectation(description: "real answer")
+        agent.refreshDisplays { _ in real.fulfill() }
+        wait(for: [real], timeout: 5)
+        XCTAssertEqual(agent.displays.map(\.width), [2560])
+    }
+
     // MARK: - Helpers
 
     /// Connect, and wait for the host's first display list.

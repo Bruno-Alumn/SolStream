@@ -1325,7 +1325,9 @@ public final class AgentConnection {
                 return
             }
             let displays = Self.parseDisplays(message)
-            self?.setDisplays(displays)
+            // An empty answer is one that did not parse: a PC always has a
+            // display. It must not wipe the list the greeting gave.
+            if !displays.isEmpty { self?.setDisplays(displays) }
             completion?(displays)
         }
     }

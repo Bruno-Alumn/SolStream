@@ -531,10 +531,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// was none, and streaming the real monitor. A plain request, which every
     /// host answers; failing that, the list already held.
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
+        let held = agent.displays
         agent.refreshDisplays { [weak self] displays in
             DispatchQueue.main.async {
                 self?.start(host: host, agent: agent, targets: targets,
-                            displays: displays.isEmpty ? agent.displays : displays)
+                            displays: displays.isEmpty ? held : displays)
             }
         }
     }
