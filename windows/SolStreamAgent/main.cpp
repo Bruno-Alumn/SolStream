@@ -1854,6 +1854,191 @@ ClientLimits ClientSizeLimits(HWND window) {
     return limits;
 }
 
+/// How tall the title bar an application draws inside its own client area is,
+/// in pixels; 0 when it draws none, or when that cannot be told.
+///
+/// A standard title bar sits above the client area, outside the Mac's crop
+/// already. Chrome, Discord, Explorer and the like draw theirs inside it, so
+/// their minimise, maximise and close reach the stream, and the Mac can leave
+/// the strip out of the picture when the person asks it to.
+///
+/// Asked of the application rather than assumed: WM_NCHITTEST down a few
+/// columns from the top of the client area, the way Windows itself finds out
+/// where a click would drag the window or press a caption button. The strip is
+/// the rows where any column answers as caption or as one of its buttons -- a
+/// tab under one column, the empty strip or a button under another -- and it
+/// ends at the first row where none does. A row is answered by whichever
+/// column the application says is caption, so Discord's (drag in the middle,
+/// its own buttons at the right, which are client) and Chrome's (tabs in the
+/// middle, Windows-style buttons at the right) both measure.
+///
+/// Zero rather than a guess when the answer would be wrong to act on: a window
+/// that is DPI-virtualised (the point would be scaled before it reached the
+/// application), one that answers caption all the way down (a splash, or a
+/// window draggable anywhere), one that is hung, and a strip thinner than a
+/// border.
+int TitleStripHeight(HWND window) {
+    const RECT frame = VisibleFrame(window);
+    const RECT client = ClientAreaInScreen(window);
+    if (client.top - frame.top > 4) {
+        return 0;
+    }
+    if (GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(window))
+            != DPI_AWARENESS_PER_MONITOR_AWARE || Unresponsive(window)) {
+        return 0;
+    }
+    const UINT window_dpi = GetDpiForWindow(window);
+    const int dpi = window_dpi ? (int) window_dpi : 96;
+    const LONG width = client.right - client.left;
+    const LONG height = client.bottom - client.top;
+    if (width < MulDiv(160, dpi, 96) || height < MulDiv(80, dpi, 96)) {
+        return 0;
+    }
+    // Under the close button, under maximise, and two across the middle.
+    const LONG columns[] = {
+        client.right - MulDiv(23, dpi, 96), client.right - MulDiv(69, dpi, 96),
+        client.left + width / 2, client.left + width / 4,
+    };
+    const ULONGLONG started = GetTickCount64();
+    bool gave_up = false;
+    // What the application says a point is. Explorer and Windows Terminal put
+    // a child window over their title strip that answers for it, while the
+    // window itself says client there, so the child under the point is asked
+    // as well; a child that is see-through for hit-testing defers to its parent.
+    auto ask = [&](HWND target, LONG x, LONG y, LRESULT& hit) {
+        DWORD_PTR answer = HTNOWHERE;
+        if (!SendMessageTimeoutW(target, WM_NCHITTEST, 0, MAKELPARAM((short) x, (short) y),
+                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &answer)) {
+            gave_up = true;
+            return false;
+        }
+        hit = (LRESULT) answer;
+        return true;
+    };
+    auto child_under = [&](LONG x, LONG y) {
+        HWND deepest = window;
+        for (int depth = 0; depth < 8; ++depth) {
+            POINT point{x, y};
+            ScreenToClient(deepest, &point);
+            HWND next = ChildWindowFromPointEx(deepest, point,
+                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
+            if (!next || next == deepest) {
+                break;
+            }
+            deepest = next;
+        }
+        return deepest;
+    };
+    auto row = [&](LONG y, bool& caption) {
+        caption = false;
+        bool title = false;
+        for (const LONG x : columns) {
+            if (GetTickCount64() - started > 300) {
+                gave_up = true;
+                return false;
+            }
+            LRESULT hit = HTNOWHERE;
+            if (!ask(window, x, y, hit)) {
+                return false;
+            }
+            if (hit == HTCLIENT) {
+                const HWND child = child_under(x, y);
+                LRESULT child_hit = HTNOWHERE;
+                if (child != window && !ask(child, x, y, child_hit)) {
+                    return false;
+                }
+                if (child != window && child_hit != HTTRANSPARENT && child_hit != HTNOWHERE) {
+                    hit = child_hit;
+                }
+            }
+            switch (hit) {
+            case HTCAPTION: case HTSYSMENU: case HTMINBUTTON: case HTMAXBUTTON:
+            case HTCLOSE: case HTHELP:
+                caption = true;
+                title = true;
+                break;
+            // The resize edge along the top belongs to the strip, but alone it
+            // is not one.
+            case HTTOP: case HTTOPLEFT: case HTTOPRIGHT:
+                title = true;
+                break;
+            default:
+                break;
+            }
+        }
+        return title;
+    };
+
+    const int most = std::min<int>(MulDiv(96, dpi, 96), (int) height / 3);
+    const int step = std::max(1, MulDiv(2, dpi, 96));
+    bool saw_caption = false;
+    int last_title = -1;
+    int first_plain = -1;
+    for (int y = 0; y < most; y += step) {
+        bool caption = false;
+        if (!row(client.top + y, caption)) {
+            first_plain = y;
+            break;
+        }
+        saw_caption = saw_caption || caption;
+        last_title = y;
+    }
+    if (gave_up || !saw_caption || first_plain < 0) {
+        return 0;
+    }
+    // Sampled every `step`; the edge is somewhere after the last title row.
+    int strip = first_plain;
+    for (int y = last_title + 1; y < first_plain; ++y) {
+        bool caption = false;
+        if (!row(client.top + y, caption)) {
+            strip = y;
+            break;
+        }
+    }
+    return (gave_up || strip < MulDiv(8, dpi, 96)) ? 0 : strip;
+}
+
+/// TitleStripHeight for the window being placed, measured at most once a
+/// second. A drag on the Mac places the window at the round trip's rate, and
+/// the strip does not change with the width; a second is soon enough for an
+/// application that lays itself out again after moving onto the capture
+/// display. Only the command thread places windows.
+int CachedTitleStripHeight(HWND window) {
+    static HWND measured = nullptr;
+    static UINT measured_dpi = 0;
+    static ULONGLONG measured_at = 0;
+    static int height = 0;
+    const UINT dpi = GetDpiForWindow(window);
+    const ULONGLONG now = GetTickCount64();
+    if (window != measured || dpi != measured_dpi || now - measured_at > 1000) {
+        height = TitleStripHeight(window);
+        measured = window;
+        measured_dpi = dpi;
+        measured_at = now;
+    }
+    return height;
+}
+
+/// The file name of the program that owns this window, "Discord.exe", for the
+/// Mac to remember per-application choices by; empty when Windows will not say.
+std::string ProgramName(HWND window) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    HANDLE process = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    if (!process) {
+        return {};
+    }
+    wchar_t path[MAX_PATH] = {0};
+    DWORD length = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &length);
+    CloseHandle(process);
+    if (!ok) {
+        return {};
+    }
+    const wchar_t* name = std::wcsrchr(path, L'\\');
+    return ToUtf8(name ? name + 1 : path);
+}
+
 
 /// Has this slot's window gone?
 ///
@@ -3797,7 +3982,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                       limits.maximum.x, limits.maximum.y,
                       limits.resizable ? "true" : "false",
                       ResizeBorderThickness(window), missed);
-        return buffer;
+        // The title strip the application draws, for the Mac to leave out of
+        // the picture when asked, and the program, to remember that by.
+        std::string reply(buffer);
+        reply.pop_back();
+        reply += ",\"titleBar\":" + std::to_string(CachedTitleStripHeight(window));
+        reply += ",\"program\":\"" + JsonEscape(ProgramName(window)) + "\"}";
+        return reply;
     }
 
     if (command == "lock") {

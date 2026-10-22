@@ -26,4 +26,27 @@ final class StreamSettingsTests: XCTestCase {
         XCTAssertEqual(StreamSettings.VideoQuality.maximum.bitrateKbps(remote: true), 50_000,
                        "an explicit choice is not lowered for the path")
     }
+
+    func testAHiddenTitleBarIsKeptPerProgramAndOffUntilChosen() {
+        let key = "SolStream.hiddenTitleBars"
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let saved {
+                UserDefaults.standard.set(saved, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+        let settings = StreamSettings.shared
+
+        XCTAssertFalse(settings.hidesTitleBar(of: "Discord.exe"), "off for every program until chosen")
+        settings.setHidesTitleBar(true, of: "Discord.exe")
+        XCTAssertTrue(settings.hidesTitleBar(of: "discord.EXE"), "Windows file names ignore case")
+        XCTAssertFalse(settings.hidesTitleBar(of: "msedge.exe"), "one program's choice is not another's")
+        settings.setHidesTitleBar(true, of: "msedge.exe")
+        settings.setHidesTitleBar(false, of: "DISCORD.exe")
+        XCTAssertFalse(settings.hidesTitleBar(of: "Discord.exe"))
+        XCTAssertTrue(settings.hidesTitleBar(of: "msedge.exe"))
+    }
 }

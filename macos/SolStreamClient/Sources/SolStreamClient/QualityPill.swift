@@ -46,6 +46,14 @@ final class QualityPill: DS.Box {
         didSet { refresh() }
     }
 
+    /// Whether the application's own title bar is left out of the picture, or
+    /// nil when the host found none drawn inside the window, and the popover
+    /// has no row for it: a title bar Windows draws is outside the picture
+    /// already.
+    var hidesTitleBar: Bool?
+    /// The choice, made in the popover.
+    var onTitleBarChosen: ((Bool) -> Void)?
+
     init() {
         super.init(fill: DS.raised, radius: DS.Metric.chipRadius)
 
@@ -282,6 +290,23 @@ final class QualityPill: DS.Box {
         let soundQualityRow = setting("Sound quality", soundQuality)
         let mouseRow = setting("Mouse", modes)
         let videoRow = setting("Video", quality)
+
+        // The application's own minimise, maximise and close, for one drawn
+        // inside its window, where the picture would otherwise show them. Only
+        // then: a title bar Windows draws is outside the picture already. Off
+        // until chosen, so nobody loses a strip they never asked to lose. No
+        // note under it, which would take the popover past a laptop's comfort;
+        // "Title bar, Show, Hide" says it, and the tooltip says the rest.
+        var titleBarRow: NSView?
+        if let hidesTitleBar {
+            let choice = SolarSegments(labels: ["Show", "Hide"], accessibilityLabel: "Title bar")
+            choice.target = self
+            choice.action = #selector(titleBarChosen(_:))
+            choice.selectedSegment = hidesTitleBar ? 1 : 0
+            choice.toolTip = "Hide leaves the app's own minimise, maximise and close out of the "
+                + "picture, with whatever shares their strip. Kept for this app."
+            titleBarRow = setting("Title bar", choice)
+        }
         let footer = DS.hairlineView()
         let settingsLink = LinkButton(title: "All settings", target: self,
                                       action: #selector(openSettings(_:)))
@@ -306,6 +331,10 @@ final class QualityPill: DS.Box {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = DS.Space.x3
+        // With the mouse: both are about how the window behaves, not the stream.
+        if let titleBarRow, let at = stack.arrangedSubviews.firstIndex(of: videoRow) {
+            stack.insertArrangedSubview(titleBarRow, at: at)
+        }
         stack.setCustomSpacing(DS.Space.x2, after: row)
         // A note sits under its own row, closer to it than to the next one.
         // The sound's two rows are one group, with their two notes under both.
@@ -409,6 +438,13 @@ final class QualityPill: DS.Box {
         StreamSettings.shared.pointerMode = mode
         mouseHint?.stringValue = Self.pointerHint(mode, followsGame: followsGame)
         refitDetail()
+    }
+
+    @objc private func titleBarChosen(_ sender: SolarSegments) {
+        let hides = sender.selectedSegment == 1
+        guard hides != hidesTitleBar else { return }
+        hidesTitleBar = hides
+        onTitleBarChosen?(hides)
     }
 
     @objc private func volumeMoved(_ sender: NSSlider) {

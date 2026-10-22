@@ -28,6 +28,19 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Where this window's client area sits on the capture display.
     private(set) var tile: CGRect
 
+    /// The title bar the application draws inside its own window, in host
+    /// pixels at the top of `tile`, as the host last measured it; zero when it
+    /// draws none there.
+    private var hostTitleBar: CGFloat = 0
+    /// Whether that strip is left out of the picture. Off until chosen in the
+    /// pill's popover, then kept per program -- see `adoptTitleBar`.
+    private var hidesTitleBar = false
+    /// The program that owns the host window, "Discord.exe", once the host
+    /// has named it.
+    private var program = ""
+    /// The last placement, so a change to the crop can apply its limits again.
+    private var lastPlacement: AgentConnection.Placement?
+
     /// The capture display, in virtual-desktop coordinates. Nothing outside this
     /// is in the stream at all.
     private var displayRect: CGRect {
@@ -77,6 +90,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         super.init()
         build(title: remote.title,
               naturalSize: remote.naturalSize)
+        pill.onTitleBarChosen = { [weak self] hides in self?.setHidesTitleBar(hides) }
 
         if remote.hidesCaptionWhenCropped {
             Log.info("[window] \"\(remote.title)\" has a standard title bar "
@@ -85,7 +99,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
             // Not a failure: Explorer, Chrome, Discord and friends draw their
             // caption inside the client area, sharing that strip with tabs and
             // the address bar. Cropping the buttons away would take those too, so
-            // the buttons stay — and closing from inside the stream has to work.
+            // the buttons stay unless the person hides the strip from the pill --
+            // and closing from inside the stream has to work.
             Log.info("[window] \"\(remote.title)\" draws its own title bar, so its "
                      + "window buttons stay visible; watching for it to be closed")
         }
@@ -307,12 +322,14 @@ final class AppWindow: NSObject, NSWindowDelegate {
         captureHint.flash()
     }
 
-    /// Point this window at a different region of the canvas.
+    /// Point this window at a different region of the canvas: the host
+    /// window's client area, of which the picture shows `picture(of:)`.
     func setTile(_ rect: CGRect) {
         tile = rect
-        let crop = CGRect(x: rect.minX - CGFloat(display.x),
-                          y: rect.minY - CGFloat(display.y),
-                          width: rect.width, height: rect.height)
+        let shown = picture(of: rect)
+        let crop = CGRect(x: shown.minX - CGFloat(display.x),
+                          y: shown.minY - CGFloat(display.y),
+                          width: shown.width, height: shown.height)
         metalView?.sourceRect = crop
         inputCapture?.sourceRect = crop
         inputCapture?.canvasSize = session.canvasSize
@@ -320,6 +337,57 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // whatever shape we are dragged into, so locking the aspect would stop
         // the very thing that makes this feel native — stretch either axis and
         // the Windows app reflows, exactly as a local window would.
+    }
+
+    // MARK: - The application's own title bar
+
+    /// Host pixels left off the top of the host window's client area.
+    private var hiddenStrip: CGFloat { hidesTitleBar ? hostTitleBar : 0 }
+
+    /// The part of the host window's client area `rect` that the picture shows:
+    /// all of it, or all but the application's own title bar. The crop and the
+    /// pointer both follow this, so a click lands where it was aimed either way.
+    private func picture(of rect: CGRect) -> CGRect {
+        let strip = min(hiddenStrip, max(rect.height - 1, 0))
+        return CGRect(x: rect.minX, y: rect.minY + strip,
+                      width: rect.width, height: rect.height - strip)
+    }
+
+    /// Take the host's measurement of the application's own title bar, and the
+    /// choice kept for this program the first time the host names it.
+    private func adoptTitleBar(_ placement: AgentConnection.Placement) {
+        if program.isEmpty, !placement.program.isEmpty {
+            program = placement.program
+            hidesTitleBar = StreamSettings.shared.hidesTitleBar(of: program)
+            if hidesTitleBar {
+                Log.info("[window] leaving \(program)'s own title bar out of the picture, as chosen before")
+            }
+        }
+        hostTitleBar = placement.titleBarHeight
+        pill.hidesTitleBar = hostTitleBar > 0 ? hidesTitleBar : nil
+    }
+
+    /// Leave the application's own title bar out of the picture, or put it back.
+    ///
+    /// This window loses or gains the strip and the host window keeps its size,
+    /// so the application does not lay itself out again, and nothing goes to
+    /// the host but the pointer's new mapping.
+    private func setHidesTitleBar(_ hides: Bool) {
+        guard hides != hidesTitleBar, !isClosing else { return }
+        hidesTitleBar = hides
+        if !program.isEmpty {
+            StreamSettings.shared.setHidesTitleBar(hides, of: program)
+        }
+        Log.info("[window] \(hides ? "hiding" : "showing") the application's own title bar "
+                 + "(\(Int(hostTitleBar)) px)")
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        let scale = screen.backingScaleFactor
+        let shown = picture(of: tile)
+        if let lastPlacement {
+            applySizeLimits(lastPlacement, achieved: shown, scale: scale)
+        }
+        setTile(tile)
+        matchWindow(to: shown, scale: scale)
     }
 
     // MARK: - Window
@@ -530,9 +598,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
             return
         }
         // Ask for the size in host pixels, using the window's backing scale so a
-        // Retina window does not request half the pixels it can display.
+        // Retina window does not request half the pixels it can display -- and
+        // with the application's own title bar on top when the picture leaves
+        // it out, so what shows is as big as this window.
         let scale = screen.backingScaleFactor
         let size = window.contentView?.bounds.size ?? .zero
+        let strip = hiddenStrip
 
         // Never ask for more than the capture display holds. The host will
         // happily size a window past the edge of its display, and the part that
@@ -541,7 +612,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let maxWidth = CGFloat(display.width)
         let maxHeight = CGFloat(display.height)
         let wanted = CGSize(width: min((size.width * scale).rounded(), maxWidth),
-                            height: min((size.height * scale).rounded(), maxHeight))
+                            height: min((size.height * scale).rounded() + strip, maxHeight))
         let origin = CGPoint(x: min(tile.minX, CGFloat(display.x) + maxWidth - wanted.width),
                              y: min(tile.minY, CGFloat(display.y) + maxHeight - wanted.height))
         let requested = CGRect(origin: origin, size: wanted)
@@ -567,14 +638,17 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
                 let visible = achieved.intersection(self.displayRect)
-                self.applySizeLimits(placement, achieved: visible, scale: scale)
+                self.adoptTitleBar(placement)
+                self.lastPlacement = placement
+                let shown = self.picture(of: visible)
+                self.applySizeLimits(placement, achieved: shown, scale: scale)
                 if placement.resizeBorder > 0 {
                     self.inputCapture?.edgeGuard = placement.resizeBorder
                 }
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
                 if matchBack {
-                    self.matchWindow(to: visible, scale: scale)
+                    self.matchWindow(to: shown, scale: scale)
                 }
                 if visible != achieved {
                     Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
@@ -612,10 +686,14 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// laid out once -- is held at exactly the size it is: dragging it smaller
     /// here would only crop its controls off on the PC, which is what letting
     /// any size through used to do. A resizable one gets the application's own
-    /// minimum and, when it declares one, its maximum.
+    /// minimum and, when it declares one, its maximum -- less the
+    /// application's own title bar when the picture leaves it out.
+    ///
+    /// - Parameter achieved: what the picture shows of the host window.
     private func applySizeLimits(_ placement: AgentConnection.Placement,
                                  achieved: CGRect, scale: CGFloat) {
         guard let window, scale > 0 else { return }
+        let strip = hiddenStrip
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame.size
         func points(_ pixels: CGSize) -> NSSize {
             var size = NSSize(width: (pixels.width / scale).rounded(),
@@ -643,8 +721,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
         if !window.styleMask.contains(.resizable) {
             window.styleMask.insert(.resizable)
         }
-        applyMinimumSize(placement.minimumSize, scale: scale)
-        let maximum = placement.maximumSize
+        applyMinimumSize(CGSize(width: placement.minimumSize.width,
+                                height: max(placement.minimumSize.height - strip, 1)),
+                         scale: scale)
+        var maximum = placement.maximumSize
+        if maximum.height > 0 { maximum.height = max(maximum.height - strip, 1) }
         if maximum.width > 0 || maximum.height > 0 {
             let limit = points(CGSize(width: maximum.width > 0 ? maximum.width : .greatestFiniteMagnitude,
                                       height: maximum.height > 0 ? maximum.height : .greatestFiniteMagnitude))

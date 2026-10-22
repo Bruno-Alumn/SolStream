@@ -251,6 +251,31 @@ final class StreamSettings {
         set { InputCapture.followsHostCursor = newValue; announce(restarts: false) }
     }
 
+    // MARK: - Windows
+
+    /// Whether the title bar `program` draws inside its own window -- the strip
+    /// with its minimise, maximise and close, in Chrome, Discord or Explorer --
+    /// is left out of the picture. Off for every program until the person
+    /// chooses it in the popover, then remembered for that program. Windows
+    /// file names ignore case, so this does too.
+    func hidesTitleBar(of program: String) -> Bool {
+        hiddenTitleBars.contains(program.lowercased())
+    }
+
+    func setHidesTitleBar(_ hides: Bool, of program: String) {
+        var programs = hiddenTitleBars
+        if hides {
+            programs.insert(program.lowercased())
+        } else {
+            programs.remove(program.lowercased())
+        }
+        set(programs.sorted(), Key.hiddenTitleBars, restarts: false)
+    }
+
+    private var hiddenTitleBars: Set<String> {
+        Set(defaults.stringArray(forKey: Key.hiddenTitleBars) ?? [])
+    }
+
     // MARK: - General
 
     /// Copy and paste between the Mac and the PC while a stream is open.
@@ -305,6 +330,7 @@ final class StreamSettings {
         static let soundQuality = "SolStream.soundQuality"
         static let soundSource = "SolStream.soundSource"
         static let clipboard = "SolStream.syncsClipboard"
+        static let hiddenTitleBars = "SolStream.hiddenTitleBars"
     }
 
     private func set(_ value: Any, _ key: String, restarts: Bool) {

@@ -1250,6 +1250,14 @@ public final class AgentConnection {
         /// silent outcome, with this window resizing itself to match whatever came
         /// back either way.
         public let missed: Int
+        /// Host pixels at the top of the client area holding a title bar the
+        /// application draws there itself -- Chrome's tab strip, Discord's bar --
+        /// with its own minimise, maximise and close. Zero when it draws none, or
+        /// on a host too old to measure it.
+        public var titleBarHeight: CGFloat = 0
+        /// The program that owns the window, "Discord.exe", for choices kept per
+        /// application. Empty on a host that predates it.
+        public var program = ""
     }
 
     public func place(windowID: UInt64, at rect: CGRect,
@@ -1281,6 +1289,8 @@ public final class AgentConnection {
             placement.maximumSize = CGSize(width: message["maxW"] as? Int ?? 0,
                                            height: message["maxH"] as? Int ?? 0)
             placement.isResizable = message["resizable"] as? Bool ?? true
+            placement.titleBarHeight = CGFloat(max(message["titleBar"] as? Int ?? 0, 0))
+            placement.program = message["program"] as? String ?? ""
             completion?(placement)
         }
     }

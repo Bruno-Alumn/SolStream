@@ -190,6 +190,35 @@ final class QualityPillTests: XCTestCase {
         XCTAssertTrue(Self.words(in: detail).contains { $0.hasPrefix("The PC's pointer goes exactly") })
     }
 
+    func testTheTitleBarChoiceIsOnlyOfferedForOneDrawnInsideTheWindow() throws {
+        let plain = detail()
+        XCTAssertNil(Self.titleBarToggle(in: plain),
+                     "a title bar Windows draws is outside the picture; there is nothing to hide")
+
+        var chosen: [Bool] = []
+        let detail = detail(hidesTitleBar: false) { chosen.append($0) }
+        let toggle = try XCTUnwrap(Self.titleBarToggle(in: detail), "no title bar choice in the popover")
+        XCTAssertEqual(toggle.selectedSegment, 0, "the title bar must show until it is hidden")
+        XCTAssertEqual(toggle.toolTip?.hasPrefix("Hide leaves the app's own minimise"), true)
+        Self.assertInside(detail, [toggle, try XCTUnwrap(Self.settingsLink(in: detail))])
+        // One row more than the 460 the others keep to, for the apps that
+        // draw their own title bar.
+        XCTAssertLessThanOrEqual(detail.bounds.height, 460 + 40, "the popover has grown too tall")
+        // In the same column as the other controls.
+        let mouse = try XCTUnwrap(Self.all(SolarSegments.self, in: detail).first { $0 !== toggle })
+        XCTAssertEqual(toggle.convert(toggle.bounds, to: detail).minX.rounded(),
+                       mouse.convert(mouse.bounds, to: detail).minX.rounded())
+        try Self.writePicture(of: detail, named: "solstream-quality-popover-title-bar.png")
+
+        toggle.choose(1)
+        toggle.choose(1)
+        toggle.choose(0)
+        XCTAssertEqual(chosen, [true, false], "each change once, and only changes")
+
+        let hidden = self.detail(hidesTitleBar: true) { _ in }
+        XCTAssertEqual(try XCTUnwrap(Self.titleBarToggle(in: hidden)).selectedSegment, 1)
+    }
+
     func testTheGamingHintPromisesTheMenusOnlyOnceTheHostReportsItsCursor() throws {
         StreamSettings.shared.pointerMode = .gaming
         let detail = detail()
@@ -328,8 +357,11 @@ final class QualityPillTests: XCTestCase {
     /// pill and AppKit holds targets weakly, so something else has to.
     private var pills: [QualityPill] = []
 
-    private func detail(audioActive: Bool = true) -> NSView {
+    private func detail(audioActive: Bool = true, hidesTitleBar: Bool? = nil,
+                        onTitleBarChosen: ((Bool) -> Void)? = nil) -> NSView {
         let pill = QualityPill()
+        pill.hidesTitleBar = hidesTitleBar
+        pill.onTitleBarChosen = onTitleBarChosen
         var stats = QualityPill.Stats()
         stats.fps = 60
         stats.latencyMs = 9
@@ -357,6 +389,10 @@ final class QualityPillTests: XCTestCase {
 
     private static func soundMenu(in view: NSView) -> NSPopUpButton? {
         all(NSPopUpButton.self, in: view).first { $0.accessibilityLabel() == "Sound quality" }
+    }
+
+    private static func titleBarToggle(in view: NSView) -> SolarSegments? {
+        all(SolarSegments.self, in: view).first { $0.accessibilityLabel() == "Title bar" }
     }
 
     private static func settingsLink(in view: NSView) -> NSButton? {
