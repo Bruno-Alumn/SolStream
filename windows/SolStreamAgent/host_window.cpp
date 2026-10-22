@@ -540,7 +540,9 @@ enum ButtonId {
 
 /// Where the Mac app comes from: the same releases the updaters read.
 constexpr wchar_t kMacAppUrl[] = L"https://github.com/Bruno-Alumn/SolStream/releases/latest";
-constexpr wchar_t kMacAppShown[] = L"github.com/Bruno-Alumn/SolStream/releases";
+/// Shown short enough to stay on one line beside its button; the button opens
+/// the releases page itself.
+constexpr wchar_t kMacAppShown[] = L"github.com/Bruno-Alumn/SolStream";
 
 /// A tick box. Drawn rather than a real BUTTON control for the same reason the
 /// buttons are: the design gives its resting, hover, checked and focused looks
@@ -2587,7 +2589,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                        L"blink.";
                 break;
             case DriverStep::Done:
-                text = L"Installing SolStream…";
+                text = L"Copying SolStream into Program Files…";
                 break;
             default:
                 return 0;
