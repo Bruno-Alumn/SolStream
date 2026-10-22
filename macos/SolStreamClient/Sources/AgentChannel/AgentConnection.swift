@@ -371,7 +371,8 @@ public final class AgentConnection {
         self.host = host
         self.port = port
         self.token = token ?? Self.storedToken(for: host)
-        self.clientID = Self.installClientID
+        self.clientID = Self.clientIDDefaultsOverride.map { Self.clientID(in: $0) }
+            ?? Self.installClientID
     }
 
     // MARK: - Coming back to a host that is still holding the last connection
@@ -393,6 +394,11 @@ public final class AgentConnection {
 
     /// Made once per process, from what `clientID(in:)` keeps.
     static let installClientID = clientID(in: .standard)
+
+    /// For tests, so a connection they make keeps its id in defaults of their
+    /// own rather than writing one into the standard defaults. Read when the
+    /// connection is made.
+    static var clientIDDefaultsOverride: UserDefaults?
 
     /// The id kept in `defaults`, made and kept there the first time.
     static func clientID(in defaults: UserDefaults) -> String {

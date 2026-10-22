@@ -123,9 +123,18 @@ final class AgentReconnectTests: XCTestCase {
     // MARK: - Client id
 
     func testClientIDIsMadeOnceAndKept() throws {
-        let suite = "SolStreamTests.clientID.\(UUID().uuidString)"
+        // A path, not a name: a named suite leaves its plist behind in
+        // ~/Library/Preferences after every run, even once emptied. This one
+        // lives in a temporary folder and goes with it.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-clientid-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let suite = folder.appendingPathComponent("defaults").path
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: folder)
+        }
 
         let first = AgentConnection.clientID(in: defaults)
         XCTAssertTrue(AgentConnection.isClientID(first), first)

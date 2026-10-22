@@ -135,7 +135,14 @@ final class AgentLineTests: XCTestCase {
         let tokens = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-lines-\(UUID().uuidString)", isDirectory: true)
         TokenStore.directoryOverride = tokens
+        // The client id too, kept by path in the same folder, so connecting
+        // writes nothing into the test runner's own defaults.
+        try FileManager.default.createDirectory(at: tokens, withIntermediateDirectories: true)
+        let ids = tokens.appendingPathComponent("defaults").path
+        AgentConnection.clientIDDefaultsOverride = UserDefaults(suiteName: ids)
         defer {
+            AgentConnection.clientIDDefaultsOverride = nil
+            UserDefaults().removePersistentDomain(forName: ids)
             TokenStore.directoryOverride = nil
             try? FileManager.default.removeItem(at: tokens)
         }
