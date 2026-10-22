@@ -626,6 +626,55 @@ void TestLogonTaskAccounts() {
     CHECK(!mine.empty() && mine.back() == own);
 }
 
+/// Who the task goes to when more than one could: whoever asked for the
+/// install, then whoever is signed in to this session, and only then the
+/// account the install runs as -- which, elevated with another
+/// administrator's name and password, is that administrator, whose logon was
+/// never going to start SolStream for anybody. Each is asked for only when
+/// those before it named nobody.
+void TestLogonTaskAccountOrder() {
+    std::vector<std::string> asked;
+    auto sid = [&asked](const char* who, const wchar_t* value) {
+        return [&asked, who, value] {
+            asked.push_back(who);
+            return std::wstring(value);
+        };
+    };
+    std::vector<std::wstring> accounts;
+
+    CHECK(ChooseLogonTaskAccounts(sid("passed", L"S-1-5-18"), sid("session", L"S-1-5-19"),
+                                  sid("process", L"S-1-5-20"), accounts)
+          == TaskAccountFrom::Passed);
+    CHECK(!accounts.empty() && accounts.back() == L"S-1-5-18");
+    CHECK(asked.size() == 1 && asked.back() == "passed");
+
+    // Nothing passed: whoever is at this desktop, not the account this runs as.
+    asked.clear();
+    CHECK(ChooseLogonTaskAccounts(sid("passed", L""), sid("session", L"S-1-5-19"),
+                                  sid("process", L"S-1-5-20"), accounts)
+          == TaskAccountFrom::Session);
+    CHECK(!accounts.empty() && accounts.back() == L"S-1-5-19");
+    CHECK(asked.size() == 2 && asked.back() == "session");
+
+    // What was passed is not a SID: as good as nothing.
+    CHECK(ChooseLogonTaskAccounts(sid("passed", L"PC\\me"), sid("session", L"S-1-5-19"),
+                                  sid("process", L"S-1-5-20"), accounts)
+          == TaskAccountFrom::Session);
+
+    // Nobody signed in to this session, as in session 0: this process's own.
+    asked.clear();
+    CHECK(ChooseLogonTaskAccounts(sid("passed", L""), sid("session", L""),
+                                  sid("process", L"S-1-5-20"), accounts)
+          == TaskAccountFrom::Process);
+    CHECK(!accounts.empty() && accounts.back() == L"S-1-5-20");
+    CHECK(asked.size() == 3 && asked.back() == "process");
+
+    CHECK(ChooseLogonTaskAccounts(sid("passed", L""), sid("session", L""),
+                                  sid("process", L""), accounts)
+          == TaskAccountFrom::Nobody);
+    CHECK(accounts.empty());
+}
+
 /// The two rules the installer writes. Every profile: on a PC at its
 /// company's office Windows uses the Domain profile, and a rule for only
 /// Private and Public left the Mac unanswered there.
@@ -2263,6 +2312,7 @@ int wmain(int argc, wchar_t** argv) {
     TestInstallOptions();
     TestLogonTask();
     TestLogonTaskAccounts();
+    TestLogonTaskAccountOrder();
     TestFirewallRule();
     TestFirewallSweep();
     TestRegisterUnderAccounts();

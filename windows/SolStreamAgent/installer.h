@@ -134,6 +134,27 @@ std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& p
 /// tests.
 std::wstring FirewallSweepCommand(const std::wstring& directory);
 
+/// Which account the logon task went to, and so why: ChooseLogonTaskAccounts'
+/// answer.
+enum class TaskAccountFrom {
+    Nobody,   ///< none of the three named an account
+    Passed,   ///< the one the unelevated half passed: whoever asked for the install
+    Session,  ///< whoever is signed in to this session
+    Process,  ///< the account this install runs as
+};
+
+/// The logon task's account, spelled the ways LogonTaskAccounts gives, from
+/// the first of these SIDs that names one: `passed`, the one the unelevated
+/// half passed; then `session`, whoever is signed in to this session; then
+/// `process`, this process's own. Each is asked for only when those before it
+/// named nobody: finding the session's user can wait on a domain controller.
+/// `accounts` is empty when none did. Exposed, with the three as parameters,
+/// for its tests.
+TaskAccountFrom ChooseLogonTaskAccounts(const std::function<std::wstring()>& passed,
+                                        const std::function<std::wstring()>& session,
+                                        const std::function<std::wstring()>& process,
+                                        std::vector<std::wstring>& accounts);
+
 /// Register that task under each of `accounts` in turn, best first, until Task
 /// Scheduler takes one: `attempt` registers it under one of them. The index of
 /// the one taken, or -1 with `error` holding the first one's failure. Exposed,

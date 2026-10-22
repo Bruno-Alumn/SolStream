@@ -94,6 +94,9 @@ std::wstring CurrentUserSid() {
     return out;
 }
 
+/// Below, beside the log's path: SessionUserSid writes to it too.
+void InstallLog(const std::string& line);
+
 /// Whoever is signed in to the session this process runs in, as a SID string,
 /// or empty when nobody is.
 ///
@@ -132,9 +135,19 @@ std::wstring SessionUserSid() {
     wchar_t found_domain[256] = {0};
     DWORD found_domain_size = 256;
     SID_NAME_USE kind = SidTypeUnknown;
+    // Said in the log when it fails, because the task then goes to the account
+    // this runs as, and the log is the one place that can say why: an Entra ID
+    // or domain account whose name Windows can't look up from here, say.
     if (!LookupAccountNameW(nullptr, account.c_str(), sid, &sid_size, found_domain,
-                            &found_domain_size, &kind)
-        || kind != SidTypeUser) {
+                            &found_domain_size, &kind)) {
+        const DWORD code = GetLastError();
+        InstallLog("could not look up " + ToUtf8(account)
+                   + ", who is signed in to this session (error " + std::to_string(code)
+                   + ")");
+        return {};
+    }
+    if (kind != SidTypeUser) {
+        InstallLog(ToUtf8(account) + ", signed in to this session, is not a user account");
         return {};
     }
     std::wstring out;
@@ -975,6 +988,22 @@ int RegisterUnderAccounts(
     return -1;
 }
 
+TaskAccountFrom ChooseLogonTaskAccounts(const std::function<std::wstring()>& passed,
+                                        const std::function<std::wstring()>& session,
+                                        const std::function<std::wstring()>& process,
+                                        std::vector<std::wstring>& accounts) {
+    accounts = LogonTaskAccounts(passed());
+    if (!accounts.empty()) {
+        return TaskAccountFrom::Passed;
+    }
+    accounts = LogonTaskAccounts(session());
+    if (!accounts.empty()) {
+        return TaskAccountFrom::Session;
+    }
+    accounts = LogonTaskAccounts(process());
+    return accounts.empty() ? TaskAccountFrom::Nobody : TaskAccountFrom::Process;
+}
+
 namespace {
 
 /// The Task Scheduler's class and interface ids, spelled out here rather than
@@ -1061,14 +1090,11 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
     // come. That account is left for when the session names nobody, as in
     // session 0 with nobody signed in, and its own token says exactly which
     // account it is.
-    std::vector<std::wstring> accounts = LogonTaskAccounts(SwitchValue(kInvokingUserSwitch));
-    if (accounts.empty()) {
-        accounts = LogonTaskAccounts(SessionUserSid());
-    }
-    if (accounts.empty()) {
-        accounts = LogonTaskAccounts(CurrentUserSid());
-    }
-    if (accounts.empty()) {
+    std::vector<std::wstring> accounts;
+    const TaskAccountFrom from = ChooseLogonTaskAccounts(
+        [] { return SwitchValue(kInvokingUserSwitch); }, SessionUserSid, CurrentUserSid,
+        accounts);
+    if (from == TaskAccountFrom::Nobody) {
         error = "Could not tell which account to start SolStream for.";
         return false;
     }
@@ -1085,8 +1111,18 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
             return false;
         },
         error);
-    if (taken > 0) {
-        InstallLog("registered the task for " + ToUtf8(accounts[static_cast<size_t>(taken)]));
+    // Which account, and why that one, every time: a task that went to the
+    // wrong person is a SolStream that never starts at their logon, and
+    // nothing else on the PC says so.
+    if (taken >= 0) {
+        const char* why = from == TaskAccountFrom::Passed
+            ? "the account that asked for the install"
+            : from == TaskAccountFrom::Session
+            ? "signed in to this session, as no account was passed"
+            : "the account this install runs as, as no account was passed and nobody "
+              "signed in to this session could be looked up";
+        InstallLog("registered the task for " + ToUtf8(accounts[static_cast<size_t>(taken)])
+                   + " (" + why + ")");
     }
     return taken >= 0;
 }
