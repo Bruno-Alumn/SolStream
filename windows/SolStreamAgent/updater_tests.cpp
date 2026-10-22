@@ -9,18 +9,18 @@
 // No network, and nothing outside a temporary folder: %LOCALAPPDATA% is pointed
 // at one before anything runs, so the real Updates folder is never touched. The
 // one exception is a volatile registry key of its own under HKCU, for the
-// virtual display's settings records, deleted again at the end. The fetching
+// virtual display's records, deleted again at the end. The fetching
 // itself (Get, the redirects, the token's scoping) needs a server and is not
 // covered here.
 //
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
-// takes of the virtual display's settings, when its device is waiting for a
-// restart, which adapter is Tailscale's, the clipboard's privacy
-// markers and line endings, when the sound capture opens its device
-// again, when the encoder spends a frame id, when a Mac may take
-// back the session it left behind, and how a key the Mac sends by
-// position is pressed here.
+// takes of the virtual display and its settings, when its device is waiting
+// for a restart or switched off, which adapter is Tailscale's, the
+// clipboard's privacy markers and line endings, when the sound capture opens
+// its device again, when the encoder spends a frame id, when a Mac may take
+// back the session it left behind, and how a key the Mac sends by position
+// is pressed here.
 
 #include "updater.cpp"
 
@@ -28,6 +28,7 @@
 #include <shellapi.h>
 #include <winioctl.h>
 #include <cfgmgr32.h>
+#include <setupapi.h>
 
 #include <cctype>
 #include <cstdio>
@@ -1156,6 +1157,124 @@ void TestDriverSettingsRecords(const std::wstring& scratch) {
     RemoveTree(theirs);
 }
 
+/// What uninstall makes of Windows' answers when it removes SolStream's
+/// device. A removal Windows puts off to the restart says yes to DIF_REMOVE
+/// as well, and was taken for done; and only a definite "no such device" is
+/// gone, while access denied leaves the device there and SolStream's.
+void TestRemovalClassification() {
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .removed = true})
+          == DeviceRemoval::Removed);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .removed = true,
+                           .install_flags = DI_NEEDREBOOT})
+          == DeviceRemoval::RemovedAtRestart);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .removed = true,
+                           .install_flags = DI_NEEDRESTART | DI_QUIETINSTALL})
+          == DeviceRemoval::RemovedAtRestart);
+    // Flags that say nothing about a restart.
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .removed = true,
+                           .install_flags = DI_QUIETINSTALL})
+          == DeviceRemoval::Removed);
+    // Refused, whatever the flags say.
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true}) == DeviceRemoval::Failed);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .install_flags = DI_NEEDREBOOT})
+          == DeviceRemoval::Failed);
+    // The instance ID names some other device now, which is never asked to go.
+    CHECK(ClassifyRemoval({.opened = true}) == DeviceRemoval::NotDrivers);
+    CHECK(ClassifyRemoval({.open_error = ERROR_CLASS_MISMATCH}) == DeviceRemoval::NotDrivers);
+    CHECK(ClassifyRemoval({.open_error = ERROR_NO_SUCH_DEVINST}) == DeviceRemoval::Gone);
+    CHECK(ClassifyRemoval({.open_error = ERROR_INVALID_DEVINST_NAME}) == DeviceRemoval::Gone);
+    CHECK(ClassifyRemoval({.open_error = ERROR_ACCESS_DENIED}) == DeviceRemoval::Failed);
+    CHECK(ClassifyRemoval({.open_error = ERROR_GEN_FAILURE}) == DeviceRemoval::Failed);
+    CHECK(ClassifyRemoval({}) == DeviceRemoval::Failed);
+}
+
+/// Uninstall lets the device's records go only once the device is gone. One
+/// Windows refused to remove, or removes only when the PC restarts, is still
+/// there and still using its driver and its settings: its record, the
+/// package's and the settings' all stay, and so do the package and the
+/// settings themselves. In a key of this test's own, as for the settings.
+void TestDriverRecords(const std::wstring& scratch) {
+    const std::wstring key =
+        L"Software\\SolStreamUpdaterTests-" + std::to_wstring(GetCurrentProcessId());
+    HKEY records = FreshRecordsKey(key);
+    if (records == nullptr) {
+        std::printf("FAIL: could not make a registry key for the device records\n");
+        ++g_failures;
+        return;
+    }
+    auto record = [records](const wchar_t* name, const std::wstring& value) {
+        CHECK(RegSetValueExW(records, name, 0, REG_SZ, (const BYTE*) value.c_str(),
+                             (DWORD) ((value.size() + 1) * sizeof(wchar_t)))
+              == ERROR_SUCCESS);
+    };
+    auto recorded = [records](const wchar_t* name) {
+        return RegQueryValueExW(records, name, nullptr, nullptr, nullptr, nullptr)
+            == ERROR_SUCCESS;
+    };
+
+    // What an install that made all three leaves: the device, the package
+    // and a settings folder with the driver's file in it.
+    const std::wstring instance = L"ROOT\\DISPLAY\\0001";
+    const std::wstring folder = scratch + L"\\DeviceSettings";
+    auto install = [&] {
+        CreateDirectoryW(folder.c_str(), nullptr);
+        CHECK(WriteAll(folder + L"\\vdd_settings.xml", "x"));
+        record(L"DisplayDriverDevice", instance);
+        record(L"DisplayDriverInf", L"oem42.inf");
+        record(L"DisplayDriverSettingsFolder", folder);
+    };
+    std::vector<std::wstring> asked;
+    std::vector<std::wstring> uninstalled;
+    std::string note;
+    auto uninstall = [&](DeviceRemoval outcome) {
+        asked.clear();
+        uninstalled.clear();
+        note.clear();
+        RemoveRecordedDriver(
+            HKEY_CURRENT_USER, key.c_str(), instance,
+            [&asked, outcome](const std::wstring& device, DWORD& code) {
+                asked.push_back(device);
+                code = outcome == DeviceRemoval::Failed ? ERROR_ACCESS_DENIED : 0;
+                return outcome;
+            },
+            [&uninstalled](const std::wstring& package) {
+                uninstalled.push_back(package);
+                return true;
+            },
+            note);
+    };
+
+    for (const DeviceRemoval still_there :
+         {DeviceRemoval::Failed, DeviceRemoval::RemovedAtRestart}) {
+        install();
+        uninstall(still_there);
+        CHECK(asked.size() == 1 && asked.front() == instance);
+        CHECK(recorded(L"DisplayDriverDevice"));
+        CHECK(recorded(L"DisplayDriverInf"));
+        CHECK(recorded(L"DisplayDriverSettingsFolder"));
+        CHECK(uninstalled.empty());
+        CHECK(Exists(folder + L"\\vdd_settings.xml"));
+        CHECK(note.find("still recorded as SolStream's") != std::string::npos);
+    }
+    // The restart is what finishes it, and the note says so.
+    CHECK(note.find("restarts") != std::string::npos);
+
+    for (const DeviceRemoval gone :
+         {DeviceRemoval::Removed, DeviceRemoval::Gone, DeviceRemoval::NotDrivers}) {
+        install();
+        uninstall(gone);
+        CHECK(!recorded(L"DisplayDriverDevice"));
+        CHECK(!recorded(L"DisplayDriverInf"));
+        CHECK(!recorded(L"DisplayDriverSettingsFolder"));
+        CHECK(uninstalled.size() == 1 && uninstalled.front() == L"oem42.inf");
+        CHECK(!Exists(folder));
+    }
+
+    RegCloseKey(records);
+    RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());
+    RemoveTree(folder);
+}
+
 /// A device Windows starts at the next restart is an install it has not
 /// finished, not a driver somebody switched off -- which is what the window
 /// once called SolStream's own new device, sending somebody to Device Manager
@@ -2125,6 +2244,8 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsFile(scratch);
     TestDriverSettingsJunction(scratch);
     TestDriverSettingsRecords(scratch);
+    TestRemovalClassification();
+    TestDriverRecords(scratch);
     TestWaitsForRestart();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();

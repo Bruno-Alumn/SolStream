@@ -101,10 +101,6 @@ void DeleteStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
     }
 }
 
-void DeleteState(const wchar_t* name) {
-    DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
-}
-
 /// A directory only SYSTEM and administrators can write to, for the download
 /// and what comes out of it.
 ///
@@ -275,14 +271,6 @@ bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::wstring& instanc
     return true;
 }
 
-/// What became of a recorded device that uninstall asked to remove.
-enum class DeviceRemoval {
-    Removed,     ///< it was there, and now it is not
-    Gone,        ///< nothing has that instance ID any more
-    NotDrivers,  ///< the ID names some other device now, which stays
-    Failed,      ///< it is there and the driver's, and Windows would not remove it
-};
-
 /// Remove one device by its instance ID. Nothing else with the same hardware
 /// ID is touched. `code` is Windows' reason when it fails.
 DeviceRemoval RemoveDevice(const std::wstring& instance, DWORD& code) {
@@ -294,27 +282,30 @@ DeviceRemoval RemoveDevice(const std::wstring& instance, DWORD& code) {
     }
     SP_DEVINFO_DATA device{};
     device.cbSize = sizeof(device);
-    DeviceRemoval outcome = DeviceRemoval::Removed;
-    if (!SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &device)) {
-        code = GetLastError();
-        // Only a definite "no such device" is gone. Anything else -- access
-        // denied, say -- leaves the device's fate unknown, and so a failure.
-        if (code == ERROR_NO_SUCH_DEVINST || code == ERROR_INVALID_DEVINST_NAME) {
-            outcome = DeviceRemoval::Gone;
-        } else if (code == ERROR_CLASS_MISMATCH) {
-            outcome = DeviceRemoval::NotDrivers;
+    RemovalAnswers answers;
+    answers.opened = SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &device)
+                     != FALSE;
+    if (!answers.opened) {
+        code = answers.open_error = GetLastError();
+    } else {
+        answers.drivers = HasDriverHardwareId(set, device);
+    }
+    if (answers.drivers) {
+        answers.removed = SetupDiCallClassInstaller(DIF_REMOVE, set, &device) != FALSE;
+        if (!answers.removed) {
+            code = GetLastError();
         } else {
-            outcome = DeviceRemoval::Failed;
+            // Read as devcon reads them after the same call: the one place
+            // Windows says it has put the removal off to the restart.
+            SP_DEVINSTALL_PARAMS_W params{};
+            params.cbSize = sizeof(params);
+            if (SetupDiGetDeviceInstallParamsW(set, &device, &params)) {
+                answers.install_flags = params.Flags;
+            }
         }
-    } else if (!HasDriverHardwareId(set, device)) {
-        outcome = DeviceRemoval::NotDrivers;
-    } else if (!SetupDiCallClassInstaller(DIF_REMOVE, set, &device)) {
-        // Vetoed by something holding it, or refused.
-        code = GetLastError();
-        outcome = DeviceRemoval::Failed;
     }
     SetupDiDestroyDeviceInfoList(set);
-    return outcome;
+    return ClassifyRemoval(answers);
 }
 
 /// Only a name of the driver store's own form, oemNN.inf: what is passed here
@@ -686,11 +677,51 @@ void RemoveInstalledDriver(std::string& note) {
         }
     }
 
+    // No force: if some other device is using the package, it stays.
+    RemoveRecordedDriver(
+        HKEY_LOCAL_MACHINE, kStateKey, instance, RemoveDevice,
+        [](const std::wstring& package) {
+            return SetupUninstallOEMInfW(package.c_str(), 0, nullptr) != FALSE;
+        },
+        note);
+}
+
+DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
+    if (!answers.opened) {
+        // Only a definite "no such device" is gone. Anything else -- access
+        // denied, say -- leaves the device's fate unknown, and so a failure.
+        if (answers.open_error == ERROR_NO_SUCH_DEVINST
+            || answers.open_error == ERROR_INVALID_DEVINST_NAME) {
+            return DeviceRemoval::Gone;
+        }
+        return answers.open_error == ERROR_CLASS_MISMATCH ? DeviceRemoval::NotDrivers
+                                                          : DeviceRemoval::Failed;
+    }
+    if (!answers.drivers) {
+        return DeviceRemoval::NotDrivers;
+    }
+    if (!answers.removed) {
+        return DeviceRemoval::Failed;
+    }
+    // A device Windows can't stop now -- something is holding it -- is not
+    // refused: DIF_REMOVE says yes, and these flags say it goes at the
+    // restart. Taken for removed, its package and settings were let go from
+    // under it while it was still there.
+    if ((answers.install_flags & (DI_NEEDREBOOT | DI_NEEDRESTART)) != 0) {
+        return DeviceRemoval::RemovedAtRestart;
+    }
+    return DeviceRemoval::Removed;
+}
+
+void RemoveRecordedDriver(
+    HKEY root, const wchar_t* key, const std::wstring& instance,
+    const std::function<DeviceRemoval(const std::wstring& instance, DWORD& code)>& remove,
+    const std::function<bool(const std::wstring& package)>& uninstall, std::string& note) {
     // The device first, and only the one SolStream created: a device of the
     // same driver somebody added themselves stays.
     if (!instance.empty()) {
         DWORD code = 0;
-        switch (RemoveDevice(instance, code)) {
+        switch (remove(instance, code)) {
             case DeviceRemoval::Removed:
                 note += "Removed the virtual display SolStream added.\n";
                 break;
@@ -698,6 +729,18 @@ void RemoveInstalledDriver(std::string& note) {
             case DeviceRemoval::NotDrivers:
                 note += "The virtual display SolStream added was already gone.\n";
                 break;
+            case DeviceRemoval::RemovedAtRestart:
+                // Still here until the restart, so kept as a refusal is,
+                // below. The package would not have gone anyway while the
+                // device uses it, and with its record let go nothing would say
+                // again that it was SolStream's: a later install finds it in
+                // the store, takes it for somebody else's, and no uninstall
+                // ever takes it.
+                note += "Windows finishes removing the virtual display SolStream added when "
+                        "this PC restarts. Until then the display still uses its driver and "
+                        "its settings, so SolStream left them in place, still recorded as "
+                        "SolStream's.\n";
+                return;
             case DeviceRemoval::Failed:
                 // Still here, and still SolStream's. Its records stay, so a
                 // later uninstall knows it; so do the package it runs on and
@@ -708,21 +751,21 @@ void RemoveInstalledDriver(std::string& note) {
                         "settings in place, still recorded as SolStream's.\n";
                 return;
         }
-        DeleteState(kDeviceValue);
+        DeleteStateIn(root, key, kDeviceValue);
     }
-    // Then the package, and only one this install put in the store. No force:
-    // if some other device is using it, it stays.
+    // Then the package, and only one this install put in the store.
+    const std::wstring staged = ReadStateIn(root, key, kInfValue);
     if (!staged.empty()) {
-        if (IsOemInfName(staged) && SetupUninstallOEMInfW(staged.c_str(), 0, nullptr)) {
+        if (IsOemInfName(staged) && uninstall(staged)) {
             note += "Removed the virtual display driver SolStream installed.\n";
         } else {
             note += "Windows kept the virtual display driver package (" + ToUtf8(staged)
                   + "), which something else may be using.\n";
         }
-        DeleteState(kInfValue);
+        DeleteStateIn(root, key, kInfValue);
     }
 
-    RemoveRecordedDriverSettings(HKEY_LOCAL_MACHINE, kStateKey, note);
+    RemoveRecordedDriverSettings(root, key, note);
 }
 
 void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note) {
