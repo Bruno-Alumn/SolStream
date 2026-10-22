@@ -1448,7 +1448,8 @@ public final class AgentConnection {
             case .unreadablePush(let type):
                 Log.error("[agent] skipped a \(type) message that would not parse")
             case .unreadable:
-                // A reply, or a line that cannot be told from one. Skipping it
+                // A reply, or a line that may hold one: a push the host cut
+                // short has the next line it wrote run on behind it. Skipping it
                 // leaves the reply queue one short for the rest of the session:
                 // `handle` pops one waiting completion per reply, so from here
                 // on every answer would go to the caller before it. There are
@@ -1750,7 +1751,8 @@ public final class AgentConnection {
         /// A message to handle. `repaired` when it could only be read once the
         /// bytes in it that are not UTF-8 had been replaced.
         case message([String: Any], repaired: Bool)
-        /// A push that would not parse, of a kind that can be passed over.
+        /// A push that would not parse, of a kind that can be passed over, and
+        /// alone on its line.
         case unreadablePush(String)
         /// Anything else that would not parse.
         case unreadable
@@ -1782,19 +1784,33 @@ public final class AgentConnection {
            let message = try? JSONSerialization.jsonObject(with: repaired) as? [String: Any] {
             return .message(message, repaired: true)
         }
-        if let type = leadingType(of: line), skippablePushes.contains(type) {
+        // Only a push alone on its line. A host whose send fails partway keeps
+        // the socket, and its next line runs on from the half it cut off: a
+        // reply behind a broken push would be skipped with it, and every later
+        // answer handed to the caller before its own.
+        if let type = leadingType(of: line), skippablePushes.contains(type),
+           !holdsAnotherMessage(line) {
             return .unreadablePush(type)
         }
         return .unreadable
     }
 
+    /// What the host starts every line it writes with.
+    private static let lineOpening = Data(#"{"type":""#.utf8)
+
+    /// Whether a second message starts after a line's first byte. The host
+    /// escapes every quote inside a string, so `{"type":"` can only ever open
+    /// a message.
+    private static func holdsAnotherMessage(_ line: Data) -> Bool {
+        line.dropFirst().range(of: lineOpening) != nil
+    }
+
     /// The `type` a line names in its first bytes, for a line that will not
     /// parse. The host starts every line it writes with `{"type":"`.
     static func leadingType(of line: Data) -> String? {
-        let opening = Array(#"{"type":""#.utf8)
         let head = [UInt8](line.prefix(64))
-        guard head.starts(with: opening) else { return nil }
-        let rest = head.dropFirst(opening.count)
+        guard head.starts(with: lineOpening) else { return nil }
+        let rest = head.dropFirst(lineOpening.count)
         guard let close = rest.firstIndex(of: UInt8(ascii: "\"")) else { return nil }
         return String(decoding: rest[..<close], as: UTF8.self)
     }

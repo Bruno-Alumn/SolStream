@@ -67,6 +67,7 @@ final class AgentLineTests: XCTestCase {
             (#"{"type":"cursor","shape":"#, "cursor"),
             (#"{"type":"closed","id":}"#, "closed"),
             (#"{"type":"windowsChanged""#, "windowsChanged"),
+            (#"{"type":"occluded","id":7,"by":"{\"type\":\"windows\"}","#, "occluded"),
         ]
         for (text, type) in broken {
             guard case .unreadablePush(let named) = AgentConnection.read(line: Data(text.utf8)) else {
@@ -94,6 +95,23 @@ final class AgentLineTests: XCTestCase {
         ] {
             XCTAssertTrue(isUnreadable(AgentConnection.read(line: Data(text.utf8))),
                           "\(text) should not have been skipped")
+        }
+    }
+
+    /// A host whose send fails partway keeps the socket, so the next line it
+    /// writes runs on from the half it cut off. Skipping that push would skip
+    /// the reply behind it as well.
+    func testAPushCutShortWithAReplyBehindItStillCostsTheConnection() {
+        for line in [
+            codePage(#"{"type":"occluded","id":7,"by":"Sé"#)
+                + Data(#"{"type":"windows","windows":[]}"#.utf8),
+            Data(#"{"type":"occluded","id":7,"by":}{"type":"pong"}"#.utf8),
+            Data(#"{"type":"cursor","shape":{"type":"apps","apps":[]}"#.utf8),
+            Data(#"{"type":"closed","id":{"type":"clipboard","ok":true,"seq":3}"#.utf8),
+            Data(#"{"type":"windowsChanged"{"type":"pong"}"#.utf8),
+        ] {
+            XCTAssertTrue(isUnreadable(AgentConnection.read(line: line)),
+                          "\(String(decoding: line, as: UTF8.self)) should not have been skipped")
         }
     }
 
