@@ -85,9 +85,11 @@ SolStream anywhere (`driver_install.cpp`):
 
 The driver goes in first because the host chooses what to capture as it
 starts. A driver that cannot be installed is not a failed install: SolStream
-streams the main display meanwhile, and setup's summary says why and that the
-host window's **Set up** button tries again. That button, and the tray's "Set
-up virtual display…", run the same steps elevated
+streams the main display meanwhile, and setup's summary says why and what is
+left to do. That is the host window's **Set up** button when the failure left
+no device of the driver's; when it left one that didn't start, it is a restart
+or Device Manager, since **Set up** is not offered for it. That button, and
+the tray's "Set up virtual display…", run the same steps elevated
 (`SolStream.exe --install-display-driver`), and the running host then switches
 its capture to the new display without restarting. When Windows says the
 install needs a restart, the device may not start before it, so that is not

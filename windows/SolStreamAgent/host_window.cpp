@@ -161,16 +161,17 @@ std::wstring g_notice_detail;
 
 /// The virtual display, as setup found it and as the install left it.
 ///
-/// `g_driver_state` is read once as the setup window opens: the tick box is
+/// `g_driver_state` is read as the setup window opens: the tick box is
 /// offered only when there is no device of the driver's at all, and only on a
 /// PC it can be installed on (`g_can_install_driver`). One that is there but
 /// switched off is somebody's own, and setup says so rather than install over
 /// it; one that waits for a restart only needs the restart, and setup says
-/// that. `g_driver_ours` is the same question for the uninstall window, which
-/// only promises to remove a driver SolStream put there. `g_display_result` is
-/// the elevated half's answer, "ready <note>", "ready-restart <note>" or
-/// "failed <why>", empty when it was not asked to do anything -- setup's tick
-/// box's, or the host window's Set up's.
+/// that. It is read again when the tick box's set-up fails, for what the
+/// summary says is left to do. `g_driver_ours` is the same question for the
+/// uninstall window, which only promises to remove a driver SolStream put
+/// there. `g_display_result` is the elevated half's answer, "ready <note>",
+/// "ready-restart <note>" or "failed <why>", empty when it was not asked to do
+/// anything -- setup's tick box's, or the host window's Set up's.
 DriverState g_driver_state = DriverState::Missing;
 bool g_can_install_driver = true;
 bool g_driver_ours = false;
@@ -1251,9 +1252,30 @@ float DrawSetupSummary(float pad, float top, float right) {
     } else if (result.rfind("failed", 0) == 0) {
         display.mark = Mark::NeedsYou;
         display.title = L"Virtual display not set up";
-        display.detail = ToWide(result.size() > 7 ? result.substr(7) : std::string())
-                       + L" Until then SolStream streams your main display, and its "
-                         L"window offers Set up again.";
+        display.detail = ToWide(result.size() > 7 ? result.substr(7) : std::string());
+        // What is left to do depends on what the failure left, read as it
+        // finished: Set up is promised only where the window offers it, on a
+        // PC with no device of the driver's at all.
+        switch (g_driver_state) {
+            case DriverState::Missing:
+                display.detail += L" Until then SolStream streams your main display, and its "
+                                  L"window offers Set up again.";
+                break;
+            case DriverState::RestartPending:
+                display.detail += L" Restart this PC to finish setting up the virtual "
+                                  L"display. Until then SolStream streams your main display.";
+                break;
+            case DriverState::Off:
+                display.detail += L" The virtual display is installed but didn't start, so "
+                                  L"SolStream streams your main display. Restarting this PC "
+                                  L"may start it; if not, Device Manager (Display adapters) "
+                                  L"says why.";
+                break;
+            case DriverState::Ready:
+                // It runs, and the host sets it up again each time it starts.
+                display.detail += L" SolStream tries again each time it starts.";
+                break;
+        }
     } else if (g_driver_state == DriverState::Ready) {
         display.mark = Mark::Live;
         display.title = L"Virtual display ready";
@@ -2814,6 +2836,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             } else {
                 g_phase = ok ? Phase::Done : Phase::Failed;
                 g_outcome = *text;
+                // As the failure left it, so the summary offers only what the
+                // host window will: a device that was made and didn't start is
+                // not one Set up is offered for.
+                if (g_display_result.rfind("failed", 0) == 0) {
+                    g_driver_state = CurrentDriverState();
+                }
             }
             delete text;
             InvalidateRect(window, nullptr, FALSE);
