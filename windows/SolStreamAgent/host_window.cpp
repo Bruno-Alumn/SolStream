@@ -168,7 +168,8 @@ std::wstring g_notice_detail;
 /// it. `g_driver_ours` is the same question for the uninstall window, which
 /// only promises to remove a driver SolStream put there. `g_display_result` is
 /// the elevated half's answer, "ready <note>", "ready-restart <note>" or
-/// "failed <why>", empty when it was not asked to do anything.
+/// "failed <why>", empty when it was not asked to do anything -- setup's tick
+/// box's, or the host window's Set up's.
 DriverState g_driver_state = DriverState::Missing;
 bool g_can_install_driver = true;
 bool g_driver_ours = false;
@@ -780,7 +781,8 @@ Screen Describe(const HostStatus& status) {
     screen.connected = status.connected_clients > 0;
 
     // The two hard failures keep the headline and subtitle whatever else is
-    // said. Their rows give way only to an update (g_notice_about_update).
+    // said. Their rows give way only to an update (g_notice_about_update), and
+    // to the virtual display's set-up while it runs.
     bool failing = true;
     if (status.address.empty()) {
         screen.headline = L"Not reachable yet.";
@@ -815,7 +817,13 @@ Screen Describe(const HostStatus& status) {
     // advisory below, because it is the answer to the button that advisory
     // offered — showing the question again underneath its own answer would be
     // absurd — but not the two hard failures above, which are still true.
-    if (!g_notice.empty() && (!failing || g_notice_about_update)) {
+    //
+    // Except while the virtual display is being set up: that may be waiting on
+    // a Windows prompt, and what to answer and where to look for it are said
+    // only here. Once it has finished, its answer waits behind them like any
+    // other.
+    const bool setting_up_display = g_job_running && g_host_job == HostJob::Display;
+    if (!g_notice.empty() && (!failing || g_notice_about_update || setting_up_display)) {
         screen.what = g_notice;
         screen.why = g_notice_detail + (g_job_running ? PromptHint() : std::wstring());
         screen.mark = g_notice_mark;
@@ -1214,12 +1222,14 @@ float DrawSetupSummary(float pad, float top, float right) {
     const std::string& result = g_display_result;
     if (result.rfind("ready", 0) == 0) {
         // Said by the elevated half in so many words, not guessed from what
-        // its notes happen to contain.
+        // its notes happen to contain. Restart-needed is not called ready:
+        // until the restart the display may not have started at all.
         const bool restart = result.rfind("ready-restart", 0) == 0;
         display.mark = restart ? Mark::NeedsYou : Mark::Live;
-        display.title = L"Virtual display ready";
+        display.title = restart ? L"Restart this PC to finish" : L"Virtual display ready";
         display.detail = restart
-            ? L"Windows wants this PC restarted to finish installing it."
+            ? L"Windows finishes installing the virtual display when this PC restarts, "
+              L"and SolStream sets it up for your Mac after that."
             : L"Your Mac gets a screen of its own on this PC, so nothing on your monitor "
               L"is streamed.";
     } else if (result.rfind("failed", 0) == 0) {
@@ -2079,6 +2089,7 @@ void StartDisplayJob(HWND window) {
     }
     g_job_running = true;
     g_host_job = HostJob::Display;
+    g_display_result.clear();
     SetNotice(L"Setting the virtual display up…",
               L"Waiting for you to allow this in the Windows prompt.", Mark::NeedsYou,
               false);
@@ -2117,8 +2128,12 @@ void StartDisplayJob(HWND window) {
             display = "failed " + (error.empty() ? std::string("The setup did not run.") : error);
         }
         const bool restart = display.rfind("ready-restart", 0) == 0;
+        // Ahead of the answer, from the same thread, so it has arrived by the
+        // time the answer's headline is chosen from it.
+        PostMessageW(window, WM_SOLSTREAM_JOB_DISPLAY, 0, (LPARAM) new std::string(display));
         PostDone(window, ok,
-                 ok ? (restart ? L"Restart this PC to finish installing it."
+                 ok ? (restart ? L"Windows finishes installing it when this PC restarts, "
+                                 L"and SolStream sets it up for your Mac after that."
                                : L"Your Mac gets a screen of its own from the next time it "
                                  L"connects.")
                     : ToWide(display.substr(7)));
@@ -2547,13 +2562,14 @@ void ShowTrayMenu(HWND window) {
     AppendMenuW(menu, when_free, kTrayCheckUpdates, L"Check for updates");
     // The driver advisory's own button is behind the update banner while an
     // update is on offer, so it has a way in here too: neither banner can hide
-    // the other's action.
-    bool has_display = true;
+    // the other's action. Offered exactly where that button is, and nowhere it
+    // can only fail -- somebody's own driver that is switched off, an ARM PC.
+    bool offer_display = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        has_display = g_status.virtual_display;
+        offer_display = !g_status.virtual_display && !g_status.driver_off;
     }
-    if (!has_display) {
+    if (offer_display && CanInstallDisplayDriver()) {
         AppendMenuW(menu, when_free, kTraySetUpDisplay, L"Set up virtual display…");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2631,6 +2647,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             case DriverStep::Installing:
                 text = L"Installing the virtual display. If Windows asks whether to "
                        L"install software from SignPath Foundation, choose Install.";
+                break;
+            case DriverStep::Starting:
+                // Windows has had its say by now, so no prompt is mentioned,
+                // and the hint below is not added to a wait that has none.
+                text = L"Starting the virtual display…";
                 break;
             case DriverStep::Configuring:
                 text = L"Setting the virtual display up for your Mac. The screen may "
@@ -2756,6 +2777,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                         g_update_exit_early = false;
                         ApplyInstallerExited(window, g_update_exit_code);
                     }
+                } else if (ok && g_display_result.rfind("ready-restart", 0) == 0) {
+                    // Not called ready: until the restart the display may
+                    // not have started at all.
+                    SetNotice(L"Restart this PC to finish setting up the virtual display.",
+                              *text, Mark::NeedsYou, false);
                 } else {
                     SetNotice(ok ? L"The virtual display is ready."
                                  : L"SolStream couldn't set the virtual display up.",

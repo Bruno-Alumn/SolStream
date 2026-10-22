@@ -36,6 +36,7 @@ constexpr wchar_t kSetupProgressMessage[] = L"SolStream.SetupProgress";
 enum class DriverStep {
     Downloading = 1,
     Installing,   ///< Windows may ask whether to trust the publisher now
+    Starting,     ///< past that question: the device is made and its driver bound
     Configuring,  ///< the screen may blink
     Done,         ///< the display's part is over; SolStream's own install follows
 };
@@ -70,9 +71,10 @@ std::string ManualInstallAdvice();
 ///
 /// `owner` is the window waiting on this, for Windows' own prompts to come up
 /// over. True when a virtual display is ready at the end, including when one
-/// already was (`already`). `restart` is Windows saying the install needs a
-/// restart to finish. `note` collects what was done; `error` says why not, in
-/// words a person can act on.
+/// already was (`already`), and when Windows wants a restart to finish
+/// (`restart`): the display may not start until then, and SolStream sets it up
+/// when it starts after the restart. `note` collects what was done; `error`
+/// says why not, in words a person can act on.
 bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND owner,
                           bool& already, bool& restart, std::string& note,
                           std::string& error);

@@ -89,7 +89,10 @@ streams the main display meanwhile, and setup's summary says why and that the
 host window's **Set up** button tries again. That button, and the tray's "Set
 up virtual display…", run the same steps elevated
 (`SolStream.exe --install-display-driver`), and the running host then switches
-its capture to the new display without restarting.
+its capture to the new display without restarting. When Windows says the
+install needs a restart, the device may not start before it, so that is not
+called a failure: setup and the window say to restart the PC to finish, and the
+host sets the display up when it starts after the restart.
 
 Setup installs only on a PC with no device of the driver's at all. One that is
 there but switched off or failing is somebody's own: setup says it is off and

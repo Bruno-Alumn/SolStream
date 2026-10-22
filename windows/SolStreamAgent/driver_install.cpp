@@ -397,11 +397,12 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         // Somebody's own driver, switched off or failing. Theirs: installing
         // over it would bind a different version to their device, and an
         // uninstall would later take it. Saying where the switch is costs
-        // them one click and takes nothing.
+        // them one click and takes nothing. Not "then choose Set up again":
+        // once it is on there is a virtual display, and no Set up is offered.
         error = "This PC already has the Virtual Display Driver, but it's turned off or "
                 "not working, so SolStream left it alone. Turn it on in Device Manager "
-                "(Display adapters, Virtual Display Driver, Enable device), then choose "
-                "Set up again.";
+                "(Display adapters, Virtual Display Driver, Enable device) to stream to "
+                "it.";
         return false;
     }
     if (state == DriverState::Missing) {
@@ -510,6 +511,10 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             return false;
         }
         staged = oem_name ? oem_name : L"";
+        // Past the one call that can ask. What follows -- making the device,
+        // binding the driver, waiting for the display -- never does, and a
+        // slow one must not send somebody looking for a prompt that isn't there.
+        progress(DriverStep::Starting);
 
         // No device of the driver's is present (CurrentDriverState said so),
         // so this one is new and SolStream's.
@@ -574,6 +579,22 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         WriteState(kSettingsBackupValue, new_backup);
     }
     if (!configured_ok) {
+        if (restart) {
+            // Windows finishes the install at the restart, and until then the
+            // device may not start at all, so there is no display yet to set
+            // up. That is not a failure: the modes went into the settings file
+            // just now, which needs no display, and the host does the rest
+            // when it starts after the restart. Reported as one, the install was
+            // called failed, and a Set up offered that would only find the
+            // device not started and call it somebody's switched-off driver.
+            note += configured;
+            if (!configured.empty()) {
+                note += "\n";
+            }
+            note += "SolStream finishes setting the virtual display up when it starts after "
+                    "the restart.";
+            return true;
+        }
         error = configure_error;
         return false;
     }
