@@ -418,26 +418,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the Mac then attaches anyway. That is around 25 seconds of
             // "Starting…" to reach the same place. Checking first makes it
             // instant, and picking an application that is already running is a
-            // request to see it, not to start a second copy.
+            // request to see it, not to start a second copy. Only a window
+            // that is surely its own, though; see `LaunchMatch`.
             picker?.showBusy("Opening \(app.name) on \(host)…")
             agent.windows { [weak self] windows in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    if let existing = windows.first(where: {
-                        $0.title.localizedCaseInsensitiveContains(app.name)
-                    }) {
+                    if let existing = LaunchMatch.existing(app.name, in: windows) {
                         Log.info("[app] \"\(app.name)\" is already open; attaching to "
                                  + "\"\(existing.title)\"")
                         self.attach(existing, host: host, agent: agent)
                         return
                     }
-                    self.launch(app: app, host: host, agent: agent)
+                    self.launch(app: app, host: host, agent: agent,
+                                knownPIDs: Set(windows.map(\.pid)))
                 }
             }
         }
     }
 
-    private func launch(app: RemoteApp, host: String, agent: AgentConnection) {
+    private func launch(app: RemoteApp, host: String, agent: AgentConnection,
+                        knownPIDs: Set<Int>) {
         picker?.showBusy("Starting \(app.name) on \(host)…")
         agent.launch(path: app.path) { [weak self] id in
             DispatchQueue.main.async {
@@ -448,9 +449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // matched on before launching, so try once more now.
                     agent.windows { windows in
                         DispatchQueue.main.async {
-                            guard let existing = windows.first(where: {
-                                $0.title.localizedCaseInsensitiveContains(app.name)
-                            }) else {
+                            guard let existing = LaunchMatch.afterLaunch(
+                                app.name, in: windows, knownPIDs: knownPIDs) else {
                                 self.picker?.clearBusy()
                                 self.picker?.showFailure("\(app.name) didn't open a window.")
                                 return
