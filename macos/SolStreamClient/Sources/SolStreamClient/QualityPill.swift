@@ -620,13 +620,23 @@ final class QualityPill: DS.Box {
 /// The chevron is what says "go" before the pointer arrives: the words alone
 /// look like the values above them. Not "⌘,", which a menu would show --
 /// in the streamed window ⌘, goes to the PC as Ctrl+comma.
-private final class LinkButton: NSButton {
-    private let words: String
+///
+/// The connect window uses it too, for the ways out to a web page or another
+/// app: "Get it for Windows", "Get Tailscale". Those sit beside captions, so
+/// the font can be the caption's rather than the body's.
+final class LinkButton: NSButton {
+    /// What the link says. Settable, for a link whose destination changes
+    /// with what it is offering -- "Get Tailscale" or "Open Tailscale".
+    var words: String {
+        didSet { paint(); invalidateIntrinsicContentSize() }
+    }
+    private let wordsFont: NSFont
     private var hovering = false { didSet { paint() } }
     private var tracking: NSTrackingArea?
 
-    init(title: String, target: AnyObject?, action: Selector?) {
+    init(title: String, font: NSFont = DS.body, target: AnyObject?, action: Selector?) {
         words = title
+        wordsFont = font
         super.init(frame: .zero)
         self.target = target
         self.action = action
@@ -650,7 +660,7 @@ private final class LinkButton: NSButton {
 
     private func paint() {
         func styled(_ colour: NSColor) -> NSAttributedString {
-            NSAttributedString(string: words, attributes: [.font: DS.body, .foregroundColor: colour])
+            NSAttributedString(string: words, attributes: [.font: wordsFont, .foregroundColor: colour])
         }
         attributedTitle = styled(hovering ? DS.text : DS.textSecondary)
         attributedAlternateTitle = styled(DS.textMuted)

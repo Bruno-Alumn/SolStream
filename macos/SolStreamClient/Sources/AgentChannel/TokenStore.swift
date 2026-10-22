@@ -54,6 +54,28 @@ public enum TokenStore {
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
+    /// Whether this Mac has paired with any PC at all: what decides whether the
+    /// connect window walks somebody through setting one up.
+    ///
+    /// The file first, from the in-memory copy, which is all a Mac paired by
+    /// any recent build has. Only when that is empty are the places earlier
+    /// builds kept tokens looked at -- preferences, and the keychain by
+    /// attributes alone, so this never puts up a prompt -- because a Mac that
+    /// paired years ago and has not connected since is not a new Mac, and
+    /// should not be told how to install the PC end it already has.
+    public static var hasAnyToken: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if !loaded().isEmpty { return true }
+        if UserDefaults.standard.dictionaryRepresentation().keys
+            .contains(where: { $0.hasPrefix(legacyPrefix) }) { return true }
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecReturnAttributes as String: true,
+                                    kSecMatchLimit as String: kSecMatchLimitOne]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
     public static func set(_ token: String, for host: String) {
         lock.lock()
         defer { lock.unlock() }

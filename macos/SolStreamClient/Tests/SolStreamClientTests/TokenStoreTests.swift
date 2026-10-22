@@ -53,6 +53,24 @@ final class TokenStoreTests: XCTestCase {
         XCTAssertEqual(TokenStore.token(for: host), "00112233445566778899aabbccddeeff")
     }
 
+    /// Whether this Mac has paired with anything at all, which decides the
+    /// connect window's first-run guide. Measured against what is there
+    /// before the test, rather than asserted false: a Mac that ran a keychain
+    /// build may still hold an old item, and that rightly counts.
+    func testAnyTokenAtAllCounts() {
+        let before = TokenStore.hasAnyToken
+        TokenStore.set("00112233445566778899aabbccddeeff", for: host)
+        XCTAssertTrue(TokenStore.hasAnyToken)
+        TokenStore.remove(for: host)
+        XCTAssertEqual(TokenStore.hasAnyToken, before)
+    }
+
+    func testAnOlderBuildsTokenInPreferencesCounts() {
+        UserDefaults.standard.set("00112233445566778899aabbccddeeff",
+                                  forKey: "SolStream.agentToken.\(host)")
+        XCTAssertTrue(TokenStore.hasAnyToken)
+    }
+
     func testRemovingForgetsIt() {
         TokenStore.set("00112233445566778899aabbccddeeff", for: host)
         TokenStore.remove(for: host)

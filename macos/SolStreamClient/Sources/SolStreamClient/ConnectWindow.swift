@@ -15,6 +15,7 @@ import AgentChannel
 final class ConnectWindow: NSObject, NSWindowDelegate {
     private static let lastHostKey = "SolStream.lastHost"
     private static let recentHostsKey = "SolStream.recentHosts"
+    private static let width: CGFloat = 440
 
     /// What we know about a host before connecting to it.
     private struct HostState {
@@ -38,6 +39,28 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// and the update waits in Settings until somebody wants it.
     private let updateNotice = NSButton(title: "", target: nil, action: nil)
     private var updateObserver: NSObjectProtocol?
+
+    /// The first-run steps, between the subheading and the host row they end
+    /// at. See `SetupGuide`.
+    private let guide = SetupGuideView(width: ConnectWindow.width - DS.Metric.inset * 2)
+    /// "Away from home? Tailscale…" and the one thing to do about it, under
+    /// the hint. See `refreshTailscaleAdvice`.
+    private let tailscaleRow = NSStackView()
+    private let tailscaleWords = NSTextField(wrappingLabelWithString: "")
+    private let tailscaleLink = LinkButton(title: "Get Tailscale", font: DS.caption,
+                                           target: nil, action: nil)
+    private var tailscale = TailscaleStatus.missing
+    private var tailscaleCheckedAt: Date?
+    /// Whether the Tailscale line is up. Remembered rather than worked out
+    /// afresh each time, because "Checking…" says nothing either way and the
+    /// line should neither appear nor go while a probe is out.
+    private var showsTailscaleAdvice = false
+    /// What the window was last sized for: which of the two optional parts
+    /// were showing, and what the Tailscale line said, since its two wordings
+    /// can wrap differently. The window is re-fitted when this changes and at
+    /// no other time.
+    private var fittedFor: (guide: Bool, advice: String?)?
+    private var stack: NSStackView!
 
     private let browser = HostBrowser()
     private var discovered: [DiscoveredHost] = []
@@ -122,6 +145,23 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hintLabel.textColor = DS.textMuted
         hintLabel.maximumNumberOfLines = 2
 
+        // A caption and a link, both quiet: this is advice for later, not the
+        // way forward, which stays the one amber button.
+        tailscaleWords.font = DS.caption
+        tailscaleWords.textColor = DS.textMuted
+        tailscaleWords.maximumNumberOfLines = 2
+        tailscaleWords.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        tailscaleLink.target = self
+        tailscaleLink.action = #selector(tailscaleTapped)
+        // The link at the trailing end, under the buttons' column, where the
+        // eye already goes for what to press.
+        tailscaleRow.setViews([tailscaleWords], in: .leading)
+        tailscaleRow.setViews([tailscaleLink], in: .trailing)
+        tailscaleRow.orientation = .horizontal
+        tailscaleRow.alignment = .firstBaseline
+        tailscaleRow.spacing = DS.Space.x3
+        tailscaleRow.isHidden = true
+
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
         connectButton.keyEquivalent = "\r"
@@ -150,13 +190,20 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         buttons.orientation = .horizontal
         buttons.spacing = DS.Space.x3
 
-        let stack = NSStackView(views: [mark, heading, subheading, hostDropdown, hintLabel, buttons])
+        let stack = NSStackView(views: [mark, heading, subheading, guide, hostDropdown,
+                                        hintLabel, tailscaleRow, buttons])
+        self.stack = stack
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = DS.Space.x2
         stack.setCustomSpacing(DS.Space.x4, after: mark)
         stack.setCustomSpacing(DS.Space.x1, after: heading)
         stack.setCustomSpacing(DS.Space.x6, after: subheading)
+        // A hidden view is taken out of the stack along with the spacing
+        // after it, so with the guide hidden the subheading's 24 is what
+        // stands above the host row, as it always did.
+        stack.setCustomSpacing(DS.Space.x6, after: guide)
+        stack.setCustomSpacing(DS.Space.x4, after: tailscaleRow)
         // 16, not 24: the hint always reserves a second line, so when it says
         // one the gap above the buttons is already a line taller.
         stack.setCustomSpacing(DS.Space.x4, after: hintLabel)
@@ -169,7 +216,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
         let content = NSView()
         content.addSubview(stack)
-        let width = content.widthAnchor.constraint(equalToConstant: 440)
+        let width = content.widthAnchor.constraint(equalToConstant: Self.width)
         NSLayoutConstraint.activate([
             width,
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
@@ -182,6 +229,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hostDropdown.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
             hintLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
+            tailscaleRow.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -inset * 2),
             // Always two lines tall. The hint is one line or two depending on
             // what it is saying, and a window that grows and shrinks by a line
             // as a probe comes back is a window that jumps under the pointer.
@@ -191,6 +239,25 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
         window.contentView = content
         window.setContentSize(content.fittingSize)
+    }
+
+    /// Size the window to its content, keeping its top edge where it is.
+    ///
+    /// Only when the guide or the Tailscale line comes or goes -- never as a
+    /// probe comes back -- so the window changes size at most once or twice
+    /// in its life rather than under the pointer. Kept at the top because
+    /// that is where the eye is: `setContentSize` keeps the bottom, and the
+    /// heading would jump instead of the buttons.
+    private func fitIfLayoutChanged(guide showsGuide: Bool, advice: String?) {
+        if let fittedFor, fittedFor.guide == showsGuide, fittedFor.advice == advice { return }
+        fittedFor = (showsGuide, advice)
+        guard let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        let size = content.fittingSize
+        let old = window.frame
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: old.minX, y: old.maxY - frame.height)
+        window.setFrame(frame, display: window.isVisible, animate: window.isVisible)
     }
 
     func show() {
@@ -275,8 +342,56 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 : "Found \(names) on this network."
             connectButton.title = "Connect"
         }
+        // A Tailscale address with Tailscale off cannot answer however long
+        // it is given, and every other reason the hint might give -- the PC
+        // asleep, SolStream not running -- sends somebody to the wrong
+        // machine to look.
+        let tailscaleOff = StreamSettings.isRemote(host: state.address)
+            && state.isReachable != true && !tailscale.isConnected
+        if tailscaleOff {
+            hintLabel.stringValue = "That's a Tailscale address, and Tailscale is off on this Mac."
+        }
         hintLabel.textColor = DS.textMuted
         connectButton.isEnabled = !state.address.isEmpty
+
+        // "Paired" for the guide is about this Mac, not the host on show: a
+        // Mac paired with one PC knows how this works.
+        let steps = SetupGuide.steps(paired: TokenStore.hasAnyToken,
+                                     discovered: discovered.count,
+                                     reachable: state.isReachable)
+        guide.isHidden = steps == nil
+        if let steps { guide.show(steps) }
+        refreshTailscaleAdvice(firstRun: steps != nil, tailscaleOff: tailscaleOff)
+    }
+
+    /// The Tailscale line: shown on a first run, and when the PC on show is
+    /// not answering -- exactly when somebody might be away from home, or
+    /// about to be -- unless this Mac is on Tailscale already.
+    private func refreshTailscaleAdvice(firstRun: Bool, tailscaleOff: Bool) {
+        // At most every few seconds. Turning Tailscale on is noticed sooner
+        // than that when it matters: coming back from its app makes this
+        // window key, which asks again (`windowDidBecomeKey`).
+        if tailscaleCheckedAt.map({ Date().timeIntervalSince($0) > 3 }) ?? true {
+            tailscale = .current()
+            tailscaleCheckedAt = Date()
+        }
+        if firstRun || tailscaleOff {
+            showsTailscaleAdvice = true
+        } else if let reachable = state.isReachable {
+            showsTailscaleAdvice = !reachable
+        }
+        let advice = showsTailscaleAdvice ? tailscale.advice : nil
+        tailscaleRow.isHidden = advice == nil
+        if let advice {
+            tailscaleWords.stringValue = advice.words
+            tailscaleLink.words = advice.action
+            tailscaleWords.preferredMaxLayoutWidth = Self.width - DS.Metric.inset * 2
+                - tailscaleLink.intrinsicContentSize.width - tailscaleRow.spacing
+        }
+        // The hint keeps a second line whatever it says, so with the line
+        // under it the gap is already a line tall and wants no more.
+        stack.setCustomSpacing(advice == nil ? DS.Space.x4 : DS.Space.x1, after: hintLabel)
+        fitIfLayoutChanged(guide: !guide.isHidden, advice: advice?.words)
     }
 
     /// Reachability is checked by opening the port, not by pinging: what matters
@@ -522,6 +637,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         onConnect(host)
     }
 
+    @objc private func tailscaleTapped() {
+        tailscale.act()
+    }
+
     @objc private func quitTapped() {
         NSApp.terminate(nil)
     }
@@ -542,6 +661,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             attributes: [.font: DS.caption, .foregroundColor: DS.textSecondary])
         updateNotice.setAccessibilityLabel("Update \(version) available. Opens Settings.")
         updateNotice.isHidden = false
+    }
+
+    /// Back from somewhere else -- often the Tailscale app, or the browser
+    /// the download opened in. Whatever was done there, the window should
+    /// say so now rather than in a few seconds.
+    func windowDidBecomeKey(_ notification: Notification) {
+        tailscaleCheckedAt = nil
+        refresh()
     }
 
     func windowWillClose(_ notification: Notification) {
