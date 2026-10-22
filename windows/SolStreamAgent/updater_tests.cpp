@@ -1896,6 +1896,53 @@ void TestScanKeys() {
     CHECK(!BuildScanKeyInput(0xE0F2, true, &in));
 }
 
+/// The Mac's Caps Lock state, carried on every key, is matched by pressing
+/// Caps Lock here only when the PC's differs -- and what the PC's is comes from
+/// Windows, except just after a press from here, which Windows may not have
+/// caught up with.
+void TestCapsLock() {
+    using namespace media;
+    CapsLockBelief belief;
+    // Nothing known: Windows is asked.
+    CHECK(CapsLockNeedsReading(belief, 5000));
+
+    CapsLockNoted(belief, false, 5000);
+    CHECK(belief.known && !belief.on);
+    // Trusted for a second, so a press made from here is not read back as
+    // the old state and pressed a second time.
+    CHECK(!CapsLockNeedsReading(belief, 5000));
+    CHECK(!CapsLockNeedsReading(belief, 5000 + kCapsLockTrustMs - 1));
+    // Then asked again, so Caps Lock changed at the PC itself is noticed.
+    CHECK(CapsLockNeedsReading(belief, 5000 + kCapsLockTrustMs));
+    CHECK(CapsLockNeedsReading(belief, 5000 + 60000));
+    // A clock that went backwards proves nothing.
+    CHECK(CapsLockNeedsReading(belief, 4999));
+
+    // A press from here is what the PC now is.
+    CapsLockNoted(belief, true, 9000);
+    CHECK(belief.on && !CapsLockNeedsReading(belief, 9500));
+
+    // A fresh session knows nothing.
+    belief = CapsLockBelief{};
+    CHECK(!belief.known && CapsLockNeedsReading(belief, 0));
+
+    // The press itself: Caps Lock down and up by virtual key, so a Japanese
+    // layout's 英数 at that place is not what it presses.
+    INPUT toggle[2];
+    BuildCapsLockToggle(toggle);
+    CHECK(toggle[0].type == INPUT_KEYBOARD && toggle[1].type == INPUT_KEYBOARD);
+    CHECK(toggle[0].ki.wVk == VK_CAPITAL && toggle[1].ki.wVk == VK_CAPITAL);
+    CHECK(toggle[0].ki.dwFlags == 0);
+    CHECK(toggle[1].ki.dwFlags == KEYEVENTF_KEYUP);
+    CHECK(!(toggle[0].ki.dwFlags & KEYEVENTF_SCANCODE));
+
+    // Caps Lock's scan code is what the Mac reports its changes with, and the
+    // state is the modifiers byte's 0x10, clear of shift, control, alt and
+    // the Windows key.
+    CHECK(kScanCapsLock == 0x3A);
+    CHECK((kModifierCapsLock & 0x0F) == 0);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1969,6 +2016,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDecideTakeover();
     TestHolderHearing();
     TestScanKeys();
+    TestCapsLock();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

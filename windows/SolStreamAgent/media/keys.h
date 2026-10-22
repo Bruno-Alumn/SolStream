@@ -48,4 +48,55 @@ namespace solstream::media {
 ///     Japanese PC keyboard does that with are not on an Apple one.
 bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out);
 
+// ── Caps Lock ────────────────────────────────────────────────────────────────
+//
+// Caps Lock is a toggle, and the Mac used to keep it in step by sending a
+// press whenever its own changed, on top of a guess at what the PC's was. One
+// press lost -- sent before the session was running, or to a PC whose Caps Lock
+// had been set at the PC -- and the two were inverted for good: every later
+// press flipped both. So a scan-code key event carries the Mac's Caps Lock
+// STATE in its modifiers byte, and this side presses Caps Lock only when the
+// PC's differs, just before a key goes down. A lost event then costs nothing:
+// the next key brings the two back together.
+
+/// The modifiers byte's Caps Lock bit, on a `kInputKeyScan` event.
+constexpr unsigned char kModifierCapsLock = 0x10;
+
+/// Caps Lock's own scan code. From the Mac it is not a press to pass on but a
+/// report that its Caps Lock has changed, carrying the new state like any
+/// other key event; it is answered by bringing the PC's into line.
+constexpr uint16_t kScanCapsLock = 0x3A;
+
+/// What this side believes the PC's Caps Lock is, and since when.
+struct CapsLockBelief {
+    bool known = false;
+    bool on = false;
+    uint64_t atMs = 0;
+};
+
+/// How long a belief is trusted over asking Windows again.
+///
+/// Not for the cost of asking. Windows answers from the input queue of the
+/// window taking the keys, which learns of a press only when that window reads
+/// it -- so asked just after this side pressed Caps Lock, it can still say the
+/// old state, and pressing again on that answer would put the inversion back.
+/// A second is far longer than any window that is reading its input takes,
+/// and short enough that Caps Lock changed at the PC itself is noticed by the
+/// next word typed.
+constexpr uint64_t kCapsLockTrustMs = 1000;
+
+/// Whether Windows has to be asked before the belief can be acted on.
+bool CapsLockNeedsReading(const CapsLockBelief& belief, uint64_t nowMs);
+
+/// Record the PC's Caps Lock: what Windows said, or what a press from here has
+/// just made it.
+void CapsLockNoted(CapsLockBelief& belief, bool on, uint64_t nowMs);
+
+/// The press and release that toggle Caps Lock.
+///
+/// By virtual key rather than by Caps Lock's scan code: on a Japanese layout
+/// the key at that place is 英数, which switches the IME and leaves Caps Lock
+/// as it was, and every key typed would go on trying to fix it.
+void BuildCapsLockToggle(INPUT out[2]);
+
 }  // namespace solstream::media

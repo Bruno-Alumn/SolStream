@@ -450,6 +450,10 @@ final class StreamSession {
         media.sendInput(event)
     }
 
+    /// Whether `sendInput` reaches the host now. False before `start()` and
+    /// after `stop()`, when MediaClient drops what it is given.
+    var acceptsInput: Bool { media.isRunning }
+
 
     // MARK: - Sinks
 

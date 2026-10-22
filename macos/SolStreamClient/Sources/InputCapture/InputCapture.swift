@@ -515,24 +515,62 @@ public final class InputCapture {
 
     static let capsLockKeyCode: UInt16 = 0x39
     static let windowsCapsLock: UInt16 = 0x14  // VK_CAPITAL
+    static let scanCapsLock: UInt16 = 0x3A
 
-    /// What this Mac last told the host its Caps Lock is. Shared by every
-    /// window, because the host has one keyboard state. Windows starts with
-    /// it off, which is the assumption until something is sent.
-    static var hostCapsLock = false
+    /// Which host this capture's keys go to, so the guess below is kept per
+    /// PC rather than shared by every one this Mac has streamed from.
+    public var hostName = ""
+
+    /// Whether an event handed to `onInput` now reaches a running session.
+    /// Set by the owner; until a session has started, events are dropped.
+    public var acceptsInput: () -> Bool = { true }
+
+    /// What this Mac last told each host its Caps Lock is, for a host that
+    /// predates scan codes and so can only be sent presses. Shared by every
+    /// window on a host, because it has one keyboard state. Windows starts
+    /// with it off, which is the assumption until something is sent.
+    static var hostCapsLock: [String: Bool] = [:]
 
     /// Bring the host's Caps Lock to `on`.
     ///
     /// Caps Lock is a toggle on Windows — one press and release flips it — and
     /// the letters are sent as plain key codes, so without this a Mac typing
     /// with Caps Lock on produced lower case on the PC. Called from the Caps
-    /// Lock `.flagsChanged` and when capture starts, which covers it being
-    /// switched while another application had the keyboard.
+    /// Lock `.flagsChanged`, when capture starts, which covers it being
+    /// switched while another application had the keyboard, and when a
+    /// session starts.
+    ///
+    /// A host that takes scan codes is told the STATE, as Caps Lock's own key
+    /// carrying the Caps Lock bit, and every key after it carries the bit too:
+    /// the host presses its Caps Lock only when its own differs, so nothing on
+    /// this side has to guess, and a lost event is put right by the next key.
+    ///
+    /// An older host can only be sent a press, on top of a guess at its state.
+    /// The guess is moved only for a press that reached a running session: it
+    /// used to be moved first, so a stream opened with Caps Lock on -- the
+    /// window takes the keyboard before the session is running, and the press
+    /// went nowhere -- left the PC typing lower case, and every later press
+    /// flipped both sides and kept them inverted.
     func syncCapsLock(to on: Bool) {
-        guard on != Self.hostCapsLock, let send = onInput else { return }
-        Self.hostCapsLock = on
+        guard let send = onInput else { return }
+        if sendsScanCodes {
+            let state: SMTInput.Modifiers = on ? [.capsLock] : []
+            send(SMTInput.scanKey(code: Self.scanCapsLock, pressed: true, modifiers: state))
+            send(SMTInput.scanKey(code: Self.scanCapsLock, pressed: false, modifiers: state))
+            return
+        }
+        guard on != (Self.hostCapsLock[hostName] ?? false), acceptsInput() else { return }
+        Self.hostCapsLock[hostName] = on
         send(SMTInput.key(code: Self.windowsCapsLock, pressed: true, modifiers: []))
         send(SMTInput.key(code: Self.windowsCapsLock, pressed: false, modifiers: []))
+    }
+
+    /// A session has just started, or restarted, under this capture: events
+    /// sent before it were dropped. Brings the host's Caps Lock into line if
+    /// this window has the keyboard.
+    public func inputBecameLive() {
+        guard isCapturing else { return }
+        syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
     }
 
     /// Let go of anything pressed during a ⌘ chord, now that ⌘ itself is up.
@@ -579,12 +617,14 @@ public final class InputCapture {
     /// Command reports as Control, matching the key codes: a packet that said
     /// "Control is not down" while sending Control's key code would describe a
     /// keyboard nobody is holding. `.meta` is never set — that bit means the
-    /// Windows key, which no key on this Mac can reach.
+    /// Windows key, which no key on this Mac can reach. Caps Lock is its
+    /// state, which a host taking scan codes matches its own to.
     static func modifiers(from flags: NSEvent.ModifierFlags) -> SMTInput.Modifiers {
         var result: SMTInput.Modifiers = []
         if flags.contains(.shift) { result.insert(.shift) }
         if flags.contains(.control) || flags.contains(.command) { result.insert(.control) }
         if flags.contains(.option) { result.insert(.alt) }
+        if flags.contains(.capsLock) { result.insert(.capsLock) }
         return result
     }
 

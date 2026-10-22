@@ -36,9 +36,10 @@ public enum SMTInput {
         case extra2 = 5
     }
 
-    /// Sent alongside a key event. The host does not currently act on it -- the
-    /// modifier keys arrive as their own key events -- but a host that wants to
-    /// resynchronise a stuck modifier needs to be told what this side believes.
+    /// Sent alongside a key event. The modifier keys arrive as their own key
+    /// events, so the host does not act on those bits -- but a host that wants
+    /// to resynchronise a stuck modifier needs to be told what this side
+    /// believes.
     public struct Modifiers: OptionSet, Sendable {
         public let rawValue: UInt8
         public init(rawValue: UInt8) { self.rawValue = rawValue }
@@ -47,6 +48,11 @@ public enum SMTInput {
         public static let control = Modifiers(rawValue: 0x02)
         public static let alt = Modifiers(rawValue: 0x04)
         public static let meta = Modifiers(rawValue: 0x08)
+        /// The Mac's Caps Lock is on. A host that takes `scanKey` acts on this
+        /// one: before a key goes down it presses its own Caps Lock if it is
+        /// not the same, so the two cannot drift apart. A host that predates
+        /// it ignores the whole byte.
+        public static let capsLock = Modifiers(rawValue: 0x10)
     }
 
     /// One event, as `[kind, bodyLength] + body`.

@@ -77,4 +77,26 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
     return true;
 }
 
+bool CapsLockNeedsReading(const CapsLockBelief& belief, uint64_t nowMs) {
+    // A clock that has gone backwards says nothing about how old the belief
+    // is, so it is asked again rather than trusted for ever.
+    return !belief.known || nowMs < belief.atMs || nowMs - belief.atMs >= kCapsLockTrustMs;
+}
+
+void CapsLockNoted(CapsLockBelief& belief, bool on, uint64_t nowMs) {
+    belief.known = true;
+    belief.on = on;
+    belief.atMs = nowMs;
+}
+
+void BuildCapsLockToggle(INPUT out[2]) {
+    for (int i = 0; i < 2; ++i) {
+        out[i] = INPUT{};
+        out[i].type = INPUT_KEYBOARD;
+        out[i].ki.wVk = VK_CAPITAL;
+        out[i].ki.wScan = (WORD) kScanCapsLock;
+    }
+    out[1].ki.dwFlags = KEYEVENTF_KEYUP;
+}
+
 }  // namespace solstream::media

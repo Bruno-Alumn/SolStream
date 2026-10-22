@@ -446,8 +446,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let capture = InputCapture()
         capture.attach(to: view)
         capture.sendsScanCodes = session.hostTakesScanCodes
+        capture.hostName = session.host
         capture.onInput = { [weak self] packet in
             self?.session.sendInput(packet)
+        }
+        capture.acceptsInput = { [weak self] in
+            self?.session.acceptsInput ?? false
         }
         capture.onPointerCaptureChanged = { [weak self] captured in
             self?.pointerCaptureChanged(captured)
@@ -846,6 +850,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         inputCapture?.disableCapture()
         onKeyboardChange?()
+    }
+
+    /// The session under this window has started: anything the keyboard sent
+    /// before it -- the window takes the keyboard as it is shown, ahead of the
+    /// session -- went nowhere, so what must be in step is put in step now.
+    func inputBecameLive() {
+        inputCapture?.inputBecameLive()
     }
 
     /// Drive the host pointer to a known point in the picture, for `--test-input`.

@@ -22,6 +22,30 @@ int16_t ReadBE16s(const unsigned char* p) {
     return (int16_t) ReadBE16(p);
 }
 
+/// Whether this PC's Caps Lock is on, as the window taking the keys sees it.
+///
+/// GetKeyState answers for the calling thread's input queue, and this thread
+/// takes no keyboard input of its own, so alone it answers with whatever its
+/// queue last heard. Joined to the foreground window's queue for the one call,
+/// it answers for the keyboard the keys are going to -- the same
+/// AttachThreadInput ForceForeground uses, and let go of at once.
+bool CapsLockIsOn() {
+    // Asked here first as well: it is the answer when joining is refused, and
+    // the call gives this thread the queue AttachThreadInput needs it to have.
+    bool on = (GetKeyState(VK_CAPITAL) & 1) != 0;
+    const HWND foreground = GetForegroundWindow();
+    if (!foreground || IsHungAppWindow(foreground)) {
+        return on;
+    }
+    const DWORD self = GetCurrentThreadId();
+    const DWORD holder = GetWindowThreadProcessId(foreground, nullptr);
+    if (holder && holder != self && AttachThreadInput(self, holder, TRUE)) {
+        on = (GetKeyState(VK_CAPITAL) & 1) != 0;
+        AttachThreadInput(self, holder, FALSE);
+    }
+    return on;
+}
+
 /// Which keys need the extended flag or SendInput sends the numeric-keypad twin.
 bool IsExtended(unsigned short vk) {
     switch (vk) {
@@ -186,6 +210,13 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             if (length < 3) { return false; }
             const uint16_t code = ReadBE16(body);
             const bool down = body[2] != 0;
+            // Before the key, so that the letter it types already has the
+            // Mac's case. On a press only: a release types nothing.
+            if (down && length >= 4) {
+                MatchCapsLock((body[3] & kModifierCapsLock) != 0);
+            }
+            // Caps Lock's own event has done all it came to do above.
+            if (code == kScanCapsLock) { return true; }
             if (!BuildScanKeyInput(code, down, &input)) { return false; }
             TrackKey(kHeldByScan | code, down);
             break;
@@ -315,6 +346,26 @@ void InputInjector::Reset() {
     duplicates_.store(0);
     failed_.store(0);
     std::memset(seen_, 0, sizeof(seen_));
+    // Asked afresh each session: the PC's Caps Lock may have been changed at
+    // the PC since the last one.
+    capsLock_ = CapsLockBelief{};
+}
+
+void InputInjector::MatchCapsLock(bool wanted) {
+    const uint64_t now = GetTickCount64();
+    if (CapsLockNeedsReading(capsLock_, now)) {
+        CapsLockNoted(capsLock_, CapsLockIsOn(), now);
+    }
+    if (capsLock_.on == wanted) {
+        return;
+    }
+    INPUT toggle[2];
+    BuildCapsLockToggle(toggle);
+    // Believed only once Windows has taken both halves. Refused -- an
+    // elevated window has the foreground -- the next key asks again.
+    if (SendInput(2, toggle, sizeof(INPUT)) == 2) {
+        CapsLockNoted(capsLock_, wanted, now);
+    }
 }
 
 void InputInjector::TrackKey(uint32_t key, bool down) {

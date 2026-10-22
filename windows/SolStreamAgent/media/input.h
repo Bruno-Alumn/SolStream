@@ -32,6 +32,8 @@
 #include <cstdint>
 #include <mutex>
 
+#include "keys.h"
+
 namespace solstream::media {
 
 enum : unsigned char {
@@ -43,7 +45,9 @@ enum : unsigned char {
     kInputKey = 6,          ///< vk u16, down u8, modifiers u8
     kInputText = 7,         ///< UTF-16 code units, for what a keycode cannot say
     /// scan u16, down u8, modifiers u8: the key by position, a set-1 make code
-    /// with 0xE0 in the high byte for an extended key. See keys.h.
+    /// with 0xE0 in the high byte for an extended key. See keys.h. The
+    /// modifiers byte adds 0x10 for the Mac's Caps Lock being on, which this
+    /// host brings its own into line with before a key goes down.
     ///
     /// Sent only by a Mac that read "scancodes" in this host's `media open`
     /// reply; anything older sends `kInputKey`, which is still taken exactly
@@ -131,6 +135,11 @@ private:
 
     /// Note a key going down or up, so ReleaseAll can let go of it.
     void TrackKey(uint32_t key, bool down);
+
+    /// Press Caps Lock if the PC's is not what the Mac says its own is. See
+    /// keys.h. Only the receive thread touches the belief; Reset clears it.
+    void MatchCapsLock(bool wanted);
+    CapsLockBelief capsLock_;
 
     unsigned char buttonsDown_ = 0;   ///< bitmask over the five buttons
     /// The keys held down: a virtual key from `kInputKey`, or a scan code from

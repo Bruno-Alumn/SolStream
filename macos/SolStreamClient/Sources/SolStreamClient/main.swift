@@ -933,6 +933,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // gets through the NAT — so the only cost of starting here is the few
         // milliseconds spent building the windows.
         session.start()
+        // The window shown above took the keyboard before there was a session
+        // to send to.
+        appWindows.forEach { $0.inputBecameLive() }
 
         // The request was built before the host was asked, and Settings can be
         // open beside the picker while it answers. A change made in that wait
@@ -1128,6 +1131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.wire(fresh, host: host, agent: agent)
             self.appWindows.forEach { $0.rebind(to: fresh) }
             fresh.start()
+            self.appWindows.forEach { $0.inputBecameLive() }
             Log.info("[app] stream restarted")
         }
     }

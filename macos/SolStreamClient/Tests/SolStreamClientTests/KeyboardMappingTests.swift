@@ -252,14 +252,14 @@ final class KeyboardMappingTests: XCTestCase {
                        "⌃⌘W was swallowed, so the window cannot be closed")
     }
 
-    // MARK: - Caps Lock
+    // MARK: - Caps Lock, to a host that predates scan codes
 
     /// Caps Lock is a toggle on Windows, so each change on the Mac is one
     /// press and release of VK_CAPITAL — and a repeat of the same state is
     /// nothing at all.
     func testCapsLockTogglesTheHost() {
-        InputCapture.hostCapsLock = false
-        defer { InputCapture.hostCapsLock = false }
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
         let wire = Wire()
         let capsFlag = NSEvent.ModifierFlags.capsLock.rawValue
 
@@ -272,14 +272,14 @@ final class KeyboardMappingTests: XCTestCase {
 
         wire.send(.flagsChanged, keyCode: InputCapture.capsLockKeyCode, deviceFlags: 0)
         XCTAssertEqual(wire.packets.map(\.code), [0x14, 0x14, 0x14, 0x14])
-        XCTAssertFalse(InputCapture.hostCapsLock)
+        XCTAssertEqual(InputCapture.hostCapsLock[""], false)
     }
 
     /// Switched while another application had the keyboard: the next window to
     /// take capture brings the host into line.
     func testCapsLockSyncsWhenCaptureStarts() {
-        InputCapture.hostCapsLock = false
-        defer { InputCapture.hostCapsLock = false }
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
         let capture = InputCapture()
         var codes: [UInt16] = []
         capture.onInput = { data in
@@ -290,8 +290,117 @@ final class KeyboardMappingTests: XCTestCase {
         }
         capture.syncCapsLock(to: true)
         XCTAssertEqual(codes, [0x14, 0x14])
-        XCTAssertTrue(InputCapture.hostCapsLock)
+        XCTAssertEqual(InputCapture.hostCapsLock[""], true)
         capture.syncCapsLock(to: true)
         XCTAssertEqual(codes.count, 2)
+    }
+
+    /// The window takes the keyboard as it is shown, before the session runs,
+    /// and a press sent then goes nowhere. It must not be counted as having
+    /// reached the PC -- that was the inversion: the Mac sure the PC had Caps
+    /// Lock on, the PC typing lower case, and every press after flipping both.
+    func testAPressThatWentNowhereIsNotCounted() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let capture = InputCapture()
+        var live = false
+        var codes: [UInt16] = []
+        capture.acceptsInput = { live }
+        capture.onInput = { data in
+            guard live else { return }  // as MediaClient drops it
+            let bytes = [UInt8](data)
+            if bytes.count >= 6 { codes.append(UInt16(bytes[2]) << 8 | UInt16(bytes[3])) }
+        }
+        capture.syncCapsLock(to: true)
+        XCTAssertNil(InputCapture.hostCapsLock[""], "a dropped press was counted")
+
+        // The session starts; the same state is now sent, and counted.
+        live = true
+        capture.syncCapsLock(to: true)
+        XCTAssertEqual(codes, [0x14, 0x14])
+        XCTAssertEqual(InputCapture.hostCapsLock[""], true)
+    }
+
+    /// Each PC has a Caps Lock of its own, so what one was told says nothing
+    /// about another.
+    func testEachHostIsKeptApart() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        var sent = 0
+        let first = InputCapture()
+        first.hostName = "pc-one.example"
+        first.onInput = { _ in sent += 1 }
+        first.syncCapsLock(to: true)
+        XCTAssertEqual(sent, 2)
+
+        let second = InputCapture()
+        second.hostName = "pc-two.example"
+        second.onInput = { _ in sent += 1 }
+        second.syncCapsLock(to: true)
+        XCTAssertEqual(sent, 4, "the second PC was taken to have Caps Lock on already")
+        XCTAssertEqual(InputCapture.hostCapsLock["pc-one.example"], true)
+        XCTAssertEqual(InputCapture.hostCapsLock["pc-two.example"], true)
+    }
+
+    // MARK: - Caps Lock, to a host that takes scan codes
+
+    /// Scan-code events, read back off the wire with their modifiers.
+    private func scanPackets(_ capture: InputCapture) -> () -> [(code: UInt16, pressed: Bool, modifiers: UInt8)] {
+        var packets: [(code: UInt16, pressed: Bool, modifiers: UInt8)] = []
+        capture.onInput = { data in
+            let bytes = [UInt8](data)
+            guard bytes.count >= 6, bytes[0] == SMTInput.Kind.keyScan.rawValue else { return }
+            packets.append((UInt16(bytes[2]) << 8 | UInt16(bytes[3]), bytes[4] != 0, bytes[5]))
+        }
+        return { packets }
+    }
+
+    /// Such a host is told the STATE, not asked for a press, and every time:
+    /// it presses its own Caps Lock only if it differs, so a repeat costs
+    /// nothing and nothing here has to guess.
+    func testAScanCodeHostIsToldTheState() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let capture = InputCapture()
+        capture.sendsScanCodes = true
+        let packets = scanPackets(capture)
+        capture.syncCapsLock(to: true)
+        capture.syncCapsLock(to: true)
+        capture.syncCapsLock(to: false)
+        XCTAssertEqual(packets().map(\.code), Array(repeating: InputCapture.scanCapsLock, count: 6))
+        XCTAssertEqual(packets().map(\.pressed), [true, false, true, false, true, false])
+        let caps = SMTInput.Modifiers.capsLock.rawValue
+        XCTAssertEqual(packets().map(\.modifiers), [caps, caps, caps, caps, 0, 0])
+        XCTAssertTrue(InputCapture.hostCapsLock.isEmpty, "a guess was kept for a host that needs none")
+    }
+
+    /// And every key carries it, which is what puts a lost one right.
+    func testEveryKeyCarriesTheCapsLockState() {
+        let capture = InputCapture()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NSView(frame: window.contentLayoutRect)
+        window.contentView = view
+        capture.attach(to: view)
+        capture.sendsScanCodes = true
+        capture.enableCapture()
+        defer { capture.disableCapture() }
+        let packets = scanPackets(capture)
+        for (flags, caps) in [(NSEvent.ModifierFlags.capsLock.rawValue, true), (UInt(0), false)] {
+            let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: flags),
+                timestamp: 0, windowNumber: 0, context: nil, characters: "",
+                charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0x00)!
+            capture.handleKeyEvent(event)
+            XCTAssertEqual(packets().last?.code, 0x1E)
+            XCTAssertEqual((packets().last?.modifiers ?? 0) & SMTInput.Modifiers.capsLock.rawValue != 0,
+                           caps)
+        }
+    }
+
+    func testTheCapsLockBitIsClearOfTheOthers() {
+        XCTAssertEqual(SMTInput.Modifiers.capsLock.rawValue, 0x10)
+        XCTAssertTrue(InputCapture.modifiers(from: [.capsLock]).contains(.capsLock))
+        XCTAssertEqual(InputCapture.modifiers(from: [.capsLock, .shift]).rawValue, 0x11)
     }
 }
