@@ -2,23 +2,33 @@
 //
 // A streamed window spends its session on the capture display, which runs at
 // 200%, and goes back at the end to a monitor that usually runs at something
-// else. This is the part of putting it back that needs no window, so it can
-// be tested.
+// else. Two things went wrong with that, and these are the parts of the cure
+// that need no window, so they can be tested.
 //
-// SetWindowPlacement moves a window across monitors, and a window that is
-// per-monitor DPI aware -- File Explorer, anything modern -- answers the
-// WM_DPICHANGED that move sends by scaling ITSELF by the ratio of the two
+// The size. SetWindowPlacement moves a window across monitors, and a window
+// that is per-monitor DPI aware -- File Explorer, anything modern -- answers
+// the WM_DPICHANGED that move sends by scaling ITSELF by the ratio of the two
 // scalings, after it has already been given the size it was asked for. Measured
 // on a 125% monitor: put back at 1406x792, it settled at 879x495, every time,
 // and the Mac opened the next session at the smaller size and shrank it again
 // at the end. Asked a second time, the window is already on that monitor, no
 // DPI change follows, and it keeps the size it is given.
+//
+// The record. What a window is owed lives in the host's memory, so a host that
+// is killed mid-session -- ended from Task Scheduler, upgraded by force,
+// crashed -- left the window on a display nobody can see and without the
+// resize border and maximise box the session had taken. The next host found a
+// window that could not be resized and believed it. So it is written down as
+// well, and the next host gives it back before it serves anyone.
 
 #pragma once
 
 #include <windows.h>
 
+#include <cstdint>
 #include <functional>
+#include <string>
+#include <vector>
 
 namespace solstream {
 
@@ -40,5 +50,28 @@ int RestorePlacement(const WINDOWPLACEMENT& saved,
                      const std::function<bool(const WINDOWPLACEMENT&)>& set,
                      const std::function<bool(WINDOWPLACEMENT&)>& get,
                      bool* matched = nullptr);
+
+/// One window a host owes a restore to, as it is written down.
+struct OwedWindow {
+    uint64_t window = 0;      // the HWND, as the Mac also knows it
+    uint32_t pid = 0;         // who owned it, against handle reuse
+    uint64_t removed_style = 0;
+    bool topmost = false;     // whether it was always-on-top before
+    WINDOWPLACEMENT placement{};
+};
+
+/// The record as text: a header line, then one line of numbers per window.
+std::string FormatOwedWindows(const std::vector<OwedWindow>& windows);
+
+/// The record read back. Lines that are not whole are skipped, as is a record
+/// without the header; an empty list is the answer to anything unreadable.
+std::vector<OwedWindow> ParseOwedWindows(const std::string& text);
+
+/// Write the record to `path`, replacing it whole, or remove it when there is
+/// nothing owed. False when the file could not be written.
+bool SaveOwedWindows(const std::wstring& path, const std::vector<OwedWindow>& windows);
+
+/// Read the record at `path`; empty when there is none.
+std::vector<OwedWindow> LoadOwedWindows(const std::wstring& path);
 
 }  // namespace solstream

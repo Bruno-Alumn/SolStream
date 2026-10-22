@@ -2826,6 +2826,92 @@ void TestRestorePlacement() {
     CHECK(PlacementDistance(RECT{0, 0, 10, 10}, RECT{1, -1, 12, 7}) == 1 + 1 + 2 + 3);
 }
 
+void TestOwedWindows(const std::wstring& scratch) {
+    OwedWindow first;
+    first.window = 0xFFFFFFFFull;
+    first.pid = 8940;
+    first.removed_style = WS_THICKFRAME | WS_MAXIMIZEBOX;
+    first.topmost = false;
+    first.placement = PlacementAt(-1720, -40, 1406, 792);
+    first.placement.flags = WPF_SETMINPOSITION;
+    first.placement.ptMinPosition = POINT{-32000, -32000};
+    first.placement.ptMaxPosition = POINT{-1, -1};
+    OwedWindow second;
+    second.window = 1970158;
+    second.pid = 4;
+    second.topmost = true;
+    second.placement = PlacementAt(3440, 0, 3600, 2338);
+    second.placement.showCmd = SW_SHOWMAXIMIZED;
+
+    auto same = [](const OwedWindow& a, const OwedWindow& b) {
+        const WINDOWPLACEMENT& p = a.placement;
+        const WINDOWPLACEMENT& q = b.placement;
+        return a.window == b.window && a.pid == b.pid
+            && a.removed_style == b.removed_style && a.topmost == b.topmost
+            && p.length == sizeof(WINDOWPLACEMENT) && p.flags == q.flags
+            && p.showCmd == q.showCmd
+            && p.ptMinPosition.x == q.ptMinPosition.x && p.ptMinPosition.y == q.ptMinPosition.y
+            && p.ptMaxPosition.x == q.ptMaxPosition.x && p.ptMaxPosition.y == q.ptMaxPosition.y
+            && PlacementDistance(p.rcNormalPosition, q.rcNormalPosition) == 0;
+    };
+
+    const std::string text = FormatOwedWindows({first, second});
+    std::vector<OwedWindow> back = ParseOwedWindows(text);
+    CHECK(back.size() == 2);
+    CHECK(back.size() == 2 && same(back[0], first) && same(back[1], second));
+
+    // Line endings a text editor might have given it.
+    std::string crlf;
+    for (char c : text) {
+        if (c == '\n') { crlf += '\r'; }
+        crlf += c;
+    }
+    CHECK(ParseOwedWindows(crlf).size() == 2);
+
+    // Nothing without the header, and nothing from an empty file.
+    CHECK(ParseOwedWindows(text.substr(text.find('\n') + 1)).empty());
+    CHECK(ParseOwedWindows("").empty());
+    CHECK(FormatOwedWindows({}) == "SolStream owed windows 1\n");
+
+    // Each damaged line is skipped on its own; the whole one beside it stays.
+    const std::string header = "SolStream owed windows 1\n";
+    const std::string good = "100 7 0 0 0 1 0 0 0 0 10 20 110 220\n";
+    CHECK(ParseOwedWindows(header + good).size() == 1);
+    for (const char* bad : {
+             "100 7 0 0 0 1 0 0 0 0 10 20 110\n",            // too few
+             "100 7 0 0 0 1 0 0 0 0 10 20 110 220 5\n",      // too many
+             "100 7 0 0 0 1 0 0 0 0 10 20 110 2x0\n",        // not a number
+             "0 7 0 0 0 1 0 0 0 0 10 20 110 220\n",          // no window
+             "100 0 0 0 0 1 0 0 0 0 10 20 110 220\n",        // no owner
+             "4294967296 7 0 0 0 1 0 0 0 0 10 20 110 220\n", // past 32 bits
+             "100 7 0 2 0 1 0 0 0 0 10 20 110 220\n",        // topmost is 0 or 1
+             "100 7 0 0 0 12 0 0 0 0 10 20 110 220\n",       // no such showCmd
+             "100 7 -1 0 0 1 0 0 0 0 10 20 110 220\n",       // negative style
+             "100 7 0 0 0 1 0 0 0 0 110 20 10 220\n",        // empty rectangle
+             "100 7 0 0 0 1 0 0 0 0 10 20 110 99999999999\n", // past a LONG
+         }) {
+        const std::vector<OwedWindow> parsed = ParseOwedWindows(header + bad + good);
+        CHECK(parsed.size() == 1);
+        CHECK(parsed.size() == 1 && parsed[0].window == 100);
+    }
+
+    // On disk: written whole, read back, and gone once nothing is owed.
+    const std::wstring path = scratch + L"\\owed-windows.txt";
+    CHECK(LoadOwedWindows(path).empty());
+    CHECK(SaveOwedWindows(path, {first, second}));
+    back = LoadOwedWindows(path);
+    CHECK(back.size() == 2 && same(back[0], first) && same(back[1], second));
+    CHECK(GetFileAttributesW((path + L".new").c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(SaveOwedWindows(path, {second}));
+    back = LoadOwedWindows(path);
+    CHECK(back.size() == 1 && same(back[0], second));
+    CHECK(SaveOwedWindows(path, {}));
+    CHECK(GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
+    CHECK(SaveOwedWindows(path, {}));   // nothing there is fine too
+    CHECK(!SaveOwedWindows(L"", {first}));
+    CHECK(!SaveOwedWindows(scratch + L"\\no such folder\\owed.txt", {first}));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2912,6 +2998,7 @@ int wmain(int argc, wchar_t** argv) {
     TestReceiveFailures();
     TestCaptureDisplayIsStale();
     TestRestorePlacement();
+    TestOwedWindows(scratch);
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

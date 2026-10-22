@@ -1799,6 +1799,8 @@ struct WindowLock {
 
 CRITICAL_SECTION g_lock_cs;
 WindowLock g_locks[kMaxLocks];
+/// Serialises writing down what is owed; see RecordOwedWindows.
+CRITICAL_SECTION g_owed_cs;
 uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 
 /// Is this window's thread too busy to answer messages?
@@ -1817,6 +1819,7 @@ bool Unresponsive(HWND window) {
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
                      RECT* out_client = nullptr, long long* out_error = nullptr);
+void RecordOwedWindows();
 
 /// How wide the window's resize grab area is, in pixels, at its own DPI.
 ///
@@ -2849,6 +2852,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             holding = holding || g_locks[i].active;
             LeaveCriticalSection(&g_lock_cs);
             if (closed != 0) {
+                RecordOwedWindows();
                 Log("[agent] tracked window %llu was closed", (unsigned long long) closed);
                 NotifyWindowClosed(closed);
                 continue;
@@ -2962,6 +2966,46 @@ int ClaimSlot(HWND window) {
     return -1;
 }
 
+/// Where a host writes down the windows it owes a restore.
+std::wstring OwedWindowsPath() {
+    static const std::wstring path = LocalDataPath(L"owed-windows.txt");
+    return path;
+}
+
+/// Write down every window this host owes a restore, as the slots say now.
+///
+/// For the next host, should this one be killed before it can give them back
+/// itself: see window_restore.h. Called after every claim and release, and
+/// before the change the claim is for -- a resize border taken away before it
+/// is written down is one a kill at that moment loses for good. The snapshot is
+/// taken inside the same lock as the write, so two threads writing at once can
+/// only ever leave the later state on disk.
+void RecordOwedWindows() {
+    EnterCriticalSection(&g_owed_cs);
+    std::vector<solstream::OwedWindow> owed;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (!g_locks[i].active) {
+            continue;
+        }
+        solstream::OwedWindow entry;
+        entry.window = IdFromWindow(g_locks[i].window);
+        entry.pid = g_locks[i].pid;
+        entry.removed_style = (uint64_t) g_locks[i].removed_style;
+        entry.topmost = g_locks[i].saved_topmost;
+        entry.placement = g_locks[i].saved_placement;
+        owed.push_back(entry);
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    static bool complained = false;
+    if (!solstream::SaveOwedWindows(OwedWindowsPath(), owed) && !complained) {
+        complained = true;
+        Log("[restore] could not write down the windows owed a restore; a host "
+            "stopped by force would leave them where they are");
+    }
+    LeaveCriticalSection(&g_owed_cs);
+}
+
 /// Take away a window's ability to be resized from the host side.
 bool LockWindow(HWND window) {
     if (Unresponsive(window)) {
@@ -2997,6 +3041,7 @@ bool LockWindow(HWND window) {
     g_locks[slot].desired = ClientAreaInScreen(window);
     g_locks[slot].removed_style |= removing;
     LeaveCriticalSection(&g_lock_cs);
+    RecordOwedWindows();
 
     if (removing != 0) {
         SetWindowLongPtrW(window, GWL_STYLE, current & ~kLockedStyleBits);
@@ -3103,6 +3148,7 @@ void UnlockWindow(HWND window) {
     }
     LeaveCriticalSection(&g_lock_cs);
     RestoreWindow(saved);
+    RecordOwedWindows();
 }
 
 /// Release every slot at once, handing back what each window is owed.
@@ -3129,6 +3175,44 @@ void UnlockAll() {
     for (const WindowLock& saved : TakeAllSlots()) {
         RestoreWindow(saved);
     }
+    RecordOwedWindows();
+}
+
+/// Give back what a host killed mid-session owed, before serving anyone.
+///
+/// Its windows are still where it left them: on the capture display, which no
+/// monitor shows, without the resize border and maximise box the session took.
+/// Left to the next session, the window is claimed as it is -- so the Mac is
+/// told it cannot be resized, and the end of that session "restores" it to the
+/// capture display. RestoreWindow's own checks keep this from touching a
+/// window that has since closed, or a handle Windows has given to another
+/// program.
+void RestoreWindowsLeftBehind() {
+    const std::vector<solstream::OwedWindow> owed =
+        solstream::LoadOwedWindows(OwedWindowsPath());
+    if (owed.empty()) {
+        return;
+    }
+    Log("[restore] the last host stopped owing %zu window%s a restore; giving "
+        "%s back now", owed.size(), owed.size() == 1 ? "" : "s",
+        owed.size() == 1 ? "it" : "them");
+    for (const solstream::OwedWindow& entry : owed) {
+        WindowLock saved;
+        saved.window = reinterpret_cast<HWND>(static_cast<uintptr_t>(entry.window));
+        saved.pid = entry.pid;
+        // Only ever the two bits a lock takes, whatever the file says.
+        saved.removed_style = (LONG_PTR) entry.removed_style & kLockedStyleBits;
+        saved.saved_topmost = entry.topmost;
+        saved.saved_placement = entry.placement;
+        // Not this process's own window, which a handle reused since could be.
+        DWORD owner = 0;
+        if (!IsWindow(saved.window)
+            || (GetWindowThreadProcessId(saved.window, &owner), owner == GetCurrentProcessId())) {
+            continue;
+        }
+        RestoreWindow(saved);
+    }
+    RecordOwedWindows();
 }
 
 /// Tell the watcher a new size is legitimate, because the Mac asked for it.
@@ -4212,6 +4296,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 return "{\"type\":\"error\",\"message\":\"too many windows are being "
                        "managed; close one on the Mac first\"}";
             }
+            RecordOwedWindows();
         }
         // Asynchronous, and refused for a hung window, so an application stuck
         // in its message loop cannot stall the command thread.
@@ -5007,6 +5092,7 @@ void ServeAndRetire(SOCKET client) {
     for (const WindowLock& saved : owed) {
         RestoreWindow(saved);
     }
+    RecordOwedWindows();
     g_windows_restoring.fetch_sub(1);
     Log("[agent] client disconnected");
 }
@@ -6025,6 +6111,7 @@ int wmain(int argc, wchar_t** argv) {
     g_media_count = LoadMediaCount();
 
     InitializeCriticalSection(&g_lock_cs);
+    InitializeCriticalSection(&g_owed_cs);
     InitializeCriticalSection(&g_send_cs);
 
     WSADATA wsa{};
@@ -6184,6 +6271,10 @@ int wmain(int argc, wchar_t** argv) {
     // prompt arrives long before any Mac has connected — onto the capture
     // display, which no monitor shows. A watcher that only runs while someone
     // is streaming would never see the one dialog most worth carrying back.
+    // Before the watcher, whose rescue would otherwise carry these windows off
+    // the capture display at whatever size the move gave them, and before any
+    // Mac can connect and claim them as they are.
+    RestoreWindowsLeftBehind();
     StartWatcher();
     StartDiscoveryResponder();
 
