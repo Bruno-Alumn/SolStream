@@ -1356,7 +1356,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // window: the elevated half has no other way to say "it worked, but".
     //
     // One clause per thing that did not happen, with no preamble on any of them:
-    // both can fire at once, and the sentence they go into is written below.
+    // several can fire at once, and the sentence they go into is written below.
     std::string warning;
 
     // Two rules, both for one executable. There used to be six, covering three
@@ -1389,57 +1389,63 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     WriteShortcuts(destination, options);
     RegisterUninstallEntry(destination);
 
-    if (options.start_at_logon) {
-        // A failure here used to return false out of an install that had already
-        // copied the executable, opened the ports, written the shortcuts and
-        // registered itself in Add/Remove Programs -- so the user was told the
-        // install had failed when the only missing piece was the part that
-        // starts SolStream for them, which they can do from the shortcut. It is
-        // a warning for the same reason the firewall one is: what is left is a
-        // working install, and saying otherwise invites somebody to "fix" it by
-        // installing again over the top.
-        std::string task_error;
-        if (!RegisterLogonTask(destination, task_error)) {
-            // schtasks' own words, with its exit code in them, go to the log.
-            // The window gets the consequence, which is the part the person
-            // reading it can do anything about.
-            InstallLog("task failed: " + task_error);
-            if (!warning.empty()) {
-                warning += " ";
-            }
-            warning += "Windows would not register its logon task, so it will not"
-                       " start by itself when you log in.";
-        } else {
-            InstallLog("logon task registered");
-            const DWORD started =
-                RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
-            // Not worth a warning: the task exists, so the next logon starts it
-            // whatever happened here. Worth a line, because "installed but not
-            // running" is otherwise a mystery to whoever reads this log.
-            InstallLog(started == 0
-                           ? "logon task started"
-                           : "logon task registered, but starting it now "
-                                 + RunOutcome(started));
+    auto also = [&warning](const std::string& clause) {
+        if (!warning.empty()) {
+            warning += " ";
         }
+        warning += clause;
+    };
+
+    // Asked not to start at logon, the task is still registered, with no
+    // trigger, because it is what starts the copy just installed -- an update
+    // must not end with nothing running -- and the tick on the setup screen
+    // stays true: nothing starts at the next logon.
+    //
+    // A failure here used to return false out of an install that had already
+    // copied the executable, opened the ports, written the shortcuts and
+    // registered itself in Add/Remove Programs -- so the user was told the
+    // install had failed when the only missing piece was the part that starts
+    // SolStream for them, which they can do from the shortcut. It is a warning
+    // for the same reason the firewall one is: what is left is a working
+    // install, and saying otherwise invites somebody to "fix" it by installing
+    // again over the top.
+    std::string task_error;
+    const bool registered = RegisterLogonTask(destination, task_error, options.start_at_logon);
+    if (registered) {
+        InstallLog(options.start_at_logon ? "logon task registered"
+                                          : "on-demand task registered (not at logon)");
     } else {
-        // Asked not to start at logon. The task stays, with no trigger, because
-        // it is what starts the copy just installed -- an update must not end
-        // with nothing running -- and the tick on the setup screen stays true:
-        // nothing starts at the next logon.
-        std::string task_error;
-        if (RegisterLogonTask(destination, task_error, false)) {
-            InstallLog("on-demand task registered (not at logon)");
-            const DWORD started =
-                RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
-            InstallLog(started == 0 ? "started" : "starting it " + RunOutcome(started));
-        } else {
-            InstallLog("task failed: " + task_error);
+        // Task Scheduler's own words, with its code in them, go to the log. The
+        // window gets the consequence, which is the part the person reading it
+        // can do anything about.
+        InstallLog("task failed: " + task_error);
+        if (options.start_at_logon) {
+            also("Windows would not register its logon task, so it will not start by"
+                 " itself when you log in.");
         }
+    }
+    // Run whether or not that registration went through. On an update the task
+    // an earlier install registered is still there and names this same path, so
+    // it starts the copy just put in place; skipping it, as a failed
+    // registration used to, left the PC with no SolStream at all -- the old one
+    // already stopped -- until the next logon.
+    const DWORD started =
+        RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
+    if (started == 0) {
+        InstallLog(registered ? "started"
+                              : "started through the task an earlier install registered");
+    } else {
+        // A warning, not just a line: without one, setup's summary says
+        // "SolStream is running" over a PC where nothing is.
+        InstallLog("could not start it now: schtasks " + RunOutcome(started));
+        // Named when it follows another clause, which has a subject of its own.
+        also(warning.empty() ? "Windows would not start it just now."
+                             : "Windows would not start SolStream just now either.");
     }
     if (!warning.empty()) {
         // The install did happen, and that has to be the first thing said --
-        // once, at the front, so a message carrying both clauses does not say it
-        // twice and does not read like a failure.
+        // once, at the front, so a message carrying several clauses does not say
+        // it twice and does not read like a failure.
         warning = "SolStream is installed, but " + warning
                 + " You can still open it from the Start menu, and running setup"
                   " again usually puts this right.";

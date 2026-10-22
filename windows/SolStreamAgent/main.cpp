@@ -5138,8 +5138,18 @@ int wmain(int argc, wchar_t** argv) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
         }
-        std::fputs("SolStream is installed and running. It will start again "
-                   "when you log in.\n", stdout);
+        // On a true return `error` is the install's warning: it stands, but it
+        // may not be running, or may not start at logon, and this sentence
+        // must not say otherwise.
+        if (!error.empty()) {
+            std::fprintf(stdout, "%s\n", error.c_str());
+            return 0;
+        }
+        std::fputs(options.start_at_logon
+                       ? "SolStream is installed and running. It will start again "
+                         "when you log in.\n"
+                       : "SolStream is installed and running.\n",
+                   stdout);
         return 0;
     }
 
