@@ -299,10 +299,12 @@ void TestRelease() {
               == "https://api.github.com/repos/Bruno-Alumn/SolStream/releases/assets/10");
         CHECK(info.assets[1].size == 183);
     }
-    // A key inside a string is only text.
-    CHECK(ParseRelease(R"({"body":"\"tag_name\":\"v9.9.9\"","tag_name":"v1.0.0"})", info, error)
-          && info.tag == "v1.0.0");
-    CHECK(!ParseRelease(R"({"body":"\"tag_name\":\"v9.9.9\""})", info, error));
+    // A key inside a string is only text. These literals stay outside CHECK:
+    // MSVC cannot stringize a raw string that holds backslashes (C2017).
+    const std::string quoted_key = R"({"body":"\"tag_name\":\"v9.9.9\"","tag_name":"v1.0.0"})";
+    const std::string only_quoted_key = R"({"body":"\"tag_name\":\"v9.9.9\""})";
+    CHECK(ParseRelease(quoted_key, info, error) && info.tag == "v1.0.0");
+    CHECK(!ParseRelease(only_quoted_key, info, error));
     // A field named twice is not chosen between.
     CHECK(!ParseRelease(R"({"tag_name":"v1.0.0","tag_name":"v9.0.0"})", info, error));
     CHECK(!ParseRelease(R"({"tag_name":"v1.0.0","draft":false,"draft":true})", info, error));
@@ -327,7 +329,8 @@ void TestRelease() {
     CHECK(!ParseRelease(R"({'tag_name':"v1.0.0"})", info, error));
     CHECK(!ParseRelease(R"({"tag_name":"v1.0.0","x":01})", info, error));
     CHECK(!ParseRelease(R"({"tag_name":"v1.0.0","x":tru})", info, error));
-    CHECK(!ParseRelease(R"({"tag_name":"v1.0.0","x":"\q"})", info, error));
+    const std::string bad_escape = R"({"tag_name":"v1.0.0","x":"\q"})";
+    CHECK(!ParseRelease(bad_escape, info, error));
     CHECK(!ParseRelease(std::string("{\"tag_name\":\"v1\n.0.0\"}"), info, error));
     CHECK(!ParseRelease(R"(["tag_name","v1.0.0"])", info, error));
     CHECK(!ParseRelease("", info, error));
@@ -339,7 +342,8 @@ void TestRelease() {
     deeper += std::string(100000, '[') + std::string(100000, ']') + "}";
     CHECK(!ParseRelease(deeper, info, error));
     Json root;
-    CHECK(JsonReader(R"({"s":"é😀\ud800x"})").Document(root));
+    const std::string lone_surrogate = R"({"s":"é😀\ud800x"})";
+    CHECK(JsonReader(lone_surrogate).Document(root));
     CHECK(root.values.size() == 1
           && root.values[0].text == "\xC3\xA9\xF0\x9F\x98\x80\xEF\xBF\xBDx");
 }
