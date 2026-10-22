@@ -7,8 +7,18 @@ import AgentChannel
 ///
 /// Polled rather than pushed, because neither side offers a usable change
 /// notification across a network: macOS exposes a change counter and Windows a
-/// sequence number, and comparing two integers once a second costs nothing. Only a
-/// change transfers anything.
+/// sequence number, and comparing two integers costs nothing. Only a change
+/// transfers anything.
+///
+/// When it polls is what decides whether a paste gets the right text. ⌘V
+/// reaches the PC over the media channel the moment it is pressed, and the
+/// clipboard used to follow on the next one-second tick, so copying in Safari,
+/// switching to the stream and pasting often pasted what the PC had before —
+/// and the same the other way round. So a stream window taking the keyboard
+/// sends a Mac copy that was held back at once, and one losing it brings the
+/// PC's latest copy over at once, before the paste in the other application.
+/// While a stream window has the keyboard, and for a moment after, the host is
+/// asked four times a second; otherwise once.
 ///
 /// The hard part is not copying text, it is not fighting yourself. Writing a value
 /// to a clipboard bumps that clipboard's counter, which on the next tick looks
@@ -41,8 +51,27 @@ import AgentChannel
 /// both ends, because either end may be a version that does not: the
 /// conversions change nothing when applied twice.
 final class ClipboardBridge {
-    private let agent: AgentConnection
-    private let pasteboard = NSPasteboard.general
+    /// The two things the bridge asks of the host. Closures rather than the
+    /// connection itself, so that the tests can answer for it.
+    struct Host {
+        var read: (_ since: Int?,
+                   _ completion: @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void
+        var write: (_ text: String, _ completion: @escaping (Int?) -> Void) -> Void
+
+        init(read: @escaping (Int?, @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void,
+             write: @escaping (String, @escaping (Int?) -> Void) -> Void) {
+            self.read = read
+            self.write = write
+        }
+
+        init(agent: AgentConnection) {
+            self.init(read: { agent.clipboard(since: $0, completion: $1) },
+                      write: { agent.setClipboard($0, completion: $1) })
+        }
+    }
+
+    private let host: Host
+    private let pasteboard: NSPasteboard
 
     private var timer: Timer?
     private var lastLocalChangeCount: Int
@@ -52,11 +81,31 @@ final class ClipboardBridge {
     /// same text is recognised as the same.
     private var lastSyncedText: String?
     private var inFlight = false
+    /// A sync asked for while a request was on the wire, run as soon as it is
+    /// answered rather than left to the next tick.
+    private var syncAgain = false
     /// The next answer from the host is a baseline to remember, not a change
     /// to copy over.
     private var adoptsRemoteBaseline = false
-    /// Whether a Mac copy may go to the PC right now.
+    /// Whether a Mac copy may go to the PC right now: one of the stream's
+    /// windows has the keyboard.
     private let mayPush: () -> Bool
+
+    /// Until when the host is asked every `briskInterval` rather than every
+    /// `idleInterval`.
+    private var briskUntil = Date.distantPast
+    /// Until when the host is not asked at all, after it could not answer.
+    /// Most often that is another program holding the PC's clipboard open,
+    /// and the host spends up to a fifth of a second retrying before it says
+    /// so, with its other commands -- focus, placement -- waiting behind it.
+    /// Asked again at the brisk pace, that would be most of every second.
+    private var quietUntil = Date.distantPast
+    static let briskInterval: TimeInterval = 0.25
+    static let idleInterval: TimeInterval = 1.0
+    /// How long the brisk pace outlasts the stream having the keyboard. ⌘C
+    /// pressed just before ⌘Tab can reach the PC's clipboard after the sync the
+    /// switch itself asked for, and this is what still brings it over in time.
+    private static let briskSpell: TimeInterval = 2.0
 
     private static let privateTypes: Set<NSPasteboard.PasteboardType> = [
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
@@ -106,8 +155,13 @@ final class ClipboardBridge {
         return String(out)
     }
 
-    init(agent: AgentConnection, mayPush: @escaping () -> Bool) {
-        self.agent = agent
+    convenience init(agent: AgentConnection, mayPush: @escaping () -> Bool) {
+        self.init(host: Host(agent: agent), pasteboard: .general, mayPush: mayPush)
+    }
+
+    init(host: Host, pasteboard: NSPasteboard, mayPush: @escaping () -> Bool) {
+        self.host = host
+        self.pasteboard = pasteboard
         self.mayPush = mayPush
         self.lastLocalChangeCount = pasteboard.changeCount
     }
@@ -117,6 +171,9 @@ final class ClipboardBridge {
     }
 
     var isRunning: Bool { timer != nil }
+
+    /// How often the host is being asked right now; nil while stopped.
+    var pollInterval: TimeInterval? { timer?.timeInterval }
 
     /// - Parameter resuming: sync is being turned on in Settings with a stream
     ///   already open, rather than the stream opening with it on.
@@ -137,20 +194,61 @@ final class ClipboardBridge {
             lastLocalChangeCount = pasteboard.changeCount
             adoptsRemoteBaseline = true
         }
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        schedule(every: Self.idleInterval)
         Log.info("[clipboard] syncing with the host")
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        syncAgain = false
+    }
+
+    /// Sync now rather than at the next tick: one of the stream's windows has
+    /// just taken the keyboard or given it up, which is when a paste on the
+    /// other machine is about to follow. See the note on the class.
+    func syncNow() {
+        guard isRunning else { return }
+        briskUntil = Date().addingTimeInterval(Self.briskSpell)
+        // Worth one more try even straight after a failure: a paste is about
+        // to depend on it.
+        quietUntil = .distantPast
+        if inFlight {
+            syncAgain = true
+        } else {
+            tick()
+        }
+    }
+
+    /// The timer at `interval`, replaced only when the interval changes.
+    private func schedule(every interval: TimeInterval) {
+        if let timer, timer.timeInterval == interval { return }
+        timer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    /// The request on the wire has its answer; a sync asked for meanwhile
+    /// goes now.
+    private func settle() {
+        inFlight = false
+        if syncAgain {
+            syncAgain = false
+            tick()
+        }
     }
 
     private func tick() {
+        // Reached from an answer as well as from the timer, and an answer can
+        // arrive after a stop.
+        guard isRunning else { return }
+        let now = Date()
+        let streamHasKeyboard = mayPush()
+        if streamHasKeyboard { briskUntil = now.addingTimeInterval(Self.briskSpell) }
+        schedule(every: now < briskUntil ? Self.briskInterval : Self.idleInterval)
         guard !inFlight else { return }
 
         // Local change wins when both moved: what was just copied on this
@@ -160,7 +258,7 @@ final class ClipboardBridge {
             // Held until a SolStream window has the keyboard, and the PC's
             // clipboard is not pulled over it meanwhile — that would overwrite
             // what was just copied here.
-            if !isPrivate && !mayPush() { return }
+            if !isPrivate && !streamHasKeyboard { return }
             lastLocalChangeCount = pasteboard.changeCount
             if isPrivate {
                 Log.info("[clipboard] a private item was copied; not sending it to the host")
@@ -176,23 +274,30 @@ final class ClipboardBridge {
             if let local, !local.isEmpty, local != lastSyncedText {
                 lastSyncedText = local
                 inFlight = true
-                agent.setClipboard(Self.windowsLineEndings(local)) { [weak self] sequence in
+                host.write(Self.windowsLineEndings(local)) { [weak self] sequence in
                     DispatchQueue.main.async {
-                        self?.inFlight = false
+                        guard let self else { return }
                         // Adopt the sequence our own write produced, so it is not
                         // read back as a remote change on the next tick.
-                        if let sequence { self?.lastRemoteSequence = sequence }
+                        if let sequence { self.lastRemoteSequence = sequence }
+                        self.settle()
                     }
                 }
                 return
             }
         }
 
+        guard now >= quietUntil else { return }
         inFlight = true
-        agent.clipboard(since: lastRemoteSequence) { [weak self] remote in
+        host.read(lastRemoteSequence) { [weak self] remote in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.inFlight = false
+                // After the answer is applied, so a sync waiting on it starts
+                // from what it said.
+                defer { self.settle() }
+                if remote == nil {
+                    self.quietUntil = Date().addingTimeInterval(Self.idleInterval)
+                }
                 // Asked for before a stop and answered after it: sync is off
                 // now, so the answer is not applied.
                 guard let remote, self.isRunning else { return }

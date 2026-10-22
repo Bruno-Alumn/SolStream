@@ -72,6 +72,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var lastSample = Date()
 
     var onClose: (() -> Void)?
+    /// This window has taken the keyboard or given it up. A paste is likely to
+    /// follow on whichever machine now has it, which is the moment the
+    /// clipboard has to be in step.
+    var onKeyboardChange: (() -> Void)?
 
     /// Backstop for any path that deallocates the window without a close
     /// notification — a run-loop timer outlives its target quite happily.
@@ -799,6 +803,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         installPointerStats()
         // Give the host window focus too, so keystrokes land in the right app.
         agent.focus(windowID: remoteWindowID)
+        onKeyboardChange?()
     }
 
     /// The stats line reports whichever window is actually taking input.
@@ -836,6 +841,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         inputCapture?.disableCapture()
+        onKeyboardChange?()
     }
 
     /// Drive the host pointer to a known point in the picture, for `--test-input`.

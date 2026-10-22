@@ -811,6 +811,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.showPicker(host: host, reusing: agent)
                 }
             }
+            // Gaining the keyboard sends a Mac copy held back until now, before
+            // the ⌘V that follows; losing it brings the PC's last copy over
+            // before the paste in whatever application is next.
+            appWindow.onKeyboardChange = { [weak self] in
+                self?.clipboard?.syncNow()
+            }
             appWindow.setStatus("Connecting to \(host)", detail: target.title)
             // A StreamSession cannot be restarted in place — stop() releases the
             // decoder and start() does not build another — so recovering means a
