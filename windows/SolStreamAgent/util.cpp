@@ -88,31 +88,36 @@ std::wstring LocalDataPath(const wchar_t* file) {
     return dir + L"\\" + file;
 }
 
-namespace {
-
-/// A command whose first word is a bare executable name, rewritten to name the
-/// copy in System32. Already-qualified or quoted commands pass through.
-std::wstring QualifySystemCommand(const std::wstring& command) {
-    if (command.empty() || command[0] == L'"' || command.find(L':') != std::wstring::npos) {
-        return command;
+/// The program a command line starts: its first word, unquoted.
+std::wstring CommandProgram(const std::wstring& command) {
+    if (command.empty()) {
+        return {};
     }
-    const size_t space = command.find(L' ');
-    const std::wstring exe = command.substr(0, space);
-    if (exe.find(L'\\') != std::wstring::npos) {
+    if (command[0] == L'"') {
+        const size_t close = command.find(L'"', 1);
+        return command.substr(1, close == std::wstring::npos ? std::wstring::npos : close - 1);
+    }
+    return command.substr(0, command.find(L' '));
+}
+
+std::wstring QualifySystemCommand(const std::wstring& command) {
+    // Judged by the program alone. This used to pass anything with a ':' in
+    // it straight through, which is every command with a path in its
+    // ARGUMENTS -- tar unpacking into C:\ProgramData, netsh naming
+    // C:\Program Files -- so those ran unqualified, elevated, and Windows
+    // looked for them beside the setup program first.
+    const std::wstring program = CommandProgram(command);
+    if (program.empty() || program.find_first_of(L"\\/:") != std::wstring::npos) {
         return command;
     }
     wchar_t system_dir[MAX_PATH] = {0};
     if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
         return command;
     }
-    std::wstring qualified = L"\"" + std::wstring(system_dir) + L"\\" + exe + L"\"";
-    if (space != std::wstring::npos) {
-        qualified += command.substr(space);
-    }
-    return qualified;
+    const size_t rest = command[0] == L'"' ? program.size() + 2 : program.size();
+    return L"\"" + std::wstring(system_dir) + L"\\" + program + L"\""
+         + command.substr((std::min)(rest, command.size()));
 }
-
-}  // namespace
 
 DWORD RunHidden(const std::wstring& command, DWORD timeout_ms) {
     STARTUPINFOW startup{};
@@ -121,8 +126,13 @@ DWORD RunHidden(const std::wstring& command, DWORD timeout_ms) {
     startup.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION process{};
     std::wstring mutable_command = QualifySystemCommand(command);
-    if (!CreateProcessW(nullptr, mutable_command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+    // And named outright, so nothing about the search order can matter: with
+    // lpApplicationName set, CreateProcess runs exactly that file.
+    const std::wstring program = CommandProgram(mutable_command);
+    const bool absolute = program.size() > 2 && program[1] == L':';
+    if (!CreateProcessW(absolute ? program.c_str() : nullptr, mutable_command.data(), nullptr,
+                        nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                        &process)) {
         return kRunFailed;
     }
     DWORD code = kRunFailed;

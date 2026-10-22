@@ -48,6 +48,12 @@ constexpr DWORD kRunTimedOut = 0xFFFFFFFEu;
 /// left to change the machine behind a screen that has already reported.
 DWORD RunHidden(const std::wstring& command, DWORD timeout_ms = 60000);
 
+/// What RunHidden actually runs: `command` with a bare program name (its first
+/// word, quoted or not) rewritten to the copy in System32. A program given by
+/// path is left as it is. Exposed for its tests.
+std::wstring QualifySystemCommand(const std::wstring& command);
+std::wstring CommandProgram(const std::wstring& command);
+
 /// How a RunHidden answer reads in a sentence: "returned 1", "would not start",
 /// "was still running after N seconds and was stopped".
 std::string RunOutcome(DWORD code);

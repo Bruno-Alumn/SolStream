@@ -428,6 +428,30 @@ void TestNoDowngrade() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", nullptr);
 }
 
+/// Every elevated command runs its System32 program, whatever paths its
+/// arguments carry: a ':' in an argument used to skip the rewrite, so the
+/// setup's tar and netsh were searched for beside the setup in Downloads.
+void TestQualifyCommand() {
+    wchar_t dir[MAX_PATH] = {0};
+    GetSystemDirectoryW(dir, MAX_PATH);
+    const std::wstring sys = L"\"" + std::wstring(dir) + L"\\";
+    const std::wstring tar = L"tar.exe -xf \"C:\\ProgramData\\x\\d.zip\" -C \"C:\\ProgramData\\x\"";
+    CHECK(QualifySystemCommand(tar)
+          == sys + L"tar.exe\" -xf \"C:\\ProgramData\\x\\d.zip\" -C \"C:\\ProgramData\\x\"");
+    const std::wstring netsh = L"netsh.exe advfirewall firewall add rule program=\"C:\\Program Files\\S.exe\"";
+    CHECK(QualifySystemCommand(netsh).rfind(sys + L"netsh.exe\" advfirewall", 0) == 0);
+    CHECK(QualifySystemCommand(L"schtasks.exe /run") == sys + L"schtasks.exe\" /run");
+    CHECK(QualifySystemCommand(L"\"pnputil.exe\" /enum-drivers") == sys + L"pnputil.exe\" /enum-drivers");
+    CHECK(QualifySystemCommand(L"whoami") == sys + L"whoami\"");
+    // Given by path, it is left alone.
+    const std::wstring quoted = L"\"C:\\Program Files\\SolStream\\SolStream.exe\" --x";
+    CHECK(QualifySystemCommand(quoted) == quoted);
+    CHECK(QualifySystemCommand(L"C:\\Tools\\a.exe b") == L"C:\\Tools\\a.exe b");
+    CHECK(QualifySystemCommand(L"sub\\a.exe b") == L"sub\\a.exe b");
+    CHECK(CommandProgram(quoted) == L"C:\\Program Files\\SolStream\\SolStream.exe");
+    CHECK(CommandProgram(tar) == L"tar.exe");
+}
+
 /// The display driver is the one install option named for what it turns ON:
 /// absent must mean "download nothing", for anybody typing --install by hand.
 void TestInstallOptions() {
@@ -722,6 +746,7 @@ int wmain(int argc, wchar_t** argv) {
     TestCommandLine(vector, scratch);
     TestEnvironment();
     TestInstallOptions();
+    TestQualifyCommand();
     TestNoDowngrade();
     TestDownload();
     TestInstallNote();
