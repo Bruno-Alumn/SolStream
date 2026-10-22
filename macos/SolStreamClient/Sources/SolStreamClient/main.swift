@@ -1389,7 +1389,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About SolStream", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "About SolStream",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                        keyEquivalent: "")
         appMenu.addItem(withTitle: "Check for Updates…",
                         action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(.separator())
