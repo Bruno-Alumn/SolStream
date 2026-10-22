@@ -104,12 +104,14 @@ The **host** runs on the PC. It lists your windows and installed apps, starts
 apps when asked, and moves the one you're streaming onto a **virtual display**.
 That's a screen with no monitor behind it, sized to match your Mac exactly, so
 nothing you do on the real monitor ends up in the stream. Then the host
-captures the window, encodes it with the graphics card's H.264 encoder and
-sends it. Sound comes from the streamed apps only, compressed with Opus or
-sent lossless, whichever you pick.
+captures that display, encodes it with the graphics card's H.264 encoder and
+sends it. Sound comes from the streamed apps only (that needs Windows 11;
+Windows 10 sends the whole PC's sound), compressed with Opus or sent lossless,
+whichever you pick.
 
-The **Mac client** shows the app picker, opens the windows, decodes the video
-with VideoToolbox and sends your keyboard and mouse back.
+The **Mac client** shows the app picker, decodes the video with VideoToolbox,
+cuts each app's window out of it to show in a window of its own, and sends your
+keyboard and mouse back.
 
 The two talk over a TCP control channel and SMT/1, SolStream's own media
 transport. SMT/1 is plain UDP with AES-256-GCM on every packet. Both channels
@@ -159,7 +161,7 @@ cmake --build build --target SolStreamAgent --config Release
 
 `scripts/package-windows.ps1` turns that into `dist\SolStreamSetup-X.Y.Z.exe`,
 plus a copy named `SolStreamSetup.exe`. That one file is the whole installer:
-run it and it copies itself into Program Files, opens the two ports it needs
+run it and it copies itself into Program Files, opens the three ports it needs
 and sets itself to start at logon. `--uninstall` reverses all of it.
 
 On a Mac you can sanity-check the Windows code with
