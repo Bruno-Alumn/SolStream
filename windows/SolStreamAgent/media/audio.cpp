@@ -828,6 +828,10 @@ void AudioCapture::Run(const AudioEncoding& encoding, const Processes& processes
                        std::function<bool()> keepGoing) {
     stop_.store(false);
     appSources_.store(-1);
+    // This session's, for the five-second line: the capture outlives a
+    // session, and the counts went on from the last one's.
+    packets_.store(0);
+    silent_.store(0);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool ownsCom = SUCCEEDED(com);
     Packetizer packetizer(encoding, sink, packets_, silent_);
