@@ -416,7 +416,11 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// Typing that reached the list, back into the search field.
     private func continueSearch(with text: String) {
         window.makeFirstResponder(searchField)
-        searchField.currentEditor()?.insertText(text)
+        // Taking the focus selects the whole query; typing would replace it.
+        if let editor = searchField.currentEditor() {
+            editor.selectedRange = NSRange(location: (editor.string as NSString).length, length: 0)
+            editor.insertText(text)
+        }
     }
 
     /// Move the highlighted row, keeping it on screen. Clamped rather than

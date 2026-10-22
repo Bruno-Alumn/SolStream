@@ -1060,10 +1060,10 @@ public final class InputCapture {
     /// which is what macOS does. At 12 a point, as this was, content ran ten
     /// times further than the hand.
     ///
-    /// A wheel mouse reports lines, already accelerated by macOS. A line is
-    /// 40 points, as Chrome on the Mac takes it, so a slow notch moves 40 px
-    /// and a fast spin grows the way it does in a Mac app, rather than each
-    /// line being a whole Windows notch of 100 px.
+    /// A wheel mouse reports lines, one per notch, and each is a whole Windows
+    /// notch of 120: a game counts notches -- Minecraft changes hotbar slot
+    /// once per 120, and less than that does nothing -- and every Windows app
+    /// expects a wheel to arrive that way.
     ///
     /// The axes do not share a sign convention. AppKit's positive deltaY is
     /// up and its positive deltaX is LEFT (NSEvent.h: "-1 for swipe right and
@@ -1071,12 +1071,12 @@ public final class InputCapture {
     /// HWHEEL is right. So vertical passes straight through and horizontal is
     /// negated — sending both unchanged scrolled sideways the wrong way.
     static let unitsPerPoint: CGFloat = 1.2
-    static let pointsPerLine: CGFloat = 40
+    static let unitsPerLine: CGFloat = 120
 
     static func wheelUnits(deltaX: CGFloat, deltaY: CGFloat, precise: Bool,
                            residual: CGPoint)
         -> (horizontal: Int, vertical: Int, residual: CGPoint) {
-        let unit: CGFloat = precise ? unitsPerPoint : unitsPerPoint * pointsPerLine
+        let unit: CGFloat = precise ? unitsPerPoint : unitsPerLine
         let x = residual.x - deltaX * unit
         let y = residual.y + deltaY * unit
         let horizontal = Int(x.rounded(.towardZero))

@@ -39,6 +39,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// and the update waits in Settings until somebody wants it.
     private let updateNotice = NSButton(title: "", target: nil, action: nil)
     private var updateObserver: NSObjectProtocol?
+    /// Escape quits from here; see `installEscapeToQuit`.
+    private var escapeMonitor: Any?
+    private var becameKeyAt = Date.distantPast
 
     /// The first-run steps, between the subheading and the host row they end
     /// at. See `SetupGuide`.
@@ -167,11 +170,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         connectButton.keyEquivalent = "\r"
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
-        // Escape here is the way out of SolStream, as Escape in the app picker
-        // is the way back to here. This window is only up when nothing is
-        // streaming, so it never ends a stream. An open PC list takes Escape
-        // first and only closes itself.
-        quitButton.keyEquivalent = "\u{1b}"
 
         updateNotice.target = self
         updateNotice.action = #selector(updateNoticeTapped)
@@ -266,6 +264,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        installEscapeToQuit()
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -280,6 +279,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        removeEscapeToQuit()
         browser.stop()
         probe?.cancel()
         window.orderOut(nil)
@@ -654,6 +654,34 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         tailscale.act()
     }
 
+    /// Escape here is the way out of SolStream, as Escape in the app picker is
+    /// the way back to here. This window is only up when nothing is streaming,
+    /// so it never ends a stream.
+    ///
+    /// Not the Quit button's key equivalent. Escape held down to leave the
+    /// picker -- or to close the PC list or Settings -- brings this window
+    /// forward, and the key's next repeat would then quit. So only a fresh
+    /// press counts, only in this window (an open PC list is a window of its
+    /// own and closes itself), and only once this window has been in front a
+    /// moment.
+    private func installEscapeToQuit() {
+        guard escapeMonitor == nil else { return }
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 53, event.window === self.window,
+                  self.window.attachedSheet == nil else { return event }
+            guard !event.isARepeat, Date().timeIntervalSince(self.becameKeyAt) > 0.5 else {
+                return nil
+            }
+            self.quitTapped()
+            return nil
+        }
+    }
+
+    private func removeEscapeToQuit() {
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+        escapeMonitor = nil
+    }
+
     @objc private func quitTapped() {
         NSApp.terminate(nil)
     }
@@ -680,6 +708,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// the download opened in. Whatever was done there, the window should
     /// say so now rather than in a few seconds.
     func windowDidBecomeKey(_ notification: Notification) {
+        becameKeyAt = Date()
         let wasConnected = tailscale.isConnected
         tailscaleCheckedAt = nil
         refresh()
@@ -691,6 +720,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        removeEscapeToQuit()
         browser.stop()
         probe?.cancel()
         if NSApp.windows.allSatisfy({ !$0.isVisible || $0 === window }) {

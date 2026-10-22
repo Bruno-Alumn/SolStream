@@ -8,8 +8,8 @@ final class ScrollUnitsTests: XCTestCase {
     /// deltaX is left, the opposite of Windows' HWHEEL.
     func testVerticalPassesThroughAndHorizontalIsNegated() {
         let wheel = InputCapture.wheelUnits(deltaX: 1, deltaY: 1, precise: false, residual: .zero)
-        XCTAssertEqual(wheel.vertical, 48)  // one line, 40 pt, at 1.2 units a point
-        XCTAssertEqual(wheel.horizontal, -48)
+        XCTAssertEqual(wheel.vertical, 120)
+        XCTAssertEqual(wheel.horizontal, -120)
     }
 
     /// A slow trackpad scroll arrives as fractions of a point; rounding each
@@ -35,5 +35,18 @@ final class ScrollUnitsTests: XCTestCase {
     func testATrackpadSwipeMovesContentAsFarAsTheFingers() {
         let wheel = InputCapture.wheelUnits(deltaX: 0, deltaY: 100, precise: true, residual: .zero)
         XCTAssertEqual(wheel.vertical, 120)
+    }
+
+    /// Each notch of a wheel mouse is a whole Windows notch, so a game that
+    /// counts notches (Minecraft's hotbar) moves one slot per notch.
+    func testEveryWheelNotchIsAWholeWindowsNotch() {
+        var residual = CGPoint.zero
+        var notches: [Int] = []
+        for _ in 0..<3 {
+            let wheel = InputCapture.wheelUnits(deltaX: 0, deltaY: -1, precise: false, residual: residual)
+            residual = wheel.residual
+            notches.append(wheel.vertical)
+        }
+        XCTAssertEqual(notches, [-120, -120, -120])
     }
 }
