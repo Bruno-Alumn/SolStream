@@ -138,6 +138,10 @@ struct MediaSession::Impl {
     /// is what decides how long it occupies the link and how likely it is to
     /// lose a fragment on Wi-Fi.
     std::atomic<uint64_t> idrsSent{0}, idrBytes{0};
+    /// The sound's sealed datagrams, apart from the total, so the five-second
+    /// line can show what a sound quality costs: at Data saver it is a twentieth
+    /// of Lossless, and inside a 20 Mbit/s total that is noise.
+    std::atomic<uint64_t> audioBytesSent{0};
     HANDLE pacingTimer = nullptr;
     std::atomic<uint64_t> datagramsReceived{0}, rejected{0};
     std::atomic<uint64_t> idrRequests{0};
@@ -179,30 +183,32 @@ struct MediaSession::Impl {
     void SenderLoop();
     void ReceiveLoop();
     void SendPicture(const Picture& picture);
-    void SendSealed(const unsigned char* plaintext, size_t length);
+    size_t SendSealed(const unsigned char* plaintext, size_t length);
     void WaitUntil(long long deadline);
     void HandlePlaintext(const unsigned char* plaintext, size_t length);
 };
 
 // ── Sealing and sending ──────────────────────────────────────────────────────
 
-void MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t length) {
+/// Returns the datagram's size, or 0 when nothing was sent.
+size_t MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t length) {
     unsigned char datagram[smt::kMaxPlaintext + smt::kOverhead];
     size_t total = 0;
     sockaddr_in to{};
     {
         std::lock_guard<std::mutex> guard(peerLock);
-        if (!havePeer) { return; }
+        if (!havePeer) { return 0; }
         to = peer;
     }
     {
         std::lock_guard<std::mutex> guard(sealLock);
         total = smt::Seal(toClient, sessTag, plaintext, length, datagram, sizeof(datagram));
     }
-    if (total == 0) { return; }
+    if (total == 0) { return 0; }
     sendto(socket, (const char*) datagram, (int) total, 0, (sockaddr*) &to, sizeof(to));
     datagramsSent.fetch_add(1);
     bytesSent.fetch_add(total);
+    return total;
 }
 
 void MediaSession::Impl::WaitUntil(long long deadline) {
@@ -493,7 +499,15 @@ void MediaSession::Impl::SenderLoop() {
                                          TIMER_ALL_ACCESS);
     long long lastStat = 0;
     long long lastReport = Now();
-    uint64_t lastReportPictures = 0, lastReportBytes = 0;
+    uint64_t lastReportPictures = 0, lastReportBytes = 0, lastReportAudioBytes = 0;
+    // What the sound is sent as, for the report: "opus 128k/10ms" or "pcm".
+    char audioLabel[32];
+    if (config.audioEncoding.codec == AudioEncoding::Codec::Opus) {
+        snprintf(audioLabel, sizeof(audioLabel), "opus %uk/%ums",
+                 config.audioEncoding.bitrate / 1000, config.audioEncoding.frameMs);
+    } else {
+        snprintf(audioLabel, sizeof(audioLabel), "pcm");
+    }
     while (running.load()) {
         Picture picture;
         bool have = false;
@@ -551,7 +565,7 @@ void MediaSession::Impl::SenderLoop() {
             Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
-                " | audio %llu sent, %llu silent | input %llu applied, %llu dup,"
+                " | audio %s %llu sent, %llu silent, %.0f kbit/s | input %llu applied, %llu dup,"
                 " %llu failed, ack %u | rx %llu, rejected %llu | idr %llu, mean %llu KB",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
@@ -567,8 +581,14 @@ void MediaSession::Impl::SenderLoop() {
                 pictures ? sumGlassToWireMs.load() / (double) pictures : 0.0,
                 clientLastFrame.load(), clientDamaged.load(),
                 (unsigned long long) idrRequests.load(),
+                audioLabel,
                 (unsigned long long) audio.Packets(),
                 (unsigned long long) audio.Silent(),
+                // Sealed datagrams, so headers and tag included: what the
+                // sound costs the link, less IP and UDP.
+                elapsed > 0
+                    ? (double) (audioBytesSent.load() - lastReportAudioBytes) * 8.0 / elapsed / 1e3
+                    : 0.0,
                 // Whether input ARRIVED, which nothing here said before. When
                 // clicks stop landing there are only two possibilities -- the
                 // Mac is not sending them, or the host is not applying them --
@@ -587,6 +607,7 @@ void MediaSession::Impl::SenderLoop() {
             lastReport = now;
             lastReportPictures = pictures;
             lastReportBytes = bytesSent.load();
+            lastReportAudioBytes = audioBytesSent.load();
         }
 
         // Measured from the session's own start until the client has said
@@ -848,6 +869,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.datagramsSent = 0; s.bytesSent = 0;
     s.picturesSent = 0; s.picturesDropped = 0;
     s.idrsSent = 0; s.idrBytes = 0;
+    s.audioBytesSent = 0;
     s.datagramsReceived = 0; s.rejected = 0; s.idrRequests = 0;
 
     {
@@ -862,19 +884,21 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.captureThread = std::thread([&s] { s.CaptureLoop(); });
     if (config.audio) {
         s.audioThread = std::thread([&s] {
-            s.audio.Run([&s](const unsigned char* pcm, size_t length, uint32_t seq,
-                             uint32_t timestampUs, uint32_t rate, uint16_t channels) {
+            s.audio.Run(s.config.audioEncoding,
+                        [&s](const unsigned char* data, size_t length, uint32_t seq,
+                             uint32_t timestampUs, uint32_t rate, uint16_t channels,
+                             unsigned char format) {
                 unsigned char packet[smt::kMaxPlaintext];
                 if (length + 16 > sizeof(packet)) { return; }
                 packet[0] = smt::kTypeAudio;
                 packet[1] = 0;
                 packet[2] = (unsigned char) channels;
-                packet[3] = 1;    // S16 little-endian, interleaved
+                packet[3] = format;   // 1 S16 little-endian interleaved, 2 Opus
                 smt::PutBE(packet + 4, seq, 4);
                 smt::PutBE(packet + 8, timestampUs, 4);
                 smt::PutBE(packet + 12, rate, 4);
-                memcpy(packet + 16, pcm, length);
-                s.SendSealed(packet, 16 + length);
+                memcpy(packet + 16, data, length);
+                s.audioBytesSent.fetch_add(s.SendSealed(packet, 16 + length));
             }, [&s] { return s.running.load(); });
         });
     }
@@ -1013,7 +1037,8 @@ std::string MediaSession::StatsJson() const {
                 ",\"idrRequests\":%llu,\"clientFrame\":%u,\"clientDamaged\":%u"
                 ",\"encoderSubmitted\":%llu,\"encoderPictures\":%llu"
                 ",\"encoderDropped\":%llu,\"encoderExtraSamples\":%llu"
-                ",\"captureDelivered\":%llu,\"glassToWireMs\":%.2f}",
+                ",\"captureDelivered\":%llu,\"glassToWireMs\":%.2f"
+                ",\"audioPackets\":%llu,\"audioBytes\":%llu,\"audioCodec\":\"%s\"}",
                 s.running.load() ? "true" : "false",
                 (unsigned long long) s.picturesSent.load(),
                 (unsigned long long) s.picturesDropped.load(),
@@ -1028,7 +1053,10 @@ std::string MediaSession::StatsJson() const {
                 (unsigned long long) (encoderPtr ? encoderPtr->Dropped() : 0),
                 (unsigned long long) (encoderPtr ? encoderPtr->ExtraSamples() : 0),
                 (unsigned long long) (capturePtr ? capturePtr->Delivered() : 0),
-                s.lastGlassToWireMs.load());
+                s.lastGlassToWireMs.load(),
+                (unsigned long long) s.audio.Packets(),
+                (unsigned long long) s.audioBytesSent.load(),
+                s.config.audioEncoding.codec == AudioEncoding::Codec::Opus ? "opus" : "pcm");
     return buffer;
 }
 

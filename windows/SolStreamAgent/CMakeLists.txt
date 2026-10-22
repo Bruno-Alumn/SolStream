@@ -29,6 +29,13 @@ set(SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION_COMMA},0")
 # RC treats a backslash as an escape, so every path has to arrive doubled.
 string(REPLACE "\\" "\\\\" SOLSTREAM_ICON_RC "${CMAKE_CURRENT_SOURCE_DIR}/SolStream.ico")
 
+# libopus, which compresses the sound: the one component in what ships that
+# SolStream did not write. third_party/opus/SOLSTREAM.md says what it is, why
+# it is here and exactly what was taken from the release. Its licence travels
+# inside the executable, which is the only thing that ships.
+get_filename_component(SOLSTREAM_OPUS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/opus" ABSOLUTE)
+string(REPLACE "\\" "\\\\" SOLSTREAM_OPUS_COPYING_RC "${SOLSTREAM_OPUS_DIR}/COPYING")
+
 configure_file(resources.rc.in "${CMAKE_CURRENT_BINARY_DIR}/resources.rc" @ONLY)
 set(SOLSTREAM_RESOURCES "${CMAKE_CURRENT_BINARY_DIR}/resources.rc")
 
@@ -111,6 +118,21 @@ if(MSVC)
         # sleeps without this runs at a third of the rate it thinks it does.
         winmm
     )
+
+    # The sound's encoder. Static, and nothing of libopus's own build beyond the
+    # library: no tests, no programs, nothing to install.
+    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${SOLSTREAM_OPUS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/opus")
+    # The agent's static runtime, below, for the library too. libopus's own
+    # default is the DLL one, and a /MD library in a /MT program links with
+    # LNK4098 and then carries two C runtimes, each with its own heap.
+    set_property(TARGET opus PROPERTY
+                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_link_libraries(SolStreamAgent PRIVATE opus)
 
     # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
     # Without it MSVC reads them in the system code page and "token — the" is

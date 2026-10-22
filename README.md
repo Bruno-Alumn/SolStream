@@ -94,15 +94,23 @@ logon, asking for administrator rights once, visibly. `--uninstall` undoes it.
 code if you have access to the repository, but not copy, modify or distribute it
 without the owner's permission.
 
-**There are no third-party dependencies.** There used to be three:
+**There is one third-party component, and it is in the Windows host only:**
+[libopus](https://opus-codec.org) 1.6.1, BSD 3-clause, which compresses the
+PC's sound when Settings → Sound → Quality asks for anything but Lossless.
+Windows ships no Opus encoder, and the AAC encoder it does ship can do
+neither 64 nor 256 kbit/s and would put about 50 ms of delay into the sound.
+[`third_party/opus/SOLSTREAM.md`](third_party/opus/SOLSTREAM.md) says exactly
+what was taken and why. Its licence travels inside the executable:
+`SolStream.exe --licenses` prints it. The Mac decodes Opus with AudioToolbox.
+
+Two others are gone, and a third is optional and separate:
 
 | Component | Licence | What happened to it |
 | --- | --- | --- |
 | [Sunshine](https://github.com/LizardByte/Sunshine) | GPL-3.0 | Removed. It did the capture and encoding and spoke GameStream; SolStream does both itself now, over SMT/1. Nothing in what ships is under the GPL and there is no obligation left to meet. |
 | [ENet](https://github.com/lsalzman/enet) 1.3.18 | MIT | Removed with the GameStream control stream that used it. |
-| Opus | — | Removed. Audio is 48 kHz stereo PCM: 1.5 Mbit/s beside video's 20, and no codec latency. |
 | [Virtual Display Driver](https://github.com/VirtualDisplay/Virtual-Display-Driver) | see upstream | Still optional, still installed separately by the user, never redistributed here. |
 
 Everything else is in the box: BCrypt and Media Foundation and
-Windows.Graphics.Capture on Windows, CryptoKit and VideoToolbox and AudioUnit on
-macOS.
+Windows.Graphics.Capture on Windows, CryptoKit and VideoToolbox and AudioUnit
+and AudioToolbox on macOS.

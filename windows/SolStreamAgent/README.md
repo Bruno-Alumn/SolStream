@@ -103,6 +103,10 @@ SolStreamAgent.exe --print-token
 Paste it into the prompt SolStream shows the first time it connects, or pass it
 once with `--agent-token <token>`. Either way it is remembered per host.
 
+`SolStreamAgent.exe --licenses` prints the licence of the one third-party
+component compiled in: libopus, which encodes the sound. See
+`third_party/opus/SOLSTREAM.md`.
+
 Loopback is exempt, because reaching it already means running as a user on this
 machine — strictly more access than the agent grants. That exemption is what lets
 an SSH port forward work without a token.

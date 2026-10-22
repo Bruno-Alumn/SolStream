@@ -4,6 +4,7 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
+#include <opus.h>
 #include "log.h"
 
 #include <algorithm>
@@ -14,7 +15,14 @@
 namespace solstream::media {
 namespace {
 
+/// How often the endpoint is polled, and the length of a PCM packet: 960
+/// bytes of stereo S16, one datagram. An Opus packet is as long as the Mac
+/// asked for.
 constexpr int kPacketMs = 5;
+
+/// The most libopus will put in one packet whatever it is asked for, and well
+/// inside one datagram.
+constexpr int kMaxOpusPacket = 1275;
 
 template <typename T>
 void Release(T*& p) {
@@ -142,11 +150,38 @@ struct Resampler {
     }
 };
 
+/// libopus, set up the way the stream wants it, or null with the reason
+/// logged -- in which case the session sends PCM, which every Mac plays.
+OpusEncoder* OpenOpus(const AudioEncoding& encoding) {
+    int error = OPUS_OK;
+    // RESTRICTED_LOWDELAY is CELT only, with the shortest lookahead Opus has:
+    // 2.5 ms. AUDIO would add SILK's 4 ms on top for the speech modes, which
+    // at these bitrates and with a game or a film playing it would never pick.
+    OpusEncoder* encoder =
+        opus_encoder_create(48000, 2, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &error);
+    if (!encoder || error != OPUS_OK) {
+        Log("[media] the Opus encoder would not open (%s); sending PCM", opus_strerror(error));
+        if (encoder) { opus_encoder_destroy(encoder); }
+        return nullptr;
+    }
+    opus_encoder_ctl(encoder, OPUS_SET_BITRATE((opus_int32) encoding.bitrate));
+    // Constrained, so a loud passage cannot burst past the rate the Mac chose
+    // -- the reason it chose one -- while a quiet one still costs less.
+    opus_encoder_ctl(encoder, OPUS_SET_VBR_CONSTRAINT(1));
+    opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    opus_int32 lookahead = 0;
+    opus_encoder_ctl(encoder, OPUS_GET_LOOKAHEAD(&lookahead));
+    Log("[media] audio as Opus %u kbit/s in %u ms packets, %d samples of lookahead (%s)",
+        encoding.bitrate / 1000, encoding.frameMs, (int) lookahead, opus_get_version_string());
+    return encoder;
+}
+
 }  // namespace
 
 void AudioCapture::Stop() { stop_.store(true); }
 
-void AudioCapture::Run(Sink sink, std::function<bool()> keepGoing) {
+void AudioCapture::Run(const AudioEncoding& encoding, Sink sink,
+                       std::function<bool()> keepGoing) {
     stop_.store(false);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool ownsCom = SUCCEEDED(com);
@@ -199,11 +234,21 @@ void AudioCapture::Run(Sink sink, std::function<bool()> keepGoing) {
 
     // What goes on the wire is always 48 kHz stereo, whatever the endpoint is
     // running at. The Mac's renderer is fixed at 48 kHz, and a rate field it
-    // ignores would be a silent half-speed bug rather than a loud one.
+    // ignores would be a silent half-speed bug rather than a loud one. It is
+    // also the rate Opus works at internally, so it resamples nothing.
     constexpr uint32_t kWireRate = 48000;
     const double ratio = (double) format->nSamplesPerSec / (double) kWireRate;
-    const size_t framesPerPacket = (size_t) kWireRate * kPacketMs / 1000;
     Resampler resampler;
+
+    OpusEncoder* opus =
+        encoding.codec == AudioEncoding::Codec::Opus ? OpenOpus(encoding) : nullptr;
+    const unsigned char wireFormat = opus ? 2 : 1;
+    // PCM stays at 5 ms whatever was asked: 10 ms of it is 1920 bytes, which no
+    // longer fits in a datagram.
+    const size_t framesPerPacket =
+        (size_t) kWireRate * (opus ? encoding.frameMs : kPacketMs) / 1000;
+    unsigned char encoded[kMaxOpusPacket];
+    uint64_t encodeFailures = 0;
 
     LARGE_INTEGER frequency{}, started{};
     QueryPerformanceFrequency(&frequency);
@@ -246,19 +291,36 @@ void AudioCapture::Run(Sink sink, std::function<bool()> keepGoing) {
             QueryPerformanceCounter(&now);
             const uint32_t timestampUs = (uint32_t)
                 ((now.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart);
-            packet.resize(framesPerPacket * 2);
-            for (size_t i = 0; i < packet.size(); ++i) {
-                packet[i] = Clamp16(pending[i]);
+            if (opus) {
+                // Float straight in: Opus would only turn S16 back into float.
+                const opus_int32 length = opus_encode_float(
+                    opus, pending.data(), (int) framesPerPacket, encoded,
+                    (opus_int32) sizeof(encoded));
+                if (length > 0) {
+                    sink(encoded, (size_t) length, seq++, timestampUs, kWireRate, 2, wireFormat);
+                    packets_.fetch_add(1);
+                } else if (++encodeFailures == 1 || encodeFailures % 1000 == 0) {
+                    // Losing a packet loses its 10 ms and nothing else, so this
+                    // is said, not acted on -- once, then every thousandth.
+                    Log("[media] Opus could not encode a packet (%s); %llu so far",
+                        opus_strerror((int) length), (unsigned long long) encodeFailures);
+                }
+            } else {
+                packet.resize(framesPerPacket * 2);
+                for (size_t i = 0; i < packet.size(); ++i) {
+                    packet[i] = Clamp16(pending[i]);
+                }
+                sink((const unsigned char*) packet.data(), packet.size() * sizeof(int16_t),
+                     seq++, timestampUs, kWireRate, 2, wireFormat);
+                packets_.fetch_add(1);
             }
-            sink((const unsigned char*) packet.data(), packet.size() * sizeof(int16_t),
-                 seq++, timestampUs, kWireRate, 2);
-            packets_.fetch_add(1);
             pending.erase(pending.begin(), pending.begin() + framesPerPacket * 2);
         }
     }
 
     client->Stop();
     started_.store(false);
+    if (opus) { opus_encoder_destroy(opus); }
     Release(capture);
     Release(client);
     Release(device);

@@ -18,14 +18,59 @@ public struct StreamConfig: Sendable {
     public var bitrateKbps: Int
     /// Whether to ask the host for its speaker output as well as its picture.
     public var audio: Bool
+    /// How the host is asked to send it, when it is asked for at all.
+    public var audioEncoding: AudioEncoding
 
     public init(width: Int = 1920, height: Int = 1080, frameRate: Int = 60,
-                bitrateKbps: Int = 20000, audio: Bool = true) {
+                bitrateKbps: Int = 20000, audio: Bool = true,
+                audioEncoding: AudioEncoding = .pcm) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
         self.bitrateKbps = bitrateKbps
         self.audio = audio
+        self.audioEncoding = audioEncoding
+    }
+}
+
+/// How the host sends its sound: raw, or as Opus at a bitrate.
+///
+/// A request, not a promise. A host that predates Opus has never heard of the
+/// fields this becomes and sends PCM whatever it is asked, so what is actually
+/// played is decided per packet, by its format byte; see `SMTAudioPacket`.
+public struct AudioEncoding: Equatable, Sendable {
+    public enum Codec: String, Sendable {
+        case pcm, opus
+    }
+
+    public var codec: Codec
+    /// Opus's target, in bit/s. PCM's is fixed by its format: 48 kHz, two
+    /// channels, sixteen bits.
+    public var bitrate: Int
+    /// The sound in one packet. Longer is fewer packets and less overhead --
+    /// each costs 68 bytes of headers whatever it carries, which at 64 kbit/s
+    /// is most of the stream at 10 ms -- and more delay.
+    public var frameMilliseconds: Int
+
+    /// What every host sent before Opus: 5 ms packets of 16-bit stereo.
+    public static let pcm = AudioEncoding(codec: .pcm, bitrate: 1_536_000, frameMilliseconds: 5)
+
+    public static func opus(bitrate: Int, frameMilliseconds: Int) -> AudioEncoding {
+        AudioEncoding(codec: .opus, bitrate: bitrate, frameMilliseconds: frameMilliseconds)
+    }
+
+    public init(codec: Codec, bitrate: Int, frameMilliseconds: Int) {
+        self.codec = codec
+        self.bitrate = bitrate
+        self.frameMilliseconds = frameMilliseconds
+    }
+
+    /// For the log: "Opus 128 kbit/s, 10 ms" or "PCM".
+    public var summary: String {
+        switch codec {
+        case .pcm: return "PCM"
+        case .opus: return "Opus \(bitrate / 1000) kbit/s, \(frameMilliseconds) ms"
+        }
     }
 }
 

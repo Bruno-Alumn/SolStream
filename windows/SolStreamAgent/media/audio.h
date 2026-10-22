@@ -1,23 +1,29 @@
-// audio.h — WASAPI loopback capture, as 16-bit PCM.
+// audio.h — WASAPI loopback capture, sent as 16-bit PCM or as Opus.
 //
-// NO CODEC, DELIBERATELY. 48 kHz stereo S16 is 1.5 Mbit/s next to video's 20,
-// and every codec that would shrink it is either a new dependency (Opus) or
-// costs more latency than the bytes are worth (the in-box AAC encoder frames at
-// 21 ms and buffers ahead of that). SolStream streams on a LAN to a Mac; the
-// bandwidth is there and the milliseconds are not.
+// PCM is what every Mac before Opus expects, and what a Mac that names no
+// codec gets: 48 kHz stereo S16, 1.5 Mbit/s, in 5 ms packets -- 960 bytes, one
+// datagram, never fragmented, and small enough that losing one is inaudible
+// rather than a gap.
 //
-// Packets are 5 ms, which is 960 bytes of stereo S16 -- one datagram, never
-// fragmented, and small enough that losing one is inaudible rather than a gap.
+// OPUS WHEN THE MAC ASKS FOR IT BY NAME, which is the only codec that is worth
+// its bytes here. libopus is compiled in from third_party/opus -- the one
+// third-party component, BSD-licensed -- because Windows ships no Opus encoder
+// and the AAC one it does ship is the wrong tool: 96 to 192 kbit/s only, and
+// 1024-sample frames with lookahead behind them, which is some 50 ms against
+// Opus's 2.5 ms plus one packet. Restricted low delay keeps Opus to CELT, so
+// what that costs is fixed: 10 ms packets play 7.5 ms later than PCM's 5 ms
+// ones. The Mac decodes it with AudioToolbox and needs nothing.
 //
 //   off  w  field
 //    0   1  type = 0x20
 //    1   1  flags
 //    2   1  channels
 //    3   1  format: 1 = signed 16-bit little-endian, interleaved
+//                   2 = one Opus packet (RFC 6716), 48 kHz
 //    4   4  sequence, big-endian
 //    8   4  timestamp in microseconds since the session started
 //   12   4  sample rate
-//   16   N  samples
+//   16   N  samples, or the Opus packet
 
 #pragma once
 
@@ -33,16 +39,30 @@
 
 namespace solstream::media {
 
+/// What the sound is sent as. The defaults are PCM's, for a Mac that asked
+/// for nothing.
+struct AudioEncoding {
+    enum class Codec { Pcm, Opus };
+    Codec codec = Codec::Pcm;
+    unsigned bitrate = 128000;   ///< Opus's target, bit/s
+    unsigned frameMs = 5;        ///< the sound in one packet
+
+    /// The format byte on the wire.
+    unsigned char Format() const { return codec == Codec::Opus ? 2 : 1; }
+};
+
 class AudioCapture {
 public:
-    /// Called with one packet's worth of interleaved S16 samples.
-    using Sink = std::function<void(const unsigned char* pcm, size_t length,
+    /// Called with one packet: interleaved S16 samples, or one Opus packet,
+    /// as `format` says.
+    using Sink = std::function<void(const unsigned char* data, size_t length,
                                     uint32_t seq, uint32_t timestampUs,
-                                    uint32_t sampleRate, uint16_t channels)>;
+                                    uint32_t sampleRate, uint16_t channels,
+                                    unsigned char format)>;
 
     /// Runs until `keepGoing` returns false or Stop is called. Blocking: this
     /// is the body of the audio thread.
-    void Run(Sink sink, std::function<bool()> keepGoing);
+    void Run(const AudioEncoding& encoding, Sink sink, std::function<bool()> keepGoing);
     void Stop();
 
     uint64_t Packets() const { return packets_.load(); }

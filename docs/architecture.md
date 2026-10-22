@@ -86,11 +86,16 @@ On the host:
 - **Pacing** meters to a rate with no frame-period cap. Spreading a keyframe
   across its own frame period loses about 3.4% of every keyframe and none of the
   P-frames; `spike/smt-video/RESULTS.md` has the measurement.
-- **Audio** is WASAPI loopback, downmixed and resampled to 48 kHz stereo S16 and
-  sent uncompressed in 5 ms packets.
+- **Audio** is WASAPI loopback, downmixed and resampled to 48 kHz stereo. It is
+  sent as S16 in 5 ms packets, or, when the Mac asks for it in `media open`, as
+  Opus (libopus, restricted low delay) at 64, 128 or 256 kbit/s in 10 or 20 ms
+  packets. Every packet's format byte says which, so a host that predates Opus
+  simply goes on sending PCM, and the Mac plays it as before. The Mac decodes
+  Opus with AudioToolbox.
 
 On the Mac: reassembly by byte offset, a picture closed 25 ms after its LAST
-fragment, VideoToolbox for decode, AudioUnit for playback, and a 10 ms timer that
+fragment, VideoToolbox for decode, AudioToolbox for Opus and AudioUnit for
+playback, and a 10 ms timer that
 repeats unacknowledged input until the host's ack covers it.
 
 ## Discovery — UDP 47629

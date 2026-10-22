@@ -112,6 +112,10 @@ final class SettingsPane: NSView {
                                          accessibilityLabel: "Frame rate")
     // Sound
     let soundSwitch = SolarSwitch(label: "Play the PC's sound")
+    /// Under the switch: what turning it off saves, at the quality chosen.
+    let soundSwitchDetail = SettingsPane.caption("")
+    let soundQualityPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    let soundQualityDetail = SettingsPane.caption("")
     let muteButton = NSButton(image: NSImage(), target: nil, action: nil)
     let volumeSlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
     let volumeValue = DS.label("", font: DS.mono, colour: DS.textSecondary)
@@ -174,10 +178,14 @@ final class SettingsPane: NSView {
 
         let streamsAudio = settings.streamsAudio
         soundSwitch.isOn = streamsAudio
+        let soundQuality = settings.soundQuality
+        soundSwitchDetail.stringValue = Self.soundSwitchDetail(soundQuality)
+        soundQualityPopUp.selectItem(at: StreamSettings.SoundQuality.allCases.firstIndex(of: soundQuality) ?? 0)
+        soundQualityDetail.stringValue = soundQuality.detail
         let buffering = settings.audioBuffering
         bufferingPopUp.selectItem(at: StreamSettings.AudioBufferingChoice.allCases.firstIndex(of: buffering) ?? 0)
         bufferingDetail.stringValue = buffering.detail
-        for control in [muteButton, volumeSlider, bufferingPopUp] as [NSControl] {
+        for control in [soundQualityPopUp, muteButton, volumeSlider, bufferingPopUp] as [NSControl] {
             control.isEnabled = streamsAudio
         }
         // After the enabling, which decides whether the speaker keeps its amber.
@@ -267,6 +275,18 @@ final class SettingsPane: NSView {
         Log.info("[settings] the PC's sound: \(sender.isOn ? "on" : "off")")
         write { settings.streamsAudio = sender.isOn }
         refresh()
+    }
+
+    @objc private func soundQualityChosen(_ sender: NSPopUpButton) {
+        let all = StreamSettings.SoundQuality.allCases
+        guard all.indices.contains(sender.indexOfSelectedItem) else { return }
+        let quality = all[sender.indexOfSelectedItem]
+        soundQualityDetail.stringValue = quality.detail
+        soundSwitchDetail.stringValue = Self.soundSwitchDetail(quality)
+        // Choosing the one already chosen must not restart the picture.
+        guard quality != settings.soundQuality else { return }
+        Log.info("[settings] sound quality: \(quality.title)")
+        write { settings.soundQuality = quality }
     }
 
     @objc private func volumeMoved(_ sender: NSSlider) {
@@ -359,6 +379,11 @@ final class SettingsPane: NSView {
         String(format: "%.2f×", sensitivity)
     }
 
+    /// What sound costs, which is what turning it off saves.
+    static func soundSwitchDetail(_ quality: StreamSettings.SoundQuality) -> String {
+        "Off saves about \(quality.rate) when you don't need it."
+    }
+
     static func modeDetail(_ mode: InputCapture.PointerMode,
                            followsCursor: Bool = InputCapture.followsHostCursor) -> String {
         switch mode {
@@ -396,6 +421,17 @@ final class SettingsPane: NSView {
         // ── Sound ────────────────────────────────────────────────────────────
         soundSwitch.target = self
         soundSwitch.action = #selector(soundToggled(_:))
+        Self.reserveHeight(soundSwitchDetail,
+                           for: StreamSettings.SoundQuality.allCases.map(Self.soundSwitchDetail))
+
+        for quality in StreamSettings.SoundQuality.allCases {
+            soundQualityPopUp.addItem(withTitle: quality.title)
+        }
+        Self.configure(popUp: soundQualityPopUp, label: "Sound quality")
+        soundQualityPopUp.target = self
+        soundQualityPopUp.action = #selector(soundQualityChosen(_:))
+        Self.reserveHeight(soundQualityDetail,
+                           for: StreamSettings.SoundQuality.allCases.map(\.detail))
 
         muteButton.target = self
         muteButton.action = #selector(muteToggled(_:))
@@ -426,14 +462,16 @@ final class SettingsPane: NSView {
         Self.reserveHeight(bufferingDetail,
                            for: StreamSettings.AudioBufferingChoice.allCases.map(\.detail))
 
+        // "Quality" alone is enough inside the Sound card; the popover, where
+        // it sits beside the video's, has to say whose.
+        let soundQualityRow = row("Quality", trailing: soundQualityPopUp, below: [soundQualityDetail])
         let volumeRow = row("Volume", trailing: volumeValue, below: [volumeLine])
         let bufferingRow = row("Buffering", trailing: bufferingPopUp, below: [bufferingDetail])
-        soundDependentLabels = volumeRow.labels + bufferingRow.labels
+        soundDependentLabels = soundQualityRow.labels + volumeRow.labels + bufferingRow.labels
             + [Words(label: volumeValue, colour: DS.textSecondary)]
         let sound = section("Sound", rows: [
-            row("Play the PC's sound", trailing: soundSwitch, below: [
-                Self.caption("Off saves about 1.5 Mbps when you don't need it."),
-            ]),
+            row("Play the PC's sound", trailing: soundSwitch, below: [soundSwitchDetail]),
+            soundQualityRow,
             volumeRow,
             bufferingRow,
         ])

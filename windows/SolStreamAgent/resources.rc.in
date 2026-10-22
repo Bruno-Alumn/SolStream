@@ -23,6 +23,12 @@
 // assets/logo/make-logo.swift, which is the only place the mark is described.
 1 ICON "@SOLSTREAM_ICON_RC@"
 
+// -- Third-party notices ----------------------------------------------------
+//
+// libopus's licence, which asks to go wherever a binary built from it goes --
+// and what ships is this one file. `SolStream.exe --licenses` prints it.
+OPUS_COPYING RCDATA "@SOLSTREAM_OPUS_COPYING_RC@"
+
 // -- Version information ----------------------------------------------------
 //
 // Without this the file's Properties dialog is blank, the UAC prompt has no

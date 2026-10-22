@@ -3,8 +3,8 @@ import XCTest
 import InputCapture
 @testable import SolStreamClient
 
-/// The stats popover carries the stream's quick settings -- sound, mouse mode,
-/// quality -- and a way to the rest. Each has to be there, inside the popover's
+/// The stats popover carries the stream's quick settings -- sound and its
+/// quality, mouse mode, video quality -- and a way to the rest. Each has to be there, inside the popover's
 /// edge, and do what it says when used.
 final class QualityPillTests: XCTestCase {
 
@@ -12,6 +12,7 @@ final class QualityPillTests: XCTestCase {
     /// put back afterwards so running the tests changes nobody's settings.
     private static let touchedKeys = [
         "SolStream.volume", "SolStream.muted", "SolStream.streamsAudio",
+        "SolStream.soundQuality",
         "SolStream.videoQuality", "SolStream.pointerMode", "SolStream.followsHostCursor",
     ]
     private var saved: [String: Any] = [:]
@@ -27,6 +28,7 @@ final class QualityPillTests: XCTestCase {
         settings.volume = 0.7
         settings.isMuted = false
         settings.streamsAudio = true
+        settings.soundQuality = .high
         settings.videoQuality = .automatic
         settings.pointerMode = .desktop
         settings.followsHostCursor = true
@@ -64,9 +66,15 @@ final class QualityPillTests: XCTestCase {
         XCTAssertEqual(sliders.first?.isContinuous, true, "the volume must follow the drag")
 
         let menus = Self.all(NSPopUpButton.self, in: detail)
-        XCTAssertEqual(menus.count, 1, "no quality menu in the popover")
-        XCTAssertEqual(menus.first?.numberOfItems, StreamSettings.VideoQuality.allCases.count)
-        XCTAssertEqual(menus.first?.titleOfSelectedItem, StreamSettings.VideoQuality.automatic.title)
+        XCTAssertEqual(menus.count, 2, "the popover should have the video's and the sound's quality")
+        let video = try XCTUnwrap(Self.videoMenu(in: detail), "no video quality menu in the popover")
+        XCTAssertEqual(video.numberOfItems, StreamSettings.VideoQuality.allCases.count)
+        XCTAssertEqual(video.titleOfSelectedItem, StreamSettings.VideoQuality.automatic.title)
+        let sound = try XCTUnwrap(Self.soundMenu(in: detail), "no sound quality menu in the popover")
+        XCTAssertEqual(sound.itemTitles, StreamSettings.SoundQuality.allCases.map(\.title))
+        XCTAssertEqual(sound.titleOfSelectedItem, "High")
+        XCTAssertTrue(sound.isEnabled)
+        XCTAssertTrue(Self.words(in: detail).contains("256 kbps. Changing it restarts the picture briefly."))
 
         let mute = try XCTUnwrap(Self.muteButton(in: detail), "no mute button in the popover")
         let link = try XCTUnwrap(Self.settingsLink(in: detail), "no way to Settings in the popover")
@@ -74,7 +82,7 @@ final class QualityPillTests: XCTestCase {
         Self.assertInside(detail, toggles + sliders + menus + [mute, link])
 
         // The settings rows' controls share one column.
-        let columns = [toggles.first, sliders.first?.superview, menus.first].compactMap { $0 }
+        let columns = ([toggles.first, sliders.first?.superview, video, sound] as [NSView?]).compactMap { $0 }
         let lefts = columns.map { $0.convert($0.bounds, to: detail).minX }
         XCTAssertEqual(Set(lefts.map { $0.rounded() }).count, 1, "the controls do not line up: \(lefts)")
 
@@ -120,6 +128,11 @@ final class QualityPillTests: XCTestCase {
         XCTAssertEqual(Self.muteButton(in: detail)?.isEnabled, false)
         XCTAssertTrue(Self.words(in: detail).contains("Off in Settings, so the PC sends none."),
                       "with sound off the popover still blames the PC for the silence")
+        // Nothing is encoded, so there is no quality to choose and no restart
+        // to promise.
+        XCTAssertEqual(Self.soundMenu(in: detail)?.isEnabled, false)
+        XCTAssertFalse(Self.visibleWords(in: detail).contains { $0.contains("kbps") },
+                       "with sound off the popover still describes its quality")
 
         // --no-audio wins over Settings, and is the reason given.
         StreamSettings.shared.streamsAudio = true
@@ -223,14 +236,61 @@ final class QualityPillTests: XCTestCase {
     func testABitrateFromTheCommandLineHoldsTheQualityMenu() throws {
         QualityPill.commandLineOverrides = [.bitrate]
         let detail = detail()
-        let menu = try XCTUnwrap(Self.all(NSPopUpButton.self, in: detail).first)
+        let menu = try XCTUnwrap(Self.videoMenu(in: detail))
         XCTAssertFalse(menu.isEnabled, "a choice that --bitrate overrides is still offered")
         XCTAssertTrue(Self.words(in: detail).contains("Set by --bitrate for this run."))
+        XCTAssertEqual(Self.soundMenu(in: detail)?.isEnabled, true, "--bitrate held the sound's too")
+
+        QualityPill.commandLineOverrides = [.soundQuality]
+        let pinned = self.detail()
+        XCTAssertEqual(Self.soundMenu(in: pinned)?.isEnabled, false,
+                       "a choice that --sound-quality overrides is still offered")
+        XCTAssertTrue(Self.words(in: pinned).contains("Set by --sound-quality for this run."))
+        XCTAssertEqual(Self.videoMenu(in: pinned)?.isEnabled, true)
+    }
+
+    func testChoosingASoundQualityStoresItOnceAndSaysWhatItCosts() throws {
+        let detail = detail()
+        let menu = try XCTUnwrap(Self.soundMenu(in: detail))
+
+        var restarts: [Bool] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: StreamSettings.didChange, object: nil, queue: nil
+        ) { note in
+            restarts.append(note.userInfo?[StreamSettings.restartsStreamKey] as? Bool ?? false)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        menu.selectItem(withTitle: StreamSettings.SoundQuality.dataSaver.title)
+        menu.sendAction(menu.action, to: menu.target)
+        XCTAssertEqual(StreamSettings.shared.soundQuality, .dataSaver)
+        XCTAssertEqual(restarts, [true], "a new sound quality must ask for the stream to restart")
+        XCTAssertTrue(Self.words(in: detail).contains("64 kbps. Changing it restarts the picture briefly."),
+                      "the note still describes the old quality")
+        Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
+
+        menu.sendAction(menu.action, to: menu.target)
+        XCTAssertEqual(restarts, [true], "choosing the same quality again restarted the stream")
+        try Self.writePicture(of: detail, named: "solstream-quality-popover-sound.png")
+    }
+
+    /// A host that predates the choice sends PCM whatever it is asked. The
+    /// popover says so, rather than claim a quality that is not being used.
+    func testAHostThatIgnoresTheSoundQualityIsSaidToHave() throws {
+        let detail = detail()
+        let pill = try XCTUnwrap(pills.last)
+        var stats = pill.stats
+        stats.hostIgnoresSoundQuality = true
+        pill.stats = stats
+        XCTAssertTrue(Self.words(in: detail).contains(
+            "SolStream on the PC predates this, so it sends uncompressed sound."))
+        Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
+        XCTAssertLessThanOrEqual(detail.bounds.height, 460)
     }
 
     func testChoosingAQualityStoresItOnceAndSaysWhatItMeans() throws {
         let detail = detail()
-        let menu = try XCTUnwrap(Self.all(NSPopUpButton.self, in: detail).first)
+        let menu = try XCTUnwrap(Self.videoMenu(in: detail))
 
         var restarts: [Bool] = []
         let observer = NotificationCenter.default.addObserver(
@@ -291,12 +351,25 @@ final class QualityPillTests: XCTestCase {
         }
     }
 
+    private static func videoMenu(in view: NSView) -> NSPopUpButton? {
+        all(NSPopUpButton.self, in: view).first { $0.accessibilityLabel() == "Video quality" }
+    }
+
+    private static func soundMenu(in view: NSView) -> NSPopUpButton? {
+        all(NSPopUpButton.self, in: view).first { $0.accessibilityLabel() == "Sound quality" }
+    }
+
     private static func settingsLink(in view: NSView) -> NSButton? {
         all(NSButton.self, in: view).first { $0.title == "All settings" }
     }
 
     private static func words(in view: NSView) -> [String] {
         all(NSTextField.self, in: view).map(\.stringValue)
+    }
+
+    /// The words someone looking at the popover can actually see.
+    private static func visibleWords(in view: NSView) -> [String] {
+        all(NSTextField.self, in: view).filter { !$0.isHiddenOrHasHiddenAncestor }.map(\.stringValue)
     }
 
     /// Each of `controls` has a size and lies wholly inside the popover.

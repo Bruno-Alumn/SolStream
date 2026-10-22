@@ -824,16 +824,22 @@ public final class AgentConnection {
         /// arrive as pixels the Mac only ever throws away.
         public var width: Int?
         public var height: Int?
+        /// How the sound should come, when `audio` asks for it. PCM is what
+        /// every host sends unasked; anything else is a request a host that
+        /// predates it ignores. See `AudioEncoding`.
+        public var audioEncoding: AudioEncoding
 
         public init(display: String? = nil,
                     fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true,
-                    width: Int? = nil, height: Int? = nil) {
+                    width: Int? = nil, height: Int? = nil,
+                    audioEncoding: AudioEncoding = .pcm) {
             self.display = display
             self.fps = fps
             self.bitrate = bitrate
             self.audio = audio
             self.width = width
             self.height = height
+            self.audioEncoding = audioEncoding
         }
     }
 
@@ -843,6 +849,40 @@ public final class AgentConnection {
         public let port: UInt16
         public let streaming: Bool
         public let message: String?
+        /// How the host said it will send its sound. PCM from a host that
+        /// said nothing, because that is what one that predates the choice
+        /// sends.
+        public var audioCodec: AudioEncoding.Codec = .pcm
+    }
+
+    /// The `media open` command's fields beyond the key material.
+    ///
+    /// Everything a host might not know is sent only when it means something,
+    /// so a host that predates a field sees the same command it always saw:
+    /// the canvas only when one is set, and the sound's encoding only when it
+    /// is something other than the PCM every host sends unasked.
+    static func mediaOpenFields(_ request: MediaRequest) -> [String: Any] {
+        var fields: [String: Any] = ["fps": request.fps, "bitrate": request.bitrate,
+                                     "audio": request.audio ? 1 : 0]
+        if let display = request.display { fields["display"] = display }
+        // Absent means "host decides", which is what every earlier build did by
+        // having nothing to send.
+        if let width = request.width { fields["width"] = width }
+        if let height = request.height { fields["height"] = height }
+        if request.audio, request.audioEncoding.codec != .pcm {
+            fields["audioCodec"] = request.audioEncoding.codec.rawValue
+            fields["audioBitrate"] = request.audioEncoding.bitrate
+            fields["audioFrameMs"] = request.audioEncoding.frameMilliseconds
+        }
+        return fields
+    }
+
+    /// What a `media open` reply says the sound will be. A host that predates
+    /// the choice says nothing and sends PCM, and so does one that names a
+    /// codec this build has never heard of -- it cannot be sending anything
+    /// this build would play, so the packets' own format bytes decide.
+    static func audioCodec(inReply reply: [String: Any]) -> AudioEncoding.Codec {
+        (reply["audioCodec"] as? String).flatMap(AudioEncoding.Codec.init(rawValue:)) ?? .pcm
     }
 
     /// Stop the host's media session, leaving the agent channel up.
@@ -872,15 +912,8 @@ public final class AgentConnection {
         }) == errSecSuccess else { return nil }
 
         var message: [String: Any] = ["cmd": "media", "op": "open", "ver": 1,
-                                      "cpub": cpub.smtHex, "cnonce": cnonce.smtHex,
-                                      "fps": request.fps, "bitrate": request.bitrate,
-                                      "audio": request.audio ? 1 : 0]
-        if let display = request.display { message["display"] = display }
-        // Absent means "host decides", which is what every earlier build did by
-        // having nothing to send. Only sent when set, so a host that predates
-        // these fields sees the same open command it always saw.
-        if let width = request.width { message["width"] = width }
-        if let height = request.height { message["height"] = height }
+                                      "cpub": cpub.smtHex, "cnonce": cnonce.smtHex]
+        message.merge(Self.mediaOpenFields(request)) { _, field in field }
 
         let reply: [String: Any]
         do {
@@ -940,9 +973,18 @@ public final class AgentConnection {
             Log.error("[media] \(host) named \(claimed) as its media port, which is not a "
                       + "port number; trying \(port) instead")
         }
+        let audioCodec = Self.audioCodec(inReply: reply)
         Log.info("[media] session \(hcount) open, keys agree (sid \(keys.sessionTag)), "
                  + "host \(streaming ? "is streaming" : "is NOT streaming: \(message2 ?? "?")")")
-        return MediaSession(keys: keys, port: port, streaming: streaming, message: message2)
+        if request.audio, request.audioEncoding.codec != audioCodec {
+            // Said here because nothing else would: the stream plays either
+            // way, and only the bandwidth gives it away.
+            Log.info("[media] asked for \(request.audioEncoding.summary) sound; the host "
+                     + (reply["audioCodec"] == nil ? "predates the choice and sends PCM"
+                                                   : "sends \(audioCodec.rawValue)"))
+        }
+        return MediaSession(keys: keys, port: port, streaming: streaming, message: message2,
+                            audioCodec: audioCodec)
     }
 
     /// Ask for the host's displays.

@@ -37,8 +37,8 @@ public final class MediaClient {
 
     /// A complete coded picture, in Annex B, and whether it is a keyframe.
     public var onVideo: ((Data, Bool) -> Void)?
-    /// Interleaved S16 PCM and its sample rate.
-    public var onAudio: ((Data, UInt32) -> Void)?
+    /// One packet of the host's sound: PCM or Opus, as its format byte says.
+    public var onAudio: ((SMTAudioPacket) -> Void)?
     public var onStats: ((Stats) -> Void)?
     /// Called when the session gives up: the host stopped answering.
     public var onEnded: (() -> Void)?
@@ -617,14 +617,11 @@ public final class MediaClient {
         case SMT.typeVideo:
             reassembler.ingest(plaintext)
         case SMT.typeAudio:
-            guard plaintext.count > 16 else { return }
-            let b = [UInt8](plaintext)
-            let rate = (UInt32(b[12]) << 24) | (UInt32(b[13]) << 16)
-                     | (UInt32(b[14]) << 8) | UInt32(b[15])
+            guard let packet = SMTAudioPacket(plaintext: plaintext) else { return }
             stateLock.lock()
             stats.audioPackets &+= 1
             stateLock.unlock()
-            onAudio?(plaintext.dropFirst(16), rate)
+            onAudio?(packet)
         case SMT.typePong:
             guard plaintext.count >= 9 else { return }
             let sent = SMTPacket.readBE([UInt8](plaintext)[1..<9])

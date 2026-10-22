@@ -14,6 +14,7 @@ import AgentChannel
 final class SettingsWindowTests: XCTestCase {
     private static let keys = [
         "SolStream.videoQuality", "SolStream.frameRate", "SolStream.streamsAudio",
+        "SolStream.soundQuality",
         "SolStream.volume", "SolStream.muted", "SolStream.audioBuffering",
         "SolStream.syncsClipboard", "SolStream.pointerMode",
         "SolStream.gamingSensitivity", "SolStream.followsHostCursor",
@@ -46,6 +47,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.videoQuality = .high
         settings.frameRate = 30
         settings.streamsAudio = true
+        settings.soundQuality = .standard
         settings.volume = 0.4
         settings.isMuted = false
         settings.audioBuffering = .steady
@@ -61,6 +63,13 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(pane.frameRateControl.label(forSegment: pane.frameRateControl.selectedSegment),
                        "30 fps")
         XCTAssertTrue(pane.soundSwitch.isOn)
+        XCTAssertEqual(pane.soundSwitchDetail.stringValue,
+                       "Off saves about 128 kbps when you don't need it.")
+        XCTAssertEqual(pane.soundQualityPopUp.itemTitles,
+                       ["Data saver", "Standard", "High", "Lossless"], "least to most, as the video's")
+        XCTAssertEqual(pane.soundQualityPopUp.titleOfSelectedItem, "Standard")
+        XCTAssertEqual(pane.soundQualityDetail.stringValue, StreamSettings.SoundQuality.standard.detail)
+        XCTAssertTrue(pane.soundQualityPopUp.isEnabled)
         XCTAssertEqual(pane.volumeSlider.doubleValue, 40, accuracy: 0.01)
         XCTAssertEqual(pane.volumeValue.stringValue, "40%")
         XCTAssertTrue(pane.volumeSlider.isEnabled)
@@ -78,8 +87,8 @@ final class SettingsWindowTests: XCTestCase {
     }
 
     /// Rows that mean nothing in the current state say so by being disabled:
-    /// volume and buffering with the PC's sound off, sensitivity and giving
-    /// the mouse back in desktop mode.
+    /// sound quality, volume and buffering with the PC's sound off,
+    /// sensitivity and giving the mouse back in desktop mode.
     func testRowsThatDoNotApplyAreDisabled() {
         settings.streamsAudio = false
         settings.isMuted = true
@@ -89,6 +98,7 @@ final class SettingsWindowTests: XCTestCase {
 
         let pane = SettingsPane()
         XCTAssertFalse(pane.soundSwitch.isOn)
+        XCTAssertFalse(pane.soundQualityPopUp.isEnabled)
         XCTAssertFalse(pane.volumeSlider.isEnabled)
         XCTAssertFalse(pane.muteButton.isEnabled)
         XCTAssertFalse(pane.bufferingPopUp.isEnabled)
@@ -115,6 +125,10 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(pane.volumeValue.stringValue, "Muted")
         settings.videoQuality = .dataSaver
         XCTAssertEqual(pane.qualityPopUp.titleOfSelectedItem, "Data saver")
+        settings.soundQuality = .lossless
+        XCTAssertEqual(pane.soundQualityPopUp.titleOfSelectedItem, "Lossless")
+        XCTAssertEqual(pane.soundSwitchDetail.stringValue,
+                       "Off saves about 1.5 Mbps when you don't need it.")
         InputCapture.pointerMode = .gaming
         XCTAssertEqual(pane.modeControl.selectedSegment, 1)
         XCTAssertTrue(pane.sensitivitySlider.isEnabled)
@@ -126,6 +140,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.videoQuality = .automatic
         settings.frameRate = 60
         settings.streamsAudio = true
+        settings.soundQuality = .high
         settings.volume = 1
         settings.isMuted = false
         settings.audioBuffering = .automatic
@@ -161,6 +176,15 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(settings.frameRate, 30)
         expect(restart: true, "frame rate")
 
+        choose(pane.soundQualityPopUp, StreamSettings.SoundQuality.allCases.firstIndex(of: .dataSaver)!)
+        XCTAssertEqual(settings.soundQuality, .dataSaver)
+        XCTAssertEqual(pane.soundQualityDetail.stringValue, StreamSettings.SoundQuality.dataSaver.detail)
+        XCTAssertEqual(pane.soundSwitchDetail.stringValue,
+                       "Off saves about 64 kbps when you don't need it.")
+        expect(restart: true, "sound quality")
+        choose(pane.soundQualityPopUp, StreamSettings.SoundQuality.allCases.firstIndex(of: .dataSaver)!)
+        XCTAssertTrue(restarts.isEmpty, "re-choosing the sound quality restarted the stream")
+
         pane.volumeSlider.doubleValue = 25
         send(pane.volumeSlider)
         XCTAssertEqual(settings.volume, 0.25, accuracy: 0.001)
@@ -185,6 +209,7 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertTrue(pane.soundSwitch.accessibilityPerformPress())
         XCTAssertFalse(settings.streamsAudio)
         XCTAssertFalse(pane.volumeSlider.isEnabled, "volume still enabled with the sound off")
+        XCTAssertFalse(pane.soundQualityPopUp.isEnabled, "quality still enabled with the sound off")
         expect(restart: true, "the PC's sound")
 
         XCTAssertFalse(pane.sensitivitySlider.isEnabled)
@@ -288,16 +313,20 @@ final class SettingsWindowTests: XCTestCase {
         settings.videoQuality = .balanced
         settings.frameRate = 60
         settings.streamsAudio = true
+        settings.soundQuality = .high
         var request = AgentConnection.MediaRequest(display: "\\\\.\\DISPLAY9", fps: 60,
-                                                   bitrate: 20_000_000, audio: true)
+                                                   bitrate: 20_000_000, audio: true,
+                                                   audioEncoding: .opus(bitrate: 256_000,
+                                                                        frameMilliseconds: 10))
         request.width = 3024
         request.height = 1964
         let config = StreamConfig(width: 3024, height: 1964, frameRate: 60,
-                                  bitrateKbps: 20_000, audio: true)
+                                  bitrateKbps: 20_000, audio: true,
+                                  audioEncoding: .opus(bitrate: 256_000, frameMilliseconds: 10))
 
         XCTAssertNil(AppDelegate.applying(settings, to: request, config: config,
                                           host: "192.168.1.20", overrides: []),
-                     "Balanced at home is what the stream already has")
+                     "Balanced and High at home are what the stream already has")
 
         settings.frameRate = 30
         settings.videoQuality = .high
@@ -329,6 +358,57 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(AppDelegate.applying(settings, to: request, config: config,
                                             host: "100.101.102.103", overrides: [])?
                         .request.bitrate, 12_000_000)
+    }
+
+    /// The sound's quality restarts the stream like the picture's does --
+    /// but only while there is sound for the host to encode.
+    func testSoundQualityRestartsTheStreamOnlyWhileThereIsSound() {
+        settings.videoQuality = .balanced
+        settings.frameRate = 60
+        settings.streamsAudio = true
+        settings.soundQuality = .high
+        let high = StreamSettings.SoundQuality.high.encoding
+        let request = AgentConnection.MediaRequest(display: "\\\\.\\DISPLAY9", fps: 60,
+                                                   bitrate: 20_000_000, audio: true,
+                                                   audioEncoding: high)
+        let config = StreamConfig(frameRate: 60, bitrateKbps: 20_000, audio: true,
+                                  audioEncoding: high)
+        let home = "192.168.1.20"
+        XCTAssertNil(AppDelegate.applying(settings, to: request, config: config,
+                                          host: home, overrides: []))
+
+        settings.soundQuality = .dataSaver
+        let saver = AppDelegate.applying(settings, to: request, config: config,
+                                         host: home, overrides: [])
+        XCTAssertEqual(saver?.request.audioEncoding, .opus(bitrate: 64_000, frameMilliseconds: 20))
+        XCTAssertEqual(saver?.config.audioEncoding, .opus(bitrate: 64_000, frameMilliseconds: 20))
+        XCTAssertEqual(saver?.request.fps, 60, "nothing else moved")
+
+        settings.soundQuality = .lossless
+        XCTAssertEqual(AppDelegate.applying(settings, to: request, config: config,
+                                            host: home, overrides: [])?.request.audioEncoding,
+                       .pcm)
+
+        // --sound-quality on the command line wins over the window.
+        XCTAssertNil(AppDelegate.applying(settings, to: request, config: config,
+                                          host: home, overrides: [.soundQuality]))
+
+        // With the sound off there is nothing to encode, so a new quality is
+        // no reason to blank the picture...
+        var silent = config
+        silent.audio = false
+        var silentRequest = request
+        silentRequest.audio = false
+        settings.streamsAudio = false
+        settings.soundQuality = .standard
+        XCTAssertNil(AppDelegate.applying(settings, to: silentRequest, config: silent,
+                                          host: home, overrides: []))
+        // ...and turning it back on brings the quality chosen meanwhile.
+        settings.streamsAudio = true
+        let back = AppDelegate.applying(settings, to: silentRequest, config: silent,
+                                        host: home, overrides: [])
+        XCTAssertEqual(back?.request.audio, true)
+        XCTAssertEqual(back?.request.audioEncoding, .opus(bitrate: 128_000, frameMilliseconds: 10))
     }
 
     // MARK: - The window
@@ -376,6 +456,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.videoQuality = .automatic
         settings.frameRate = 60
         settings.streamsAudio = true
+        settings.soundQuality = .high
         settings.volume = 0.8
         settings.isMuted = false
         settings.audioBuffering = .automatic
@@ -412,6 +493,7 @@ final class SettingsWindowTests: XCTestCase {
 
         let controls: [NSView] = [
             pane.qualityPopUp, pane.qualityDetail, pane.frameRateControl, pane.soundSwitch,
+            pane.soundSwitchDetail, pane.soundQualityPopUp, pane.soundQualityDetail,
             pane.muteButton, pane.volumeSlider, pane.volumeValue, pane.bufferingPopUp,
             pane.bufferingDetail, pane.modeControl, pane.modeDetail, pane.sensitivitySlider,
             pane.sensitivityValue, pane.followsCursorSwitch, pane.clipboardSwitch, pane.footnote,

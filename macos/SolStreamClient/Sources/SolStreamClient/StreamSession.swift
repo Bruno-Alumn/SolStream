@@ -89,6 +89,25 @@ final class StreamSession {
         return audioFramesPlayedStorage
     }
 
+    /// Whether a sound packet has been played yet, so the first one can say
+    /// in the log what the host is really sending. Guarded by
+    /// `frameCountLock`, written on the receive thread like the count beside it.
+    private var playedAudio = false
+
+    /// What the Mac asked the host for, for that log line.
+    private let requestedAudio: AudioEncoding
+
+    /// The Mac asked for compressed sound and the host said it will send PCM:
+    /// a host that predates the choice ignores it. Fixed for the session, and
+    /// taken from the host's answer rather than from the Settings, which may
+    /// already hold the next quality while this session is still the old one.
+    let hostIgnoresSoundQuality: Bool
+
+    static func hostIgnoresSoundQuality(asked config: StreamConfig,
+                                        answered codec: AudioEncoding.Codec) -> Bool {
+        config.audio && config.audioEncoding.codec != .pcm && codec == .pcm
+    }
+
     var onPhase: ((StreamPhase) -> Void)?
 
     /// What the watchdog has to say about the picture.
@@ -136,6 +155,9 @@ final class StreamSession {
         self.host = host
         self.canvasSize = CGSize(width: config.width, height: config.height)
         self.wantsAudio = config.audio
+        self.requestedAudio = config.audioEncoding
+        self.hostIgnoresSoundQuality = Self.hostIgnoresSoundQuality(asked: config,
+                                                                    answered: session.audioCodec)
         self.media = MediaClient(keys: session.keys, host: host, port: session.port)
 
         // One decoder, fanned out to every attached window. Each window carries
@@ -163,7 +185,7 @@ final class StreamSession {
                 DispatchQueue.main.async { self.onPhase?(.streaming) }
             }
         }
-        media.onAudio = { [weak self] pcm, _ in
+        media.onAudio = { [weak self] packet in
             guard let self else { return }
             // Copied out under the lock and played outside it: the copy is what
             // keeps the renderer alive for the length of the call, and holding
@@ -173,10 +195,21 @@ final class StreamSession {
             let renderer = self.audioRenderer
             self.audioLock.unlock()
             guard let renderer else { return }
-            renderer.playAudio(pcm)
+            // By the packet's own format, never by what was asked for: a host
+            // that predates Opus sends PCM whatever it is asked.
+            switch packet.format {
+            case .pcm16: renderer.playAudio(packet.payload)
+            case .opus: renderer.playOpus(packet.payload)
+            }
             self.frameCountLock.lock()
             self.audioFramesPlayedStorage &+= 1
+            let first = !self.playedAudio
+            self.playedAudio = true
             self.frameCountLock.unlock()
+            if first {
+                Log.info("[audio] the host sends \(packet.format == .opus ? "Opus" : "PCM")"
+                         + " (asked for \(self.requestedAudio.summary))")
+            }
         }
         media.onStats = { [weak self] stats in
             guard let self else { return }

@@ -21,6 +21,9 @@ final class QualityPill: DS.Box {
         var droppedFrames: UInt64 = 0
         var totalFrames: UInt64 = 0
         var audioActive: Bool = false
+        /// The host answered a request for compressed sound with PCM, which
+        /// one that predates the choice does; see StreamSession.
+        var hostIgnoresSoundQuality: Bool = false
         var hostDisplay: String = ""
         /// The host reports its cursor going away -- declared on its pushes,
         /// or learned from seeing it hide and show one -- so in gaming mode the
@@ -30,8 +33,8 @@ final class QualityPill: DS.Box {
         var hostReportsCursor: Bool = false
     }
 
-    /// What a command-line flag fixed for this run (`--bitrate`, `--no-audio`),
-    /// which the popover's controls cannot change. Process-wide because the
+    /// What a command-line flag fixed for this run (`--bitrate`, `--no-audio`,
+    /// `--sound-quality`), which the popover's controls cannot change. Process-wide because the
     /// flags are: set once by the app delegate after reading them.
     static var commandLineOverrides: Set<StreamSettings.Override> = []
 
@@ -225,6 +228,23 @@ final class QualityPill: DS.Box {
         self.soundControls = soundControls
         self.soundNote = soundNote
 
+        // The sound's quality sits under its volume, and its note under the
+        // volume's, so everything about the sound is one group. Named in full:
+        // "Quality" in a popover that has the video's as well could be either.
+        let soundQuality = NSPopUpButton(frame: .zero, pullsDown: false)
+        for choice in StreamSettings.SoundQuality.allCases {
+            soundQuality.addItem(withTitle: choice.title)
+            soundQuality.lastItem?.representedObject = choice.rawValue
+            soundQuality.lastItem?.toolTip = choice.detail
+        }
+        soundQuality.selectItem(withTitle: settings.soundQuality.title)
+        soundQuality.target = self
+        soundQuality.action = #selector(soundQualityChosen(_:))
+        soundQuality.setAccessibilityLabel("Sound quality")
+        let soundQualityNote = note("")
+        soundQualityMenu = soundQuality
+        self.soundQualityNote = soundQualityNote
+
         // The mouse mode lives here, beside the numbers it affects, rather than
         // in a menu: it is a per-moment choice -- a game now, a spreadsheet in
         // a minute -- and this is the one control on the streamed window.
@@ -259,6 +279,7 @@ final class QualityPill: DS.Box {
         // Named as Settings names its section: "Quality" alone, under Sound,
         // read as if it might be the sound's too.
         let soundRow = setting("Sound", soundControls)
+        let soundQualityRow = setting("Sound quality", soundQuality)
         let mouseRow = setting("Mouse", modes)
         let videoRow = setting("Video", quality)
         let footer = DS.hairlineView()
@@ -272,7 +293,9 @@ final class QualityPill: DS.Box {
             hostDisplay.view,
             DS.hairlineView(),
             soundRow,
+            soundQualityRow,
             soundNote,
+            soundQualityNote,
             mouseRow,
             mouseHint,
             videoRow,
@@ -285,10 +308,14 @@ final class QualityPill: DS.Box {
         stack.spacing = DS.Space.x3
         stack.setCustomSpacing(DS.Space.x2, after: row)
         // A note sits under its own row, closer to it than to the next one.
-        for (settingRow, itsNote) in [(soundRow, soundNote), (mouseRow, mouseHint), (videoRow, qualityNote)] {
+        // The sound's two rows are one group, with their two notes under both.
+        for (settingRow, itsNote) in [(soundQualityRow, soundQualityNote), (mouseRow, mouseHint),
+                                      (videoRow, qualityNote)] {
             stack.setCustomSpacing(DS.Space.x1, after: settingRow)
             stack.setCustomSpacing(DS.Space.x4, after: itsNote)
         }
+        stack.setCustomSpacing(DS.Space.x2, after: soundRow)
+        stack.setCustomSpacing(2, after: soundNote)
         stack.setCustomSpacing(DS.Space.x3, after: footer)
         stack.edgeInsets = NSEdgeInsets(top: DS.Space.x5, left: DS.Space.x5,
                                         bottom: DS.Space.x4, right: DS.Space.x5)
@@ -361,6 +388,8 @@ final class QualityPill: DS.Box {
     private weak var hostDisplayValue: NSTextField?
     private weak var soundControls: NSStackView?
     private weak var soundNote: NSTextField?
+    private weak var soundQualityMenu: NSPopUpButton?
+    private weak var soundQualityNote: NSTextField?
     private weak var mouseHint: NSTextField?
     private weak var qualityNote: NSTextField?
     private weak var muteButton: NSButton?
@@ -440,7 +469,30 @@ final class QualityPill: DS.Box {
             volumeSlider.needsDisplay = true
         }
         soundControls?.alphaValue = off ? 0.5 : 1
-        return Self.show(Self.soundNote(audioActive: stats.audioActive, muted: muted), in: soundNote)
+
+        // With no sound sent there is nothing to encode, so the quality stands
+        // down with the volume, and its note -- which promises a restart that
+        // would not happen -- goes. A flag fixes it for the run, as --bitrate
+        // fixes the video's.
+        let pinned = Self.commandLineOverrides.contains(.soundQuality)
+        soundQualityMenu?.isEnabled = !off && !pinned
+        let qualityText = Self.soundQualityNote(settings.soundQuality, pinned: pinned,
+                                                ignored: stats.hostIgnoresSoundQuality)
+        let qualityMoved = Self.show(qualityText, in: soundQualityNote)
+        let wasHidden = soundQualityNote?.isHidden ?? true
+        soundQualityNote?.isHidden = off
+        let soundMoved = Self.show(Self.soundNote(audioActive: stats.audioActive, muted: muted),
+                                   in: soundNote)
+        return soundMoved || qualityMoved || wasHidden != off
+    }
+
+    @objc private func soundQualityChosen(_ sender: NSPopUpButton) {
+        guard let raw = sender.selectedItem?.representedObject as? String,
+              let choice = StreamSettings.SoundQuality(rawValue: raw) else { return }
+        // Choosing the one already chosen must not restart the picture.
+        guard choice != StreamSettings.shared.soundQuality else { return }
+        StreamSettings.shared.soundQuality = choice
+        if showSound() { refitDetail() }
     }
 
     @objc private func qualityChosen(_ sender: NSPopUpButton) {
@@ -491,6 +543,17 @@ final class QualityPill: DS.Box {
     /// One wording for both places the mode is chosen; see SettingsPane.
     private static func pointerHint(_ mode: InputCapture.PointerMode, followsGame: Bool) -> String {
         SettingsPane.modeDetail(mode, followsCursor: followsGame)
+    }
+
+    /// The sound's quality, said as the video's is: what it costs, and that
+    /// choosing it restarts the stream. A host that ignored it is said to
+    /// have, because otherwise the menu would claim 64 kbps of a stream that
+    /// is still sending 1.5 Mbps.
+    private static func soundQualityNote(_ quality: StreamSettings.SoundQuality, pinned: Bool,
+                                         ignored: Bool) -> String {
+        if pinned { return "Set by --sound-quality for this run." }
+        if ignored { return "SolStream on the PC predates this, so it sends uncompressed sound." }
+        return "\(quality.rate). Changing it restarts the picture briefly."
     }
 
     /// What the quality means, and that choosing it is not free: the PC's

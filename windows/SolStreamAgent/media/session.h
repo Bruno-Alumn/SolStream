@@ -17,6 +17,8 @@
 
 #include <windows.h>
 
+#include "audio.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,6 +34,8 @@ struct MediaConfig {
     UINT bitrate = 20000000;
     unsigned short port = 47999;
     bool audio = true;
+    /// PCM unless the Mac asked for Opus by name; see audio.h.
+    AudioEncoding audioEncoding;
 };
 
 class MediaSession {

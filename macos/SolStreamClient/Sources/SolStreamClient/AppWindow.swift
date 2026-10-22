@@ -118,6 +118,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             stats.droppedFrames = snapshot.dropped
             stats.totalFrames = snapshot.frames
             stats.audioActive = snapshot.audioFrames > 0
+            stats.hostIgnoresSoundQuality = self.session.hostIgnoresSoundQuality
             stats.hostDisplay = "\(self.display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
                 + "· \(self.display.width)×\(self.display.height)"
             stats.hostReportsCursor = self.inputCapture?.hostReportsCursorVisibility ?? false

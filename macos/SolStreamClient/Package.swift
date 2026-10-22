@@ -70,12 +70,13 @@ let package = Package(
             ]
         ),
 
-        // -- Audio renderer (AudioUnit) --
+        // -- Audio renderer (AudioUnit; Opus decoded by AudioToolbox) --
         .target(
             name: "AudioRenderer",
             dependencies: ["SolStreamLogging"],
             linkerSettings: [
                 .linkedFramework("AudioUnit"),
+                .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AVFoundation"),
             ]

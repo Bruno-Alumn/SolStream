@@ -5,11 +5,11 @@ import AVFoundation
 import os
 import SolStreamLogging
 
-/// Renders Opus/S16LE audio frames using AudioUnit for low-latency playback.
+/// Plays the host's sound -- 16-bit PCM, or Opus decoded on the way in --
+/// through the default output AudioUnit.
 ///
-/// Uses the RemoteIO AudioUnit (output unit) for macOS audio output.
-/// Audio frames arrive from the stream connection, are decoded, and
-/// queued in a ring buffer for the AudioUnit playback callback.
+/// Packets arrive from the stream connection, are decoded if they need to be,
+/// and are queued in a ring buffer for the AudioUnit's render callback.
 public final class AudioRenderer {
     private var audioUnit: AudioUnit?
     private var isRunning = false
@@ -104,8 +104,8 @@ public final class AudioRenderer {
         audioUnit = nil
     }
 
-    /// Play a decoded audio frame. Called from the stream connection callback.
-    /// Formats supported: 16-bit PCM, 48kHz stereo.
+    /// Play one packet of 16-bit PCM, 48 kHz stereo, interleaved. Called from
+    /// the stream connection's receive thread.
     public func playAudio(_ data: Data) {
         guard !data.isEmpty, isRunning else { return }
 
@@ -120,6 +120,25 @@ public final class AudioRenderer {
                 start: base.assumingMemoryBound(to: Int16.self), count: usable))
         }
     }
+
+    /// Play one Opus packet. Called from the stream connection's receive
+    /// thread, and only ever from that one thread: the decoder keeps state
+    /// from one packet to the next.
+    ///
+    /// - Returns: false when the packet could not be decoded.
+    @discardableResult
+    public func playOpus(_ packet: Data) -> Bool {
+        guard !packet.isEmpty, isRunning else { return false }
+        return opus.decode(packet) { samples in
+            let usable = samples.count - (samples.count % 2)
+            guard usable > 0 else { return }
+            ringBuffer.write(UnsafeBufferPointer(rebasing: samples[0..<usable]))
+        }
+    }
+
+    /// Built on the first Opus packet, so a stream of PCM -- from a host that
+    /// predates Opus, or chosen as Lossless -- never builds a decoder.
+    private lazy var opus = OpusDecoder(sampleRate: sampleRate, channels: Int(channelCount))
 
     /// Stop audio playback.
     public func stop() {

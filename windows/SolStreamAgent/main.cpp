@@ -3442,6 +3442,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // made step 4 measurable before step 6 existed.
         std::string started = "false";
         std::string startError;
+        // What the sound will be sent as, said in the reply so the Mac knows
+        // without waiting for a packet. Empty -- and so not said -- without sound.
+        std::string audioCodecReply;
 #ifdef SOLSTREAM_MEDIA
         long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
         // Zero means "host decides", which is what an absent field leaves behind.
@@ -3454,6 +3457,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         FieldNumber(line, "audio", audio);
         FieldNumber(line, "width", width);
         FieldNumber(line, "height", height);
+        // Sound quality. Absent from every Mac that predates it, which therefore
+        // gets the PCM it has always had.
+        std::string audioCodec;
+        long long audioBitrate = 0, audioFrameMs = 0;
+        FieldString(line, "audioCodec", audioCodec);
+        FieldNumber(line, "audioBitrate", audioBitrate);
+        FieldNumber(line, "audioFrameMs", audioFrameMs);
         HWND targetWindow =
             targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
         HMONITOR targetMonitor =
@@ -3482,6 +3492,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             config.width = (UINT) (width > 0 ? (width > 4096 ? 4096 : width) : 0);
             config.height = (UINT) (height > 0 ? (height > 4096 ? 4096 : height) : 0);
             config.audio = audio != 0;
+            // Opus only when named. A bitrate outside what libopus does well with
+            // stereo falls back to Standard's, and a packet length other than the
+            // three the Mac offers to 10 ms, rather than either being clamped: as
+            // with the video's, a number that far out is a client bug.
+            if (audioCodec == "opus") {
+                config.audioEncoding.codec = solstream::media::AudioEncoding::Codec::Opus;
+                config.audioEncoding.bitrate =
+                    (unsigned) (audioBitrate >= 24000 && audioBitrate <= 510000
+                                    ? audioBitrate : 128000);
+                config.audioEncoding.frameMs =
+                    (unsigned) (audioFrameMs == 5 || audioFrameMs == 10 || audioFrameMs == 20
+                                    ? audioFrameMs : 10);
+            }
+            if (config.audio) {
+                audioCodecReply = audioCodec == "opus" ? "opus" : "pcm";
+            }
             config.port = solstream::kDefaultMediaPort;
             // Start does not return until the capture and the encoder have both
             // opened or one of them has failed, so `streaming` below is what
@@ -3499,9 +3525,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 #else
         startError = "this build has no media path";
 #endif
-        Log("[media] session %llu opened; keys derived; streaming %s%s%s",
+        Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s",
             hcount, started.c_str(), startError.empty() ? "" : " -- ",
-            startError.c_str());
+            startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str());
         return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
                ",\"hpub\":\"" + hpubHex + "\""
                ",\"hnonce\":\"" + hnonceHex + "\""
@@ -3510,6 +3536,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                ",\"streaming\":" + started
                + (startError.empty() ? std::string()
                                      : ",\"message\":\"" + JsonEscape(startError) + "\"")
+               + (audioCodecReply.empty() ? std::string()
+                                          : ",\"audioCodec\":\"" + audioCodecReply + "\"")
                + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
     }
 
@@ -4479,6 +4507,25 @@ void ReleaseUnwantedConsole() {
 #endif
 }
 
+/// The licences of the third-party code inside this executable, which
+/// resources.rc embeds. libopus's is the only one. Its BSD licence asks for the
+/// notice to go wherever a binary does, and for a program that ships as one
+/// file, that means inside it. Nothing to print means a build without the media
+/// path, which has no libopus in it either.
+int PrintLicenses() {
+    HRSRC found = FindResourceW(nullptr, L"OPUS_COPYING", RT_RCDATA);
+    HGLOBAL loaded = found ? LoadResource(nullptr, found) : nullptr;
+    const void* text = loaded ? LockResource(loaded) : nullptr;
+    if (!text) {
+        std::fputs("This build of SolStream contains no third-party code.\n", stdout);
+        return 0;
+    }
+    std::fputs("SolStream compresses the PC's sound with libopus (https://opus-codec.org),\n"
+               "which is distributed under this licence:\n\n", stdout);
+    std::fwrite(text, 1, SizeofResource(nullptr, found), stdout);
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     ReleaseUnwantedConsole();
     // Everything outside main.cpp logs through the agent's file rather than
@@ -4491,6 +4538,7 @@ int wmain(int argc, wchar_t** argv) {
     // required.
     std::string bind_address = kLoopback;
     bool print_token = false;
+    bool print_licenses = false;
     bool no_auth = false;
     bool install = false;
     bool uninstall = false;
@@ -4522,6 +4570,8 @@ int wmain(int argc, wchar_t** argv) {
             start_hidden = true;
         } else if (arg == L"--print-token") {
             print_token = true;
+        } else if (arg == L"--licenses") {
+            print_licenses = true;
         } else if (arg == L"--no-auth") {
             no_auth = true;
         } else if (arg == L"--install") {
@@ -4536,6 +4586,11 @@ int wmain(int argc, wchar_t** argv) {
         } else if (arg == L"--configure-display") {
             configure_display = true;
         }
+    }
+
+    // Asks nothing of the machine, so it answers before anything is set up.
+    if (print_licenses) {
+        return PrintLicenses();
     }
 
     // Without this every coordinate we read or write is silently rescaled by

@@ -9,8 +9,9 @@ import MediaSession
 /// the code that opens a stream all read the same values. Each change posts
 /// `didChange` with `restartsStream` saying whether it can be applied to a
 /// running stream as it is (volume, buffering, mouse, clipboard) or needs the
-/// media session opened again (quality, frame rate, sound on or off), because
-/// the host's encoder and audio capture are fixed when the session opens.
+/// media session opened again (quality, frame rate, sound on or off, sound
+/// quality), because the host's encoders and audio capture are fixed when the
+/// session opens.
 ///
 /// The mouse settings live in InputCapture, which owns the behaviour; they are
 /// mirrored here so every setting has one address.
@@ -88,11 +89,72 @@ final class StreamSettings {
 
     // MARK: - Sound
 
-    /// Whether the PC sends its sound at all. Off saves 1.5 Mbit/s and the
-    /// PC's audio capture; volume and mute are the gentler controls.
+    /// Whether the PC sends its sound at all. Off saves the sound's share of
+    /// the network and the PC's audio capture; volume and mute are the gentler
+    /// controls.
     var streamsAudio: Bool {
         get { defaults.object(forKey: Key.audio) as? Bool ?? true }
         set { set(newValue, Key.audio, restarts: true) }
+    }
+
+    /// How the PC encodes its sound. Least to most, as the video's are.
+    ///
+    /// Opus, which the PC compiles in and AudioToolbox decodes, is all but
+    /// transparent at 256 kbit/s and still good at 64; it costs 7.5 ms more
+    /// delay than PCM at 10 ms a packet, and 17.5 ms at Data saver's 20.
+    /// Lossless is the PCM every host sent before, and the only one a host
+    /// that predates the choice can send.
+    enum SoundQuality: String, CaseIterable {
+        case dataSaver, standard, high, lossless
+
+        var title: String {
+            switch self {
+            case .dataSaver: return "Data saver"
+            case .standard: return "Standard"
+            case .high: return "High"
+            case .lossless: return "Lossless"
+            }
+        }
+
+        /// What it costs, spelt as the video's figures are.
+        var rate: String {
+            switch self {
+            case .dataSaver: return "64 kbps"
+            case .standard: return "128 kbps"
+            case .high: return "256 kbps"
+            case .lossless: return "1.5 Mbps"
+            }
+        }
+
+        /// One line saying what it is for, shown under the choice.
+        var detail: String {
+            switch self {
+            case .dataSaver: return "\(rate). Slow or metered networks; a little more delay."
+            case .standard: return "\(rate). Hard to tell from High, for half the data."
+            case .high: return "\(rate). Sounds as it does on the PC."
+            case .lossless: return "\(rate), uncompressed. Wired networks; least delay."
+            }
+        }
+
+        /// What the host is asked for.
+        ///
+        /// Data saver's packets are 20 ms rather than 10 because every packet
+        /// carries 68 bytes of headers: at 64 kbit/s and 10 ms they would be
+        /// nearly half the stream, and halving the packets is worth more there
+        /// than the 10 ms it adds.
+        var encoding: AudioEncoding {
+            switch self {
+            case .dataSaver: return .opus(bitrate: 64_000, frameMilliseconds: 20)
+            case .standard: return .opus(bitrate: 128_000, frameMilliseconds: 10)
+            case .high: return .opus(bitrate: 256_000, frameMilliseconds: 10)
+            case .lossless: return .pcm
+            }
+        }
+    }
+
+    var soundQuality: SoundQuality {
+        get { defaults.string(forKey: Key.soundQuality).flatMap(SoundQuality.init(rawValue:)) ?? .high }
+        set { set(newValue.rawValue, Key.soundQuality, restarts: true) }
     }
 
     /// 0...1.
@@ -180,8 +242,8 @@ final class StreamSettings {
     /// `base` with the chosen frame rate, bitrate and sound applied.
     ///
     /// `overrides` names fields a command-line flag already set (`--bitrate`,
-    /// `--fps`, `--no-audio`), which win: the test harness and anyone
-    /// debugging from a terminal must get exactly what they typed.
+    /// `--fps`, `--no-audio`, `--sound-quality`), which win: the test harness
+    /// and anyone debugging from a terminal must get exactly what they typed.
     func apply(to base: StreamConfig, host: String,
                overrides: Set<Override> = []) -> StreamConfig {
         var config = base
@@ -190,10 +252,11 @@ final class StreamSettings {
             config.bitrateKbps = videoQuality.bitrateKbps(remote: Self.isRemote(host: host))
         }
         if !overrides.contains(.audio) { config.audio = streamsAudio }
+        if !overrides.contains(.soundQuality) { config.audioEncoding = soundQuality.encoding }
         return config
     }
 
-    enum Override: Hashable { case frameRate, bitrate, audio }
+    enum Override: Hashable { case frameRate, bitrate, audio, soundQuality }
 
     // MARK: - Storage
 
@@ -204,6 +267,7 @@ final class StreamSettings {
         static let volume = "SolStream.volume"
         static let muted = "SolStream.muted"
         static let buffering = "SolStream.audioBuffering"
+        static let soundQuality = "SolStream.soundQuality"
         static let clipboard = "SolStream.syncsClipboard"
     }
 

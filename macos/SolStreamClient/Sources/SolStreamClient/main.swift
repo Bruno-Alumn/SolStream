@@ -97,6 +97,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overrides.insert(.audio)
             Log.info("[stream] no sound from the host")
         }
+        if let name = value(after: "--sound-quality") {
+            // By the name Settings stores (dataSaver, standard, high, lossless)
+            // or the one it shows, so either can be typed.
+            let all = StreamSettings.SoundQuality.allCases
+            if let quality = all.first(where: {
+                $0.rawValue.caseInsensitiveCompare(name) == .orderedSame
+                    || $0.title.caseInsensitiveCompare(name) == .orderedSame
+            }) {
+                config.audioEncoding = quality.encoding
+                overrides.insert(.soundQuality)
+                Log.info("[stream] sound quality \(quality.title): \(quality.encoding.summary)")
+            } else {
+                Log.error("[stream] --sound-quality \(name) is not one of "
+                          + all.map(\.rawValue).joined(separator: ", ") + "; using Settings")
+            }
+        }
         settingsOverrides = overrides
         QualityPill.commandLineOverrides = overrides
 
@@ -661,7 +677,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 display: display.name,
                 fps: config.frameRate,
                 bitrate: config.bitrateKbps * 1000,
-                audio: config.audio)
+                audio: config.audio,
+                audioEncoding: config.audioEncoding)
             // The canvas, said out loud: it is the size every crop is expressed
             // in, so the host must encode exactly this and not the raw source.
             request.width = config.width
@@ -1089,8 +1106,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Open the stream again with what Settings now says, keeping the windows.
     ///
-    /// Frame rate, bitrate and whether the PC captures its sound are fixed on
-    /// the host when a media session opens, so a new value needs a new session.
+    /// Frame rate, bitrate, whether the PC captures its sound and how it
+    /// encodes it are fixed on the host when a media session opens, so a new
+    /// value needs a new session.
     /// This rebuilds the stored request from the settings and hands it to
     /// `recoverMedia`, which already knows how to swap a session under windows
     /// that stay where they are.
@@ -1124,25 +1142,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      status: ("Applying settings…", "Restarting the picture from \(host)"))
     }
 
-    /// `request` and `config` with the settings' frame rate, bitrate and sound,
-    /// or nil when the stream already has all three -- in which case there is
-    /// nothing to restart for.
+    /// `request` and `config` with the settings' frame rate, bitrate, sound and
+    /// sound quality, or nil when the stream already has them all -- in which
+    /// case there is nothing to restart for.
+    ///
+    /// The sound's quality counts only while there is sound: with it off, the
+    /// host captures none to encode, and the restart that turns it back on
+    /// picks the new quality up with it.
     static func applying(_ settings: StreamSettings, to request: AgentConnection.MediaRequest,
                          config: StreamConfig, host: String,
                          overrides: Set<StreamSettings.Override>)
         -> (request: AgentConnection.MediaRequest, config: StreamConfig)? {
         let fresh = settings.apply(to: config, host: host, overrides: overrides)
+        let soundChanged = fresh.audio != config.audio
+            || (fresh.audio && fresh.audioEncoding != config.audioEncoding)
         guard fresh.frameRate != config.frameRate || fresh.bitrateKbps != config.bitrateKbps
-                || fresh.audio != config.audio else { return nil }
+                || soundChanged else { return nil }
         var updated = request
         updated.fps = fresh.frameRate
         updated.bitrate = fresh.bitrateKbps * 1000
         updated.audio = fresh.audio
+        updated.audioEncoding = fresh.audioEncoding
         return (updated, fresh)
     }
 
     static func describe(_ config: StreamConfig) -> String {
-        "\(config.frameRate) fps, \(config.bitrateKbps) kbit/s, sound \(config.audio ? "on" : "off")"
+        "\(config.frameRate) fps, \(config.bitrateKbps) kbit/s, "
+            + (config.audio ? "sound \(config.audioEncoding.summary)" : "sound off")
     }
 
     /// Choose which host display to stream.
