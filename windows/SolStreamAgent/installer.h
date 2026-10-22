@@ -111,6 +111,11 @@ std::wstring InstallLogPath();
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
                           bool at_logon);
 
+/// The netsh command that writes one inbound allow rule for `program` on
+/// `ports`. Exposed for its tests.
+std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& program,
+                                 const std::wstring& protocol, const std::wstring& ports);
+
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
 /// than showing the user an exit code.

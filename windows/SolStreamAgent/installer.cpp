@@ -457,27 +457,10 @@ void DeleteRulesForProgram(const std::wstring& directory) {
     }
 }
 
-/// One rule, naming both the program and the ports it may use.
-///
-/// Naming the program is what stops Windows asking the user whether to allow it
-/// — that prompt is raised per-executable, and on this project it once landed on
-/// a display with no monitor and blocked every click for days. Naming the ports
-/// as well is what keeps the rule honest: a program rule on its own opens every
-/// port that executable ever binds, and an agent that later opens a socket for
-/// something else should not inherit a hole it was never granted.
 bool AddRule(const std::wstring& name, const std::wstring& program,
              const std::wstring& protocol, const std::wstring& ports) {
     DeleteRule(name);
-    const std::wstring command =
-        L"netsh.exe advfirewall firewall add rule"
-        L" name=\"" + name + L"\""
-        L" dir=in action=allow"
-        L" program=\"" + program + L"\""
-        L" protocol=" + protocol +
-        L" localport=" + ports +
-        L" profile=private,public"
-        L" description=\"SolStream remote application streaming\"";
-    return RunHidden(command) == 0;
+    return RunHidden(FirewallRuleCommand(name, program, protocol, ports)) == 0;
 }
 
 // ── Shortcuts ────────────────────────────────────────────────────────────────
@@ -733,6 +716,33 @@ std::wstring XmlEscape(const std::wstring& text) {
 }
 
 }  // namespace
+
+/// One rule, naming both the program and the ports it may use.
+///
+/// Naming the program is what stops Windows asking the user whether to allow it
+/// — that prompt is raised per-executable, and on this project it once landed on
+/// a display with no monitor and blocked every click for days. Naming the ports
+/// as well is what keeps the rule honest: a program rule on its own opens every
+/// port that executable ever binds, and an agent that later opens a socket for
+/// something else should not inherit a hole it was never granted.
+///
+/// Every profile, the Domain one included. Without it a PC on its company's
+/// network -- where Windows uses the Domain profile -- met its default Block,
+/// and because a rule naming SolStream.exe existed, Windows did not ask either:
+/// the Mac's knock and connection went unanswered with nothing on the PC saying
+/// why. The program and the ports are what keep the rule narrow, not the
+/// profile.
+std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& program,
+                                 const std::wstring& protocol, const std::wstring& ports) {
+    return L"netsh.exe advfirewall firewall add rule"
+           L" name=\"" + name + L"\""
+           L" dir=in action=allow"
+           L" program=\"" + program + L"\""
+           L" protocol=" + protocol +
+           L" localport=" + ports +
+           L" profile=any"
+           L" description=\"SolStream remote application streaming\"";
+}
 
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
                           bool at_logon) {

@@ -523,6 +523,22 @@ void TestLogonTask() {
           != std::wstring::npos);
 }
 
+/// The two rules the installer writes. Every profile: on a PC at its
+/// company's office Windows uses the Domain profile, and a rule for only
+/// Private and Public left the Mac unanswered there.
+void TestFirewallRule() {
+    const std::wstring rule = FirewallRuleCommand(
+        L"SolStream - agent", L"C:\\Program Files\\SolStream\\SolStream.exe", L"TCP", L"47630");
+    CHECK(rule.rfind(L"netsh.exe advfirewall firewall add rule", 0) == 0);
+    CHECK(rule.find(L" profile=any ") != std::wstring::npos);
+    CHECK(rule.find(L"private,public") == std::wstring::npos);
+    // Still narrow: the one program, the one protocol, the named ports.
+    CHECK(rule.find(L" program=\"C:\\Program Files\\SolStream\\SolStream.exe\" ")
+          != std::wstring::npos);
+    CHECK(rule.find(L" dir=in action=allow ") != std::wstring::npos);
+    CHECK(rule.find(L" protocol=TCP localport=47630 ") != std::wstring::npos);
+}
+
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -1056,6 +1072,7 @@ int wmain(int argc, wchar_t** argv) {
     TestEnvironment();
     TestInstallOptions();
     TestLogonTask();
+    TestFirewallRule();
     TestQualifyCommand();
     TestNoDowngrade();
     TestDownload();
