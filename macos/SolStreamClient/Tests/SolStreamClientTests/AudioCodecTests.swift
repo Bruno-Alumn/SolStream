@@ -264,6 +264,20 @@ final class AudioCodecTests: XCTestCase {
         XCTAssertFalse(StreamSession.hostIgnoresSoundQuality(asked: lossless, answered: .pcm))
     }
 
+    /// The popover's "all the PC's sound" is said only when the streamed apps'
+    /// alone was asked for and the whole PC's promised -- as a host on
+    /// Windows 10 answers -- and not with the sound off.
+    func testTheMacNoticesAHostThatSendsTheWholePCsSound() {
+        let apps = StreamConfig(audio: true, audioSource: .apps)
+        XCTAssertTrue(StreamSession.hostSendsWholePC(asked: apps, answered: .system))
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: apps, answered: .apps))
+        var silent = apps
+        silent.audio = false
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: silent, answered: .system))
+        let everything = StreamConfig(audio: true, audioSource: .system)
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: everything, answered: .system))
+    }
+
     // MARK: - Helpers
 
     /// main.cpp's FieldNumber, transcribed: the first `"key"`, then the first

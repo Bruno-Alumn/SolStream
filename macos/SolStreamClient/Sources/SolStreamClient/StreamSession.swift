@@ -108,6 +108,15 @@ final class StreamSession {
         config.audio && config.audioEncoding.codec != .pcm && codec == .pcm
     }
 
+    /// The Mac asked for the streamed apps' sound alone and the host said it
+    /// will send the whole PC's, which a Windows older than build 20348 does
+    /// whatever it is asked. Fixed for the session, as the answer is.
+    let hostSendsWholePC: Bool
+
+    static func hostSendsWholePC(asked config: StreamConfig, answered source: AudioSource) -> Bool {
+        config.audio && config.audioSource == .apps && source == .system
+    }
+
     /// The host said it takes keys by position, so the PC's own keyboard
     /// layout decides what they type. Fixed for the session, as the host's
     /// answer is; a host that predates it is sent keys by virtual key.
@@ -153,6 +162,7 @@ final class StreamSession {
         self.requestedAudio = config.audioEncoding
         self.hostIgnoresSoundQuality = Self.hostIgnoresSoundQuality(asked: config,
                                                                     answered: session.audioCodec)
+        self.hostSendsWholePC = Self.hostSendsWholePC(asked: config, answered: session.audioSource)
         self.hostTakesScanCodes = session.takesScanCodes
         // Said once a session, because it decides what every key types and
         // nothing on screen shows which way they are going.

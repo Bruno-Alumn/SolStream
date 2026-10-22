@@ -45,6 +45,10 @@
 
 namespace solstream::media {
 
+/// Whether this Windows can capture the streamed apps' sound alone: build
+/// 20348 or later. Below that, a request for it gets the whole PC's.
+bool AppSoundSupported();
+
 /// What the sound is sent as. The defaults are PCM's, for a Mac that asked
 /// for nothing.
 struct AudioEncoding {

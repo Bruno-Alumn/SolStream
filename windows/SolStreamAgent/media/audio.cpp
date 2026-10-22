@@ -7,6 +7,7 @@
 #include <audioclientactivationparams.h>
 #include <opus.h>
 #include "audio_reopen.h"
+#include "audio_source.h"
 #include "log.h"
 
 #include <algorithm>
@@ -517,8 +518,7 @@ bool HasProcessLoopback() {
     OSVERSIONINFOW version{};
     version.dwOSVersionInfoSize = sizeof(version);
     return rtlGetVersion && rtlGetVersion(&version) == 0
-        && (version.dwMajorVersion > 10
-            || (version.dwMajorVersion == 10 && version.dwBuildNumber >= 20348));
+        && VersionHasAppSound(version.dwMajorVersion, version.dwBuildNumber);
 }
 
 /// The streamed apps' sound, and nothing else, until `running` says stop.
@@ -825,6 +825,8 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
 }
 
 }  // namespace
+
+bool AppSoundSupported() { return HasProcessLoopback(); }
 
 void AudioCapture::Stop() { stop_.store(true); }
 

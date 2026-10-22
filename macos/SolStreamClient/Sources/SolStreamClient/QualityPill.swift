@@ -24,6 +24,9 @@ final class QualityPill: DS.Box {
         /// The host answered a request for compressed sound with PCM, which
         /// one that predates the choice does; see StreamSession.
         var hostIgnoresSoundQuality: Bool = false
+        /// The host answered a request for the streamed apps' sound with the
+        /// whole PC's, as one on Windows 10 does; see StreamSession.
+        var hostSendsWholePC: Bool = false
         var hostDisplay: String = ""
         /// The host reports its cursor going away -- declared on its pushes,
         /// or learned from seeing it hide and show one -- so in gaming mode the
@@ -517,7 +520,8 @@ final class QualityPill: DS.Box {
         let qualityMoved = Self.show(qualityText, in: soundQualityNote)
         let wasHidden = soundQualityNote?.isHidden ?? true
         soundQualityNote?.isHidden = off
-        let soundMoved = Self.show(Self.soundNote(audioActive: stats.audioActive, muted: muted),
+        let soundMoved = Self.show(Self.soundNote(audioActive: stats.audioActive, muted: muted,
+                                                  wholePC: stats.hostSendsWholePC),
                                    in: soundNote)
         return soundMoved || qualityMoved || wasHidden != off
     }
@@ -566,13 +570,20 @@ final class QualityPill: DS.Box {
         return nil
     }
 
-    private static func soundNote(audioActive: Bool, muted: Bool) -> String {
+    /// - Parameter wholePC: the host sends all its sound though only the
+    ///   streamed apps' was asked for, which Settings says is what you get.
+    private static func soundNote(audioActive: Bool, muted: Bool, wholePC: Bool) -> String {
         switch soundOff(audioActive: audioActive) {
         case .byFlag: return "Off for this run, by --no-audio."
         case .inSettings: return "Off in Settings, so the PC sends none."
         case nil: break
         }
         if muted { return audioActive ? "Muted on this Mac. The PC is still playing." : "Muted on this Mac." }
+        if wholePC {
+            return audioActive
+                ? "Playing all the PC's sound: the streamed apps' alone needs Windows 11."
+                : "Nothing playing. The PC sends all its sound: the streamed apps' alone needs Windows 11."
+        }
         return audioActive ? "Playing from the PC." : "Nothing playing on the PC right now."
     }
 

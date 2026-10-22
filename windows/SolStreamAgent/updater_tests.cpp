@@ -34,11 +34,13 @@
 #include <cctype>
 #include <cstdio>
 #include <map>
+#include <cstring>
 
 #include "clipboard.h"
 #include "driver_install.h"
 #include "foreground.h"
 #include "media/audio_reopen.h"
+#include "media/audio_source.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "session_takeover.h"
@@ -2564,6 +2566,22 @@ void TestForegroundBound() {
     CloseHandle(done);
 }
 
+void TestAudioSource() {
+    using namespace media;
+    // Process loopback came with build 20348.
+    CHECK(!VersionHasAppSound(10, 19045));   // Windows 10 22H2
+    CHECK(!VersionHasAppSound(10, 20347));
+    CHECK(VersionHasAppSound(10, 20348));
+    CHECK(VersionHasAppSound(10, 22631));    // Windows 11
+    CHECK(VersionHasAppSound(11, 0));
+    CHECK(!VersionHasAppSound(6, 30000));
+    // The reply says what will be sent, not what was asked.
+    CHECK(std::strcmp(AudioSourceReply(true, true), "apps") == 0);
+    CHECK(std::strcmp(AudioSourceReply(true, false), "system") == 0);
+    CHECK(std::strcmp(AudioSourceReply(false, true), "system") == 0);
+    CHECK(std::strcmp(AudioSourceReply(false, false), "system") == 0);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2646,6 +2664,7 @@ int wmain(int argc, wchar_t** argv) {
     TestHoldOrder();
     TestStrandedWindows();
     TestForegroundBound();
+    TestAudioSource();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

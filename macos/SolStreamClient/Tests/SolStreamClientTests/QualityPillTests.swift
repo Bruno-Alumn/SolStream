@@ -317,6 +317,27 @@ final class QualityPillTests: XCTestCase {
         XCTAssertLessThanOrEqual(detail.bounds.height, 460)
     }
 
+    /// A host on Windows 10 sends all its sound whatever Settings asks for.
+    /// The popover says so, rather than leave Settings' "only the streamed
+    /// apps" standing.
+    func testAHostThatSendsTheWholePCsSoundIsSaidToHave() throws {
+        let detail = detail()
+        let pill = try XCTUnwrap(pills.last)
+        var stats = pill.stats
+        stats.hostSendsWholePC = true
+        pill.stats = stats
+        XCTAssertTrue(Self.words(in: detail).contains(
+            "Playing all the PC's sound: the streamed apps' alone needs Windows 11."))
+        Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
+        XCTAssertLessThanOrEqual(detail.bounds.height, 460)
+        stats.audioActive = false
+        pill.stats = stats
+        XCTAssertTrue(Self.words(in: detail).contains(
+            "Nothing playing. The PC sends all its sound: the streamed apps' alone needs Windows 11."))
+        Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
+        XCTAssertLessThanOrEqual(detail.bounds.height, 460)
+    }
+
     func testChoosingAQualityStoresItOnceAndSaysWhatItMeans() throws {
         let detail = detail()
         let menu = try XCTUnwrap(Self.videoMenu(in: detail))

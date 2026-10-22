@@ -78,6 +78,8 @@
 // built on Windows.
 #include "media/log.h"
 #ifdef SOLSTREAM_MEDIA
+#include "media/audio.h"
+#include "media/audio_source.h"
 #include "media/capture.h"
 #include "media/channel.h"
 #include "media/session.h"
@@ -3842,11 +3844,17 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             }
             // The streamed apps' sound only: the processes of every window the
             // Mac is managing, read afresh by the audio thread as they change.
-            if (config.audio && audioSource == "apps") {
-                config.audioProcesses = [] { return StreamedProcesses(); };
-                audioSourceReply = "apps";
-            } else if (config.audio) {
-                audioSourceReply = "system";
+            // Said only when this Windows can do it, so that the Mac hears
+            // when it gets the whole PC's sound instead; see audio_source.h.
+            if (config.audio) {
+                audioSourceReply = solstream::media::AudioSourceReply(
+                    audioSource == "apps", solstream::media::AppSoundSupported());
+                if (audioSourceReply == "apps") {
+                    config.audioProcesses = [] { return StreamedProcesses(); };
+                } else if (audioSource == "apps") {
+                    Log("[media] only the streamed apps' sound needs Windows build 20348 "
+                        "or later; sending the whole PC's");
+                }
             }
             config.port = solstream::kDefaultMediaPort;
             // Start does not return until the capture and the encoder have both
