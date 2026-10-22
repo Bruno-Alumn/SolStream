@@ -69,7 +69,7 @@
 namespace solstream {
 namespace {
 
-constexpr wchar_t kClassName[] = L"SolStreamHostWindow";
+constexpr const wchar_t* kClassName = kHostWindowClass;
 /// Setup gets its OWN class, and the reason is not tidiness.
 ///
 /// The installed agent starts by asking whether SolStream is already running,
@@ -135,10 +135,17 @@ UINT g_taskbar_created = 0;
 /// Sent by a second launch (a shortcut, the Start menu, setup's "Open") to the
 /// running copy: "show your window". Registered, so both processes agree on it.
 UINT g_show_request = 0;
+/// Sent by an install or an uninstall that is about to replace this copy:
+/// kQuitHostMessage.
+UINT g_quit_request = 0;
 bool g_tray_added = false;
 /// Set by the tray's Quit, so the WM_CLOSE that follows ends the program
 /// instead of hiding the window again.
 bool g_quitting = false;
+/// Set when an install asked this copy to quit. It goes even with a job
+/// running: the install stops it by force a few seconds later regardless,
+/// and that is the ending this exists to spare it.
+bool g_quit_requested = false;
 
 /// Which face the window is showing, fixed at creation.
 WindowMode g_mode = WindowMode::Host;
@@ -2687,6 +2694,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         ShowFromTray(window);
         return 0;
     }
+    if (g_quit_request != 0 && message == g_quit_request && g_mode == WindowMode::Host) {
+        // An install or an uninstall about to replace this copy, asking it to
+        // go the way the tray's Quit does. Stopped by force instead, as it
+        // always used to be, it never got to WM_DESTROY: its icon stayed by
+        // the clock, dead, beside the new copy's, and a window being streamed
+        // kept the style and the placement the stream gave it. Answered at
+        // once and done from the queue, so the install is not left waiting
+        // inside this call while the session winds down.
+        g_quitting = true;
+        g_quit_requested = true;
+        PostMessageW(window, WM_CLOSE, 0, 0);
+        return (LRESULT) kHostQuitting;
+    }
     if (g_progress_message != 0 && message == g_progress_message) {
         // The virtual display's progress, from the elevated half. Each step is
         // a wait the person would otherwise sit through wondering, and the
@@ -3086,7 +3106,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // could tell the user how it went. Nor is the refusal remembered:
             // left set, it would turn the next close with the window's × --
             // which only ever hides it -- into quitting.
-            if (g_job_running) {
+            if (g_job_running && !g_quit_requested) {
                 g_quitting = false;
                 return 0;
             }
@@ -3118,6 +3138,10 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     g_mode = mode;
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     g_show_request = RegisterWindowMessageW(L"SolStream.ShowHostWindow");
+    // Not added to the message filter, unlike the progress message below: the
+    // installer that sends it is elevated, which UIPI lets through, and nothing
+    // less privileged than this process has any business ending it.
+    g_quit_request = RegisterWindowMessageW(kQuitHostMessage);
     g_progress_message = RegisterWindowMessageW(kSetupProgressMessage);
     // A message from a more privileged process than this one is let through
     // UIPI's filter as long as it goes downwards, which this one does -- but

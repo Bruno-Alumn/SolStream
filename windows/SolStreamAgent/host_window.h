@@ -41,6 +41,18 @@ struct HostStatus {
     std::wstring tailscale_address;
 };
 
+/// The running host's window class: how a second launch finds it to bring it
+/// forward, and how an install finds it to ask it to quit. Setup's window has a
+/// class of its own, and host_window.cpp says why that matters.
+constexpr wchar_t kHostWindowClass[] = L"SolStreamHostWindow";
+
+/// Sent by an install or an uninstall to the host it is about to replace or
+/// remove: quit, as the tray's Quit does. The host answers kHostQuitting. A
+/// host from before this message existed answers 0, and is stopped by force as
+/// every host used to be.
+constexpr wchar_t kQuitHostMessage[] = L"SolStream.QuitHost";
+constexpr unsigned kHostQuitting = 0x51554954u;  // "QUIT"
+
 /// Which face the window shows.
 ///
 /// One window class, three faces, rather than a separate installer executable.

@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "host_window.h"
 #include "ports.h"
 #include "util.h"
 
@@ -382,9 +383,72 @@ DWORD TreeSizeKb(const std::wstring& path) {
 }
 
 
+/// Ask each host running out of the install directory, on this desktop, to
+/// quit the way its tray's Quit does, and give it a moment to.
+///
+/// Stopped by force, a host never reached WM_DESTROY: its notification icon
+/// stayed by the clock, dead and still saying whatever it last said, beside
+/// the icon of the copy that replaced it; and a window being streamed when
+/// somebody reinstalled or uninstalled kept the locked style, the topmost bit
+/// and the virtual-display placement the stream gave it. Asked, it puts all of
+/// that back on its way out. StopInstalled still stops by force whatever is
+/// left, so a host that will not answer -- hung, or a copy from before this
+/// request existed, which answers 0 -- costs at most a few seconds' wait.
+///
+/// Found by window class and then held to the same rule as StopInstalled: its
+/// program must be under the install directory. Setup's window has a class of
+/// its own, and a host somebody runs from anywhere else is not ours to end.
+void AskInstalledHostsToQuit(const std::wstring& destination) {
+    std::vector<HWND> windows;
+    for (HWND window = FindWindowExW(nullptr, nullptr, kHostWindowClass, nullptr);
+         window != nullptr;
+         window = FindWindowExW(nullptr, window, kHostWindowClass, nullptr)) {
+        windows.push_back(window);
+    }
+    if (windows.empty()) {
+        return;
+    }
+    const UINT quit = RegisterWindowMessageW(kQuitHostMessage);
+    const std::wstring inside = FoldCase(destination + L"\\");
+    for (HWND window : windows) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(window, &pid);
+        if (pid == 0 || pid == GetCurrentProcessId()) {
+            continue;
+        }
+        HANDLE process =
+            OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (process == nullptr) {
+            continue;
+        }
+        wchar_t image[MAX_PATH * 2] = {0};
+        DWORD size = MAX_PATH * 2;
+        const bool ours = QueryFullProcessImageNameW(process, 0, image, &size)
+                          && FoldCase(image).rfind(inside, 0) == 0;
+        DWORD_PTR answer = 0;
+        if (ours && quit != 0
+            && SendMessageTimeoutW(window, quit, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000,
+                                   &answer)
+            && answer == kHostQuitting) {
+            // Long enough to stop a stream and give its windows back, which
+            // takes well under a second. A host still here after that is
+            // stopped by force like anything else.
+            InstallLog(WaitForSingleObject(process, 5000) == WAIT_OBJECT_0
+                           ? "the running host quit when asked"
+                           : "the running host was asked to quit and had not after 5 "
+                             "seconds");
+        }
+        CloseHandle(process);
+    }
+}
+
 /// Stop anything already running out of the install directory, or the copy
 /// fails on a locked executable and leaves a half-installed folder.
 void StopInstalled(const std::wstring& destination) {
+    // Asked to quit first, and only what is still here after that is stopped
+    // below: see AskInstalledHostsToQuit.
+    AskInstalledHostsToQuit(destination);
+
     // By WHERE a process is running from, never by what it is called.
     //
     // The point of this is to release locks on files about to be overwritten,
@@ -1464,6 +1528,10 @@ bool UninstallSelf(std::string& error) {
         return false;
     }
     const std::wstring destination = InstallDirectory();
+    // Asked before the task is ended, for the reason StopInstalled asks before
+    // it forces: Task Scheduler ending the host is not the host quitting, and
+    // only quitting takes its icon away and gives the streamed windows back.
+    AskInstalledHostsToQuit(destination);
     RunHidden(L"schtasks.exe /end /tn \"" + std::wstring(kTaskName) + L"\"");
     RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
     // /delete answers non-zero both for "there was no such task", which is the
