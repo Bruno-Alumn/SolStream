@@ -340,6 +340,9 @@ private:
     IAudioClient* client_ = nullptr;
 };
 
+/// One wanted app's capture. Kept while the app is wanted even when the tap
+/// stops working -- the audio service restarted, say -- with `client` null
+/// until it opens again; see RunApps.
 struct ProcessTap {
     DWORD pid = 0;
     IAudioClient* client = nullptr;
@@ -347,6 +350,8 @@ struct ProcessTap {
     HANDLE ready = nullptr;
     /// Stereo frames read and not yet mixed.
     std::vector<float> queued;
+    ReadTrouble trouble;
+    Reopener reopen;
 };
 
 void CloseTap(ProcessTap& tap) {
@@ -417,15 +422,19 @@ HRESULT OpenTap(DWORD pid, ProcessTap& tap) {
 
 /// Everything a tap has delivered, onto the end of its queue. A buffer
 /// flagged silent still holds its place in time, as zeros, so the apps
-/// being mixed stay in step.
-void ReadTap(ProcessTap& tap) {
+/// being mixed stay in step. Returns the failure that stopped the reading, if
+/// one did: a tap whose reads fail has stopped delivering, and treating that
+/// as nothing yet kept the app silent until the set of windows changed.
+HRESULT ReadTap(ProcessTap& tap) {
     UINT32 available = 0;
-    while (SUCCEEDED(tap.capture->GetNextPacketSize(&available)) && available > 0) {
+    HRESULT hr = tap.capture->GetNextPacketSize(&available);
+    while (SUCCEEDED(hr) && available > 0) {
         BYTE* data = nullptr;
         UINT32 frames = 0;
         DWORD flags = 0;
-        if (FAILED(tap.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
-            return;
+        hr = tap.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+        if (FAILED(hr)) {
+            break;
         }
         const size_t at = tap.queued.size();
         tap.queued.resize(at + (size_t) frames * 2, 0.0f);
@@ -433,7 +442,15 @@ void ReadTap(ProcessTap& tap) {
             memcpy(tap.queued.data() + at, data, (size_t) frames * 2 * sizeof(float));
         }
         tap.capture->ReleaseBuffer(frames);
+        hr = tap.capture->GetNextPacketSize(&available);
     }
+    return hr;
+}
+
+/// How many of the wanted apps are being heard, for the five-second line.
+int OpenTaps(const std::vector<ProcessTap>& taps) {
+    return (int) std::count_if(taps.begin(), taps.end(),
+                               [](const ProcessTap& tap) { return tap.client != nullptr; });
 }
 
 /// How far one tap may run ahead of another before the one behind is counted
@@ -442,15 +459,18 @@ void ReadTap(ProcessTap& tap) {
 /// must not hold up the others' sound while it does.
 constexpr size_t kMixSlackFrames = kWireRate * 30 / 1000;
 
-/// Every tap's sound added together, as far as all of them have reached.
+/// Every tap's sound added together, as far as all of them have reached. A
+/// tap waiting to open again has nothing queued and is left out of the reckoning,
+/// or it would hold the others back by the whole of kMixSlackFrames.
 void Mix(std::vector<ProcessTap>& taps, std::vector<float>& out) {
     size_t least = SIZE_MAX, most = 0;
     for (const ProcessTap& tap : taps) {
+        if (!tap.client) { continue; }
         const size_t frames = tap.queued.size() / 2;
         least = frames < least ? frames : least;
         most = frames > most ? frames : most;
     }
-    if (taps.empty()) { return; }
+    if (least == SIZE_MAX) { return; }
     size_t frames = least;
     if (most > least + kMixSlackFrames) { frames = most - kMixSlackFrames; }
     if (frames == 0) { return; }
@@ -529,15 +549,16 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
             if (wanted != current) {
                 // Kept where still wanted, so an app that stays does not lose a
                 // beat when another joins it.
+                const auto unwanted = [&wanted](const ProcessTap& tap) {
+                    return !std::binary_search(wanted.begin(), wanted.end(), tap.pid);
+                };
                 for (ProcessTap& tap : taps) {
-                    if (!std::binary_search(wanted.begin(), wanted.end(), tap.pid)) {
+                    if (unwanted(tap)) {
                         Log("[media] no longer hearing %s", ProcessName(tap.pid).c_str());
                         CloseTap(tap);
                     }
                 }
-                taps.erase(std::remove_if(taps.begin(), taps.end(),
-                                          [](const ProcessTap& tap) { return !tap.client; }),
-                           taps.end());
+                taps.erase(std::remove_if(taps.begin(), taps.end(), unwanted), taps.end());
                 for (DWORD pid : wanted) {
                     const bool have = std::any_of(taps.begin(), taps.end(),
                                                   [pid](const ProcessTap& tap) { return tap.pid == pid; });
@@ -546,6 +567,7 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                     const HRESULT hr = OpenTap(pid, tap);
                     if (SUCCEEDED(hr)) {
                         Log("[media] hearing %s", ProcessName(pid).c_str());
+                        tap.reopen.Opened(now);
                         taps.push_back(std::move(tap));
                     } else {
                         Log("[media] could not hear %s (0x%08lX)", ProcessName(pid).c_str(), hr);
@@ -555,17 +577,50 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                 // process that refused once, four times a second, would only
                 // fill the log.
                 current = wanted;
-                appSources.store((int) taps.size());
             }
+            // Unlike a tap that would not open, one that opened and then
+            // stopped working is opened again, every half second until it
+            // does: it worked, so what stopped it -- the audio service
+            // restarting, most likely -- passes.
+            for (ProcessTap& tap : taps) {
+                if (tap.client || !tap.reopen.Due(now)) { continue; }
+                const HRESULT hr = OpenTap(tap.pid, tap);
+                if (SUCCEEDED(hr)) {
+                    if (tap.reopen.Opened(now)) {
+                        Log("[media] hearing %s again", ProcessName(tap.pid).c_str());
+                    }
+                } else if (tap.reopen.OpenFailed(hr, now)) {
+                    Log("[media] could not hear %s again yet (0x%08lX); trying every half second",
+                        ProcessName(tap.pid).c_str(), hr);
+                }
+            }
+            appSources.store(OpenTaps(taps));
         }
-        if (taps.empty()) {
+        events.clear();
+        for (const ProcessTap& tap : taps) {
+            if (tap.client) { events.push_back(tap.ready); }
+        }
+        if (events.empty()) {
             Sleep(kPacketMs);
             continue;
         }
-        events.clear();
-        for (const ProcessTap& tap : taps) { events.push_back(tap.ready); }
         WaitForMultipleObjects((DWORD) events.size(), events.data(), FALSE, 20);
-        for (ProcessTap& tap : taps) { ReadTap(tap); }
+        const ULONGLONG readAt = GetTickCount64();
+        for (ProcessTap& tap : taps) {
+            if (!tap.client) { continue; }
+            const HRESULT hr = ReadTap(tap);
+            if (SUCCEEDED(hr)) {
+                tap.trouble.Worked();
+            } else if (tap.trouble.GiveUp(hr, readAt)) {
+                // Closed but kept, and opened again by the check above.
+                if (tap.reopen.Lost(hr, readAt)) {
+                    Log("[media] lost the sound of %s (0x%08lX); opening it again",
+                        ProcessName(tap.pid).c_str(), hr);
+                }
+                CloseTap(tap);
+                appSources.store(OpenTaps(taps));
+            }
+        }
         Mix(taps, pending);
         packetizer.Drain(pending);
     }
