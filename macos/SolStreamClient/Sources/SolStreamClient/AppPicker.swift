@@ -37,7 +37,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// happens on the window the person is already looking at.
     let window: NSWindow
     private let searchField = DS.Field(placeholder: "")
-    private let tableView = NSTableView()
+    private let tableView = PickerTableView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
@@ -120,7 +120,16 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
-        tableView.doubleAction = #selector(openTapped)
+        // One click opens: the list is a set of things to open, not a set of
+        // things to select and then confirm, and a click that only highlighted
+        // left a second step for no reason. The arrows still only move the
+        // highlight, and Return opens it.
+        tableView.action = #selector(rowClicked)
+        tableView.onReturn = { [weak self] in self?.openTapped() }
+        tableView.onEscape = { [weak self] in self?.backTapped() }
+        // Typing with the list focused goes on searching, as it would if the
+        // focus had never left the field.
+        tableView.onTyping = { [weak self] text in self?.continueSearch(with: text) }
         tableView.backgroundColor = .clear
         tableView.style = .plain
         tableView.selectionHighlightStyle = .regular
@@ -128,6 +137,13 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.gridStyleMask = []
 
         scrollView.documentView = tableView
+        // Hover follows the pointer, not just its crossings: rows scrolled
+        // under a pointer that does not move get no exit, and kept their
+        // highlight; see `refreshHover`.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshHover),
+                                               name: NSView.boundsDidChangeNotification,
+                                               object: scrollView.contentView)
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
@@ -344,6 +360,21 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         openButton.isEnabled = !rows.isEmpty
+        refreshHover()
+    }
+
+    /// Put the hover on whichever row is under the pointer now, and on no
+    /// other. Tracking areas only report the pointer crossing a row's edge,
+    /// and a list scrolled by the wheel or trackpad moves the rows instead:
+    /// the row that slid out from under the pointer never heard it leave, and
+    /// a reused row view brought its highlight to a new title.
+    @objc private func refreshHover() {
+        let pointer = tableView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        let visible = tableView.visibleRect
+        let under = visible.contains(pointer) ? tableView.row(at: pointer) : -1
+        tableView.enumerateAvailableRowViews { view, row in
+            (view as? PickerRowView)?.hovering = row == under
+        }
     }
 
     /// Prefix beats word-start beats substring; nil means no match at all.
@@ -361,9 +392,9 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     @objc private func openTapped() {
         // One open at a time, and the check has to be here rather than on the
         // button. `showBusy` disables the Open button, which is exactly right
-        // for the button — but this method is also the table's `doubleAction`
-        // and what the search field calls on Return, and neither of those asks
-        // the button whether it is enabled. Double-clicking a row that was
+        // for the button — but this method is also what a click on a row and
+        // Return in the field or the list call, and none of those asks the
+        // button whether it is enabled. Clicking a row that was
         // already starting therefore ran the whole flow a second time: a second
         // media session negotiated over the top of the first, and a second
         // window for the same application. `busyRow` is what `showBusy` sets and
@@ -373,6 +404,19 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         let index = tableView.selectedRow
         guard index >= 0, index < rows.count else { return }
         onChoose(rows[index].choice)
+    }
+
+    @objc private func rowClicked() {
+        let row = tableView.clickedRow
+        guard row >= 0, row < rows.count else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        openTapped()
+    }
+
+    /// Typing that reached the list, back into the search field.
+    private func continueSearch(with text: String) {
+        window.makeFirstResponder(searchField)
+        searchField.currentEditor()?.insertText(text)
     }
 
     /// Move the highlighted row, keeping it on screen. Clamped rather than
@@ -385,6 +429,9 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.scrollRowToVisible(next)
     }
 
+    /// Back to choosing a PC. Escape does this too -- from the list, and from
+    /// the search field once it is empty; with something typed, Escape clears
+    /// that first, as it does in every Mac search field.
     @objc private func backTapped() {
         close()
         onCancel()
@@ -464,8 +511,13 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 /// `accentTint` with a 3px accent bar on the leading edge — not the system blue,
 /// and not Nocturne's purple outline, which was the heaviest thing in the window.
 private final class PickerRowView: NSTableRowView {
-    private var hovering = false {
-        didSet { needsDisplay = true; syncCell() }
+    /// Set by the picker from where the pointer is; see `refreshHover`.
+    var hovering = false {
+        didSet {
+            guard hovering != oldValue else { return }
+            needsDisplay = true
+            syncCell()
+        }
     }
 
     override var isSelected: Bool {
@@ -644,8 +696,45 @@ extension AppPicker: NSTextFieldDelegate {
         case #selector(NSResponder.moveUp(_:)):
             moveSelection(by: -1)
             return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            if searchField.stringValue.isEmpty {
+                backTapped()
+            } else {
+                searchField.stringValue = ""
+                applyFilter()
+            }
+            return true
         default:
             return false
+        }
+    }
+}
+
+/// The list's own keys: Return opens the highlighted row and Escape goes back,
+/// whichever of the list and the search field has the focus -- NSTableView
+/// does neither by itself, so once a row had been clicked Return did nothing.
+/// Anything typed goes back to the search.
+private final class PickerTableView: NSTableView {
+    var onReturn: (() -> Void)?
+    var onEscape: (() -> Void)?
+    var onTyping: ((String) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
+        switch event.keyCode {
+        case 36, 76:  // Return, keypad Enter
+            onReturn?()
+        case 53:      // Escape
+            onEscape?()
+        default:
+            if modifiers.isEmpty, let text = event.characters,
+               let scalar = text.unicodeScalars.first,
+               !CharacterSet.controlCharacters.contains(scalar),
+               scalar.value < 0xF700 || scalar.value > 0xF8FF {  // not an arrow or function key
+                onTyping?(text)
+            } else {
+                super.keyDown(with: event)
+            }
         }
     }
 }
