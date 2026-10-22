@@ -307,6 +307,28 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [.press(1)])
     }
 
+    /// ⇧ the monitor never saw go down -- held as the window took the
+    /// keyboard, or pressed while a menu was tracking -- is put right by the
+    /// click it is held for, before the button: a Shift-click is a Shift-click
+    /// only if the PC has Shift.
+    func testAClickBringsShiftDownBeforeTheButton() {
+        let shift: UInt = 0x0002_0000 | 0x0000_0002  // the flag, and the left key's bit
+        InputCapture.pointerMode = .desktop
+        let desktop = Mouse()
+        desktop.withKeys.removeAll()
+        desktop.press(flags: shift)
+        XCTAssertEqual(desktop.withKeys, [.abs(400, 300), .key(0xA0, true), .press(1)])
+
+        // And with the mouse captured for a game.
+        InputCapture.pointerMode = .gaming
+        let game = Mouse()
+        game.click()
+        XCTAssertTrue(game.locked)
+        game.withKeys.removeAll()
+        game.press(flags: shift)
+        XCTAssertEqual(game.withKeys, [.key(0xA0, true), .press(1)])
+    }
+
     func testAReleaseWithNoForwardedPressSendsNothing() {
         InputCapture.pointerMode = .gaming
         let mouse = Mouse()
@@ -422,10 +444,16 @@ final class GamingCursorTests: XCTestCase {
 private final class Mouse {
     enum Packet: Equatable {
         case abs(Int, Int), rel(Int, Int), press(UInt8), release(UInt8), scroll
+        /// A key by virtual key, and whether it went down.
+        case key(UInt16, Bool)
     }
 
     let capture = InputCapture()
+    /// What the mouse sent.
     var packets: [Packet] = []
+    /// The same, with the keys in among it: ⌃⌥ is forwarded, and Caps Lock
+    /// is synced as capture starts, so the keys are kept out of `packets`.
+    var withKeys: [Packet] = []
     private(set) var locked = false
     /// Where the pointer is, as a unit point in the picture; nil for not over
     /// it, or under something else.
@@ -457,7 +485,8 @@ private final class Mouse {
         lift()
     }
 
-    func press() { capture.handleMouseEvent(event(.leftMouseDown)) }
+    /// - Parameter flags: the raw modifier word the press carries.
+    func press(flags: UInt = 0) { capture.handleMouseEvent(event(.leftMouseDown, flags: flags)) }
     func lift() { capture.handleMouseEvent(event(.leftMouseUp)) }
 
     /// A move to the middle of the picture, carrying `delta` in points.
@@ -488,9 +517,11 @@ private final class Mouse {
     /// Deltas can only be set on the CGEvent underneath, and the trip there
     /// and back moves the location by wherever the window server thinks this
     /// unshown window is -- so the location is put back by the difference.
-    private func event(_ type: NSEvent.EventType, delta: CGPoint = .zero) -> NSEvent {
+    private func event(_ type: NSEvent.EventType, delta: CGPoint = .zero,
+                       flags: UInt = 0) -> NSEvent {
         let wanted = NSPoint(x: size.width / 2, y: size.height / 2)
-        let plain = NSEvent.mouseEvent(with: type, location: wanted, modifierFlags: [],
+        let plain = NSEvent.mouseEvent(with: type, location: wanted,
+                                       modifierFlags: NSEvent.ModifierFlags(rawValue: flags),
                                        timestamp: 0, windowNumber: window.windowNumber,
                                        context: nil, eventNumber: 0, clickCount: 1,
                                        pressure: type == .leftMouseUp ? 0 : 1)!
@@ -511,19 +542,24 @@ private final class Mouse {
         let body = Array(bytes.dropFirst(2))
         func word(_ at: Int) -> Int { Int(body[at]) << 8 | Int(body[at + 1]) }
         func signed(_ at: Int) -> Int { Int(Int16(bitPattern: UInt16(word(at)))) }
+        let packet: Packet
         switch kind {
         case .mouseAbs:
             // Back from 0...65535 to the 800×600 canvas.
-            packets.append(.abs((word(0) * 800 + 32767) / 65535, (word(2) * 600 + 32767) / 65535))
+            packet = .abs((word(0) * 800 + 32767) / 65535, (word(2) * 600 + 32767) / 65535)
         case .mouseRel:
-            packets.append(.rel(signed(0), signed(2)))
+            packet = .rel(signed(0), signed(2))
         case .button:
-            packets.append(body[1] != 0 ? .press(body[0]) : .release(body[0]))
+            packet = body[1] != 0 ? .press(body[0]) : .release(body[0])
         case .scrollV, .scrollH:
-            packets.append(.scroll)
+            packet = .scroll
+        case .key where body.count >= 3:
+            withKeys.append(.key(UInt16(word(0)), body[2] != 0))
+            return
         default:
-            // Keys: ⌃⌥ is forwarded, and Caps Lock is synced as capture starts.
-            break
+            return
         }
+        packets.append(packet)
+        withKeys.append(packet)
     }
 }
