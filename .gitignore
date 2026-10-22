@@ -11,7 +11,10 @@ macos/SolStreamClient/.build/
 # Local analysis notes
 .hermes/
 
-# Sync metadata
+# Sync metadata, and the copies Syncthing makes when two machines change a
+# file at once: their names carry a device ID.
+*.sync-conflict-*
+.syncthing.*
 .stfolder/
 .stignore
 .stversions/

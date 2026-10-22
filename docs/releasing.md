@@ -83,12 +83,17 @@ uploads to a draft and publishes last, which is what immutable releases need.
    What it cannot check is the secret itself, or the Intel half: if only that
    fails on the tag, see *A build failed* below.
 
-2. Tag that commit and push the tag:
+2. Tag that commit and push the tag. In UTC: an annotated tag records the
+   tagger's time zone, and every date in this repository is kept at +0000 so
+   none of them says where it was made.
 
    ```bash
-   git tag -a v1.0.1 -m "SolStream 1.0.1"
+   TZ=UTC git tag -a v1.0.1 -m "SolStream 1.0.1"
+   git cat-file tag v1.0.1 | grep '^tagger .* +0000$'
    git push origin v1.0.1
    ```
+
+   The same goes for commits: `TZ=UTC git commit`.
 
    One tag at a time: let one release publish before pushing the next tag.
 
