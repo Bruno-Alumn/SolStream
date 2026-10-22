@@ -143,7 +143,13 @@ if(MSVC)
     set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
     set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
     set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    # libopus also builds its tests whenever BUILD_TESTING is on, whatever
+    # OPUS_BUILD_TESTING says, and its tests are not vendored: a configure with
+    # SolStream's tests on would fail on missing files. Off for libopus alone.
+    set(SOLSTREAM_BUILD_TESTING "${BUILD_TESTING}")
+    set(BUILD_TESTING OFF)
     add_subdirectory("${SOLSTREAM_OPUS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/opus")
+    set(BUILD_TESTING "${SOLSTREAM_BUILD_TESTING}")
     # The agent's static runtime, below, for the library too. libopus's own
     # default is the DLL one, and a /MD library in a /MT program links with
     # LNK4098 and then carries two C runtimes, each with its own heap.
