@@ -18,8 +18,9 @@
 // takes of the virtual display's settings, when its device is waiting for a
 // restart, which adapter is Tailscale's, the clipboard's privacy
 // markers and line endings, when the sound capture opens its device
-// again, when the encoder spends a frame id, and when a Mac may take
-// back the session it left behind.
+// again, when the encoder spends a frame id, when a Mac may take
+// back the session it left behind, and how a key the Mac sends by
+// position is pressed here.
 
 #include "updater.cpp"
 
@@ -37,6 +38,7 @@
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "session_takeover.h"
+#include "media/keys.h"
 #include "tailscale.h"
 #include "vdd.h"
 
@@ -1821,6 +1823,79 @@ void TestHolderHearing() {
     }
 }
 
+/// A key the Mac sends by position goes in as that scan code, so this PC's own
+/// layout decides what it types -- except the few where the Mac's meaning has
+/// no PC key to carry it.
+void TestScanKeys() {
+    using media::BuildScanKeyInput;
+    INPUT in{};
+
+    // An ordinary key: the scan code alone, no virtual key, so the layout
+    // here decides. The key marked Z on a German keyboard is 0x15 -- what a
+    // US keyboard calls Y -- and must arrive as 0x15, not as VK_Y.
+    CHECK(BuildScanKeyInput(0x0015, true, &in));
+    CHECK(in.type == INPUT_KEYBOARD);
+    CHECK(in.ki.wVk == 0);
+    CHECK(in.ki.wScan == 0x15);
+    CHECK(in.ki.dwFlags == KEYEVENTF_SCANCODE);
+
+    CHECK(BuildScanKeyInput(0x0015, false, &in));
+    CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP));
+
+    // The ISO keyboard's extra key and the one left of 1.
+    CHECK(BuildScanKeyInput(0x0056, true, &in) && in.ki.wScan == 0x56 && in.ki.wVk == 0);
+    CHECK(BuildScanKeyInput(0x0029, true, &in) && in.ki.wScan == 0x29 && in.ki.wVk == 0);
+
+    // 0xE0 in the high byte is an extended key: the arrows, the right-hand
+    // Control and Alt, the keypad's Enter and slash, Insert and Menu.
+    CHECK(BuildScanKeyInput(0xE04B, true, &in));
+    CHECK(in.ki.wScan == 0x4B && in.ki.wVk == 0);
+    CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY));
+    CHECK(BuildScanKeyInput(0xE01D, false, &in));
+    CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+    CHECK(BuildScanKeyInput(0xE01C, true, &in) && in.ki.wScan == 0x1C
+          && (in.ki.dwFlags & KEYEVENTF_EXTENDEDKEY));
+
+    // The keypad's digits and point go in by virtual key, so this PC's Num
+    // Lock cannot turn them into Home, End and the arrows. The scan code is
+    // still given, as the PC's own keyboard would report it.
+    const struct { uint16_t scan; WORD vk; } keypad[] = {
+        {0x52, VK_NUMPAD0}, {0x4F, VK_NUMPAD1}, {0x50, VK_NUMPAD2}, {0x51, VK_NUMPAD3},
+        {0x4B, VK_NUMPAD4}, {0x4C, VK_NUMPAD5}, {0x4D, VK_NUMPAD6}, {0x47, VK_NUMPAD7},
+        {0x48, VK_NUMPAD8}, {0x49, VK_NUMPAD9}, {0x53, VK_DECIMAL},
+    };
+    for (const auto& key : keypad) {
+        CHECK(BuildScanKeyInput(key.scan, true, &in));
+        CHECK(in.ki.wVk == key.vk && in.ki.wScan == key.scan && in.ki.dwFlags == 0);
+        CHECK(BuildScanKeyInput(key.scan, false, &in) && in.ki.dwFlags == KEYEVENTF_KEYUP);
+    }
+    // Only without the prefix: E0 47 is Home, which stays a scan code.
+    CHECK(BuildScanKeyInput(0xE047, true, &in) && in.ki.wVk == 0
+          && in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY));
+    // The keypad's operators mean the same with Num Lock on or off.
+    CHECK(BuildScanKeyInput(0x004E, true, &in) && in.ki.wVk == 0
+          && in.ki.dwFlags == KEYEVENTF_SCANCODE);
+
+    // The keypad's '=' has no PC key, so it goes in as the character.
+    CHECK(BuildScanKeyInput(0x0059, true, &in));
+    CHECK(in.ki.wVk == 0 && in.ki.wScan == L'=' && in.ki.dwFlags == KEYEVENTF_UNICODE);
+    CHECK(BuildScanKeyInput(0x0059, false, &in)
+          && in.ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+
+    // Kana and Eisu switch the IME on and off.
+    CHECK(BuildScanKeyInput(0x00F2, true, &in) && in.ki.wVk == 0x16 && in.ki.dwFlags == 0);
+    CHECK(BuildScanKeyInput(0x00F1, false, &in) && in.ki.wVk == 0x1A
+          && in.ki.dwFlags == KEYEVENTF_KEYUP);
+
+    // Nothing that names no key.
+    CHECK(!BuildScanKeyInput(0x0000, true, &in));
+    CHECK(!BuildScanKeyInput(0xE000, true, &in));
+    CHECK(!BuildScanKeyInput(0xE11D, true, &in));   // E1 is Pause's, which no Mac has
+    CHECK(!BuildScanKeyInput(0x1234, true, &in));
+    CHECK(!BuildScanKeyInput(0x0095, true, &in));   // a break code
+    CHECK(!BuildScanKeyInput(0xE0F2, true, &in));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1893,6 +1968,7 @@ int wmain(int argc, wchar_t** argv) {
     TestClientId();
     TestDecideTakeover();
     TestHolderHearing();
+    TestScanKeys();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

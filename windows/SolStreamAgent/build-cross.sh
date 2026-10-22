@@ -34,6 +34,7 @@ echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
     -o SolStreamUpdaterTests.exe \
     updater_tests.cpp util.cpp clipboard.cpp installer.cpp media/log.cpp \
     driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp session_takeover.cpp \
+    media/keys.cpp \
     -luser32 -ladvapi32 -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lole32 -loleaut32 -luuid \
     -lsetupapi -lcfgmgr32 -lnewdev -liphlpapi -lws2_32 -lwtsapi32
 echo "built: $(pwd)/SolStreamUpdaterTests.exe"

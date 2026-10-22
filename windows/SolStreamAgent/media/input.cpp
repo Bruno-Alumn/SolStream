@@ -1,4 +1,5 @@
 #include "input.h"
+#include "keys.h"
 #include "smt.h"
 
 #include <dwmapi.h>
@@ -178,22 +179,15 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             input.ki.wScan = (WORD) MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
             input.ki.dwFlags = (down ? 0 : KEYEVENTF_KEYUP)
                              | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
-            if (down) {
-                if (keysDownCount_ < 256) {
-                    bool already = false;
-                    for (int i = 0; i < keysDownCount_; ++i) {
-                        if (keysDown_[i] == vk) { already = true; break; }
-                    }
-                    if (!already) { keysDown_[keysDownCount_++] = vk; }
-                }
-            } else {
-                for (int i = 0; i < keysDownCount_; ++i) {
-                    if (keysDown_[i] == vk) {
-                        keysDown_[i] = keysDown_[--keysDownCount_];
-                        break;
-                    }
-                }
-            }
+            TrackKey(vk, down);
+            break;
+        }
+        case kInputKeyScan: {
+            if (length < 3) { return false; }
+            const uint16_t code = ReadBE16(body);
+            const bool down = body[2] != 0;
+            if (!BuildScanKeyInput(code, down, &input)) { return false; }
+            TrackKey(kHeldByScan | code, down);
             break;
         }
         case kInputText: {
@@ -323,14 +317,41 @@ void InputInjector::Reset() {
     std::memset(seen_, 0, sizeof(seen_));
 }
 
+void InputInjector::TrackKey(uint32_t key, bool down) {
+    if (down) {
+        if (keysDownCount_ < 256) {
+            bool already = false;
+            for (int i = 0; i < keysDownCount_; ++i) {
+                if (keysDown_[i] == key) { already = true; break; }
+            }
+            if (!already) { keysDown_[keysDownCount_++] = key; }
+        }
+    } else {
+        for (int i = 0; i < keysDownCount_; ++i) {
+            if (keysDown_[i] == key) {
+                keysDown_[i] = keysDown_[--keysDownCount_];
+                break;
+            }
+        }
+    }
+}
+
 void InputInjector::ReleaseAll() {
     for (int i = 0; i < keysDownCount_; ++i) {
         INPUT up{};
-        up.type = INPUT_KEYBOARD;
-        up.ki.wVk = keysDown_[i];
-        up.ki.wScan = (WORD) MapVirtualKeyW(keysDown_[i], MAPVK_VK_TO_VSC);
-        up.ki.dwFlags = KEYEVENTF_KEYUP
-                      | (IsExtended(keysDown_[i]) ? KEYEVENTF_EXTENDEDKEY : 0);
+        if (keysDown_[i] & kHeldByScan) {
+            // Released the way it was pressed: by scan code, or by whatever
+            // BuildScanKeyInput chose for it.
+            if (!BuildScanKeyInput((uint16_t) (keysDown_[i] & 0xFFFF), false, &up)) {
+                continue;
+            }
+        } else {
+            const WORD vk = (WORD) keysDown_[i];
+            up.type = INPUT_KEYBOARD;
+            up.ki.wVk = vk;
+            up.ki.wScan = (WORD) MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            up.ki.dwFlags = KEYEVENTF_KEYUP | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+        }
         SendInput(1, &up, sizeof(INPUT));
     }
     keysDownCount_ = 0;

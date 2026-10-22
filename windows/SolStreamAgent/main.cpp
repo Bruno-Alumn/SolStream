@@ -3739,7 +3739,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // What the sound will be sent as, said in the reply so the Mac knows
         // without waiting for a packet. Empty -- and so not said -- without sound.
         std::string audioCodecReply, audioSourceReply;
+        // What this host's input takes beyond what every host does. A Mac
+        // sends keys by position only when this says "scancodes", and by
+        // virtual key otherwise -- which every host, this one included, still
+        // takes -- so either end can be the older one.
+        std::string inputReply;
 #ifdef SOLSTREAM_MEDIA
+        inputReply = ",\"scancodes\":1";
         long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
         // Zero means "host decides", which is what an absent field leaves behind.
         long long width = 0, height = 0;
@@ -3844,6 +3850,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                                           : ",\"audioCodec\":\"" + audioCodecReply + "\"")
                + (audioSourceReply.empty() ? std::string()
                                            : ",\"audioSource\":\"" + audioSourceReply + "\"")
+               + inputReply
                + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
     }
 

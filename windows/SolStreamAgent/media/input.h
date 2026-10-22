@@ -42,6 +42,13 @@ enum : unsigned char {
     kInputScrollH = 5,      ///< amount i16
     kInputKey = 6,          ///< vk u16, down u8, modifiers u8
     kInputText = 7,         ///< UTF-16 code units, for what a keycode cannot say
+    /// scan u16, down u8, modifiers u8: the key by position, a set-1 make code
+    /// with 0xE0 in the high byte for an extended key. See keys.h.
+    ///
+    /// Sent only by a Mac that read "scancodes" in this host's `media open`
+    /// reply; anything older sends `kInputKey`, which is still taken exactly
+    /// as it always was.
+    kInputKeyScan = 8,
 };
 
 /// Where absolute coordinates land.
@@ -122,8 +129,15 @@ private:
     uint32_t highest_ = 0;
     bool started_ = false;
 
+    /// Note a key going down or up, so ReleaseAll can let go of it.
+    void TrackKey(uint32_t key, bool down);
+
     unsigned char buttonsDown_ = 0;   ///< bitmask over the five buttons
-    unsigned short keysDown_[256] = {};
+    /// The keys held down: a virtual key from `kInputKey`, or a scan code from
+    /// `kInputKeyScan` marked with `kHeldByScan`, so each is released the way
+    /// it was pressed.
+    static constexpr uint32_t kHeldByScan = 0x10000;
+    uint32_t keysDown_[256] = {};
     int keysDownCount_ = 0;
 };
 
