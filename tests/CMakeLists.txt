@@ -1,4 +1,7 @@
-# There are no C++ tests, and this directory no longer pretends there are.
+# No tests are defined in this directory. The C++ tests that exist are the
+# Windows updater's -- SolStreamUpdaterTests, declared in windows/SolStreamAgent
+# when BUILD_TESTING is on and run by CI. This directory no longer pretends to
+# hold a suite of its own.
 #
 # It used to fetch GoogleTest — a 30 MB archive downloaded and built at configure
 # time — and define an add_solstream_test() helper on top of it. Nothing ever
@@ -8,10 +11,10 @@
 # every configure, it has to be kept in step with the toolchain, and it makes the
 # tree look as though a C++ suite exists to be run.
 #
-# The tests that do exist are the Swift ones in
-# macos/SolStreamClient/Tests/SolStreamClientTests, run with `swift test`. The
-# Windows side is verified by running it, which docs/architecture.md is honest
-# about under "What is measured, and what is not".
+# Most tests are the Swift ones in macos/SolStreamClient/Tests/SolStreamClientTests,
+# run with `swift test`. Beyond the updater, the Windows side is verified by
+# running it, which docs/architecture.md is honest about under "What is
+# measured, and what is not".
 #
 # This file stays behind as a comment rather than being deleted because the
 # top-level CMakeLists.txt still does add_subdirectory(tests) inside

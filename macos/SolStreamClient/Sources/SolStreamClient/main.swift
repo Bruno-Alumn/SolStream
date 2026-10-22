@@ -58,7 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         buildMenu()
         observeSettings()
-        Log.startSession(version: "v0.3")
+        // The bundle's version, which packaging stamps from the repository's
+        // VERSION file -- the one place a version is written. Not the pretend
+        // one: the log has to say what is really running.
+        Log.startSession(version: "v" + Updater.bundleVersion(.main))
 
         let arguments = CommandLine.arguments
         func value(after flag: String) -> String? {
@@ -197,6 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + captureDelay) { [weak self] in
                 self?.captureTestScreenshot()
             }
+        } else {
+            // Not in the test paths: they photograph the app on a timer, and
+            // a check would put network traffic and log lines into a run that
+            // is meant to show one thing.
+            MainActor.assumeIsolated { Updater.shared.start() }
         }
     }
 
@@ -699,13 +707,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // in, so the host must encode exactly this and not the raw source.
             request.width = config.width
             request.height = config.height
+            // The negotiation is the start of the stream: an install that
+            // finishes during it must not quit the app halfway through, with
+            // no session yet for quitting to close. Set back on each way out
+            // that ends without a window; `presentApps` keeps it set.
+            Updater.shared.isStreaming = true
             guard let media = await agent.openMediaSession(request) else {
+                Updater.shared.isStreaming = false
                 Log.error("[app] \(host) refused the media session")
                 self.picker?.clearBusy()
                 self.picker?.showFailure("\(host) refused to start streaming.")
                 return
             }
             guard media.streaming else {
+                Updater.shared.isStreaming = false
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
                 self.picker?.clearBusy()
@@ -755,6 +770,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         streamDisplay = display
         streamHost = host
         mediaRecoveryAttempts = 0
+        // Nothing downloads or installs while this is set; see Updater.
+        MainActor.assumeIsolated { Updater.shared.isStreaming = true }
 
         let tiles = Self.tileLayout(count: targets.count, on: display)
 
@@ -783,6 +800,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.closeMediaSession()
                 self.clipboard?.stop()
                 self.clipboard = nil
+                // An update the person asked for during the stream installs
+                // from here, and relaunches.
+                MainActor.assumeIsolated { Updater.shared.isStreaming = false }
                 // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
                 // tell a new connection from the last one's teardown still
                 // running, and answers "busy". Nothing needs the disconnect: the
@@ -1079,6 +1099,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.show()
     }
 
+    /// Settings, where the Updates card shows the check as it runs and what it
+    /// found -- rather than an alert, which would have to be dismissed to be
+    /// rid of and could not show a download's progress.
+    @objc private func checkForUpdates() {
+        showSettings()
+        MainActor.assumeIsolated { Updater.shared.checkNow() }
+    }
+
     /// Volume, buffering and the mouse are applied by whoever owns them as they
     /// change. What is left here is the clipboard, and the changes the host can
     /// only take by opening the stream again.
@@ -1298,6 +1326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About SolStream", action: nil, keyEquivalent: "")
+        appMenu.addItem(withTitle: "Check for Updates…",
+                        action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(.separator())
         // ⌘, as in every Mac application, and not moved onto ⌃⌘: it is not
         // reserved the way ⌘Q is, so while a streamed window has the keyboard
@@ -1402,6 +1432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingRestart?.cancel()
         pendingRestart = nil
         streamHost = nil
+        MainActor.assumeIsolated { Updater.shared.isStreaming = false }
         agent?.disconnect()
         agent = nil
         picker?.close()

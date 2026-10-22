@@ -63,6 +63,7 @@
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
+#include "updater.h"
 #include "util.h"
 
 // The media path is MSVC-only: Windows.Graphics.Capture and Media Foundation
@@ -4618,9 +4619,25 @@ int wmain(int argc, wchar_t** argv) {
     bool headless = false;
     bool start_hidden = false;
     bool install_driver = false;
+    bool check_updates = false;
+    bool download_update = false;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
-        if (arg == L"--port" && i + 1 < argc) {
+        if (arg == L"--verify-update-signature") {
+            // Everything after it is its own: two paths and perhaps a key.
+            // Answered here, before any of the machine is touched -- CI runs it
+            // on a build that is not installed, where carrying on would open the
+            // setup window and wait for somebody to close it.
+            return solstream::update::VerifySignatureCommand(argc - i - 1, argv + i + 1);
+        }
+        if (arg == L"--check-updates") {
+            check_updates = true;
+            // Only as its modifier: on its own the word means nothing here.
+            if (i + 1 < argc && std::wstring(argv[i + 1]) == L"--download") {
+                download_update = true;
+                ++i;
+            }
+        } else if (arg == L"--port" && i + 1 < argc) {
             port = static_cast<unsigned short>(std::wcstol(argv[i + 1], nullptr, 10));
         } else if (arg == L"--headless") {
             headless = true;
@@ -4656,9 +4673,34 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    // Every DLL from System32 and nowhere else, for the elevated roles that run
+    // from a folder this user's own programs can write to: the install the
+    // updater starts from %LOCALAPPDATA%\SolStream\Updates and the one setup
+    // starts from Downloads, and the uninstall that steps out to %TEMP%. Windows looks beside the executable first, so a DLL planted there
+    // would run inside the elevated process the moment the prompt was approved.
+    // CMakeLists.txt's /DEPENDENTLOADFLAG covers the imports resolved before
+    // wmain; this covers everything loaded after it, including what system DLLs
+    // load by bare name.
+    //
+    // Not for the host. The installed one runs from Program Files, which only an
+    // administrator can write to, and its media path loads hardware encoders
+    // whose own dependencies this has never been tried against. Nor, yet, for
+    // the unelevated setup window: a DLL planted beside it runs as the user who
+    // planted it, which gains nothing, and its Direct2D, DirectWrite, comctl32
+    // and driver-install paths have not been tried under this restriction.
+    if (install || uninstall) {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+
     // Asks nothing of the machine, so it answers before anything is set up.
     if (print_licenses) {
         return PrintLicenses();
+    }
+    // One update check, said on the console: how the updater is tested by hand.
+    // Honours SOLSTREAM_PRETEND_VERSION and SOLSTREAM_GITHUB_TOKEN; --download
+    // also fetches and verifies the installer, and never runs it.
+    if (check_updates) {
+        return solstream::update::CheckCommand(download_update);
     }
 
     // Without this every coordinate we read or write is silently rescaled by
@@ -4742,8 +4784,37 @@ int wmain(int argc, wchar_t** argv) {
             }
             return 0;
         }
+        // Hold this very file, sharing read access only, until it has been
+        // copied: InstallSelf copies it into Program Files by path. Started by
+        // the updater, this is the other half of its hold -- the updater keeps
+        // the download open across this process starting, and this keeps it
+        // open from here to the copy, so nothing can rename it and put other
+        // bytes at that path in between. From the setup window it costs nothing.
+        HANDLE self = INVALID_HANDLE_VALUE;
+        DWORD hold_error = ERROR_FILENAME_EXCED_RANGE;
+        {
+            wchar_t path[MAX_PATH] = {0};
+            const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+            if (length > 0 && length < MAX_PATH) {
+                self = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                hold_error = GetLastError();
+            }
+        }
+        // Without the hold, the copy below would be by a path nothing protects
+        // once InstallSelf has stopped the old host (and with it the updater's
+        // hold). So no hold, no install -- before anything has been changed.
+        if (self == INVALID_HANDLE_VALUE) {
+            const std::string error = "SolStream couldn't hold its own installer file "
+                                      "(error " + std::to_string(hold_error)
+                                    + "), so nothing was changed.";
+            solstream::WriteInstallResult(false, error);
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
         std::string error;
         const bool ok = solstream::InstallSelf(options, error);
+        CloseHandle(self);
         // The window that asked for this is in another process and cannot see a
         // return code, so the reason goes in a file it knows to read.
         solstream::WriteInstallResult(ok, error);
@@ -5140,6 +5211,17 @@ int wmain(int argc, wchar_t** argv) {
             // Keyed on clients that have PROVED the token, not on open sockets: the
             // Mac treats `busy` as final, so counting any accepted socket let a port
             // scanner or a single stray connect() lock the paired Mac out.
+            // An update waiting on its permission prompt, or already running:
+            // the installer is about to stop this host, so a Mac let in now
+            // would have its stream cut. Closed without a word, like the
+            // unauthenticated case below, so the Mac's reconnect backoff brings
+            // it back -- to the new host, once it is up. Not an auth refusal:
+            // the Mac forgets its token on one of those.
+            if (solstream::update::InstallStarting()) {
+                Log("[agent] turned a client away: an update is being installed");
+                closesocket(client);
+                continue;
+            }
             if (g_clients_authenticated.load() > 0) {
                 char name[256] = {};
                 DWORD name_size = sizeof(name);
@@ -5231,6 +5313,23 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    // What became of an update this PC started. When this copy is the version
+    // it was installing, somebody pressed Install a moment ago, watched that
+    // window close, and is waiting for SolStream to come back -- so the window
+    // opens to say it has, though the logon task asked for the tray. Read only
+    // by the installed copy, the only one an install replaces, and after the
+    // single-instance check, so a second copy that exits cannot use it up.
+    if (solstream::RunningInstalled()) {
+        const solstream::update::InstallNote note = solstream::update::TakeInstallNote();
+        if (note.kind != solstream::update::InstallNote::Kind::None) {
+            solstream::SayInstallOutcome(
+                note.kind == solstream::update::InstallNote::Kind::Installed, note.version);
+            if (note.recent) {
+                start_hidden = false;
+            }
+        }
+    }
+
     if (!solstream::ShowHostWindow(solstream::WindowMode::Host, start_hidden)) {
         // No window station — a scheduled task in session 0, typically. The
         // agent is still useful there, so carry on rather than exiting: the
@@ -5289,6 +5388,25 @@ int wmain(int argc, wchar_t** argv) {
         }
     });
     status.detach();
+
+    // Updates: a minute after start, then daily, on their own thread. Only
+    // here, with a window -- an update is installed when somebody says so, and
+    // headless or in session 0 there is nobody to say it and nowhere to ask.
+    // "Streaming" is a Mac that has proved the token, the same count the window
+    // shows; a scheduled check waits for it to go.
+    //
+    // And only for the installed copy. The installer replaces Program Files and
+    // stops what runs from there; offered to a copy started from anywhere else
+    // -- a development build with --bind -- it would install the update, leave
+    // this copy running, and the new host would exit on this one's mutex.
+    if (solstream::RunningInstalled()) {
+        solstream::update::SchedulerHooks hooks;
+        hooks.streaming_clients = [] { return g_clients_authenticated.load(); };
+        hooks.finished = [](const solstream::update::CheckResult& result, bool asked) {
+            solstream::UpdateCheckFinished(result, asked);
+        };
+        solstream::update::StartScheduler(hooks);
+    }
 
     // Installed here because an out-of-context hook delivers its callbacks on
     // the thread that set it, through that thread's message loop — and this is

@@ -748,7 +748,12 @@ const IID kIidTaskService = {0x2faba4c7, 0x4da9, 0x4013,
 /// to sit in %TEMP% -- writable by every unelevated process of the same user,
 /// any of which could rewrite RunLevel or Command between the write and the
 /// read and come away with an elevated task that runs at every logon.
-bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
+/// Register the task that starts the installed host. With `at_logon` it runs at
+/// every logon; without, it has no trigger at all and only runs when asked to --
+/// which is still how an install or an update starts the new copy, so turning
+/// "start when I log in" off no longer means an update leaves nothing running.
+bool RegisterLogonTask(const std::wstring& destination, std::string& error,
+                       bool at_logon = true) {
     // Whoever asked for the install, not whoever approved it: an administrator
     // setting this up for somebody else must not register a task that runs as
     // themselves. How the difference is worked out is in LogonTaskAccount.
@@ -759,7 +764,9 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error) {
         L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
         L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
         L"  <RegistrationInfo><Description>Starts SolStream so this PC can serve a Mac.</Description></RegistrationInfo>\r\n"
-        L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
+        + std::wstring(at_logon
+              ? L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
+              : L"  <Triggers />\r\n") +
         L"  <Principals><Principal id=\"Author\">\r\n"
         // The account is declared here, beside InteractiveToken, so no password
         // is ever wanted for it.
@@ -1139,6 +1146,43 @@ bool RunningInstalled() {
     return FoldCase(here) == FoldCase(there);
 }
 
+/// Whether the installed task starts SolStream at logon. True when it cannot
+/// tell -- no task, no access to read it -- because that is the setup screen's
+/// default, and an update guessing "off" would turn a person's logon start off.
+bool StartsAtLogon() {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    ITaskService* service = nullptr;
+    ITaskFolder* root = nullptr;
+    IRegisteredTask* task = nullptr;
+    ITaskDefinition* definition = nullptr;
+    ITriggerCollection* triggers = nullptr;
+    VARIANT none;
+    VariantInit(&none);
+    BSTR root_path = SysAllocString(L"\\");
+    BSTR name = SysAllocString(kTaskName);
+    LONG count = -1;
+    HRESULT hr = (root_path && name) ? S_OK : E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) {
+        hr = CoCreateInstance(kClsidTaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+                              kIidTaskService, (void**) &service);
+    }
+    if (SUCCEEDED(hr)) { hr = service->Connect(none, none, none, none); }
+    if (SUCCEEDED(hr)) { hr = service->GetFolder(root_path, &root); }
+    if (SUCCEEDED(hr)) { hr = root->GetTask(name, &task); }
+    if (SUCCEEDED(hr)) { hr = task->get_Definition(&definition); }
+    if (SUCCEEDED(hr)) { hr = definition->get_Triggers(&triggers); }
+    if (SUCCEEDED(hr)) { hr = triggers->get_Count(&count); }
+    if (triggers) { triggers->Release(); }
+    if (definition) { definition->Release(); }
+    if (task) { task->Release(); }
+    if (root) { root->Release(); }
+    if (service) { service->Release(); }
+    SysFreeString(name);
+    SysFreeString(root_path);
+    if (SUCCEEDED(com)) { CoUninitialize(); }
+    return FAILED(hr) || count != 0;
+}
+
 bool InstallSelf(const InstallOptions& options, std::string& error) {
     InstallLog("install requested");
     if (!IsElevated()) {
@@ -1173,11 +1217,41 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // The executable, not its directory. Copying the DIRECTORY -- which this
     // once did -- puts everything else in the user's Downloads folder into
     // Program Files with it.
-    if (!CopyFileW(ExePath().c_str(), (destination + L"\\SolStream.exe").c_str(),
-                   FALSE)) {
+    //
+    // Beside the old one first, then swapped in with one rename. Copying
+    // straight over SolStream.exe left nothing runnable when the copy failed
+    // part-way -- the file still locked by a host slow to exit, an antivirus
+    // scan, a full disk -- and on a self-update the host had already been
+    // stopped, so the PC had no SolStream until somebody logged in again.
+    // Now a failure leaves the old copy whole and starts it again.
+    const std::wstring installed = destination + L"\\SolStream.exe";
+    const std::wstring incoming = installed + L".new";
+    bool replaced = false;
+    DWORD failure = 0;
+    if (CopyFileW(ExePath().c_str(), incoming.c_str(), FALSE)) {
+        for (int attempt = 0; attempt < 10 && !replaced; ++attempt) {
+            if (attempt > 0) { Sleep(500); }
+            replaced = MoveFileExW(incoming.c_str(), installed.c_str(),
+                                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+            if (!replaced) { failure = GetLastError(); }
+        }
+    } else {
+        failure = GetLastError();
+    }
+    if (!replaced) {
+        DeleteFileW(incoming.c_str());
         error = "Could not copy SolStream into " + ToUtf8(destination)
-              + " (error " + std::to_string(GetLastError()) + ")";
+              + " (error " + std::to_string(failure) + ")";
         InstallLog("copy failed: " + error);
+        if (GetFileAttributesW(installed.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            // The old copy is intact: bring it back rather than leave the PC
+            // with no host. A first install has no old copy and no task.
+            const DWORD restarted =
+                RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
+            InstallLog(restarted == 0 ? "restarted the copy that was already installed"
+                                      : "could not restart the installed copy "
+                                            + RunOutcome(restarted));
+        }
         return false;
     }
     InstallLog("copied");
@@ -1256,10 +1330,19 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
                                  + RunOutcome(started));
         }
     } else {
-        // Asked not to. Clear any task an earlier install left, or the tick on
-        // the setup screen is describing something that is not true.
-        RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
-        InstallLog("logon task not wanted");
+        // Asked not to start at logon. The task stays, with no trigger, because
+        // it is what starts the copy just installed -- an update must not end
+        // with nothing running -- and the tick on the setup screen stays true:
+        // nothing starts at the next logon.
+        std::string task_error;
+        if (RegisterLogonTask(destination, task_error, false)) {
+            InstallLog("on-demand task registered (not at logon)");
+            const DWORD started =
+                RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
+            InstallLog(started == 0 ? "started" : "starting it " + RunOutcome(started));
+        } else {
+            InstallLog("task failed: " + task_error);
+        }
     }
     if (!warning.empty()) {
         // The install did happen, and that has to be the first thing said --

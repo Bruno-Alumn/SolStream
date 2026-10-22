@@ -8,9 +8,13 @@
 #
 # package-windows.ps1 - assemble the SolStream host application for Windows.
 #
-# There is one file to assemble now.
+# There is one file to assemble now, under two names.
 #
-#     SolStreamSetup.exe    what a person downloads
+#     SolStreamSetup-X.Y.Z.exe    the release asset: what a person downloads and
+#                                 what the Windows updater fetches
+#     SolStreamSetup.exe          the same bytes, for instructions that name it
+#
+# X.Y.Z is VERSION at the repository root (docs/updates.md).
 #
 # This script used to build a folder: the executable, 65 MB of unmodified
 # Sunshine with its assets and web UI, a display driver package, and a licenses\
@@ -35,11 +39,12 @@
 # So a packaged SolStream streams a real monitor until somebody installs an
 # indirect display driver themselves.
 #
-# NOTHING HERE SIGNS THE EXECUTABLE, and there is no CI: this script is run by
-# hand on a Windows machine. An unsigned download means SmartScreen's "Windows
-# protected your PC" and an Unknown publisher prompt at the UAC dialog. See
-# installer/README.md, which records the gap rather than pretending it is
-# closed.
+# NOTHING HERE SIGNS THE EXECUTABLE with a certificate. The release workflow
+# (.github/workflows/release.yml) runs this same script on a GitHub Windows
+# runner, and what makes a release trustworthy to the updater is the signed
+# SHA256SUMS beside it (docs/updates.md) -- which does nothing for SmartScreen.
+# An unsigned download still means "Windows protected your PC" and an Unknown
+# publisher prompt at the UAC dialog; *Install* in README.md says what to click.
 #
 # Usage:
 #   .\package-windows.ps1
@@ -51,12 +56,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== SolStream Windows package ==="
+# Read before building, so a malformed VERSION costs nothing. Get-Content drops
+# the line ending, CRLF or not; anything else on the line is an error, because
+# the release tag, the asset name and the updater's comparison all parse it.
+$version = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\VERSION") -TotalCount 1
+if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw "VERSION must hold one line, X.Y.Z (found '$version')"
+}
 
-# BUILD_TESTING=OFF because this is a packaging run and there is no C++ suite to
-# build: left to its default, include(CTest) turns it ON and the configure walks
-# into tests/, which is where a fetched test framework used to be downloaded and
-# compiled before anything a user downloads was built.
+Write-Host "=== SolStream Windows package $version ==="
+
+# BUILD_TESTING=OFF because this is a packaging run: left to its default,
+# include(CTest) turns it ON and the updater's test executable would be built
+# into the package's build tree too. CI builds and runs it separately.
 cmake -S "$PSScriptRoot\.." -B $BuildDir -DBUILD_TESTING=OFF | Out-Null
 # Checked for the same reason the build below is, and it is the easier of the two
 # to miss: `| Out-Null` swallows the configure's output, so a configure that
@@ -75,18 +87,37 @@ if ($LASTEXITCODE -ne 0) { throw "the build failed ($LASTEXITCODE)" }
 $exe = Join-Path $BuildDir "bin\release\SolStreamAgent.exe"
 if (-not (Test-Path $exe)) { throw "no executable at $exe" }
 
+# The version block is the executable's own claim about what it is -- the
+# number Add/Remove Programs lists and the one the updater compares against the
+# release. CMake stamps it at configure time, so a VERSION bumped since the last
+# configure, or a build that stopped reading VERSION, would ship a file named
+# for one version that believes it is another, and it would offer itself the
+# update it already is.
+$stamped = (Get-Item $exe).VersionInfo.ProductVersion
+if ($stamped -ne $version) {
+    throw "the executable says it is version '$stamped', but VERSION says $version"
+}
+
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-# Named SolStreamSetup.exe rather than SolStream.exe, because that is what it is
-# when it is downloaded: run from anywhere other than the install directory it
-# shows the setup screen, and what it copies into Program Files is itself, named
+# Named SolStreamSetup rather than SolStream, because that is what it is when it
+# is downloaded: run from anywhere other than the install directory it shows the
+# setup screen, and what it copies into Program Files is itself, named
 # SolStream.exe. One binary, two names, no second project to keep in step.
+$versioned = Join-Path $OutDir "SolStreamSetup-$version.exe"
+Copy-Item $exe $versioned -Force
 $single = Join-Path $OutDir "SolStreamSetup.exe"
 Copy-Item $exe $single -Force
+
+# Earlier versions' setups would otherwise pile up beside this one, each a
+# download that looks current and is not.
+Get-ChildItem -Path $OutDir -Filter "SolStreamSetup-*.exe" |
+    Where-Object { $_.Name -ne "SolStreamSetup-$version.exe" } |
+    Remove-Item -Force
 
 # An earlier release of this script wrote SolStream.exe here. Leaving it beside
 # the new name would mean two downloads that differ only in which one is stale.
 $stale = Join-Path $OutDir "SolStream.exe"
 if (Test-Path $stale) { Remove-Item $stale -Force }
 
-Write-Host ("=== Setup program: {0} ({1:N1} MB) ===" -f $single, ((Get-Item $single).Length / 1MB))
+Write-Host ("=== Setup program: {0} ({1:N1} MB), also as {2} ===" -f $versioned, ((Get-Item $versioned).Length / 1MB), $single)

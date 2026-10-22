@@ -11,3 +11,9 @@
 *.ico binary
 *.icns binary
 *.pdf binary
+
+# Signed bytes: a line-ending conversion would break the signature.
+tests/update-vector/* -text
+
+# One line, read by shell, PowerShell, CMake and the workflows: always LF.
+VERSION text eol=lf

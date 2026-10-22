@@ -21,6 +21,9 @@ final class SettingsWindowTests: XCTestCase {
     ]
     private var saved: [String: Any] = [:]
     private let settings = StreamSettings.shared
+    /// The Updates card's own defaults, so nothing it shows or remembers is
+    /// the real app's.
+    private let updaterSuite = "SolStreamSettingsUpdaterTests-\(UUID().uuidString)"
 
     override func setUp() {
         super.setUp()
@@ -38,11 +41,34 @@ final class SettingsWindowTests: XCTestCase {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
+        UserDefaults().removePersistentDomain(forName: updaterSuite)
         super.tearDown()
+    }
+
+    /// An updater that never checks anything: no stub, no network, no bundle
+    /// to replace -- its state is set by hand. Every way it has out of the
+    /// test runner fails the test instead, so a later change that gives it
+    /// something to install cannot quit the runner or open Finder.
+    @MainActor
+    private func makeUpdater() -> Updater {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StubProtocol.self]
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-settings-updates-\(UUID().uuidString)", isDirectory: true)
+        let updater = Updater(defaults: UserDefaults(suiteName: updaterSuite)!, configuration: configuration,
+                              environment: ["SOLSTREAM_PRETEND_VERSION": "1.0.0"],
+                              installTarget: nil, publicKey: UpdateSignature.productionKey,
+                              downloadsFolder: scratch.appendingPathComponent("update-cache"),
+                              revealFolder: scratch.appendingPathComponent("Revealed"))
+        updater.relaunch = { _ in XCTFail("a test tried to relaunch") }
+        updater.terminate = { XCTFail("a test tried to quit") }
+        updater.showInFinder = { _ in XCTFail("a test tried to open Finder") }
+        return updater
     }
 
     // MARK: - Reading
 
+    @MainActor
     func testEveryControlShowsTheSettingsAsTheyAre() {
         settings.videoQuality = .high
         settings.frameRate = 30
@@ -57,7 +83,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.followsHostCursor = false
         settings.syncsClipboard = false
 
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: makeUpdater())
         XCTAssertEqual(pane.qualityPopUp.titleOfSelectedItem, "High")
         XCTAssertEqual(pane.qualityDetail.stringValue, StreamSettings.VideoQuality.high.detail)
         XCTAssertEqual(pane.frameRateControl.segmentCount, 2)
@@ -93,6 +119,7 @@ final class SettingsWindowTests: XCTestCase {
     /// Rows that mean nothing in the current state say so by being disabled:
     /// sound quality, volume and buffering with the PC's sound off,
     /// sensitivity and giving the mouse back in desktop mode.
+    @MainActor
     func testRowsThatDoNotApplyAreDisabled() {
         settings.streamsAudio = false
         settings.isMuted = true
@@ -100,7 +127,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.followsHostCursor = true
         settings.syncsClipboard = true
 
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: makeUpdater())
         XCTAssertFalse(pane.soundSwitch.isOn)
         XCTAssertFalse(pane.soundSourceControl.isEnabled)
         XCTAssertFalse(pane.soundQualityPopUp.isEnabled)
@@ -118,11 +145,12 @@ final class SettingsWindowTests: XCTestCase {
 
     /// The popover on a streamed window changes the same settings, and the mouse
     /// mode has a setter of its own; an open Settings window follows both.
+    @MainActor
     func testItFollowsChangesMadeElsewhere() {
         settings.volume = 1
         settings.isMuted = false
         settings.pointerMode = .desktop
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: makeUpdater())
 
         settings.volume = 0.2
         XCTAssertEqual(pane.volumeSlider.doubleValue, 20, accuracy: 0.01)
@@ -141,6 +169,7 @@ final class SettingsWindowTests: XCTestCase {
 
     // MARK: - Writing
 
+    @MainActor
     func testEachControlWritesItsSettingAndSaysWhetherTheStreamRestarts() {
         settings.videoQuality = .automatic
         settings.frameRate = 60
@@ -154,7 +183,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.gamingSensitivity = 1
         settings.followsHostCursor = true
         settings.syncsClipboard = true
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: makeUpdater())
 
         var restarts: [Bool] = []
         let observer = NotificationCenter.default.addObserver(
@@ -287,13 +316,14 @@ final class SettingsWindowTests: XCTestCase {
 
     /// VoiceOver reads the figures beside the sliders, not the slider's own
     /// value: sensitivity runs over a logarithm, where 0.5x is "minus 1".
+    @MainActor
     func testSlidersSayTheirValuesInTheirOwnUnits() {
         settings.pointerMode = .gaming
         settings.gamingSensitivity = 0.5
         settings.streamsAudio = true
         settings.volume = 0.8
         settings.isMuted = false
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: makeUpdater())
         XCTAssertEqual(pane.sensitivitySlider.accessibilityValueDescription(), "0.50×")
         XCTAssertEqual(pane.volumeSlider.accessibilityValueDescription(), "80%")
         settings.isMuted = true
@@ -466,8 +496,9 @@ final class SettingsWindowTests: XCTestCase {
 
     // MARK: - The window
 
+    @MainActor
     func testTheWindowIsOneFixedSizeWindowCalledSettings() {
-        let settingsWindow = SettingsWindow()
+        let settingsWindow = SettingsWindow(updater: makeUpdater())
         let window = settingsWindow.window
         XCTAssertEqual(window.title, "Settings")
         XCTAssertFalse(window.styleMask.contains(.resizable))
@@ -480,10 +511,39 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertTrue(window.collectionBehavior.contains(.moveToActiveSpace))
     }
 
+    /// On a screen too short for it, the pane scrolls rather than run under
+    /// the Dock, starting at its heading; on one tall enough it is whole
+    /// again, with no scroll view left behind.
+    @MainActor
+    func testAScreenTooShortForThePaneScrollsIt() throws {
+        let settingsWindow = SettingsWindow(updater: makeUpdater())
+        let window = settingsWindow.window
+        let pane = settingsWindow.pane
+        let size = pane.fittingSize
+
+        settingsWindow.fit(height: size.height + 100)
+        XCTAssertTrue(window.contentView === pane, "a tall enough screen got a scroll view")
+
+        settingsWindow.fit(height: 600)
+        let scroll = try XCTUnwrap(window.contentView as? NSScrollView)
+        XCTAssertTrue(scroll.documentView === pane)
+        XCTAssertEqual(scroll.frame.height, 600, accuracy: 0.5, "taller than the screen")
+        XCTAssertEqual(pane.frame.size.height, size.height, accuracy: 0.5, "the pane was squashed")
+        XCTAssertEqual(scroll.contentView.bounds.maxY, pane.frame.maxY, accuracy: 0.5,
+                       "opened somewhere other than its heading")
+        XCTAssertFalse(scroll.drawsBackground)
+
+        settingsWindow.fit(height: size.height)
+        XCTAssertTrue(window.contentView === pane)
+        XCTAssertNil(scroll.documentView)
+        XCTAssertEqual(pane.frame.height, size.height, accuracy: 0.5)
+    }
+
     /// ⌘W closes it with Caps Lock on, and on a layout whose W key types
     /// another letter; ⌥⌘W and ⌘Q are left alone.
+    @MainActor
     func testCommandWClosesItOnAnyLayout() throws {
-        let window = SettingsWindow().window
+        let window = SettingsWindow(updater: makeUpdater()).window
         func key(_ characters: String, keyCode: UInt16,
                  _ modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
             try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
@@ -505,6 +565,7 @@ final class SettingsWindowTests: XCTestCase {
     /// Laid out, nothing cut off or overlapping, small enough for a 13-inch
     /// MacBook -- and photographed for whoever changes it next: both themes,
     /// and the dark one again with the rows that do not apply disabled.
+    @MainActor
     func testThePaneFitsAndIsPhotographed() throws {
         settings.videoQuality = .automatic
         settings.frameRate = 60
@@ -517,22 +578,138 @@ final class SettingsWindowTests: XCTestCase {
         settings.gamingSensitivity = 1
         settings.followsHostCursor = true
         settings.syncsClipboard = true
-        try photograph("solstream-settings.png", theme: .darkAqua)
-        try photograph("solstream-settings-light.png", theme: .aqua)
+        let updater = makeUpdater()
+        updater.state = .upToDate
+        try photograph("solstream-settings.png", theme: .darkAqua, updater: updater)
+        try photograph("solstream-settings-light.png", theme: .aqua, updater: updater)
 
         settings.streamsAudio = false
         settings.isMuted = true
         settings.pointerMode = .desktop
-        try photograph("solstream-settings-disabled.png", theme: .darkAqua)
+        try photograph("solstream-settings-disabled.png", theme: .darkAqua, updater: updater)
     }
 
-    private func photograph(_ name: String, theme: NSAppearance.Name,
+    // MARK: - Updates
+
+    /// The card says what the updater is doing, offers the one action that
+    /// fits, and never moves while it does.
+    @MainActor
+    func testTheUpdatesCardFollowsTheUpdater() throws {
+        let updater = makeUpdater()
+        let pane = SettingsPane(updater: updater)
+        pane.layoutSubtreeIfNeeded()
+        let height = pane.fittingSize.height
+        XCTAssertEqual(pane.versionLabel.stringValue, "Version 1.0.0")
+        XCTAssertEqual(pane.updateStatus.stringValue, "Not checked yet.")
+        XCTAssertFalse(pane.checkButton.isHidden)
+        XCTAssertTrue(pane.checkButton.isEnabled)
+        XCTAssertTrue(pane.installButton.isHidden)
+        XCTAssertTrue(pane.automaticUpdatesSwitch.isOn, "on unless turned off")
+
+        func expect(_ state: Updater.State, status: String, action: String?, enabled: Bool = true,
+                    file: StaticString = #filePath, line: UInt = #line) {
+            updater.state = state
+            XCTAssertEqual(pane.updateStatus.stringValue, status, file: file, line: line)
+            if let action {
+                XCTAssertFalse(pane.installButton.isHidden, file: file, line: line)
+                XCTAssertTrue(pane.checkButton.isHidden, file: file, line: line)
+                XCTAssertEqual(pane.installButton.title, action, file: file, line: line)
+                XCTAssertEqual(pane.installButton.isEnabled, enabled, file: file, line: line)
+            } else {
+                XCTAssertTrue(pane.installButton.isHidden, file: file, line: line)
+                XCTAssertFalse(pane.checkButton.isHidden, file: file, line: line)
+                XCTAssertEqual(pane.checkButton.isEnabled, enabled, file: file, line: line)
+            }
+            XCTAssertEqual(pane.fittingSize.height, height, "the card moved", file: file, line: line)
+            XCTAssertTrue(statusFitsItsTwoLines(pane), "\(state) needs a third line",
+                          file: file, line: line)
+        }
+        expect(.checking, status: "Checking…", action: nil, enabled: false)
+        expect(.upToDate, status: "Up to date.", action: nil)
+        expect(.available("1.1.0"), status: "Update 1.1.0 is available.", action: "Download")
+        expect(.downloading("1.1.0", 0.34), status: "Downloading 1.1.0… 34%", action: nil, enabled: false)
+        expect(.ready("1.1.0"), status: "Update 1.1.0 is ready to install.", action: "Install and relaunch")
+        XCTAssertEqual(pane.installButton.style, .primary)
+        updater.isStreaming = true
+        XCTAssertEqual(pane.installButton.title, "Install after stream", "followed the stream opening")
+        expect(.waitingForStream("1.1.0"), status: "Update 1.1.0 installs when the stream closes.",
+               action: "Don't install")
+        XCTAssertEqual(pane.installButton.style, .secondary)
+        updater.isStreaming = false
+        expect(.installing("1.1.0"), status: "Installing 1.1.0…", action: "Install and relaunch",
+               enabled: false)
+        expect(.manualInstall("1.1.0", reason: "SolStream can't replace itself here."),
+               status: "SolStream can't replace itself here.", action: "Show download")
+        expect(.failed("The update's signature didn't verify."),
+               status: "The update's signature didn't verify.", action: nil)
+
+        // Every reason a failure can give fits beside the button -- by a
+        // measure that does say no to one that does not.
+        updater.state = .failed(String(repeating: "A reason far too long ", count: 4))
+        XCTAssertFalse(statusFitsItsTwoLines(pane))
+        let reasons: [UpdateError] = [
+            .transport(.offline), .transport(.timedOut), .transport(.refusedAddress("x")),
+            .transport(.cannotWrite), .tooLarge, .http(503), .tokenRefused, .rateLimited,
+            .malformedRelease, .missingAsset("x"), .badSignature, .malformedSums, .notInSums("x"),
+            .checksumMismatch, .install(.wrongIdentifier(nil)), .install(.wrongVersion(nil)),
+            .install(.signatureRejected("")), .install(.notAnApp), .install(.moveFailed("")),
+            .install(.checksumMismatch), .install(.notNewer("10.10.10")), .transport(.cancelled),
+        ]
+        for reason in reasons {
+            expect(.failed(reason.reason), status: reason.reason, action: nil)
+        }
+        let notWritable = UpdateError.install(.notWritable(URL(fileURLWithPath: "/Applications"))).reason
+        expect(.manualInstall("10.10.10", reason: notWritable), status: notWritable, action: "Show download")
+        updater.isStreaming = true
+        expect(.ready("10.10.10"), status: "Update 10.10.10 is ready to install.",
+               action: "Install after stream")
+        // Nothing downloads during a stream, so no button offers to. This
+        // updater has no bundle to install into, so nothing downloads after
+        // it either, and the status does not say it will.
+        expect(.available("10.10.10"), status: "Update 10.10.10 is available.", action: nil)
+        expect(.waitingForStream("10.10.10"), status: "Update 10.10.10 installs when the stream closes.",
+               action: "Don't install")
+        expect(.installed("10.10.10"),
+               status: "Update 10.10.10 is installed. Restarts after the stream.",
+               action: nil, enabled: false)
+        updater.isStreaming = false
+        expect(.available("10.10.10"), status: "Update 10.10.10 is available.", action: "Download")
+
+        XCTAssertTrue(pane.automaticUpdatesSwitch.accessibilityPerformPress())
+        XCTAssertFalse(updater.checksAutomatically)
+        XCTAssertTrue(pane.automaticUpdatesSwitch.accessibilityPerformPress())
+        XCTAssertTrue(updater.checksAutomatically)
+        XCTAssertEqual(pane.automaticUpdatesSwitch.accessibilityLabel(), "Check for updates automatically")
+        XCTAssertEqual(pane.versionLabel.accessibilityLabel(), "SolStream version 1.0.0")
+    }
+
+    /// The card with an update ready, in both themes, for whoever changes it
+    /// next; and a failure, whose words are the longest it shows.
+    @MainActor
+    func testTheUpdatesCardIsPhotographed() throws {
+        let updater = makeUpdater()
+        updater.state = .ready("1.1.0")
+        try photograph("solstream-settings-updates.png", theme: .darkAqua, updater: updater,
+                       cropToUpdates: true)
+        try photograph("solstream-settings-updates-light.png", theme: .aqua, updater: updater,
+                       cropToUpdates: true)
+        updater.state = .failed("The new copy couldn't be moved into place.")
+        try photograph("solstream-settings-updates-failed.png", theme: .darkAqua, updater: updater,
+                       cropToUpdates: true)
+    }
+
+    @MainActor
+    private func photograph(_ name: String, theme: NSAppearance.Name, updater: Updater,
+                            cropToUpdates: Bool = false,
                             file: StaticString = #filePath, line: UInt = #line) throws {
         let appearance = try XCTUnwrap(NSAppearance(named: theme))
-        let pane = SettingsPane()
+        let pane = SettingsPane(updater: updater)
         pane.appearance = appearance
         let size = pane.fittingSize
-        XCTAssertLessThanOrEqual(size.height, 720, "too tall for a 13-inch MacBook",
+        // 1440x900, the smallest 13-inch MacBook, leaves about 800 points
+        // between the menu bar and a Dock at its usual size. A shorter screen
+        // gets a scroll view (`SettingsWindow.fit`); this keeps that rare.
+        XCTAssertLessThanOrEqual(size.height, 770, "too tall for a 13-inch MacBook",
                                  file: file, line: line)
         XCTAssertLessThanOrEqual(size.width, 820, file: file, line: line)
 
@@ -551,12 +728,15 @@ final class SettingsWindowTests: XCTestCase {
             pane.muteButton, pane.volumeSlider, pane.volumeValue, pane.bufferingPopUp,
             pane.bufferingDetail, pane.modeControl, pane.modeDetail, pane.sensitivitySlider,
             pane.sensitivityValue, pane.followsCursorSwitch, pane.clipboardSwitch, pane.footnote,
+            pane.versionLabel, pane.updateStatus, pane.automaticUpdatesSwitch,
+            pane.installButton.isHidden ? pane.checkButton : pane.installButton,
         ]
         let frames = controls.map { $0.convert($0.bounds, to: pane) }
         for (control, frame) in zip(controls, frames) {
             XCTAssertFalse(frame.isEmpty, "\(type(of: control)) has no size", file: file, line: line)
             XCTAssertTrue(pane.bounds.insetBy(dx: DS.Metric.inset - 1, dy: 0).contains(frame),
-                          "\(type(of: control)) is cut off or outside the inset",
+                          "\(type(of: control)) \((control as? NSTextField)?.stringValue ?? "") "
+                              + "is cut off or outside the inset: \(frame)",
                           file: file, line: line)
         }
         for (index, a) in frames.enumerated() {
@@ -566,19 +746,47 @@ final class SettingsWindowTests: XCTestCase {
             }
         }
 
+        // The status sits beside its button and within its two lines.
+        let status = pane.updateStatus.convert(pane.updateStatus.bounds, to: pane)
+        let action = pane.installButton.isHidden ? pane.checkButton : pane.installButton
+        XCTAssertLessThan(status.maxX, action.convert(action.bounds, to: pane).minX,
+                          "the update status runs under its button", file: file, line: line)
+        XCTAssertTrue(statusFitsItsTwoLines(pane), "the update status needs a third line",
+                      file: file, line: line)
+
+        // The whole pane, or the Updates heading and card with an inset of
+        // ground around them.
+        var region = backdrop.bounds
+        if cropToUpdates, let section = pane.updatesSection {
+            region = section.convert(section.bounds, to: backdrop)
+                .insetBy(dx: -DS.Space.x4, dy: -DS.Space.x4).intersection(backdrop.bounds)
+        }
         let scale: CGFloat = 2
         let rep = try XCTUnwrap(NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale),
-            pixelsHigh: Int(size.height * scale), bitsPerSample: 8, samplesPerPixel: 4,
+            bitmapDataPlanes: nil, pixelsWide: Int(region.width * scale),
+            pixelsHigh: Int(region.height * scale), bitsPerSample: 8, samplesPerPixel: 4,
             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
             bytesPerRow: 0, bitsPerPixel: 0))
-        rep.size = size
-        backdrop.cacheDisplay(in: backdrop.bounds, to: rep)
+        rep.size = region.size
+        backdrop.cacheDisplay(in: region, to: rep)
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)
         try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: url)
     }
 
     // MARK: - Helpers
+
+    /// Whether the update status, measured with no limit on its lines, needs
+    /// no more than the two its row has room for beside the button. The label
+    /// itself is limited to two, so asking it would always say yes.
+    @MainActor
+    private func statusFitsItsTwoLines(_ pane: SettingsPane) -> Bool {
+        let probe = NSTextField(wrappingLabelWithString: pane.updateStatus.stringValue)
+        probe.font = pane.updateStatus.font
+        let width = pane.updateStatus.preferredMaxLayoutWidth
+        let needed = probe.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 10_000))
+            .height ?? .infinity
+        return needed <= ceil(DS.body.boundingRectForFont.height) * 2 + 2
+    }
 
     private func choose(_ popUp: NSPopUpButton, _ index: Int) {
         popUp.selectItem(at: index)

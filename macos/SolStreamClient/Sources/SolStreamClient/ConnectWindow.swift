@@ -33,6 +33,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private let hintLabel = NSTextField(wrappingLabelWithString: "")
     private let connectButton: DS.Button
     private let quitButton: DS.Button
+    /// "Update 1.1.0 available", in the corner the buttons leave free. Not an
+    /// alert and not the accent: the one thing this window is for is the PC,
+    /// and the update waits in Settings until somebody wants it.
+    private let updateNotice = NSButton(title: "", target: nil, action: nil)
+    private var updateObserver: NSObjectProtocol?
 
     private let browser = HostBrowser()
     private var discovered: [DiscoveredHost] = []
@@ -75,6 +80,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         build()
         window.delegate = self
         refresh()
+        refreshUpdateNotice()
+        updateObserver = NotificationCenter.default.addObserver(
+            forName: Updater.didChange, object: Updater.shared, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshUpdateNotice() }
+        }
+    }
+
+    deinit {
+        if let updateObserver { NotificationCenter.default.removeObserver(updateObserver) }
     }
 
     private func build() {
@@ -114,11 +128,25 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
 
+        updateNotice.target = self
+        updateNotice.action = #selector(updateNoticeTapped)
+        updateNotice.isBordered = false
+        updateNotice.image = NSImage(systemSymbolName: "arrow.down.circle",
+                                     accessibilityDescription: nil)
+        updateNotice.symbolConfiguration = .init(pointSize: 11, weight: .medium)
+        updateNotice.imagePosition = .imageLeading
+        updateNotice.imageHugsTitle = true
+        updateNotice.contentTintColor = DS.textMuted
+        updateNotice.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        updateNotice.isHidden = true
+
         // Both buttons trailing, the primary last, the way every Mac dialog puts
-        // them: the eye ends where the way forward is.
+        // them: the eye ends where the way forward is. The update notice, when
+        // there is one, takes the leading end of the same line, so it costs
+        // the window no height.
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [spacer, quitButton, connectButton])
+        let buttons = NSStackView(views: [updateNotice, spacer, quitButton, connectButton])
         buttons.orientation = .horizontal
         buttons.spacing = DS.Space.x3
 
@@ -496,6 +524,24 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     @objc private func quitTapped() {
         NSApp.terminate(nil)
+    }
+
+    /// Settings, where the Updates card has the button. Installing straight
+    /// from a line this small would be a relaunch nobody saw coming.
+    @objc private func updateNoticeTapped() {
+        NotificationCenter.default.post(name: StreamSettings.openSettingsRequest, object: nil)
+    }
+
+    private func refreshUpdateNotice() {
+        guard let version = MainActor.assumeIsolated({ Updater.shared.announcedVersion }) else {
+            updateNotice.isHidden = true
+            return
+        }
+        updateNotice.attributedTitle = NSAttributedString(
+            string: " Update \(version) available",
+            attributes: [.font: DS.caption, .foregroundColor: DS.textSecondary])
+        updateNotice.setAccessibilityLabel("Update \(version) available. Opens Settings.")
+        updateNotice.isHidden = false
     }
 
     func windowWillClose(_ notification: Notification) {

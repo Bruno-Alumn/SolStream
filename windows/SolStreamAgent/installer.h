@@ -65,6 +65,10 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error);
 /// `error` with something a person can act on.
 bool InstallSelf(const InstallOptions& options, std::string& error);
 
+/// Whether the installed copy starts at logon, so an update can keep that
+/// choice. True when it cannot tell.
+bool StartsAtLogon();
+
 /// Undo InstallSelf. Settings in %LOCALAPPDATA%\SolStream are deliberately kept:
 /// they hold the pairing token and the media session counter, and making every
 /// Mac pair again after a reinstall is a worse default than leaving a few

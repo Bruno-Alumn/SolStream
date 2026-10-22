@@ -1,116 +1,204 @@
 # SolStream
 
-Run one Windows application in a window on your Mac.
+SolStream puts a single Windows app on your Mac, in its own window.
 
-Not a desktop in a box. One application, in one native macOS window, with its own
-title bar and traffic lights, that you move and resize and ⌘-Tab to like anything
-else on the Mac. The PC it is actually running on is meant to stop being
-something you think about.
+You don't get a remote desktop. You get the app: a normal macOS window with
+traffic lights and a title bar, which you can move, resize, full-screen and
+⌘-Tab to like anything else. The app keeps running on your PC. With any luck
+you stop noticing that.
+
+## Install
+
+Grab both files from the [Releases page](https://github.com/Bruno-Alumn/SolStream/releases):
+
+- **Mac** (macOS 14 or later): `SolStream-X.Y.Z-macOS.dmg`. Open it and drag
+  SolStream into Applications.
+- **Windows PC**: `SolStreamSetup-X.Y.Z.exe`. Run it. It installs itself, asks
+  for administrator rights once, and from then on starts quietly in the tray
+  when you log in.
+
+Neither file is signed with a paid certificate yet, so both systems complain
+the first time:
+
+- On the Mac, macOS says it couldn't check the app for malware. Close the
+  warning, go to System Settings → Privacy & Security and click *Open Anyway*.
+- On the PC, SmartScreen says "Windows protected your PC". Click *More info*,
+  then *Run anyway*. The admin prompt after that will say *Unknown publisher*.
+
+## Using it
+
+1. Open SolStream on the Mac. It finds the PC on your network, or over
+   Tailscale if you're away from home.
+2. The first time, type in the pairing token. You'll find it in SolStream's
+   window on the PC (click the tray icon).
+3. Pick an app, either one that's already open or one from the Start menu.
+   It opens in its own Mac window.
+
+Click the fps number in a stream window's title bar for the controls you'll
+reach for mid-stream: volume and mute, Desktop or Gaming mouse, and video
+quality. Everything else lives in SolStream › Settings.
+
+Gaming mode is for games that take over the mouse. Click into the window and
+the mouse belongs to the game. Press ⌃⌥ (Control-Option) to get it back. In
+games that show a cursor in their menus, such as Minecraft's pause screen, you
+get the mouse back without pressing anything.
+
+## Updates
+
+Both programs check for a new release a minute after they start, then once a
+day. You can also check by hand: *Check for Updates…* in the Mac's SolStream
+menu, or *Check for updates* in the tray menu on the PC.
+
+When an update turns up, you'll see a notice. Nothing installs until you say
+so, and never in the middle of a stream. Every release comes with a list of
+checksums signed by a key that's built into both programs. The updater checks
+that signature and then the file itself, and throws away anything that doesn't
+match.
+
+A few things to expect:
+
+- The Mac app replaces itself, so it has to sit somewhere you can write to,
+  like Applications. If it can't, it tells you instead of asking for an admin
+  password.
+- macOS may ask for Local Network access again after an update.
+- On Windows, installing an update asks for admin rights, same as the first
+  install.
+
+### While this repository is private
+
+GitHub hides the releases of a private repository from anyone who isn't signed
+in, so the updaters find nothing and stay quiet. To test updates in the
+meantime, create a fine-grained personal access token limited to this
+repository, with *Contents: Read-only* and an expiry date. Give it to the
+program as `SOLSTREAM_GITHUB_TOKEN`.
+
+- **Mac:** quit SolStream, then run this in Terminal and paste the token when
+  it asks:
+
+  ```bash
+  /bin/bash -c 'read -rsp "Token: " t && SOLSTREAM_GITHUB_TOKEN="$t" exec open -a SolStream'
+  ```
+
+  The token only exists for that one launch. Don't use `launchctl setenv`,
+  because that hands it to every app you open.
+- **PC:** add it as a *user* variable under *Edit environment variables for
+  your account* in the Start menu (not a system variable, which every account
+  on the PC can read). Then quit SolStream from the tray and start it again.
+
+Once the repository is public, none of this is needed and you can delete the
+token. [`docs/updates.md`](docs/updates.md) has the full details.
 
 ## How it works
 
-SolStream is two programs and a protocol it owns.
+There are two programs, plus a protocol of their own between them.
 
-A **host application** runs on the Windows PC. It enumerates the windows and
-installed applications, launches things on request, parks the window being
-streamed on a **virtual display** — a display with no physical panel, sized to
-match the Mac exactly — and then captures, encodes and sends the picture itself.
+The **host** runs on the PC. It lists your windows and installed apps, starts
+apps when asked, and moves the one you're streaming onto a **virtual display**.
+That's a screen with no monitor behind it, sized to match your Mac exactly, so
+nothing you do on the real monitor ends up in the stream. Then the host
+captures the window, encodes it with the graphics card's H.264 encoder and
+sends it. Sound comes from the streamed apps only, compressed with Opus or
+sent lossless, whichever you pick.
 
-A **macOS client** shows the picker, opens the window, decodes the video and
-sends back the keyboard and mouse.
+The **Mac client** shows the app picker, opens the windows, decodes the video
+with VideoToolbox and sends your keyboard and mouse back.
 
-Between them is **SMT/1**, SolStream's own media transport: plain UDP carrying
-AES-256-GCM, with the keys agreed over the agent channel — which is itself
-encrypted, with an ephemeral key, from the moment it has authenticated. There is no third program, no pairing PIN, no
-certificate exchange and no forward-error-correction tax on the bandwidth.
-`docs/transport-smt1.md` is the design; it was written clean-room from
-requirements.
+The two talk over a TCP control channel and SMT/1, SolStream's own media
+transport. SMT/1 is plain UDP with AES-256-GCM on every packet. Both channels
+are encrypted, with keys agreed once the Mac has proved it knows the pairing
+token. The design is in [`docs/transport-smt1.md`](docs/transport-smt1.md).
 
 ```
    macOS                                  Windows
    ┌───────────────────┐                  ┌────────────────────────┐
-   │ SolStream.app     │  agent channel   │ SolStream.exe          │
+   │ SolStream.app     │  control, TCP    │ SolStream.exe          │
    │  picker           │◄────47630───────►│  windows, apps, launch │
-   │  window + decode  │   newline-JSON   │  window placement      │
+   │  window + decode  │   encrypted      │  window placement      │
    │  input capture    │                  │  keys for the session  │
    │                   │                  │                        │
-   │                   │  SMT/1, one UDP  │  Windows.Graphics      │
+   │                   │  SMT/1, UDP      │  Windows.Graphics      │
    │                   │◄────47631───────►│   .Capture             │
    │                   │  AES-256-GCM     │  hardware H.264        │
-   └───────────────────┘                  │  WASAPI loopback       │
+   └───────────────────┘                  │  per-app sound, Opus   │
                                           └───────────┬────────────┘
                                                       │ captures
                                                       ▼
                                               virtual display
 ```
 
-Measured against a real host at 3600×2338 — 8.4 megapixels, slightly more than
-4K — with full-screen GPU-drawn content: **49 fps sustained, 0 pictures lost**,
-capture to the last byte on the wire **6.4 ms at best, 20.6 ms on average**.
-
-## Layout
-
-| Path | What it is |
-| --- | --- |
-| `windows/SolStreamAgent/` | The Windows host application. See its [README](windows/SolStreamAgent/README.md). |
-| `windows/SolStreamAgent/media/` | SMT/1's host half: capture, encode, packetize, pace, send. |
-| `macos/SolStreamClient/Sources/MediaSession/` | SMT/1's client half. |
-| `windows/VirtualDisplay/` | Setting up the virtual display it streams from. |
-| `macos/SolStreamClient/` | The macOS client, a SwiftPM package. |
-| `spike/` | Throwaway programs that answered one question each, kept for their results. |
-| `scripts/` | Packaging, both platforms. |
-| `docs/` | Architecture and design notes. |
+On a real PC at 3600×2338 (a little more than 4K), with full-screen content
+the GPU redraws constantly, it held 49 fps without losing a frame. The time
+from capture to the last byte leaving the PC was 6.4 ms at best and 20.6 ms on
+average.
 
 ## Building
 
-**macOS client** — needs Xcode's toolchain, macOS 14 or newer:
+**Mac client.** You need Xcode's command-line tools on macOS 14 or newer.
 
 ```bash
 cd macos/SolStreamClient && swift build && swift test
 ```
 
-`scripts/package-macos.sh --dev` produces `SolStream.app`.
+`scripts/package-macos.sh --dev` builds `SolStream.app`, and from it
+`dist/SolStream-X.Y.Z-macOS.zip` and `.dmg`. Add `--universal` to include
+Intel Macs, as releases do. The version always comes from the `VERSION` file.
 
-**Windows host** — needs CMake and MSVC.
+**Windows host.** You need CMake and Visual Studio's C++ tools (MSVC).
 
 ```
 cmake --build build --target SolStreamAgent --config Release
 ```
 
-`sh windows/SolStreamAgent/build-cross.sh` compiles with mingw as an offline
-syntax check, but MSVC is the source of truth and the media path is MSVC-only:
-Windows.Graphics.Capture arrives through C++/WinRT and the encoder through Media
-Foundation, and mingw has neither. A green mingw build has hidden a total MSVC
-failure before.
+`scripts/package-windows.ps1` turns that into `dist\SolStreamSetup-X.Y.Z.exe`,
+plus a copy named `SolStreamSetup.exe`. That one file is the whole installer:
+run it and it copies itself into Program Files, opens the two ports it needs
+and sets itself to start at logon. `--uninstall` reverses all of it.
 
-`scripts/package-windows.ps1` produces `SolStreamSetup.exe` — one file, which is
-the whole package. Installing is the executable's own job: run it and it offers
-to copy itself into Program Files, open the two ports it needs and start at
-logon, asking for administrator rights once, visibly. `--uninstall` undoes it.
+On a Mac you can sanity-check the Windows code with
+`sh windows/SolStreamAgent/build-cross.sh`, which compiles it with mingw. Only
+MSVC builds the real thing, though. The capture and encoding code needs
+C++/WinRT and Media Foundation, which mingw doesn't have, and a clean mingw
+build has hidden a broken MSVC one before.
 
-## Licensing
+To publish a release, push a version tag. See
+[`docs/releasing.md`](docs/releasing.md).
 
-**All rights reserved.** SolStream has no open-source licence: you may read this
-code if you have access to the repository, but not copy, modify or distribute it
-without the owner's permission.
+## Where things are
 
-**There is one third-party component, and it is in the Windows host only:**
-[libopus](https://opus-codec.org) 1.6.1, BSD 3-clause, which compresses the
-PC's sound when Settings → Sound → Quality asks for anything but Lossless.
-Windows ships no Opus encoder, and the AAC encoder it does ship can do
-neither 64 nor 256 kbit/s and would put about 50 ms of delay into the sound.
-[`third_party/opus/SOLSTREAM.md`](third_party/opus/SOLSTREAM.md) says exactly
-what was taken and why. Its licence travels inside the executable:
-`SolStream.exe --licenses` prints it. The Mac decodes Opus with AudioToolbox.
+| Path | What's in it |
+| --- | --- |
+| `macos/SolStreamClient/` | The Mac app, a Swift package. |
+| `macos/SolStreamClient/Sources/MediaSession/` | The Mac half of SMT/1. |
+| `windows/SolStreamAgent/` | The Windows host. It has its own [README](windows/SolStreamAgent/README.md). |
+| `windows/SolStreamAgent/media/` | The PC half of SMT/1: capture, encode, packetize, pace, send. |
+| `windows/VirtualDisplay/` | Setting up the virtual display. |
+| `scripts/` | Packaging for both platforms, and release signing. |
+| `.github/workflows/` | CI and the release pipeline. |
+| `docs/` | Design notes. |
+| `spike/` | Small throwaway programs, each written to answer one question, kept for the answers. |
 
-Two others are gone, and a third is optional and separate:
+## Licence
 
-| Component | Licence | What happened to it |
-| --- | --- | --- |
-| [Sunshine](https://github.com/LizardByte/Sunshine) | GPL-3.0 | Removed. It did the capture and encoding and spoke GameStream; SolStream does both itself now, over SMT/1. Nothing in what ships is under the GPL and there is no obligation left to meet. |
-| [ENet](https://github.com/lsalzman/enet) 1.3.18 | MIT | Removed with the GameStream control stream that used it. |
-| [Virtual Display Driver](https://github.com/VirtualDisplay/Virtual-Display-Driver) | see upstream | Still optional, still installed separately by the user, never redistributed here. |
+All rights reserved. SolStream has no open-source licence. If you have access
+to this repository you can read the code, but you can't copy, change or
+redistribute it without the owner's permission.
 
-Everything else is in the box: BCrypt and Media Foundation and
-Windows.Graphics.Capture on Windows, CryptoKit and VideoToolbox and AudioUnit
-and AudioToolbox on macOS.
+The Windows host includes one outside library: [libopus](https://opus-codec.org)
+1.6.1 (BSD 3-clause), which compresses the sound unless you choose Lossless.
+Windows has no Opus encoder of its own, and its built-in AAC encoder can't do
+64 or 256 kbit/s and adds about 50 ms of delay. What was taken and why is in
+[`third_party/opus/SOLSTREAM.md`](third_party/opus/SOLSTREAM.md), and
+`SolStream.exe --licenses` prints the licence. The Mac decodes Opus with
+AudioToolbox.
+
+Two earlier dependencies are gone. [Sunshine](https://github.com/LizardByte/Sunshine)
+(GPL-3.0) used to do the capture and encoding, and
+[ENet](https://github.com/lsalzman/enet) (MIT) carried its control stream.
+SolStream does both itself now, so nothing it ships is under the GPL.
+
+The [Virtual Display Driver](https://github.com/VirtualDisplay/Virtual-Display-Driver)
+is optional, installed separately, and never bundled.
+
+Everything else comes with the operating systems: BCrypt, Media Foundation and
+Windows.Graphics.Capture on Windows; CryptoKit, VideoToolbox, AudioUnit and
+AudioToolbox on the Mac.

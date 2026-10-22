@@ -22,7 +22,20 @@ cmake_policy(SET CMP0091 NEW)
 # being embedded, which meant every ordinary build produced an executable with
 # no icon and no version block -- and the only builds that had them were the
 # packaged ones nobody looks at until they are on somebody else's machine.
-set(SOLSTREAM_VERSION "1.0.0")
+#
+# The version is the repository's VERSION file and nothing else: the Mac
+# bundle, this executable's version block and the release tag all read it, and
+# the updater compares against what lands here (docs/updates.md). Checked to be
+# exactly X.Y.Z, because the updater refuses any other shape -- a build that
+# could not parse its own version would never see an update. Changing the file
+# re-runs the configure.
+set(SOLSTREAM_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION")
+file(READ "${SOLSTREAM_VERSION_FILE}" SOLSTREAM_VERSION)
+string(STRIP "${SOLSTREAM_VERSION}" SOLSTREAM_VERSION)
+if(NOT SOLSTREAM_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "VERSION must hold X.Y.Z and nothing else, not '${SOLSTREAM_VERSION}'")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SOLSTREAM_VERSION_FILE}")
 string(REPLACE "." "," SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION}")
 set(SOLSTREAM_VERSION_COMMA "${SOLSTREAM_VERSION_COMMA},0")
 
@@ -68,6 +81,8 @@ add_executable(SolStreamAgent
     display_setup.cpp
     host_window.cpp
     installer.cpp
+    # Finds, verifies and installs updates from GitHub releases.
+    updater.cpp
     ${SOLSTREAM_MEDIA_SOURCES}
     ${SOLSTREAM_RESOURCES}
     # Merged into the linker's manifest: no console window when started from
@@ -156,7 +171,50 @@ if(MSVC)
     # point is that there is one thing to run.
     set_property(TARGET SolStreamAgent PROPERTY
                  MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+    # Every DLL this program imports comes from System32, never from beside the
+    # executable. The updater runs it elevated from %LOCALAPPDATA%\SolStream\
+    # Updates, setup runs it elevated from Downloads, and uninstall from %TEMP%
+    # -- all three writable by the user's own programs, and Windows looks in
+    # the program's own folder first for any import that is not a KnownDLL
+    # (dwmapi, winhttp, d2d1, dxgi, mfplat...). A planted one would run elevated
+    # before wmain, where nothing in the code can stop it. 0x800 is
+    # LOAD_LIBRARY_SEARCH_SYSTEM32, honoured for static imports from Windows 10
+    # 1607; side-by-side and API-set DLLs resolve as before. Loads after wmain
+    # are main.cpp's SetDefaultDllDirectories. Check: `dumpbin /loadconfig`
+    # shows DependentLoadFlags 0x800 -- not yet seen on a real MSVC link, so
+    # look on the first one rather than remove it. The mingw build cannot set
+    # it: its linker has no such option, and it is not what ships.
+    target_link_options(SolStreamAgent PRIVATE /DEPENDENTLOADFLAG:0x800)
 else()
     target_compile_options(SolStreamAgent PRIVATE -Wall -Wextra -municode)
     target_link_options(SolStreamAgent PRIVATE -municode -static)
+endif()
+
+# The updater's own tests: version, JSON, SHA256SUMS and base64 parsing, the
+# signature against tests/update-vector, the host allow-list, the anti-rollback
+# name check, the download's hold, and the note an install leaves. No network,
+# and nothing outside a temporary folder: it never sees the real
+# %LOCALAPPDATA%. updater_tests.cpp includes updater.cpp to reach its internals,
+# so that is not listed again here. Not built by package-windows.ps1, which
+# configures with BUILD_TESTING off.
+if(BUILD_TESTING)
+    add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp installer.cpp media/log.cpp)
+    set_target_properties(SolStreamUpdaterTests PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_compile_definitions(SolStreamUpdaterTests PRIVATE UNICODE _UNICODE
+        SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
+    target_link_libraries(SolStreamUpdaterTests PRIVATE
+        user32 advapi32 shell32 winhttp crypt32 bcrypt ole32 oleaut32 uuid)
+    if(MSVC)
+        target_compile_options(SolStreamUpdaterTests PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(SolStreamUpdaterTests PRIVATE -Wall -Wextra -municode)
+        target_link_options(SolStreamUpdaterTests PRIVATE -municode -static)
+    endif()
+    add_test(NAME updater
+             COMMAND SolStreamUpdaterTests
+                     "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/update-vector")
 endif()

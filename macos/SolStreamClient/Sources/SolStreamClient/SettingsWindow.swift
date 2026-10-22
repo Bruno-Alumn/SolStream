@@ -14,10 +14,14 @@ import SolStreamLogging
 /// is running.
 final class SettingsWindow: NSObject {
     let window: NSWindow
-    let pane = SettingsPane()
+    let pane: SettingsPane
     private var hasBeenShown = false
+    /// Made the first time a screen is too short for the pane; see `fit`.
+    private var scroller: NSScrollView?
 
-    override init() {
+    /// - Parameter updater: for the Updates card; the tests pass their own.
+    init(updater: Updater = .shared) {
+        pane = SettingsPane(updater: updater)
         let size = pane.fittingSize
         // Not resizable: every row is laid out to a fixed width, and there is
         // nothing a larger window would show more of.
@@ -47,12 +51,63 @@ final class SettingsWindow: NSObject {
         // Read again rather than trusted: the observers keep it current, but a
         // window that has been closed for an hour should not depend on that.
         pane.refresh()
+        // Every time: the window may open on another screen, or the Dock may
+        // have grown since.
+        let screen = window.screen ?? NSScreen.main
+        fit(height: screen?.visibleFrame.height ?? .greatestFiniteMagnitude)
         if !hasBeenShown {
             window.center()
             hasBeenShown = true
         }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// The pane whole when `available` -- the screen's height less the menu
+    /// bar and the Dock -- has room for it, and otherwise the pane in a scroll
+    /// view that tall. The window is not resizable, so on a short screen the
+    /// foot of the right column would otherwise sit under the Dock, out of
+    /// reach.
+    func fit(height available: CGFloat) {
+        let size = pane.fittingSize
+        if size.height <= available {
+            guard window.contentView !== pane else { return }
+            scroller?.documentView = nil
+            pane.autoresizingMask = [.width, .height]
+            window.contentView = pane
+            window.setContentSize(size)
+            return
+        }
+        let scroll = scroller ?? Self.makeScroller()
+        scroller = scroll
+        if window.contentView !== scroll {
+            // Out of the window before it goes into the scroll view, so it is
+            // never in two places at once.
+            window.contentView = scroll
+            // Its own height, fixed: the clip view resizing must not stretch
+            // or squash a pane laid out to fit its rows exactly.
+            pane.autoresizingMask = []
+            pane.frame = NSRect(origin: .zero, size: size)
+            scroll.documentView = pane
+        }
+        window.setContentSize(NSSize(width: size.width, height: floor(available)))
+        // At the top, where the heading is. The clip view, like the pane,
+        // counts up from the bottom.
+        let clip = scroll.contentView
+        clip.scroll(to: NSPoint(x: 0, y: max(0, size.height - clip.bounds.height)))
+        scroll.reflectScrolledClipView(clip)
+    }
+
+    private static func makeScroller() -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        // The window's own ground shows through, as it does behind the pane.
+        scroll.drawsBackground = false
+        // The pane's top inset already clears the transparent title bar; the
+        // scroll view adding the bar's height again would push it down.
+        scroll.automaticallyAdjustsContentInsets = false
+        return scroll
     }
 }
 
@@ -90,9 +145,9 @@ private final class SettingsPanelWindow: NSWindow {
 /// The window's content, built on its own so that tests can lay it out and
 /// photograph it without a window ever reaching the screen.
 ///
-/// Two columns of cards: what you see and hear on the left, what your hands do
-/// and the clipboard on the right. In one column the same rows stand some 850
-/// points tall, more than a 13-inch MacBook shows under its menu bar.
+/// Two columns of cards: what you see and hear on the left, what your hands do,
+/// the clipboard and updates on the right. In one column the same rows stand
+/// some 1,000 points tall, more than a 13-inch MacBook shows under its menu bar.
 final class SettingsPane: NSView {
     static let columnWidth: CGFloat = 344
     /// Two columns, the gutter between them and the window's inset either side.
@@ -130,6 +185,15 @@ final class SettingsPane: NSView {
     let followsCursorSwitch = SolarSwitch(label: "Give the mouse back when the game shows its cursor")
     // General
     let clipboardSwitch = SolarSwitch(label: "Sync the clipboard")
+    // Updates
+    let updater: Updater
+    let versionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
+    let updateStatus = NSTextField(wrappingLabelWithString: "")
+    let checkButton = DS.Button(title: "Check now", target: nil, action: nil)
+    let installButton = DS.Button(title: "Install and relaunch", style: .primary, target: nil, action: nil)
+    let automaticUpdatesSwitch = SolarSwitch(label: "Check for updates automatically")
+    /// The heading and card together, for the test that photographs them.
+    private(set) var updatesSection: NSView?
     let footnote = SettingsPane.caption(
         "Quality, frame rate and the PC's sound apply by restarting the picture for a moment.")
 
@@ -143,7 +207,10 @@ final class SettingsPane: NSView {
     private var isWriting = false
     private var observers: [NSObjectProtocol] = []
 
-    init() {
+    /// - Parameter updater: whose state the Updates card shows; the tests pass
+    ///   one of their own, so photographing the card checks nothing for real.
+    init(updater: Updater = .shared) {
+        self.updater = updater
         super.init(frame: .zero)
         build()
         refresh()
@@ -158,6 +225,11 @@ final class SettingsPane: NSView {
                 self.refresh()
             })
         }
+        // A check moves on by itself, so the card follows it while open.
+        observers.append(center.addObserver(forName: Updater.didChange, object: updater,
+                                            queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshUpdates() }
+        })
     }
 
     @available(*, unavailable)
@@ -208,6 +280,52 @@ final class SettingsPane: NSView {
         Self.dim(gamingDependentLabels, !gaming)
 
         clipboardSwitch.isOn = settings.syncsClipboard
+        refreshUpdates()
+    }
+
+    /// The Updates card from the updater's state.
+    ///
+    /// One button at a time beside the status: Check now, or -- when there is
+    /// something to act on -- the one action it calls for. The line is a
+    /// button's height whichever shows, so the card never moves under the
+    /// pointer as a check runs.
+    func refreshUpdates() {
+        versionLabel.stringValue = "Version \(updater.currentVersion)"
+        versionLabel.setAccessibilityLabel("SolStream version \(updater.currentVersion)")
+        automaticUpdatesSwitch.isOn = updater.checksAutomatically
+        updateStatus.stringValue = updater.statusText
+
+        let action: (title: String, style: DS.Button.Style, enabled: Bool)?
+        switch updater.state {
+        case .available:
+            // Nothing downloads during a stream, so no button says it would.
+            action = updater.isStreaming ? nil : ("Download", .primary, true)
+        case .ready:
+            action = (updater.isStreaming ? "Install after stream" : "Install and relaunch", .primary, true)
+        case .waitingForStream:
+            action = ("Don't install", .secondary, true)
+        case .installing:
+            action = ("Install and relaunch", .primary, false)
+        case .manualInstall:
+            action = ("Show download", .primary, true)
+        case .idle, .checking, .upToDate, .downloading, .installed, .failed:
+            action = nil
+        }
+        if let action {
+            installButton.title = action.title
+            installButton.style = action.style
+            installButton.isEnabled = action.enabled
+        }
+        installButton.isHidden = action == nil
+        checkButton.isHidden = action != nil
+        switch updater.state {
+        // Installed and waiting to restart: there is nothing left to check.
+        case .checking, .downloading, .installed: checkButton.isEnabled = false
+        default: checkButton.isEnabled = true
+        }
+        let shown = action == nil ? checkButton : installButton
+        updateStatus.preferredMaxLayoutWidth = Self.innerWidth - shown.intrinsicContentSize.width
+            - DS.Space.x4
     }
 
     /// The speaker, the slider and the figure beside it.
@@ -369,6 +487,27 @@ final class SettingsPane: NSView {
         guard sender.isOn != settings.syncsClipboard else { return }
         Log.info("[settings] clipboard sync: \(sender.isOn ? "on" : "off")")
         write { settings.syncsClipboard = sender.isOn }
+    }
+
+    @objc private func checkForUpdatesPressed(_ sender: Any?) {
+        updater.checkNow()
+    }
+
+    /// Whatever the one action beside the status is at the moment.
+    @objc private func updateActionPressed(_ sender: Any?) {
+        switch updater.state {
+        case .available: Task { await updater.download() }
+        case .ready: updater.installAndRelaunch()
+        case .waitingForStream: updater.cancelPendingInstall()
+        case .manualInstall: updater.revealDownload()
+        default: break
+        }
+    }
+
+    @objc private func automaticUpdatesToggled(_ sender: SolarSwitch) {
+        guard sender.isOn != updater.checksAutomatically else { return }
+        // The updater logs the change itself.
+        updater.checksAutomatically = sender.isOn
     }
 
     // MARK: - Values
@@ -540,13 +679,41 @@ final class SettingsPane: NSView {
             ]),
         ])
 
+        // ── Updates ──────────────────────────────────────────────────────────
+        // The status takes the place of a row name: it is the thing to read,
+        // and the version it is about is said once, beside the heading.
+        // Clipped rather than truncated: AppKit rounds the label's width down
+        // from what its text measures by a fraction of a point, and the
+        // truncating mode then trades the last digit for an ellipsis.
+        versionLabel.lineBreakMode = .byClipping
+        updateStatus.font = DS.body
+        updateStatus.textColor = DS.text
+        updateStatus.isSelectable = false
+        updateStatus.maximumNumberOfLines = 2
+        checkButton.target = self
+        checkButton.action = #selector(checkForUpdatesPressed(_:))
+        installButton.target = self
+        installButton.action = #selector(updateActionPressed(_:))
+        automaticUpdatesSwitch.target = self
+        automaticUpdatesSwitch.action = #selector(automaticUpdatesToggled(_:))
+        let updateButtons = Self.line([installButton, checkButton], spacing: DS.Space.x2)
+        let statusRow = row(label: updateStatus, trailing: updateButtons)
+        let updates = section("Updates", accessory: versionLabel, rows: [
+            statusRow,
+            // No caption: what the switch does fits in its name, and the right
+            // column is already the taller, by the height of this card's
+            // heading and the gap above it.
+            row("Check for updates automatically", trailing: automaticUpdatesSwitch),
+        ])
+        updatesSection = updates
+
         // ── The page ─────────────────────────────────────────────────────────
         let heading = DS.label("Settings", font: DS.title)
         let subheading = DS.label("Kept on this Mac, for every PC you stream from.",
                                   font: DS.body, colour: DS.textSecondary)
 
         let left = Self.column([video, sound])
-        let right = Self.column([mouse, general])
+        let right = Self.column([mouse, general, updates])
         let columns = Self.line([left, right], spacing: DS.Space.x6)
         columns.alignment = .top
 
@@ -606,6 +773,11 @@ final class SettingsPane: NSView {
         name.font = DS.body
         name.textColor = DS.text
         name.isSelectable = false
+        return row(label: name, trailing: trailing, below: below)
+    }
+
+    /// The same, with a name made by the caller: one whose words change.
+    private func row(label name: NSTextField, trailing: NSView, below: [NSView] = []) -> Row {
         name.preferredMaxLayoutWidth = Self.innerWidth - trailing.fittingSize.width - DS.Space.x4
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -631,7 +803,9 @@ final class SettingsPane: NSView {
     }
 
     /// A heading over a card of rows, with an inset hairline between rows.
-    private func section(_ title: String, rows: [Row]) -> NSView {
+    /// - Parameter accessory: something said beside the heading, at its far
+    ///   end, such as the version the Updates card is about.
+    private func section(_ title: String, accessory: NSView? = nil, rows: [Row]) -> NSView {
         let card = DS.card()
         let stack = Self.vertical([], spacing: 0)
         stack.alignment = .centerX
@@ -654,7 +828,22 @@ final class SettingsPane: NSView {
         ])
 
         let header = DS.label(title, font: DS.headline)
-        return Self.vertical([header, card], spacing: DS.Space.x2)
+        guard let accessory else { return Self.vertical([header, card], spacing: DS.Space.x2) }
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // Said in full: the spacer gives way, never the words.
+        for view in [header, accessory] {
+            view.setContentHuggingPriority(.required, for: .horizontal)
+            view.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        let heading = Self.line([header, spacer, accessory], spacing: DS.Space.x2)
+        heading.alignment = .firstBaseline
+        // A label's frame runs two points past its text. Inset by that, the
+        // words end where the card below does and the frame stays inside the
+        // window's margin.
+        heading.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 2)
+        heading.widthAnchor.constraint(equalToConstant: Self.columnWidth).isActive = true
+        return Self.vertical([heading, card], spacing: DS.Space.x2)
     }
 
     private static func column(_ sections: [NSView]) -> NSStackView {

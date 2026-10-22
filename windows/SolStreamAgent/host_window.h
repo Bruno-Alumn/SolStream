@@ -13,6 +13,10 @@
 
 #include <string>
 
+namespace solstream::update {
+struct CheckResult;
+}  // namespace solstream::update
+
 namespace solstream {
 
 /// What the window shows. Filled in by the agent and read by the UI thread.
@@ -51,6 +55,18 @@ bool ShowHostWindow(WindowMode mode = WindowMode::Host, bool start_hidden = fals
 
 /// Replace what the window displays. Safe to call from any thread.
 void UpdateHostStatus(const HostStatus& status);
+
+/// What an update check found, for the window to announce: a banner and a tray
+/// item when there is an update, and -- only when somebody asked, through
+/// "Check for updates" -- the answer either way. Never a balloon, and never the
+/// foreground: an automatic check is something the window mentions, not
+/// something that interrupts. Safe to call from any thread.
+void UpdateCheckFinished(const update::CheckResult& result, bool asked);
+
+/// What became of the update an earlier copy started installing: `installed`
+/// when this copy is `version`, otherwise it did not finish. Said in the
+/// window's notice. Call before ShowHostWindow, on the thread that will run it.
+void SayInstallOutcome(bool installed, const std::string& version);
 
 /// Pump the window's messages until it is closed. Returns the exit code.
 int RunHostWindowLoop();

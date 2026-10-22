@@ -82,9 +82,11 @@ why a driver the user installs themselves is currently the path that works.
 
 ## Known gaps
 
-- **Nothing is signed, and there is no CI.** `scripts/package-windows.ps1` builds
-  and copies; it has no `signtool` step, and there is no workflow anywhere in the
-  repository — the packaging scripts are run by hand. Unsigned, the user meets
+- **Nothing is signed with a certificate.** `scripts/package-windows.ps1` builds
+  and copies with no `signtool` step; CI (`.github/workflows/ci.yml`) and the
+  release workflow (`release.yml`) run it on GitHub's Windows runners. What makes
+  a release trustworthy to the updater is the signed SHA256SUMS
+  (docs/updates.md), which does nothing for SmartScreen. Unsigned, the user meets
   "Windows protected your PC" and an *Unknown publisher* prompt at the UAC
   dialog. Code signing is a cost rather than a technique: nothing in the
   engineering removes that prompt, only a certificate does. The macOS side of the

@@ -25,9 +25,11 @@
 #include <dwrite.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -37,6 +39,7 @@
 #include "host_theme.h"
 #include "installer.h"
 #include "ports.h"
+#include "updater.h"
 #include "util.h"
 #include "vdd.h"
 
@@ -89,10 +92,21 @@ constexpr UINT WM_SOLSTREAM_JOB_DONE = WM_APP + 1;
 constexpr UINT WM_SOLSTREAM_JOB_STEP = WM_APP + 2;
 /// The notification-area icon's callback.
 constexpr UINT WM_SOLSTREAM_TRAY = WM_APP + 3;
+/// Posted by the update scheduler's thread when a check finishes. wparam is
+/// non-zero when somebody asked for it; lparam owns an update::CheckResult the
+/// UI thread deletes.
+constexpr UINT WM_SOLSTREAM_UPDATE = WM_APP + 4;
+/// Posted by the thread that waits on a started installer, when it finished
+/// and this copy is still running -- so it was not replaced. wparam is its exit
+/// code.
+constexpr UINT WM_SOLSTREAM_UPDATE_EXITED = WM_APP + 5;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpen = 1;
 constexpr UINT kTrayCopyToken = 2;
 constexpr UINT kTrayQuit = 3;
+constexpr UINT kTrayInstallUpdate = 4;
+constexpr UINT kTrayCheckUpdates = 5;
+constexpr UINT kTraySetUpDisplay = 6;
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -138,6 +152,29 @@ bool g_job_running = false;
 /// gives away that the rest of it was drawn at all.
 std::wstring g_notice;
 std::wstring g_notice_detail;
+
+/// Which job g_job_running is about, so its answer is worded for that job.
+enum class HostJob { None, Display, Update };
+HostJob g_host_job = HostJob::None;
+
+/// The update the last check found, its checksums' signature verified. UI
+/// thread only: checks finish on another thread and report through
+/// WM_SOLSTREAM_UPDATE rather than writing here.
+bool g_update_found = false;
+update::Release g_update;
+/// "Check for updates" was chosen and has not been answered yet. Its answer
+/// goes in the notice, which says "Checking…" until then.
+bool g_update_checking = false;
+/// The installer has started and has neither stopped this copy nor finished.
+/// Install is not offered meanwhile, so a second press cannot raise a second
+/// permission prompt.
+bool g_update_installing = false;
+/// The installer's end, when it arrived before the job's own answer did.
+bool g_update_exit_early = false;
+DWORD g_update_exit_code = 0;
+/// The version the tray's tooltip announces, empty for none. Behind g_mutex,
+/// unlike the rest of the update state: the status thread builds the tooltip.
+std::wstring g_update_tip_version;
 
 HWND g_window = nullptr;
 HWND g_token_edit = nullptr;
@@ -646,6 +683,10 @@ void DrawCheck(const Check& check) {
 
 // ── What the window is currently saying ──────────────────────────────────────
 
+/// What the banner's button does. Decided by Describe, the same function that
+/// decides what the button SAYS, so the two cannot disagree.
+enum class BannerAction { None, Dismiss, InstallDriver, InstallUpdate };
+
 struct Screen {
     // A short title and the sentence under it, the same shape as setup's. One
     // long headline wrapped and left "this PC." alone on a line of its own; a
@@ -662,10 +703,24 @@ struct Screen {
     bool fix_primary = true; ///< "OK" is not the thing the screen is asking for
     bool shield = false;
     bool connected = false;
+    BannerAction action = BannerAction::None;
 };
 
 /// The dot beside a notice: working while its job runs, then how it went.
 Mark g_notice_mark = Mark::None;
+/// The notice is about an update: its progress, or the answer to something
+/// asked. Those are said even over the two hard failures below, which every
+/// other notice waits behind -- an update may be what fixes the failure, and
+/// "Check for updates" chosen from the tray must get an answer in the window it
+/// opened.
+bool g_notice_about_update = false;
+
+void SetNotice(std::wstring what, std::wstring why, Mark mark, bool about_update) {
+    g_notice = std::move(what);
+    g_notice_detail = std::move(why);
+    g_notice_mark = mark;
+    g_notice_about_update = about_update;
+}
 
 /// Derive what to show from what the agent last reported. One banner at a time:
 /// failures cascade, and four banners describing one broken link is noise.
@@ -673,6 +728,9 @@ Screen Describe(const HostStatus& status) {
     Screen screen;
     screen.connected = status.connected_clients > 0;
 
+    // The two hard failures keep the headline and subtitle whatever else is
+    // said. Their rows give way only to an update (g_notice_about_update).
+    bool failing = true;
     if (status.address.empty()) {
         screen.headline = L"Not reachable yet.";
         screen.subtitle = L"SolStream is ready, but your Mac can't reach this PC.";
@@ -680,9 +738,7 @@ Screen Describe(const HostStatus& status) {
         screen.why = L"SolStream needs both machines on the same local network.";
         screen.code = L"SS-104";
         screen.mark = Mark::Failed;
-        return screen;
-    }
-    if (!status.streaming_ready) {
+    } else if (!status.streaming_ready) {
         screen.headline = L"Streaming didn't start.";
         screen.subtitle = L"SolStream couldn't start streaming on this PC.";
         screen.what = status.streaming_detail.empty()
@@ -692,30 +748,67 @@ Screen Describe(const HostStatus& status) {
                      L"you is a real conflict rather than a hiccup.";
         screen.code = L"SS-311";
         screen.mark = Mark::Failed;
-        return screen;
+    } else {
+        failing = false;
+        screen.headline = screen.connected ? L"Streaming to your Mac."
+                                           : L"Ready for your Mac.";
+        // Connected, the token is hidden, so the subtitle says where it went
+        // rather than leaving somebody to look for it.
+        screen.subtitle = screen.connected
+            ? L"The pairing token is hidden while your Mac is connected."
+            : L"Open SolStream on your Mac and pick this PC.";
     }
-    screen.headline = screen.connected ? L"Streaming to your Mac."
-                                       : L"Ready for your Mac.";
-    // Connected, the token is hidden, so the subtitle says where it went rather
-    // than leaving somebody to look for it.
-    screen.subtitle = screen.connected
-        ? L"The pairing token is hidden while your Mac is connected."
-        : L"Open SolStream on your Mac and pick this PC.";
 
     // What a button just did, said in the window rather than in a system dialog
     // that knows nothing about this program's theme. It outranks the driver
     // advisory below, because it is the answer to the button that advisory
     // offered — showing the question again underneath its own answer would be
     // absurd — but not the two hard failures above, which are still true.
-    if (!g_notice.empty()) {
+    if (!g_notice.empty() && (!failing || g_notice_about_update)) {
         screen.what = g_notice;
         screen.why = g_notice_detail;
         screen.mark = g_notice_mark;
+        screen.code.clear();
         // Nothing to dismiss until it has finished saying it. Dismissing is not
         // the screen's main action, so it is the quiet button.
-        screen.fix = g_job_running ? L"" : L"OK";
+        const bool busy = g_job_running || g_update_checking || g_update_installing;
+        screen.fix = busy ? L"" : L"OK";
         screen.fix_primary = false;
         screen.shield = false;
+        screen.action = busy ? BannerAction::None : BannerAction::Dismiss;
+        return screen;
+    }
+
+    // An update outranks the driver advisory below, which can stand for as
+    // long as somebody is happy streaming their main display -- an update
+    // behind it would never be seen; the tray's "Set up virtual display" keeps
+    // that one reachable. It outranks the hard failures' rows too, since it
+    // may be what fixes them. Nothing installs on its own: the button does,
+    // and not while a Mac is streaming, because the installer restarts this
+    // host and that would end the stream under whoever is using it.
+    //
+    // Except while a Mac is connected without the virtual display: Install
+    // can't be pressed then anyway, and that is exactly when the advisory is
+    // true -- everything on the main display is going to the Mac.
+    if (g_update_found && !(screen.connected && !status.virtual_display)) {
+        screen.what = L"Update available: " + ToWide(g_update.version);
+        screen.mark = Mark::NeedsYou;
+        screen.code.clear();
+        if (screen.connected) {
+            screen.why = L"You can install it once your Mac has disconnected — "
+                         L"installing restarts SolStream on this PC.";
+        } else {
+            // The logon choice is kept (InstalledOptions reads it back), so
+            // the only thing worth warning about is the permission prompt.
+            screen.why = L"Windows asks for permission first. Installing restarts "
+                         L"SolStream.";
+            screen.fix = L"Install";
+            screen.shield = true;
+            screen.action = BannerAction::InstallUpdate;
+        }
+        return screen;
+    }
+    if (failing) {
         return screen;
     }
 
@@ -737,6 +830,7 @@ Screen Describe(const HostStatus& status) {
         screen.fix = L"Install driver";
         screen.mark = Mark::NeedsYou;
         screen.shield = true;
+        screen.action = BannerAction::InstallDriver;
     }
     return screen;
 }
@@ -1628,9 +1722,9 @@ void StartDisplayJob(HWND window) {
         return;
     }
     g_job_running = true;
-    g_notice = L"Setting the virtual display up…";
-    g_notice_detail = L"Installing the driver.";
-    g_notice_mark = Mark::NeedsYou;
+    g_host_job = HostJob::Display;
+    SetNotice(L"Setting the virtual display up…", L"Installing the driver.", Mark::NeedsYou,
+              false);
     InvalidateRect(window, nullptr, FALSE);
 
     std::thread([window] {
@@ -1650,6 +1744,201 @@ void StartDisplayJob(HWND window) {
     }).detach();
 }
 
+// The notification area's, below.
+std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version);
+NOTIFYICONDATAW TrayData(HWND window);
+
+// ── Updates ──────────────────────────────────────────────────────────────────
+//
+// Found by update::StartScheduler's checks (main.cpp starts it), announced
+// here, installed only from here: the banner's Install button or the tray's
+// "Install update". See docs/updates.md.
+
+/// What this install was set up with, so an update keeps it rather than
+/// quietly putting back a shortcut somebody removed: the installer applies
+/// exactly what it is told, and told nothing it writes every shortcut.
+///
+/// The paths are installer.cpp's -- SolStream.lnk on the all-users desktop and
+/// in the all-users Start menu. Where Windows will not name a folder the answer
+/// is "keep it": guessing wrong that way costs a shortcut, and the other way it
+/// costs the installer deleting one.
+///
+/// The logon task is always asked for, because it is also how the installer
+/// starts the new copy. An update told --no-logon would leave SolStream not
+/// running afterwards, with a Mac on the other side waiting for it. That does
+/// turn starting at logon back on for somebody who had turned it off, so the
+/// banner's Install says so; keeping their choice needs the installer to start
+/// the new copy some other way first.
+InstallOptions InstalledOptions() {
+    auto present = [](int csidl) {
+        wchar_t folder[MAX_PATH] = {0};
+        if (FAILED(SHGetFolderPathW(nullptr, csidl, nullptr, SHGFP_TYPE_CURRENT, folder))) {
+            return true;
+        }
+        const std::wstring link = std::wstring(folder) + L"\\SolStream.lnk";
+        return GetFileAttributesW(link.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    InstallOptions options;
+    options.desktop_shortcut = present(CSIDL_COMMON_DESKTOPDIRECTORY);
+    options.start_menu_shortcut = present(CSIDL_COMMON_PROGRAMS);
+    // As the person left it: an update used to turn "start when I log in"
+    // back on every time.
+    options.start_at_logon = StartsAtLogon();
+    return options;
+}
+
+bool StreamingNow() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_status.connected_clients > 0;
+}
+
+/// Download, verify, and start the installer. It asks for elevation, stops
+/// this host and starts the new one, so success is the last thing this copy
+/// reports.
+void StartUpdateJob(HWND window) {
+    if (g_job_running || g_update_checking || g_update_installing || !g_update_found
+        || StreamingNow()) {
+        return;
+    }
+    const update::Release release = g_update;
+    const InstallOptions options = InstalledOptions();
+    g_job_running = true;
+    g_host_job = HostJob::Update;
+    SetNotice(L"Installing SolStream " + ToWide(release.version) + L"…",
+              L"Getting the update ready.", Mark::NeedsYou, true);
+    InvalidateRect(window, nullptr, FALSE);
+
+    std::thread([window, release, options] {
+        std::string error;
+        const bool ok = update::InstallUpdate(
+            release, window, options,
+            [window](const std::wstring& text) { PostStep(window, text); },
+            // Asked again at the last moment: a Mac can connect while a large
+            // download runs, and starting the installer then ends its stream.
+            [] { return !StreamingNow(); },
+            [window](DWORD exit_code) {
+                PostMessageW(window, WM_SOLSTREAM_UPDATE_EXITED, exit_code, 0);
+            },
+            error);
+        // The new copy opens its window to say it is back (main.cpp reads the
+        // note InstallUpdate left), so this one closing is not the last word.
+        PostDone(window, ok,
+                 ok ? L"This window closes while SolStream restarts, and opens again "
+                      L"once it's back. Your Mac can connect again then."
+                    : ToWide(error));
+    }).detach();
+}
+
+/// "Check for updates": ask now, and say the answer in the window whatever it
+/// is. Automatic checks only ever speak up when they find something.
+void StartUpdateCheck(HWND window) {
+    if (g_job_running || g_update_checking || g_update_installing) {
+        return;
+    }
+    if (update::CheckNow()) {
+        g_update_checking = true;
+        SetNotice(L"Checking for updates…",
+                  L"Asking GitHub for the newest version of SolStream.", Mark::NeedsYou, true);
+    } else {
+        // main.cpp starts the checks only for the installed copy, which is the
+        // one an update replaces. Not a failure: there is nothing to fix.
+        SetNotice(L"This copy of SolStream doesn't update itself.",
+                  L"Only the copy installed in Program Files checks for updates.", Mark::None,
+                  true);
+    }
+    InvalidateRect(window, nullptr, FALSE);
+}
+
+/// A check's answer, on the UI thread. Takes ownership of `result`.
+/// The tooltip, rebuilt from the status and update state as they are now. The
+/// status thread rewrites it too, but only when the status changes.
+void RefreshTrayTip(HWND window) {
+    if (!g_tray_added) {
+        return;
+    }
+    NOTIFYICONDATAW data = TrayData(window);
+    data.uFlags = NIF_TIP | NIF_SHOWTIP;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
+    }
+    Shell_NotifyIconW(NIM_MODIFY, &data);
+}
+
+/// The update on offer, for the tooltip, which the status thread reads too.
+/// None while it is being installed: it is not on offer then.
+void PublishUpdateForTip(HWND window) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_update_tip_version = g_update_found && !g_update_installing
+                                   ? ToWide(g_update.version)
+                                   : std::wstring();
+    }
+    RefreshTrayTip(window);
+}
+
+void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, bool asked) {
+    // While an update is being installed, a check's answer must not swap the
+    // release out from under it.
+    const bool installing =
+        (g_job_running && g_host_job == HostJob::Update) || g_update_installing;
+    if (!installing) {
+        if (result->outcome == update::Outcome::Found) {
+            g_update_found = true;
+            g_update = result->release;
+        } else if (result->outcome != update::Outcome::Failed) {
+            // Withdrawn, or this copy has caught up. A failed check says
+            // nothing either way, so it changes nothing.
+            g_update_found = false;
+        }
+        PublishUpdateForTip(window);
+    }
+    if (asked && g_update_checking) {
+        g_update_checking = false;
+        switch (result->outcome) {
+            case update::Outcome::Found:
+                // The update banner is the answer, so the notice gets out of
+                // its way.
+                SetNotice(L"", L"", Mark::None, false);
+                break;
+            case update::Outcome::UpToDate:
+            case update::Outcome::NothingVisible:
+                SetNotice(L"SolStream is up to date.",
+                          L"This is version " + ToWide(result->current)
+                              + L", and there's no newer one to install.",
+                          Mark::Live, true);
+                break;
+            case update::Outcome::Failed:
+                SetNotice(L"SolStream couldn't check for updates.", ToWide(result->error),
+                          Mark::Failed, true);
+                break;
+        }
+    }
+    InvalidateRect(window, nullptr, FALSE);
+}
+
+/// The installer finished and this copy is still running, so it was not
+/// replaced. Its own log says why; the update stays on offer.
+void ApplyInstallerExited(HWND window, DWORD exit_code) {
+    g_update_installing = false;
+    PublishUpdateForTip(window);
+    if (exit_code == 0) {
+        // It says it installed, yet did not stop this copy: only possible if
+        // this copy is not the one in Program Files, which main.cpp does not
+        // offer updates to. Said as it is rather than guessed at.
+        SetNotice(L"SolStream " + ToWide(g_update.version) + L" is installed.",
+                  L"This copy is still running. Quit SolStream from the notification area "
+                  L"and open it again to use the new one.",
+                  Mark::NeedsYou, true);
+    } else {
+        SetNotice(L"SolStream couldn't install the update.",
+                  L"The installer stopped before replacing this copy. What happened is in "
+                      + InstallLogPath() + L".",
+                  Mark::Failed, true);
+    }
+    InvalidateRect(window, nullptr, FALSE);
+}
+
 void Activate(HWND window, int id) {
     switch (id) {
         case kIdCopyToken: {
@@ -1658,22 +1947,27 @@ void Activate(HWND window, int id) {
             break;
         }
         case kIdBannerFix: {
-            // Doubles as the notice's "OK": if there is something being said,
-            // this button dismisses it rather than starting the job again.
-            if (!g_notice.empty()) {
-                g_notice.clear();
-                g_notice_detail.clear();
-                g_notice_mark = Mark::None;
-                InvalidateRect(window, nullptr, FALSE);
-                break;
-            }
-            bool needs_driver = false;
+            // Whatever the banner is offering, asked of the same function that
+            // drew it. It doubles as the notice's "OK": while something is
+            // being said, the button dismisses it rather than starting a job.
+            HostStatus status;
             {
                 std::lock_guard<std::mutex> lock(g_mutex);
-                needs_driver = !g_status.virtual_display;
+                status = g_status;
             }
-            if (needs_driver) {
-                StartDisplayJob(window);
+            switch (Describe(status).action) {
+                case BannerAction::Dismiss:
+                    SetNotice(L"", L"", Mark::None, false);
+                    InvalidateRect(window, nullptr, FALSE);
+                    break;
+                case BannerAction::InstallDriver:
+                    StartDisplayJob(window);
+                    break;
+                case BannerAction::InstallUpdate:
+                    StartUpdateJob(window);
+                    break;
+                case BannerAction::None:
+                    break;
             }
             break;
         }
@@ -1780,12 +2074,20 @@ void MoveFocus(HWND window, int direction) {
 
 float ToDip(int pixels) { return pixels * 96.0f / g_dpi; }
 
-std::wstring TrayTip(const HostStatus& status) {
+/// `update_version` is g_update_tip_version, read under g_mutex by the caller.
+/// The host lives in the tray, so an update an automatic check found is said
+/// here as well -- quietly, where somebody pointing at the icon will see it,
+/// rather than with a balloon. Not while streaming: then the stream is what the
+/// icon is about, and Install has to wait for the Mac anyway.
+std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version) {
     if (!status.agent_listening) {
         return L"SolStream \u2014 not reachable yet";
     }
     if (status.connected_clients > 0) {
         return L"SolStream \u2014 streaming to your Mac";
+    }
+    if (!update_version.empty()) {
+        return L"SolStream \u2014 update " + update_version + L" available";
     }
     return L"SolStream \u2014 ready for your Mac";
 }
@@ -1812,7 +2114,7 @@ void AddTrayIcon(HWND window) {
                                     GetSystemMetrics(SM_CYSMICON), 0);
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        wcsncpy_s(data.szTip, TrayTip(g_status).c_str(), _TRUNCATE);
+        wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
     }
     g_tray_added = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     if (g_tray_added) {
@@ -1845,7 +2147,34 @@ void ShowTrayMenu(HWND window) {
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open SolStream");
     AppendMenuW(menu, MF_STRING, kTrayCopyToken, L"Copy pairing token");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kTrayQuit, L"Quit SolStream");
+    // Greyed rather than left out while something else is under way, or while
+    // a Mac is streaming, so the menu keeps its shape from one opening to the
+    // next and says the update is there even when it cannot be had right now.
+    const bool busy = g_job_running || g_update_checking || g_update_installing;
+    const UINT when_free = MF_STRING | (busy ? MF_GRAYED : 0);
+    if (g_update_found) {
+        const std::wstring install = L"Install update " + ToWide(g_update.version) + L"…";
+        AppendMenuW(menu, when_free | (StreamingNow() ? MF_GRAYED : 0), kTrayInstallUpdate,
+                    install.c_str());
+    }
+    AppendMenuW(menu, when_free, kTrayCheckUpdates, L"Check for updates");
+    // The driver advisory's own button is behind the update banner while an
+    // update is on offer, so it has a way in here too: neither banner can hide
+    // the other's action.
+    bool has_display = true;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        has_display = g_status.virtual_display;
+    }
+    if (!has_display) {
+        AppendMenuW(menu, when_free, kTraySetUpDisplay, L"Set up virtual display…");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // Greyed while a job runs: closing then is refused (WM_CLOSE), and a Quit
+    // that silently did nothing would leave an update's permission prompt to
+    // come up after somebody asked SolStream to go away.
+    AppendMenuW(menu, MF_STRING | (g_job_running ? MF_GRAYED : 0), kTrayQuit,
+                L"Quit SolStream");
     SetMenuDefaultItem(menu, kTrayOpen, FALSE);
     POINT at{};
     GetCursorPos(&at);
@@ -1867,6 +2196,21 @@ void ShowTrayMenu(HWND window) {
             CopyToClipboard(g_status.pairing_token);
             break;
         }
+        // Both open the window: it is where the progress and the answer are
+        // said. Somebody just chose this from the menu, so the window coming
+        // forward is the answer to their click, not an interruption.
+        case kTrayInstallUpdate:
+            ShowFromTray(window);
+            StartUpdateJob(window);
+            break;
+        case kTrayCheckUpdates:
+            ShowFromTray(window);
+            StartUpdateCheck(window);
+            break;
+        case kTraySetUpDisplay:
+            ShowFromTray(window);
+            StartDisplayJob(window);
+            break;
         case kTrayQuit:
             g_quitting = true;
             PostMessageW(window, WM_CLOSE, 0, 0);
@@ -1964,10 +2308,26 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             if (g_mode == WindowMode::Host) {
                 // The host window has no phases: the answer replaces the
                 // question in the same banner the button was in.
-                g_notice = ok ? L"The display is set up."
-                              : L"SolStream couldn't set the display up.";
-                g_notice_mark = ok ? Mark::Live : Mark::Failed;
-                g_notice_detail = *text;
+                if (g_host_job == HostJob::Update) {
+                    // Started: the installer stops this copy next, unless it
+                    // fails first -- WM_SOLSTREAM_UPDATE_EXITED. The update
+                    // stays found until then, so a failure can offer it again.
+                    SetNotice(ok ? L"Installing SolStream " + ToWide(g_update.version) + L"…"
+                                 : L"SolStream couldn't install the update.",
+                              *text, ok ? Mark::NeedsYou : Mark::Failed, true);
+                    g_update_installing = ok;
+                    PublishUpdateForTip(window);
+                    if (ok && g_update_exit_early) {
+                        // The installer's end overtook this message.
+                        g_update_exit_early = false;
+                        ApplyInstallerExited(window, g_update_exit_code);
+                    }
+                } else {
+                    SetNotice(ok ? L"The display is set up."
+                                 : L"SolStream couldn't set the display up.",
+                              *text, ok ? Mark::Live : Mark::Failed, false);
+                }
+                g_host_job = HostJob::None;
             } else {
                 g_phase = ok ? Phase::Done : Phase::Failed;
                 g_outcome = *text;
@@ -1976,6 +2336,24 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             InvalidateRect(window, nullptr, FALSE);
             return 0;
         }
+
+        case WM_SOLSTREAM_UPDATE:
+            ApplyUpdateCheck(window,
+                             std::unique_ptr<update::CheckResult>(
+                                 reinterpret_cast<update::CheckResult*>(lparam)),
+                             wparam != 0);
+            return 0;
+
+        case WM_SOLSTREAM_UPDATE_EXITED:
+            // Posted from a different thread than the job's own answer, so it
+            // can arrive first: kept until that answer has said "Installing".
+            if (g_job_running && g_host_job == HostJob::Update) {
+                g_update_exit_early = true;
+                g_update_exit_code = (DWORD) wparam;
+                return 0;
+            }
+            ApplyInstallerExited(window, (DWORD) wparam);
+            return 0;
 
         case WM_MOUSEMOVE: {
             const float x = ToDip(GET_X_LPARAM(lparam));
@@ -2180,8 +2558,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // Not in the middle of writing to Program Files. The work happens in
             // another process and would carry on regardless, so closing here
             // would not stop it — it would only take away the one thing that
-            // could tell the user how it went.
+            // could tell the user how it went. Nor is the refusal remembered:
+            // left set, it would turn the next close with the window's × --
+            // which only ever hides it -- into quitting.
             if (g_job_running) {
+                g_quitting = false;
                 return 0;
             }
             // Closing ends the session deliberately. A host that goes on
@@ -2316,6 +2697,7 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
 }
 
 void UpdateHostStatus(const HostStatus& status) {
+    std::wstring tip;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The agent reports once a second and almost nothing changes between
@@ -2327,6 +2709,7 @@ void UpdateHostStatus(const HostStatus& status) {
         }
         first = false;
         g_status = status;
+        tip = TrayTip(status, g_update_tip_version);
     }
     if (g_window) {
         // Only when it has actually changed, which is almost never. SetWindowText
@@ -2345,13 +2728,36 @@ void UpdateHostStatus(const HostStatus& status) {
         if (g_tray_added) {
             NOTIFYICONDATAW data = TrayData(g_window);
             data.uFlags = NIF_TIP | NIF_SHOWTIP;
-            wcsncpy_s(data.szTip, TrayTip(status).c_str(), _TRUNCATE);
+            wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
             Shell_NotifyIconW(NIM_MODIFY, &data);
         }
         InvalidateRect(g_window, nullptr, FALSE);
     }
 }
 
+void UpdateCheckFinished(const update::CheckResult& result, bool asked) {
+    // To the UI thread, which owns everything an announcement touches. The
+    // copy belongs to the message; if it cannot be posted, it is freed here.
+    if (!g_window) {
+        return;
+    }
+    auto* copy = new update::CheckResult(result);
+    if (!PostMessageW(g_window, WM_SOLSTREAM_UPDATE, asked ? 1 : 0, (LPARAM) copy)) {
+        delete copy;
+    }
+}
+
+void SayInstallOutcome(bool installed, const std::string& version) {
+    if (installed) {
+        SetNotice(L"Updated to SolStream " + ToWide(version) + L".",
+                  L"Your Mac can connect again.", Mark::Live, true);
+    } else {
+        SetNotice(L"The update to SolStream " + ToWide(version) + L" didn't finish.",
+                  L"This PC is still running SolStream " + std::wstring(kVersion)
+                      + L". What happened is in " + InstallLogPath() + L".",
+                  Mark::Failed, true);
+    }
+}
 
 int RunHostWindowLoop() {
     MSG message{};

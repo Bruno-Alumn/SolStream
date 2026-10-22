@@ -3,69 +3,106 @@
 #
 # Prerequisites:
 #   - Xcode 15+ installed
-#   - Developer ID Application certificate in keychain
+#   - Developer ID Application certificate in keychain (not for --dev)
 #   - App Store Connect API key (for notarytool)
 #
 # Usage:
-#   ./package-macos.sh [--dev] [--notarize]
+#   ./package-macos.sh [--dev] [--universal] [--notarize]
 #
-#   --dev        Development build (ad-hoc signing, no notarization)
+#   --dev        Ad-hoc signing, no notarization. The release workflow packages
+#                with it too: until there is a Developer ID certificate, ad hoc
+#                is the only identity a release can carry.
+#   --universal  Apple silicon and Intel in one executable, as a release ships.
+#                Without it, only this Mac's own architecture is built.
 #   --notarize   Production build with full notarization
+#
+# Produces:
+#   macos/SolStreamClient/.build/release/SolStream.app
+#   dist/SolStream-X.Y.Z-macOS.zip   what the Mac updater downloads
+#   dist/SolStream-X.Y.Z-macOS.dmg   what a person downloads
+# Both from the same signed bundle, so the two cannot be different builds.
 
 set -euo pipefail
-cd "$(dirname "$0")/../macos/SolStreamClient"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT/macos/SolStreamClient"
 
 PRODUCT_NAME="SolStream"
 # What SwiftPM actually builds, which differs from the bundle name.
 EXECUTABLE_NAME="SolStreamClient"
 BUNDLE_ID="com.solstream.macclient"
 BUILD_DIR=".build/release"
-DMG_NAME="${PRODUCT_NAME}.dmg"
 DMG_DIR=".build/dmg"
+DIST_DIR="$REPO_ROOT/dist"
 
-# The version, read from the one line that decides it rather than typed here as
-# well. It used to be typed in both places and they had drifted: the bundle said
-# 0.2.0 while the application it contained logged v0.3 at startup, so the Get
-# Info panel and the log a user sends back with a bug report disagreed about
-# which build they were looking at — and the log is the one that gets believed,
-# because it comes from the running program.
-#
-# main.swift wins because that string is what reaches a user's log. Reading it
-# here is what stops the two drifting again. An empty read is a hard failure
-# rather than a default, since a bundle stamped with the wrong version is worth
-# less than no bundle at all: fix the line, or fix this, before packaging.
-VERSION_SOURCE="Sources/SolStreamClient/main.swift"
-VERSION=$(sed -n '/Log\.startSession(version:/ {
-    s/.*version: "v\{0,1\}\([0-9][0-9.]*\)".*/\1/p
-    q
-}' "$VERSION_SOURCE")
-if [ -z "$VERSION" ]; then
-    echo "ERROR: could not read the version from $VERSION_SOURCE."
-    echo "       It is the Log.startSession(version: \"vX.Y\") call in"
-    echo "       applicationDidFinishLaunching; if that line has changed shape,"
-    echo "       this script has to be taught the new one."
+# The version comes from VERSION at the repository root, the one place it is
+# written (docs/updates.md): the release tag, this bundle and the Windows
+# executable all read it. It used to be read out of main.swift's log line, and
+# before that typed here as well, and the copies drifted -- the bundle said
+# 0.2.0 while the program inside it logged v0.3. The application now reads its
+# own version from this bundle, and the updater refuses a download whose bundle
+# is not exactly the release's version, so a wrong stamp here is a release
+# that cannot install. An unreadable file is therefore a hard failure, never a
+# default. tr drops the CR a Windows checkout gives the line.
+VERSION=$(head -n 1 "$REPO_ROOT/VERSION" 2>/dev/null | tr -d '\r' || true)
+if ! [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "ERROR: $REPO_ROOT/VERSION must hold one line, X.Y.Z (found \"$VERSION\")."
     exit 1
 fi
+
+# CFBundleVersion is the build number, and it has to keep rising: it is what
+# Launch Services uses to choose between two copies of the bundle id, and what a
+# crash report carries. The commit count only ever grows on main. A shallow
+# clone counts 1, which is why the release workflow fetches the whole history;
+# outside a git checkout there is nothing to count, and 1 is honest.
+BUILD_NUMBER=$(git -C "$REPO_ROOT" rev-list --count HEAD 2>/dev/null || true)
+if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+    BUILD_NUMBER=1
+fi
+
+ZIP_PATH="$DIST_DIR/$PRODUCT_NAME-$VERSION-macOS.zip"
+DMG_PATH="$DIST_DIR/$PRODUCT_NAME-$VERSION-macOS.dmg"
 
 # Parse flags
 DEV_BUILD=false
 DO_NOTARIZE=false
+UNIVERSAL=false
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_BUILD=true ;;
         --notarize) DO_NOTARIZE=true ;;
+        --universal) UNIVERSAL=true ;;
     esac
 done
 
 echo "=== SolStream macOS Package ==="
-echo "Version: $VERSION"
+echo "Version: $VERSION (build $BUILD_NUMBER)"
 echo "Dev build: $DEV_BUILD"
+echo "Universal: $UNIVERSAL"
 echo "Notarize: $DO_NOTARIZE"
 
 # Step 1: Build
 echo ""
 echo "--- Step 1: Building ---"
-swift build --configuration release
+if [ "$UNIVERSAL" = true ]; then
+    # One architecture at a time, then lipo. Asking SwiftPM for both at once
+    # switches it to a different build system that puts its products somewhere
+    # else entirely. This Mac's own architecture is built last because each
+    # build repoints .build/release at its own triple, and that is where a plain
+    # `swift build -c release` would have left it.
+    NATIVE_ARCH=$(uname -m)
+    SLICES=()
+    for arch in x86_64 arm64; do
+        [ "$arch" = "$NATIVE_ARCH" ] || SLICES+=("$arch")
+    done
+    SLICES+=("$NATIVE_ARCH")
+    SLICE_BINARIES=()
+    for arch in "${SLICES[@]}"; do
+        swift build --configuration release --arch "$arch"
+        SLICE_BINARIES+=("$(swift build --configuration release --arch "$arch" --show-bin-path)/$EXECUTABLE_NAME")
+    done
+else
+    swift build --configuration release
+fi
 
 # Assemble the bundle. SPM puts the executable in .build/release/ directly,
 # under the product's name -- which is not the bundle's name, so it is renamed
@@ -86,7 +123,14 @@ mkdir -p "$APP_PATH/Contents/Resources"
 # Unconditionally, not just when the .app is missing: guarding this on the
 # directory's existence meant every run after the first packaged the previous
 # build's binary.
-cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
+if [ "$UNIVERSAL" = true ]; then
+    # Straight into the bundle, not over either slice's own build product,
+    # which the next incremental build would then mistake for its own.
+    lipo -create -output "$APP_PATH/Contents/MacOS/$PRODUCT_NAME" "${SLICE_BINARIES[@]}"
+    lipo -info "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
+else
+    cp "$BUILD_DIR/$EXECUTABLE_NAME" "$APP_PATH/Contents/MacOS/$PRODUCT_NAME"
+fi
 
 # The icon. Cut by assets/logo/build.sh and committed, rather than generated
 # here: an icon that changes because a toolchain updated is an icon nobody
@@ -129,11 +173,12 @@ if true; then
     <string>AppIcon</string>
     <key>CFBundleIconName</key>
     <string>AppIcon</string>
-    <!-- Both come from the Log.startSession(version:) line in main.swift, read
-         by this script, so the version in Get Info and the version in the log
-         cannot disagree about which build somebody is running. -->
+    <!-- The version from VERSION, which the application reads back from here
+         for its log and its updater, so Get Info, the log and the release
+         cannot disagree about which build somebody is running. The build
+         number is the commit count; see the top of this script. -->
     <key>CFBundleVersion</key>
-    <string>$VERSION</string>
+    <string>$BUILD_NUMBER</string>
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundlePackageType</key>
@@ -198,39 +243,100 @@ else
         --sign "$IDENTITY" "$APP_PATH"
 fi
 
-# Verify signing
-codesign --verify --verbose "$APP_PATH"
+# Verify signing, as strictly as the updater will before it installs this
+# bundle (docs/updates.md): failing here costs a rebuild, failing there costs
+# every installed copy its update.
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
-# Step 4: Create DMG
+# Step 4: Zip, for the updater
 echo ""
-echo "--- Step 4: Creating DMG ---"
-rm -rf "$DMG_DIR" "$DMG_NAME"
+echo "--- Step 4: Creating zip ---"
+mkdir -p "$DIST_DIR"
+# Earlier versions' packages go too, as package-windows.ps1 removes its older
+# setups: beside the new ones they are downloads that look current and are not,
+# and signing by hand (docs/releasing.md) picks files out of here.
+find "$DIST_DIR" -maxdepth 1 \
+    \( -name "$PRODUCT_NAME-*-macOS.zip" -o -name "$PRODUCT_NAME-*-macOS.dmg" \) \
+    ! -name "$PRODUCT_NAME-$VERSION-macOS.*" -delete
+rm -f "$ZIP_PATH"
+# ditto rather than zip: it is what the updater unpacks with, and it keeps the
+# bundle's symlinks and signature exactly as they are. Without extended
+# attributes, resource forks or ACLs, though: ditto stores those as AppleDouble
+# "._" files, which every file here has (com.apple.provenance, at least). ditto
+# folds them back in on the way out, but any other unzip leaves them in the
+# bundle as files the signature does not cover, and codesign then rejects it.
+# They would also carry this machine's attributes onto every Mac that installs
+# the release.
+ditto -c -k --norsrc --noextattr --noacl --keepParent "$APP_PATH" "$ZIP_PATH"
+if zipinfo -1 "$ZIP_PATH" | grep -q '\._'; then
+    echo "ERROR: $ZIP_PATH carries AppleDouble (._) entries."
+    exit 1
+fi
+
+# Unpacked again and checked the way the updater checks it, because the zip,
+# not the bundle above, is what installed copies receive.
+ZIP_CHECK_DIR=$(mktemp -d)
+trap 'rm -rf "$ZIP_CHECK_DIR"' EXIT
+ditto -x -k "$ZIP_PATH" "$ZIP_CHECK_DIR"
+UNZIPPED="$ZIP_CHECK_DIR/$PRODUCT_NAME.app"
+UNZIPPED_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$UNZIPPED/Contents/Info.plist")
+UNZIPPED_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$UNZIPPED/Contents/Info.plist")
+if [ "$UNZIPPED_ID" != "$BUNDLE_ID" ] || [ "$UNZIPPED_VERSION" != "$VERSION" ]; then
+    echo "ERROR: the zip holds $UNZIPPED_ID $UNZIPPED_VERSION, not $BUNDLE_ID $VERSION."
+    exit 1
+fi
+codesign --verify --deep --strict "$UNZIPPED"
+echo "Zip created: $ZIP_PATH"
+
+# Step 5: Create DMG
+echo ""
+echo "--- Step 5: Creating DMG ---"
+rm -rf "$DMG_DIR" "$DMG_PATH"
+# An earlier version of this script wrote the DMG beside Package.swift. Left
+# there, it is a download that looks current and is not.
+rm -f "$REPO_ROOT/macos/SolStreamClient/$PRODUCT_NAME.dmg"
 mkdir -p "$DMG_DIR"
 cp -R "$APP_PATH" "$DMG_DIR/"
 ln -s /Applications "$DMG_DIR/Applications"
 
-hdiutil create -volname "$PRODUCT_NAME" \
-    -srcfolder "$DMG_DIR" \
-    -ov -format UDZO \
-    "$DMG_NAME"
+# Retried because hdiutil fails now and then with "Resource busy" when the
+# disk-image service is still busy with something else, which on a CI runner
+# would otherwise fail a release that has nothing wrong with it.
+for attempt in 1 2 3; do
+    if hdiutil create -volname "$PRODUCT_NAME" \
+        -srcfolder "$DMG_DIR" \
+        -ov -format UDZO \
+        "$DMG_PATH"; then
+        break
+    fi
+    if [ "$attempt" = 3 ]; then
+        echo "ERROR: hdiutil could not create $DMG_PATH."
+        exit 1
+    fi
+    echo "  hdiutil failed; trying again in 5 seconds."
+    sleep 5
+done
 
 rm -rf "$DMG_DIR"
 
 echo ""
-echo "DMG created: $DMG_NAME"
+echo "DMG created: $DMG_PATH"
 
-# Step 5: Notarize (optional)
+# Step 6: Notarize (optional)
+# The DMG is what is submitted. Notarizing it also records the bundle inside,
+# which is byte for byte the one in the zip, so the updater's copy passes
+# Gatekeeper's online check too; only the DMG gets a stapled ticket.
 if [ "$DO_NOTARIZE" = true ]; then
     echo ""
-    echo "--- Step 5: Notarizing ---"
+    echo "--- Step 6: Notarizing ---"
 
     # Requires App Store Connect API key or Apple ID
     # Option A: API key
     if [ -f "$HOME/.appstoreconnect/private_key.p8" ]; then
-        xcrun notarytool submit "$DMG_NAME" \
+        xcrun notarytool submit "$DMG_PATH" \
             --key "$HOME/.appstoreconnect/private_key.p8" \
-            --key-id "$(cat $HOME/.appstoreconnect/key-id.txt)" \
-            --issuer "$(cat $HOME/.appstoreconnect/issuer-id.txt)" \
+            --key-id "$(cat "$HOME/.appstoreconnect/key-id.txt")" \
+            --issuer "$(cat "$HOME/.appstoreconnect/issuer-id.txt")" \
             --wait
     else
         # Option B: Apple ID (interactive)
@@ -254,7 +360,7 @@ if [ "$DO_NOTARIZE" = true ]; then
         read -rp "Apple ID: " APPLE_ID
         read -rsp "App-specific password: " APP_PASSWORD
         echo ""
-        xcrun notarytool submit "$DMG_NAME" \
+        xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APP_PASSWORD" \
             --team-id "$TEAM_ID" \
@@ -262,7 +368,7 @@ if [ "$DO_NOTARIZE" = true ]; then
     fi
 
     # Staple the ticket
-    xcrun stapler staple "$DMG_NAME"
+    xcrun stapler staple "$DMG_PATH"
 
     echo ""
     echo "Notarization complete."
@@ -270,5 +376,5 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "Package: $DMG_NAME"
-ls -lh "$DMG_NAME"
+echo "App: $APP_PATH"
+ls -lh "$ZIP_PATH" "$DMG_PATH"

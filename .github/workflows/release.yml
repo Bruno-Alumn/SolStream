@@ -1,0 +1,538 @@
+name: Release
+
+# A release is the tag vX.Y.Z on a commit of main whose VERSION says X.Y.Z
+# (docs/updates.md). Pushing that tag builds both programs from it, signs the
+# checksums and publishes the GitHub release both updaters read. How to cut
+# one, what keeps the signing key to this workflow, and what to do when a run
+# fails: docs/releasing.md.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  # Re-running a tag: `gh workflow run release.yml --ref v1.0.1`. Started on
+  # the tag, the run uses this file as it was tagged, exactly as the push did.
+  # Started on a branch, the first job refuses it.
+  workflow_dispatch:
+
+# One run per tag, and never cancelled: a publish stopped halfway leaves more
+# to clean up than a second run that waits its turn.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# Nothing by default; each job asks for what it uses.
+permissions: {}
+
+env:
+  # Shell steps read the tag from the environment rather than having it pasted
+  # into their text, because a tag name is input; the check job holds it to
+  # vX.Y.Z before anything else runs.
+  TAG: ${{ github.ref_name }}
+
+# Actions are pinned to commits, not tags: a tag can be moved, and the sign and
+# publish jobs run these beside the signing key and a token that can write.
+# Dependabot keeps the pins current.
+jobs:
+  check:
+    name: Tag matches VERSION
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      sha: ${{ steps.check.outputs.sha }}
+      trusted-key: ${{ steps.check.outputs.trusted-key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # All of it, so the tagged commit can be found on main.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the tag, VERSION and the public key
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != tag ] || ! [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::$TAG is not a release tag. A release is vX.Y.Z, and a re-run is started on its tag: gh workflow run release.yml --ref vX.Y.Z"
+            exit 1
+          fi
+          version=$(head -n 1 VERSION)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error file=VERSION::The tag is $TAG but VERSION says '$version'. Tag the commit that set VERSION (docs/releasing.md)."
+            exit 1
+          fi
+          # A guard against tagging the wrong commit, not against anybody: a
+          # tag on another commit runs that commit's copy of this file. The tag
+          # ruleset in docs/releasing.md is what stops that.
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$TAG is not on main. Tag a commit of main (docs/releasing.md)."
+            exit 1
+          fi
+
+          # The production public key as docs/updates.md writes it down.
+          read_key() {
+            awk '/compiled into both programs:/ {found = 1; next} found && NF {print $1; exit}'
+          }
+          valid_key() {
+            [[ "$1" =~ ^[A-Za-z0-9+/]{87}=$ ]] && [ "$1" != "$(cat tests/update-vector/test-key.pub.b64)" ]
+          }
+          key=$(read_key < docs/updates.md)
+          if ! valid_key "$key"; then
+            echo "::error file=docs/updates.md::Could not read the production public key from docs/updates.md."
+            exit 1
+          fi
+          # The key is written three times. Each copy installed from this
+          # release checks every later release with the key compiled into it,
+          # so a program whose copy differs from the document could never
+          # update again, and nothing would show it until the next release.
+          for source in macos/SolStreamClient/Sources/SolStreamClient/UpdateFormats.swift windows/SolStreamAgent/updater.h; do
+            if ! grep -qF "\"$key\"" "$source"; then
+              echo "::error file=$source::does not carry the public key in docs/updates.md. Copies installed from $TAG would refuse every release after it."
+              exit 1
+            fi
+          done
+
+          # The signature has to satisfy the copies already installed, so it
+          # is checked against the key the latest release carries: the one in
+          # its docs/updates.md, which the loop above held its programs to when
+          # it was released. Only the first release, with nothing installed
+          # yet, uses this commit's. This is also what lets a key change ship:
+          # that release carries the new key and is signed with the old one
+          # (docs/releasing.md).
+          if latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> "$RUNNER_TEMP/latest.err"); then
+            # Read whole before awk sees it: awk stops at the key, and gh
+            # writing the rest into the closed pipe would fail this step under
+            # pipefail, now and then, with no message.
+            doc=$(gh api "repos/$GITHUB_REPOSITORY/contents/docs/updates.md?ref=$latest" \
+              -H "Accept: application/vnd.github.raw")
+            trusted=$(read_key <<< "$doc")
+            if ! valid_key "$trusted"; then
+              echo "::error::Could not read the public key from docs/updates.md at $latest."
+              exit 1
+            fi
+            echo "Installed copies run $latest and check updates with $trusted"
+            if [ "$trusted" != "$key" ]; then
+              echo "::notice::$TAG changes the update signing key. It is signed with the old one; set the new private key as SOLSTREAM_UPDATE_SIGNING_KEY once it is published (docs/releasing.md)."
+            fi
+          elif grep -q "HTTP 404" "$RUNNER_TEMP/latest.err"; then
+            echo "No release yet: checking with this commit's key, $key"
+            trusted=$key
+          else
+            cat "$RUNNER_TEMP/latest.err"
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            # Every job builds this commit, not whatever the tag points at
+            # by the time it starts.
+            echo "sha=$(git rev-parse HEAD)"
+            echo "trusted-key=$trusted"
+          } >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: macOS package
+    needs: check
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          # All of it: the bundle's build number is the commit count, and a
+          # shallow clone has one commit.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Toolchain
+        run: swift --version
+      - name: Package
+        # --dev is ad hoc signing. There is no Developer ID certificate, so
+        # that is the only identity a release can carry; README.md says what
+        # Gatekeeper makes of it. --universal so it runs on Intel Macs too.
+        run: bash scripts/package-macos.sh --dev --universal
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          # A re-run of this job replaces what an earlier attempt uploaded.
+          overwrite: true
+          path: |
+            dist/SolStream-${{ needs.check.outputs.version }}-macOS.zip
+            dist/SolStream-${{ needs.check.outputs.version }}-macOS.dmg
+          if-no-files-found: error
+          # Both are compressed already.
+          compression-level: 0
+          retention-days: 7
+
+  windows:
+    name: Windows package (MSVC)
+    needs: check
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - name: Package
+        run: ./scripts/package-windows.ps1
+      - name: Check update signatures with the built setup
+        # The setup is the updater: if it cannot tell a good signature from a
+        # bad one, no release after this one reaches anybody. CI runs the same
+        # checks on every commit.
+        run: |
+          $exe = (Resolve-Path "dist\SolStreamSetup-$env:VERSION.exe").Path
+          $vector = (Resolve-Path "tests\update-vector").Path
+          $testKey = (Get-Content "$vector\test-key.pub.b64" -TotalCount 1).Trim()
+
+          # The same signature over a SHA256SUMS with one byte changed.
+          $tampered = (New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "tampered-vector")).FullName
+          $bytes = [IO.File]::ReadAllBytes("$vector\SHA256SUMS")
+          $bytes[0] = $bytes[0] -bxor 1
+          [IO.File]::WriteAllBytes("$tampered\SHA256SUMS", $bytes)
+          Copy-Item "$vector\SHA256SUMS.sig" $tampered
+
+          function Test-Signature([string[]] $arguments, [int] $expected, [string] $what) {
+              $start = [Diagnostics.ProcessStartInfo]::new($exe)
+              $start.UseShellExecute = $false
+              foreach ($argument in @("--verify-update-signature") + $arguments) { $start.ArgumentList.Add($argument) }
+              $process = [Diagnostics.Process]::Start($start)
+              # A build that does not know the flag opens its setup window
+              # instead, and nobody on a runner is going to close it.
+              if (-not $process.WaitForExit(60000)) {
+                  $process.Kill($true)
+                  throw "${what}: still running after a minute"
+              }
+              if ($process.ExitCode -ne $expected) {
+                  throw "${what}: exit code $($process.ExitCode), expected $expected"
+              }
+              Write-Host "${what}: $expected, as expected"
+          }
+
+          Test-Signature @("$vector\SHA256SUMS", "$vector\SHA256SUMS.sig", $testKey) 0 "test vector, test key"
+          Test-Signature @("$tampered\SHA256SUMS", "$tampered\SHA256SUMS.sig", $testKey) 1 "one byte changed"
+          Test-Signature @("$vector\SHA256SUMS", "$vector\SHA256SUMS.sig") 1 "test vector, compiled-in key"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          # A re-run of this job replaces what an earlier attempt uploaded.
+          overwrite: true
+          path: dist/SolStreamSetup-${{ needs.check.outputs.version }}.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: Sign
+    needs: [check, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The one job that sees the signing key, so it does nothing else: no token,
+    # no checkout, no package installed, nothing but the runner's own OpenSSL
+    # and Python's standard library beside the key. Anything that ran in this
+    # job could read the key, sudo being free on a hosted runner. It belongs in
+    # a `release` environment that hands its secret only to runs on a v* tag,
+    # but GitHub Free has no environments in a private repository, and naming
+    # one here could stop the job instead; until then the secret is the
+    # repository's (docs/releasing.md says when to add the line).
+    permissions: {}
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      TRUSTED_KEY: ${{ needs.check.outputs.trusted-key }}
+    steps:
+      # By name: on a re-run, the run may already hold an earlier attempt's
+      # signature as well.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows
+          path: release
+      - name: Write SHA256SUMS
+        # ci.yml runs this step, as written here, on stand-in files.
+        id: sums
+        working-directory: release
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' "SolStream-$VERSION-macOS.zip" "SolStream-$VERSION-macOS.dmg" "SolStreamSetup-$VERSION.exe" | LC_ALL=C sort)
+          # Exactly these and nothing else, since everything here is published.
+          if [ "$(find . -mindepth 1 -maxdepth 1 -printf '%P\n' | LC_ALL=C sort)" != "$expected" ]; then
+            echo "::error::The builds did not produce exactly the three release assets."
+            ls -lA
+            exit 1
+          fi
+          mapfile -t assets <<< "$expected"
+          sha256sum -- "${assets[@]}" > SHA256SUMS
+          # The format docs/updates.md fixes and both updaters parse: 64
+          # lowercase hex digits, two spaces, the name, one line per asset.
+          if [ "$(wc -l < SHA256SUMS)" -ne 3 ] || grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9._-]+$' SHA256SUMS; then
+            echo "::error::SHA256SUMS is not in the format docs/updates.md sets."
+            exit 1
+          fi
+          cat SHA256SUMS
+      - name: Sign SHA256SUMS
+        # ci.yml runs this step, as written here, with a throwaway key.
+        id: sign
+        env:
+          SIGNING_KEY: ${{ secrets.SOLSTREAM_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::The SOLSTREAM_UPDATE_SIGNING_KEY secret is not set. docs/releasing.md says how to set it."
+            exit 1
+          fi
+          # Readable by this user only, and removed when the step ends,
+          # however it ends.
+          umask 077
+          key_file=$(mktemp "$RUNNER_TEMP/signing-key.XXXXXX")
+          trap 'shred -u "$key_file" 2>/dev/null || rm -f "$key_file"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key_file"
+          unset SIGNING_KEY
+
+          # The secret has to be the private half of the key installed copies
+          # trust, which the check job chose. Any other P-256 key signs
+          # perfectly well and makes a release every installed copy refuses.
+          # The public half is compared as the DER SubjectPublicKeyInfo OpenSSL
+          # writes: a fixed P-256 header, then the point docs/updates.md holds.
+          expected=$(python3 -I -c 'import base64, sys; print(base64.b64encode(bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200") + base64.b64decode(sys.argv[1], validate=True)).decode())' "$TRUSTED_KEY")
+          if [ "$(openssl pkey -in "$key_file" -pubout -outform DER | openssl base64 -A)" != "$expected" ]; then
+            echo "::error::SOLSTREAM_UPDATE_SIGNING_KEY is not the private half of $TRUSTED_KEY, the key installed copies check with (docs/releasing.md)."
+            exit 1
+          fi
+
+          openssl dgst -sha256 -sign "$key_file" -out "$RUNNER_TEMP/SHA256SUMS.der" release/SHA256SUMS
+          # OpenSSL writes DER, SEQUENCE { INTEGER r, INTEGER s }; the format
+          # is base64 of r and s as 32 bytes each, then a newline.
+          python3 -I - "$RUNNER_TEMP/SHA256SUMS.der" release/SHA256SUMS.sig <<'PY'
+          import base64, sys
+
+          der = open(sys.argv[1], "rb").read()
+
+          def element(data, at, tag):
+              # A P-256 signature is at most 72 bytes, so every length is one byte.
+              if data[at] != tag or data[at + 1] >= 0x80:
+                  sys.exit("OpenSSL wrote a signature this cannot read")
+              end = at + 2 + data[at + 1]
+              return data[at + 2:end], end
+
+          body, end = element(der, 0, 0x30)
+          r, at = element(body, 0, 0x02)
+          s, at = element(body, at, 0x02)
+          if end != len(der) or at != len(body):
+              sys.exit("OpenSSL wrote a signature this cannot read")
+          raw = b"".join(int.from_bytes(n, "big").to_bytes(32, "big") for n in (r, s))
+          with open(sys.argv[2], "w") as f:
+              f.write(base64.b64encode(raw).decode() + "\n")
+          PY
+          cat release/SHA256SUMS.sig
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          # A re-run of this job replaces what an earlier attempt uploaded.
+          overwrite: true
+          path: |
+            release/SHA256SUMS
+            release/SHA256SUMS.sig
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Check the signature
+    needs: [check, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The reference verifier, scripts/sign-release.py, against the key
+    # installed copies carry: a second implementation, so a mistake in the
+    # Sign job's own encoding cannot pass by agreeing with itself. A job of its
+    # own because it installs `cryptography` from PyPI, which has no business
+    # near the key or a token that can write. Nothing downstream trusts its
+    # verdict, either: code from PyPI holds this run's artifact token, so
+    # Publish checks again without it.
+    permissions:
+      contents: read
+    env:
+      TRUSTED_KEY: ${{ needs.check.outputs.trusted-key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+      - name: Install the verifier's one dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check 'cryptography>=42'
+      - name: Check the signature, then the files against SHA256SUMS
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/venv/bin/python" scripts/sign-release.py verify "$TRUSTED_KEY" release/SHA256SUMS
+          cd release && sha256sum --check --strict SHA256SUMS
+
+  publish:
+    name: Publish
+    needs: [check, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One publish at a time across every tag, so each decides whether it is
+    # the latest after the one before has published (below). GitHub keeps one
+    # waiting run per group and cancels an older waiting one, so push release
+    # tags one at a time.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    # The only job that can write, and all it writes is the release. It runs
+    # gh, coreutils, OpenSSL and Python's standard library, nothing else.
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      SHA: ${{ needs.check.outputs.sha }}
+      TRUSTED_KEY: ${{ needs.check.outputs.trusted-key }}
+    steps:
+      # By name, the three this job checks and uploads.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: release
+      - name: Check the signature, then the files against SHA256SUMS
+        # Again, here, with nothing from PyPI. Any job in this run can replace
+        # the run's artifacts, and the job before this one ran a package from
+        # PyPI: swapping the builds and a SHA256SUMS to match would pass a
+        # hash check alone, and put somebody else's DMG and setup on the
+        # Releases page, which is where every first install comes from. What
+        # this job uploads is what this step checked. ci.yml runs this step, as
+        # written here, on stand-in files.
+        id: check-signed
+        working-directory: release
+        run: |
+          set -euo pipefail
+          # This version's three assets, exactly. A good signature over another
+          # SHA256SUMS -- an older release's, say -- would pass the two checks
+          # below and vouch for nothing this job uploads.
+          expected=$(printf '%s\n' "SolStream-$VERSION-macOS.zip" "SolStream-$VERSION-macOS.dmg" "SolStreamSetup-$VERSION.exe" | LC_ALL=C sort)
+          if grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9._-]+$' SHA256SUMS || [ "$(cut -c 67- SHA256SUMS)" != "$expected" ]; then
+            echo "::error::SHA256SUMS does not list exactly the three assets of $VERSION."
+            exit 1
+          fi
+
+          # OpenSSL takes both in DER: the key as P-256's fixed
+          # SubjectPublicKeyInfo header and then the point docs/updates.md
+          # holds, the signature as SEQUENCE { INTEGER r, INTEGER s }.
+          python3 -I - "$TRUSTED_KEY" SHA256SUMS.sig "$RUNNER_TEMP/trusted.der" "$RUNNER_TEMP/signature.der" <<'PY'
+          import base64, sys
+
+          point = base64.b64decode(sys.argv[1], validate=True)
+          with open(sys.argv[2]) as f:
+              raw = base64.b64decode(f.read().strip(), validate=True)
+          if len(point) != 65 or point[0] != 4 or len(raw) != 64:
+              sys.exit("The key or the signature is not the size docs/updates.md sets.")
+
+          def integer(n):
+              # Minimal and signed: no leading zero bytes, but one in front of
+              # a high bit, which would otherwise read as negative.
+              n = n.lstrip(b"\0") or b"\0"
+              if n[0] & 0x80:
+                  n = b"\0" + n
+              return b"\x02" + bytes([len(n)]) + n
+
+          # At most 70 bytes, so every length fits in one.
+          body = integer(raw[:32]) + integer(raw[32:])
+          with open(sys.argv[3], "wb") as f:
+              f.write(bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200") + point)
+          with open(sys.argv[4], "wb") as f:
+              f.write(b"\x30" + bytes([len(body)]) + body)
+          PY
+          openssl dgst -sha256 -verify "$RUNNER_TEMP/trusted.der" -keyform DER -signature "$RUNNER_TEMP/signature.der" SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A published release is never replaced: an updater may already have
+          # read its SHA256SUMS. A draft left by a failed run counts too.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::$TAG already has a release. docs/releasing.md says what to do."
+            exit 1
+          fi
+          # The release hangs on the tag, wherever it points now; the files
+          # were built from $SHA. If the tag has moved since, the release page
+          # and its source archives would name another commit.
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" != "$SHA" ]; then
+            echo "::error::$TAG has moved since this run built $SHA. Release the next patch version (docs/releasing.md)."
+            exit 1
+          fi
+
+          # Both updaters ask for /releases/latest, so only the highest version
+          # may be it. A fix released for an older line would otherwise hide
+          # the newer release from every installed copy. Only a 404 means no
+          # release yet; anything else is an answer this cannot decide on.
+          if latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> "$RUNNER_TEMP/latest.err"); then
+            :
+          elif grep -q "HTTP 404" "$RUNNER_TEMP/latest.err"; then
+            latest=
+          else
+            cat "$RUNNER_TEMP/latest.err"
+            echo "::error::Could not ask GitHub which release is the latest, so cannot tell whether $TAG may be. Nothing is published; re-run this job."
+            exit 1
+          fi
+          make_latest=true
+          if [ -n "$latest" ] && [ "$(printf '%s\n' "${latest#v}" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]; then
+            make_latest=false
+          fi
+
+          {
+            echo "SolStream $VERSION."
+            echo
+            echo "- **Mac** (macOS 14 or later, Apple silicon or Intel): \`SolStream-$VERSION-macOS.dmg\`. Open it and drag SolStream into Applications."
+            echo "- **Windows PC**, the host: \`SolStreamSetup-$VERSION.exe\`. Run it and it installs itself."
+            echo
+            echo "Neither is signed with a paid certificate yet, so both systems warn the first time; [Install](https://github.com/$GITHUB_REPOSITORY#install) says what to click. From 1.0.0 on, installed copies find new releases by themselves and ask before installing them, after checking \`SHA256SUMS.sig\` and \`SHA256SUMS\`."
+            # Without a token a private repository's releases answer 404, so
+            # the sentence above would promise updates that never arrive.
+            # Asked of the API rather than hard-coded, so the caveat drops out
+            # by itself on the first release after the repository goes public.
+            if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "false" ]; then
+              echo
+              echo "While the repository is private, installed copies see new releases only with \`SOLSTREAM_GITHUB_TOKEN\` set ([how](https://github.com/$GITHUB_REPOSITORY#while-this-repository-is-private))."
+            fi
+          } > "$RUNNER_TEMP/notes.md"
+
+          # With assets to attach, gh uploads them to a draft and publishes it
+          # only once all five are there, so an updater never sees this
+          # release without its SHA256SUMS.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "SolStream $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --generate-notes \
+            --latest="$make_latest" \
+            "release/SolStream-$VERSION-macOS.zip" \
+            "release/SolStream-$VERSION-macOS.dmg" \
+            "release/SolStreamSetup-$VERSION.exe" \
+            release/SHA256SUMS \
+            release/SHA256SUMS.sig

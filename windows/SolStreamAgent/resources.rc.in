@@ -1,7 +1,8 @@
 // resources.rc.in -- the executable's icon and its version block.
 //
-// Configured by CMake, which substitutes the paths. Backslashes are doubled
-// because RC treats them as escapes.
+// Configured by CMake, which substitutes the paths, and the version from the
+// repository's VERSION file -- the same number the updater compares against.
+// Backslashes are doubled because RC treats them as escapes.
 //
 // DELIBERATELY ASCII, every character of it. rc.exe reads a resource script in
 // the machine's ANSI code page unless told otherwise, and this file is UTF-8, so
