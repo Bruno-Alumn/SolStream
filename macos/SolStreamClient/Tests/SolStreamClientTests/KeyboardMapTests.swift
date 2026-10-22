@@ -94,6 +94,7 @@ final class KeyboardMapTests: XCTestCase {
         XCTAssertEqual(scan(0x5D), 0x7D)  // ¥
         XCTAssertEqual(scan(0x5E), 0x73)  // _
         XCTAssertEqual(scan(0x5F), 0x7E)  // the keypad's comma
+        XCTAssertEqual(vk(0x5F), 0xBC)    // as the main keyboard's, which types a comma
         XCTAssertEqual(scan(0x66), 0xF1)  // Eisu
         XCTAssertEqual(scan(0x68), 0xF2)  // Kana
         XCTAssertEqual(vk(0x66), 0x1A)    // VK_IME_OFF

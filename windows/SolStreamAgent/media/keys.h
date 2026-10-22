@@ -46,8 +46,10 @@ namespace solstream::media {
 ///   - The keypad's digits and point go in by virtual key. A Mac keypad has no
 ///     Num Lock and always types digits, while the same scan codes on a PC
 ///     with Num Lock off are Home, End and the arrows.
-///   - The keypad's '=' (0x59), which a PC keypad does not have, goes in as
-///     the character.
+///   - The keypad's '=' (0x59) and the JIS keypad's comma (0x7E), which a
+///     PC keypad does not have, go in as the character. 0x7E is a keypad
+///     key only a Brazilian layout makes a character of; on a Japanese or US
+///     one it typed nothing.
 ///   - The JIS keyboard's Kana (0xF2, LANG1) and Eisu (0xF1, LANG2) go in as
 ///     VK_IME_ON and VK_IME_OFF, which switch the IME on and off: the keys a
 ///     Japanese PC keyboard does that with are not on an Apple one.

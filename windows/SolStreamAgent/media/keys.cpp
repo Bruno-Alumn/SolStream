@@ -9,6 +9,7 @@ constexpr WORD kVkImeOff = 0x1A;
 
 /// Set-1 codes with no PC key behind them, given the Mac's meaning instead.
 constexpr unsigned char kScanKeypadEquals = 0x59;
+constexpr unsigned char kScanKeypadComma = 0x7E;  // JIS
 constexpr unsigned char kScanLang1 = 0xF2;  // Kana
 constexpr unsigned char kScanLang2 = 0xF1;  // Eisu
 
@@ -66,8 +67,8 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
             *out = input;
             return true;
         }
-        if (scan == kScanKeypadEquals) {
-            input.ki.wScan = L'=';
+        if (scan == kScanKeypadEquals || scan == kScanKeypadComma) {
+            input.ki.wScan = scan == kScanKeypadEquals ? L'=' : L',';
             input.ki.dwFlags = KEYEVENTF_UNICODE | up;
             *out = input;
             return true;

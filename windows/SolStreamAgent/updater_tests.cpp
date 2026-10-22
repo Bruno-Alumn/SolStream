@@ -1895,6 +1895,12 @@ void TestScanKeys() {
     CHECK(in.ki.wVk == 0 && in.ki.wScan == L'=' && in.ki.dwFlags == KEYEVENTF_UNICODE);
     CHECK(BuildScanKeyInput(0x0059, false, &in)
           && in.ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+    // And so does the JIS keypad's comma, whose place only a Brazilian
+    // layout gives a character.
+    CHECK(BuildScanKeyInput(0x007E, true, &in));
+    CHECK(in.ki.wVk == 0 && in.ki.wScan == L',' && in.ki.dwFlags == KEYEVENTF_UNICODE);
+    CHECK(BuildScanKeyInput(0x007E, false, &in)
+          && in.ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
 
     // Kana and Eisu switch the IME on and off.
     CHECK(BuildScanKeyInput(0x00F2, true, &in) && in.ki.wVk == 0x16 && in.ki.dwFlags == 0);

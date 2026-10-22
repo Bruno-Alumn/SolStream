@@ -179,7 +179,7 @@ enum KeyboardMap {
         // JIS
         0x5D: 0xDC,  // ¥ (VK_OEM_5 on a Japanese layout)
         0x5E: 0xE2,  // _ (VK_OEM_102)
-        0x5F: 0x6C,  // the keypad's comma (VK_SEPARATOR)
+        0x5F: 0xBC,  // the keypad's comma, as the main keyboard's; VK_SEPARATOR typed nothing
         0x66: 0x1A,  // Eisu → VK_IME_OFF
         0x68: 0x16,  // Kana → VK_IME_ON
     ]
