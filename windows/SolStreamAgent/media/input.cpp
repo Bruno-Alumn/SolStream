@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 
 #include <cstring>
+#include <optional>
 
 namespace solstream::media {
 namespace {
@@ -22,27 +23,42 @@ int16_t ReadBE16s(const unsigned char* p) {
     return (int16_t) ReadBE16(p);
 }
 
-/// Whether this PC's Caps Lock is on, as the window taking the keys sees it.
+/// Whether this PC's Caps Lock is on, as the window taking the keys sees it,
+/// or nothing when that cannot be asked.
 ///
 /// GetKeyState answers for the calling thread's input queue, and this thread
 /// takes no keyboard input of its own, so alone it answers with whatever its
 /// queue last heard. Joined to the foreground window's queue for the one call,
 /// it answers for the keyboard the keys are going to -- the same
 /// AttachThreadInput ForceForeground uses, and let go of at once.
-bool CapsLockIsOn() {
-    // Asked here first as well: it is the answer when joining is refused, and
-    // the call gives this thread the queue AttachThreadInput needs it to have.
-    bool on = (GetKeyState(VK_CAPITAL) & 1) != 0;
+///
+/// When it cannot be joined -- no foreground window, one that is not
+/// answering, or one that refuses this agent, as an elevated window or the
+/// secure desktop does -- there is no answer. This thread's own used to stand
+/// in, and Caps Lock was pressed on a reading that could be any age: a game
+/// on a loading screen, not reading its input, had its Caps Lock flipped by
+/// the first key of every second.
+std::optional<bool> CapsLockIsOn() {
+    // Asked here first, for the queue: the call gives this thread the one
+    // AttachThreadInput needs it to have.
+    const bool own = (GetKeyState(VK_CAPITAL) & 1) != 0;
     const HWND foreground = GetForegroundWindow();
     if (!foreground || IsHungAppWindow(foreground)) {
-        return on;
+        return std::nullopt;
     }
     const DWORD self = GetCurrentThreadId();
     const DWORD holder = GetWindowThreadProcessId(foreground, nullptr);
-    if (holder && holder != self && AttachThreadInput(self, holder, TRUE)) {
-        on = (GetKeyState(VK_CAPITAL) & 1) != 0;
-        AttachThreadInput(self, holder, FALSE);
+    if (!holder) {
+        return std::nullopt;
     }
+    if (holder == self) {
+        return own;
+    }
+    if (!AttachThreadInput(self, holder, TRUE)) {
+        return std::nullopt;
+    }
+    const bool on = (GetKeyState(VK_CAPITAL) & 1) != 0;
+    AttachThreadInput(self, holder, FALSE);
     return on;
 }
 
@@ -355,7 +371,14 @@ void InputInjector::Reset() {
 void InputInjector::MatchCapsLock(bool wanted) {
     const uint64_t now = GetTickCount64();
     if (CapsLockNeedsReading(capsLock_, now)) {
-        CapsLockNoted(capsLock_, CapsLockIsOn(), now);
+        const std::optional<bool> on = CapsLockIsOn();
+        if (!on) {
+            // Nothing to go on, so nothing is pressed and nothing believed:
+            // the next key asks again.
+            capsLock_ = CapsLockBelief{};
+            return;
+        }
+        CapsLockNoted(capsLock_, *on, now);
     }
     if (capsLock_.on == wanted) {
         return;
