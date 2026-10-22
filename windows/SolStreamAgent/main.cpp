@@ -4464,7 +4464,7 @@ constexpr int kMaxAuthFailures = 3;
 // network change can take it over rather than be told it is busy with itself
 // (session_takeover.h).
 //
-// All three fields are guarded by g_holder_mutex. The socket is cleared under
+// All four fields are guarded by g_holder_mutex. The socket is cleared under
 // it BEFORE the serving thread closes the socket, so a takeover that shuts the
 // holder down can never reach a handle Winsock has since given to somebody
 // else -- it reuses SOCKET values freely.
@@ -4474,10 +4474,9 @@ SOCKET g_holder_socket = INVALID_SOCKET;
 std::string g_holder_id;
 /// Set by a takeover, read by the serving thread on its next wakeup.
 bool g_holder_retiring = false;
-/// When the holder last sent anything, by GetTickCount64. Written on every
-/// receive, so it is atomic rather than under the mutex. Bytes still unread
-/// on the socket count as heard as well: see ListenForTakeover.
-std::atomic<unsigned long long> g_holder_heard_at{0};
+/// When the holder was last heard from: by the serving thread's reads, and by
+/// knocks that find more waiting unread than before (session_takeover.h).
+solstream::HolderHearing g_holder_hearing;
 
 /// Record `client` as the session's holder, the moment it is authenticated.
 void BecomeHolder(SOCKET client, const std::string& id) {
@@ -4485,7 +4484,28 @@ void BecomeHolder(SOCKET client, const std::string& id) {
     g_holder_socket = client;
     g_holder_id = id;
     g_holder_retiring = false;
-    g_holder_heard_at.store(GetTickCount64());
+    g_holder_hearing = solstream::HeardFresh(GetTickCount64());
+}
+
+/// Bytes waiting unread on `socket`, or nothing known.
+bool UnreadBytes(SOCKET socket, unsigned long long& unread) {
+    u_long waiting = 0;
+    if (ioctlsocket(socket, FIONREAD, &waiting) != 0) {
+        return false;
+    }
+    unread = waiting;
+    return true;
+}
+
+/// The serving thread has read from `client`: see solstream::HearingRead.
+void HeardFromHolder(SOCKET client, unsigned long long sent_by) {
+    unsigned long long left = 0;
+    const bool known = UnreadBytes(client, left);
+    std::lock_guard<std::mutex> lock(g_holder_mutex);
+    if (g_holder_socket != client) {
+        return;
+    }
+    solstream::HearingRead(g_holder_hearing, sent_by, known ? left : g_holder_hearing.unread);
 }
 
 /// Whether a takeover has asked `client`'s session to end.
@@ -4631,7 +4651,15 @@ void ServeClient(SOCKET client) {
     // it. The rest of an oversized line has not arrived yet — it comes in later
     // recv() chunks — so this cannot be a one-off scan of what is in hand.
     bool discarding = false;
+    // When this thread last stopped waiting and went to handle what arrived.
+    ULONGLONG busy_since = GetTickCount64();
     for (;;) {
+        // Anything already waiting came while the last command ran, which can
+        // be a minute for a launch. Said to have been sent no later than that
+        // command started, so a Mac whose network went in the middle of it is
+        // not counted as heard from the moment the command returns.
+        unsigned long long waiting = 0;
+        const bool came_while_busy = UnreadBytes(client, waiting) && waiting > 0;
         const ClientWait waited = AwaitClient(client, timeout_ms);
         if (waited == ClientWait::Retired) {
             Log("[agent] ending this session: the Mac that held it has taken it over");
@@ -4657,7 +4685,9 @@ void ServeClient(SOCKET client) {
         if (n <= 0) {
             return;
         }
-        g_holder_heard_at.store(GetTickCount64());
+        const ULONGLONG received_at = GetTickCount64();
+        HeardFromHolder(client, came_while_busy ? busy_since : received_at);
+        busy_since = received_at;
         // Here, on every wakeup, and before a single byte of what arrived is
         // looked at. Anywhere further down and some framing state ducks it: the
         // oversized-line discard below leaves the loop early, so a client that
@@ -4983,24 +5013,19 @@ bool ListenForTakeover(SOCKET client) {
     {
         std::lock_guard<std::mutex> lock(g_holder_mutex);
         const bool present = g_holder_socket != INVALID_SOCKET;
-        // Read in this order, and never subtracted the other way round: the
-        // serving thread writes the stamp on every receive, and one written
-        // after `now` was taken would wrap the difference to an enormous
-        // silence -- which is exactly the answer that ends a session.
-        const unsigned long long heard = g_holder_heard_at.load();
-        const unsigned long long now = GetTickCount64();
-        silent_ms = now > heard ? now - heard : 0;
-        // The stamp is written when the serving thread reads, and a thread
-        // inside a long command -- a launch waits up to a minute for its
-        // window -- reads nothing until it returns, while the Mac's pings
-        // pile up unread behind it. Bytes waiting on the socket are the Mac
-        // being heard from all the same. A Mac whose network has gone sends
-        // nothing new, so its takeover waits at most for the command.
+        // A serving thread inside a long command -- a launch waits up to a
+        // minute for its window -- reads nothing until it returns, while a live
+        // Mac's pings pile up unread behind it. More waiting than at the last
+        // look is that Mac heard from; the same amount is not, so a Mac whose
+        // network went in the middle of the command is taken over 15 seconds
+        // after the first knock that finds its last bytes waiting, launch or
+        // no launch.
         if (present) {
-            u_long waiting = 0;
-            if (ioctlsocket(g_holder_socket, FIONREAD, &waiting) == 0 && waiting > 0) {
-                silent_ms = 0;
+            unsigned long long unread = 0;
+            if (!UnreadBytes(g_holder_socket, unread)) {
+                unread = g_holder_hearing.unread;
             }
+            silent_ms = solstream::HearingSilentMs(g_holder_hearing, unread, GetTickCount64());
         }
         verdict = solstream::DecideTakeover(proof_ok, id, present, g_holder_id, silent_ms);
         if (verdict == solstream::TakeoverVerdict::Take && present) {

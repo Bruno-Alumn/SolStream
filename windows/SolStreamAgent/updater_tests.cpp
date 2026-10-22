@@ -1735,6 +1735,92 @@ void TestDecideTakeover() {
     CHECK(DecideTakeover(true, theirs, false, "", 0) == TakeoverVerdict::Take);
 }
 
+/// When the session's Mac counts as heard from, through a long command that
+/// stops the serving thread reading. Times in ms; the session authenticated at
+/// 1000, and a launch runs from 2000 to 62000.
+void TestHolderHearing() {
+    const unsigned long long ping = 24;
+
+    // A live Mac pings every ten seconds and the pings pile up unread. Each
+    // knock that finds more waiting than the last hears it; the session is
+    // never silent for kTakeoverSilenceMs.
+    {
+        HolderHearing h = HeardFresh(1000);
+        h.heard_at = 2000;  // the launch request, read as it arrived
+        CHECK(HearingSilentMs(h, 0, 9000) == 7000);
+        CHECK(HearingSilentMs(h, ping, 13000) == 0);       // first ping, first look
+        CHECK(HearingSilentMs(h, ping, 20000) == 7000);
+        CHECK(HearingSilentMs(h, 2 * ping, 23000) == 0);   // the next one
+        CHECK(HearingSilentMs(h, 2 * ping, 32000) == 9000);
+        CHECK(HearingSilentMs(h, 3 * ping, 33000) == 0);
+        CHECK(HearingSilentMs(h, 3 * ping, 42000) < kTakeoverSilenceMs);
+    }
+
+    // The Mac's network goes at 13000, after one ping. Knocks from its new
+    // address find that ping waiting and nothing more: it is taken over 15
+    // seconds after the first of them, well inside the Mac's 45, though the
+    // launch runs on for another 40.
+    {
+        HolderHearing h = HeardFresh(1000);
+        h.heard_at = 2000;
+        CHECK(HearingSilentMs(h, ping, 16000) == 0);
+        CHECK(HearingSilentMs(h, ping, 25000) == 9000);
+        CHECK(HearingSilentMs(h, ping, 30999) < kTakeoverSilenceMs);
+        CHECK(HearingSilentMs(h, ping, 31000) >= kTakeoverSilenceMs);
+        CHECK(HearingSilentMs(h, ping, 40000) >= kTakeoverSilenceMs);
+    }
+
+    // The same, but the launch returns at 62000 before the Mac knocks again.
+    // The serving thread reads the old ping then: it was waiting when the
+    // thread came out, so it is said to have been sent by 2000, when the
+    // launch began. The silence is not started again by reading it.
+    {
+        HolderHearing h = HeardFresh(1000);
+        h.heard_at = 2000;
+        CHECK(HearingSilentMs(h, ping, 16000) == 0);
+        HearingRead(h, 2000, 0);
+        CHECK(HearingSilentMs(h, 0, 63000) == 47000);
+        CHECK(HearingSilentMs(h, 0, 63000) >= kTakeoverSilenceMs);
+    }
+
+    // Read with nothing having been looked at during the launch: still the
+    // launch's start, so the silence counts from there.
+    {
+        HolderHearing h = HeardFresh(1000);
+        h.heard_at = 2000;
+        HearingRead(h, 2000, 0);
+        CHECK(HearingSilentMs(h, 0, 62500) == 60500);
+    }
+
+    // What arrives while the thread is waiting is heard when it is read.
+    {
+        HolderHearing h = HeardFresh(1000);
+        HearingRead(h, 70000, 0);
+        CHECK(HearingSilentMs(h, 0, 75000) == 5000);
+        // And an older stamp never moves it back.
+        HearingRead(h, 2000, 0);
+        CHECK(HearingSilentMs(h, 0, 75000) == 5000);
+    }
+
+    // A read resets the baseline: the next command piling up the same number
+    // of bytes again is the Mac heard from, not nothing new.
+    {
+        HolderHearing h = HeardFresh(1000);
+        CHECK(HearingSilentMs(h, ping, 5000) == 0);
+        HearingRead(h, 5000, 0);
+        CHECK(HearingSilentMs(h, ping, 30000) == 0);
+        // And what a read left behind is not growth either.
+        HearingRead(h, 30000, ping);
+        CHECK(HearingSilentMs(h, ping, 50000) == 20000);
+    }
+
+    // A clock that has not moved past the stamp is no silence at all.
+    {
+        HolderHearing h = HeardFresh(9000);
+        CHECK(HearingSilentMs(h, 0, 8000) == 0);
+    }
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1806,6 +1892,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTakeoverProof();
     TestClientId();
     TestDecideTakeover();
+    TestHolderHearing();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

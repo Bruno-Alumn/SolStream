@@ -99,4 +99,38 @@ TakeoverVerdict DecideTakeover(bool proof_ok, const std::string& client_id,
     return TakeoverVerdict::Take;
 }
 
+HolderHearing HeardFresh(unsigned long long now) {
+    HolderHearing hearing;
+    hearing.heard_at = now;
+    return hearing;
+}
+
+void HearingRead(HolderHearing& hearing, unsigned long long sent_by, unsigned long long left) {
+    if (sent_by > hearing.heard_at) {
+        hearing.heard_at = sent_by;
+    }
+    // What is left is the baseline the next knock measures growth from. Left
+    // at the count before the read, a command that piled up the same number of
+    // bytes again would look as if nothing had arrived.
+    hearing.unread = left;
+}
+
+unsigned long long HearingSilentMs(HolderHearing& hearing, unsigned long long unread,
+                                   unsigned long long now) {
+    // Growth since the last look, or since the last read. A first look that
+    // finds anything waiting counts too: those bytes came after the last read,
+    // at a moment this side cannot know, and taking it as now puts the
+    // takeover at most kTakeoverSilenceMs after this knock -- where taking it
+    // as long ago would end a live Mac's session in the middle of a launch.
+    if (unread > hearing.unread) {
+        hearing.unread_grew_at = now;
+    }
+    hearing.unread = unread;
+    const unsigned long long last =
+        hearing.heard_at > hearing.unread_grew_at ? hearing.heard_at : hearing.unread_grew_at;
+    // Never subtracted the other way round: a wrapped difference would be an
+    // enormous silence, which is exactly the answer that ends a session.
+    return now > last ? now - last : 0;
+}
+
 }  // namespace solstream
