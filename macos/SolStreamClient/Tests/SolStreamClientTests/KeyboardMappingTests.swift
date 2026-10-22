@@ -252,6 +252,52 @@ final class KeyboardMappingTests: XCTestCase {
                        "⌃⌘W was swallowed, so the window cannot be closed")
     }
 
+    // MARK: - A key held across a SolStream shortcut
+
+    private let leftCommandAndControl: UInt = 0x0010_0000 | 0x0004_0000 | 0x0000_0008 | 0x0000_0001
+    private let wKey: UInt16 = 0x0D  // W, whose ⌃⌘ is SolStream's close-window
+
+    /// Hold W, press ⌃⌘, let go of W first: W's release carries ⌃⌘ and must
+    /// still reach the host, or W stays held there.
+    func testTheReleaseOfAKeyHeldBeforeAShortcutReachesTheHost() {
+        let wire = Wire()
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        wire.send(.flagsChanged, keyCode: leftControl, deviceFlags: controlFlag | leftControlBit)
+        wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: leftCommandAndControl)
+        XCTAssertTrue(wire.send(.keyUp, keyCode: wKey, deviceFlags: leftCommandAndControl),
+                      "W's release was handed to AppKit as ⌃⌘W")
+        let w = wire.packets.filter { $0.code == 0x57 }
+        XCTAssertEqual(w.map(\.pressed), [true, false])
+    }
+
+    /// And a repeat of it under ⌃⌘ is the key still being held, not the
+    /// shortcut that closes the window.
+    func testARepeatOfAHeldKeyIsNotAShortcut() {
+        let wire = Wire()
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        XCTAssertTrue(wire.send(.keyDown, keyCode: wKey, deviceFlags: leftCommandAndControl),
+                      "a repeat of W reached the menu as ⌃⌘W")
+        // A fresh press under ⌃⌘ is still SolStream's.
+        XCTAssertFalse(wire.send(.keyDown, keyCode: 0x03, deviceFlags: leftCommandAndControl))
+    }
+
+    /// A key pressed before ⌘ whose release macOS never delivered is let go of
+    /// when ⌘ comes up, if this Mac's keyboard says it is up -- and kept if
+    /// the hand is still on it.
+    func testAKeyLetGoOfUnderCommandIsReleasedWithIt() {
+        for stillHeld in [false, true] {
+            let wire = Wire()
+            wire.capture.isKeyPhysicallyDown = { $0 == self.wKey && stillHeld }
+            wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+            wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: commandFlag | leftCommandBit)
+            // No key-up for W at all.
+            wire.send(.flagsChanged, keyCode: leftCommand, deviceFlags: 0)
+            let w = wire.packets.filter { $0.code == 0x57 }
+            XCTAssertEqual(w.map(\.pressed), stillHeld ? [true] : [true, false],
+                           stillHeld ? "a key still held was released" : "W was left held on the host")
+        }
+    }
+
     // MARK: - Caps Lock, to a host that predates scan codes
 
     /// Caps Lock is a toggle on Windows, so each change on the Mac is one

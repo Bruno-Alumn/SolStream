@@ -309,10 +309,20 @@ public final class InputCapture {
     /// releases everything it is holding when a session ends, which covers the
     /// session going away; this covers the window merely losing focus, which it
     /// does not.
-    private var heldKeys: Set<HostKey> = []
+    ///
+    /// By macOS key code, as the host was told it: a key's release is sent the
+    /// way its press was, whatever else is held by then.
+    private var heldKeys: [UInt16: HostKey] = [:]
 
     /// The subset of `heldKeys` pressed while ⌘ was down — see `releaseChordKeys`.
-    private var chordKeys: Set<HostKey> = []
+    private var chordKeys: Set<UInt16> = []
+
+    /// Whether a key is physically down on this Mac right now, by macOS key
+    /// code. Replaceable so the tests decide rather than the keyboard of the
+    /// Mac running them.
+    var isKeyPhysicallyDown: (UInt16) -> Bool = { code in
+        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(code))
+    }
 
     /// Buttons currently down, for exactly the reason above. Capture stops the
     /// moment the window resigns key, so the matching mouse-up is never seen and
@@ -428,25 +438,37 @@ public final class InputCapture {
         case .keyDown, .keyUp:
             // SolStream's own shortcuts are neither forwarded nor swallowed:
             // AppKit gets them exactly as it would if nothing were streaming.
-            guard !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
+            //
+            // Except for a key the host already has down. Its repeats and its
+            // release go to the host whatever is held with them by then: hold
+            // W in a game, press ⌃⌘F for full screen, let go of W before ⌃⌘,
+            // and W's release carries ⌃⌘ -- which made it a SolStream
+            // shortcut, handed to AppKit, and W stayed held on the PC. A
+            // repeat of it under ⌃⌘ would have reached the menu as ⌃⌘W, which
+            // closes the window.
+            let held = heldKeys[event.keyCode]
+            guard held != nil
+                    || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
-            guard let key = Self.hostKey(forMacKey: event.keyCode,
-                                         isISO: keyboardIsISO(event)) else {
+            guard let key = held ?? Self.hostKey(forMacKey: event.keyCode,
+                                                 isISO: keyboardIsISO(event)) else {
                 noteUnmapped(event.keyCode)
                 return false
             }
             let pressed = event.type == .keyDown
             if pressed {
-                heldKeys.insert(key)
+                heldKeys[event.keyCode] = key
                 // macOS does not reliably deliver the key-up for a key released
                 // while ⌘ is still held, and a key-down the host never sees
                 // released auto-repeats forever. Which keys were part of a ⌘
                 // chord is recorded here so they can be let go when ⌘ is.
-                if event.modifierFlags.contains(.command) { chordKeys.insert(key) }
+                if held == nil, event.modifierFlags.contains(.command) {
+                    chordKeys.insert(event.keyCode)
+                }
             } else {
-                heldKeys.remove(key)
-                chordKeys.remove(key)
+                heldKeys[event.keyCode] = nil
+                chordKeys.remove(event.keyCode)
             }
             onInput?(keyPacket(key, pressed: pressed,
                                modifiers: modifiers(from: event.modifierFlags)))
@@ -578,19 +600,28 @@ public final class InputCapture {
     /// Belt and braces against the one macOS behaviour that would leave a key
     /// stuck down on the host: key-up delivery while Command is held. If the
     /// key-ups did arrive there is nothing here to release.
+    ///
+    /// The same goes for a key pressed BEFORE ⌘ and let go of while it was
+    /// held, which is not a chord key: so any other key the host still has
+    /// down that this Mac's keyboard says is up is let go of too. One still
+    /// physically held is left alone, and its own release will follow.
     private func releaseChordKeys() {
-        for key in chordKeys {
-            heldKeys.remove(key)
+        for code in chordKeys {
+            guard let key = heldKeys.removeValue(forKey: code) else { continue }
             onInput?(keyPacket(key, pressed: false, modifiers: []))
         }
         chordKeys.removeAll()
+        for code in heldKeys.keys.sorted() where !isKeyPhysicallyDown(code) {
+            guard let key = heldKeys.removeValue(forKey: code) else { continue }
+            onInput?(keyPacket(key, pressed: false, modifiers: []))
+        }
     }
 
     /// Release everything still held when focus leaves. Without this the host
     /// keeps the key down — and Windows auto-repeats a key it never sees
     /// released, so a single missed key-up types forever.
     private func releaseHeldInput() {
-        for key in heldKeys {
+        for key in heldKeys.values {
             onInput?(keyPacket(key, pressed: false, modifiers: []))
         }
         heldKeys.removeAll()
