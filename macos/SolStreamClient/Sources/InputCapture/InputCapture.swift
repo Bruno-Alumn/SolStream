@@ -1211,10 +1211,28 @@ public final class InputCapture {
     }
 
     private func button(for event: NSEvent) -> SMTInput.MouseButton? {
-        switch event.type {
+        Self.button(for: event.type, number: event.buttonNumber)
+    }
+
+    /// Which host button a Mac button event is.
+    ///
+    /// AppKit numbers the thumb buttons of a five-button mouse 3 (back) and 4
+    /// (forward), and Windows calls them XBUTTON1 and XBUTTON2 -- which is what
+    /// the wire's `extra1` and `extra2` become on the host. They used to be
+    /// dropped here, so back and forward did nothing in a browser on the PC
+    /// and a game bound to Mouse4 or Mouse5 never saw them. Anything beyond
+    /// the fifth has no Windows button to be, and is still not sent.
+    static func button(for type: NSEvent.EventType, number: Int) -> SMTInput.MouseButton? {
+        switch type {
         case .leftMouseDown, .leftMouseUp: return .left
         case .rightMouseDown, .rightMouseUp: return .right
-        case .otherMouseDown, .otherMouseUp: return event.buttonNumber == 2 ? .middle : nil
+        case .otherMouseDown, .otherMouseUp:
+            switch number {
+            case 2: return .middle
+            case 3: return .extra1
+            case 4: return .extra2
+            default: return nil
+            }
         default: return nil
         }
     }
