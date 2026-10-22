@@ -106,6 +106,21 @@ final class ConnectWindowTests: XCTestCase {
         return nil
     }
 
+    /// The Tailscale line's link: the one beside the line's words, not the
+    /// setup guide's, which comes first.
+    private func tailscaleLink(in window: NSWindow) -> LinkButton? {
+        var found: LinkButton?
+        func walk(_ view: NSView) {
+            if found == nil, let row = view as? NSStackView,
+               row.views.contains(where: { ($0 as? NSTextField)?.stringValue.contains("Tailscale") == true }) {
+                found = row.views.lazy.compactMap { $0 as? LinkButton }.first
+            }
+            view.subviews.forEach(walk)
+        }
+        window.contentView.map(walk)
+        return found
+    }
+
     /// Every label the window is showing, joined, to look for words in.
     private func shown(in window: NSWindow) -> String {
         var found: [String] = []
@@ -164,12 +179,19 @@ final class ConnectWindowTests: XCTestCase {
     /// line says what to run and offers no link.
     func testTheCommandLineAloneGetsWordsAndNoLink() throws {
         let world = World(tailscale: .commandLineButOff(daemonRunning: true), answering: [])
-        let (_, window) = try makeWindow(world)
+        let (connect, window) = try makeWindow(world)
         try pick("192.168.1.20", in: window)
         waitUntil { self.shown(in: window).contains("Not answering") }
         XCTAssertTrue(shown(in: window).contains("sudo tailscale up"))
-        let link = try XCTUnwrap(find(LinkButton.self, in: window.contentView))
+        let link = try XCTUnwrap(tailscaleLink(in: window))
         XCTAssertTrue(link.isHiddenOrHasHiddenAncestor)
+
+        // With the app, the same line has its link: this is the line's own.
+        world.tailscale = .installedButOff
+        connect.networkChanged()
+        XCTAssertTrue(shown(in: window).contains("Turn it on"))
+        XCTAssertFalse(link.isHiddenOrHasHiddenAncestor)
+        XCTAssertEqual(link.words, "Open Tailscale")
     }
 
     /// On Tailscale there is nothing to recommend, so the line takes no room.
