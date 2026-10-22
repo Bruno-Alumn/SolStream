@@ -12,6 +12,19 @@ final class KeyframeHoldTests: XCTestCase {
         t0 + UInt64(milliseconds * 1_000_000)
     }
 
+    /// When the request goes out again, read the way MediaClient reads it: on
+    /// a 10 ms timer, from `start` to `end`.
+    private func repeats(_ hold: inout KeyframeHold, from start: Double, to end: Double,
+                         rttMs: Double) -> [Double] {
+        var asked: [Double] = []
+        var at = start
+        while at <= end {
+            if hold.reaskDue(now: ms(at), rttMs: rttMs) { asked.append(at) }
+            at += 10
+        }
+        return asked
+    }
+
     func testDamageHoldsPFramesAndAsksOncePerBurst() {
         var hold = KeyframeHold()
         XCTAssertEqual(hold.picture(frameId: 1, isIdr: true, now: ms(0)), .decode)
@@ -141,6 +154,38 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertEqual(hold.damaged(frameId: 5, now: ms(230)), .holdAndAsk)
         // And it no longer counts as on its way.
         XCTAssertTrue(hold.reaskDue(now: ms(481), rttMs: 0))
+    }
+
+    /// The same on a LAN, where the broken IDR is reported well inside the
+    /// host's 200 ms limit of the request that brought it. That report still
+    /// asks at once, but the host ignores it, so the repeat is counted from the
+    /// request the host acted on: 250 ms after it, not after the one it
+    /// ignored.
+    func testABrokenIdrInsideTheHostsLimitIsAskedForAgainOnTime() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        for at in stride(from: 20.0, through: 120.0, by: 20.0) {
+            hold.idrArriving(frameId: 5, now: ms(at))
+        }
+        XCTAssertEqual(hold.damaged(frameId: 5, now: ms(136)), .holdAndAsk,
+                       "still asked at once")
+        XCTAssertEqual(hold.damaged(frameId: 6, now: ms(140)), .hold,
+                       "and still once per burst")
+        // It used to come at 390, a quarter-second after the ignored request.
+        XCTAssertEqual(repeats(&hold, from: 140, to: 600, rttMs: 0), [260, 520])
+    }
+
+    /// Fresh damage soon after a repair: its request falls inside the host's
+    /// limit too, and the repeat is counted from the one before it.
+    func testNewDamageInsideTheHostsLimitIsAskedForAgainOnTime() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        XCTAssertEqual(hold.picture(frameId: 6, isIdr: true, now: ms(60)), .decode)
+        XCTAssertEqual(hold.damaged(frameId: 8, now: ms(150)), .holdAndAsk)
+        // It used to come at 410.
+        XCTAssertEqual(repeats(&hold, from: 150, to: 600, rttMs: 0), [260, 520])
     }
 
     /// Damage older than an IDR that is already arriving needs no request of

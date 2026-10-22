@@ -27,6 +27,9 @@ struct KeyframeHold {
     /// A lost run reports every picture in it at once, and one request covers
     /// the lot.
     static let burstMs: Double = 20
+    /// The host acts on one keyframe request per this long, and drops the rest
+    /// without a word.
+    static let hostLimitMs: Double = 200
     /// Still holding this long after asking: the request or the IDR was lost.
     /// Just past the host's 200 ms limit, so the repeat is never the one it
     /// ignores.
@@ -52,9 +55,13 @@ struct KeyframeHold {
     private(set) var lastIdr: UInt32?
     /// The last picture handed to the decoder.
     private(set) var lastDecoded: UInt32?
-    /// When the host was last asked for a keyframe, in uptime nanoseconds, or
-    /// nil before the first request.
+    /// When the host was last sent a keyframe request it can have acted on --
+    /// one more than its 200 ms limit after the one before -- in uptime
+    /// nanoseconds, or nil before the first request. The repeat is counted
+    /// from this.
     private var askedAt: UInt64?
+    /// When the last request of any kind went out, for one per burst.
+    private var sentAt: UInt64?
     /// The IDR whose fragments are arriving while the hold is on, and when the
     /// latest of them came.
     private var arrivingIdr: (frameId: UInt32, at: UInt64)?
@@ -123,9 +130,9 @@ struct KeyframeHold {
     }
 
     /// Whether to ask (again) now: at once when nothing has been asked yet,
-    /// which is the session opening, and otherwise once the last request has
-    /// gone unanswered for a quarter-second -- or a round trip and a little
-    /// more, where that is longer.
+    /// which is the session opening, and otherwise once the last request the
+    /// host can have acted on has gone unanswered for a quarter-second -- or a
+    /// round trip and a little more, where that is longer.
     ///
     /// Unanswered means no fragment of the IDR either. The repeat used to fire
     /// on the clock alone, and over a relayed path -- a 150-200 ms round trip,
@@ -142,17 +149,33 @@ struct KeyframeHold {
             let interval = max(Self.reaskMs, rttMs + Self.reaskMarginMs)
             if Self.millis(from: since, to: now) <= interval { return false }
         }
-        askedAt = now
+        sent(now)
         return true
     }
 
     /// Ask now unless a request went out within the last burst.
     private mutating func ask(_ now: UInt64) -> Bool {
-        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.burstMs {
+        if let sentAt, Self.millis(from: sentAt, to: now) <= Self.burstMs {
             return false
         }
-        askedAt = now
+        sent(now)
         return true
+    }
+
+    /// A request is going out now.
+    ///
+    /// One inside the host's limit still goes: it is one datagram, and if the
+    /// request before it was lost on the way, it is the one the host acts on.
+    /// But it no longer restarts the repeat. It used to, and the host had all
+    /// but certainly ignored it: on a LAN a requested IDR that breaks on the
+    /// way is reported damaged 100-170 ms after the request that brought it,
+    /// and the repeat then came a quarter-second after the request the host
+    /// ignored rather than the one it acted on -- about 150 ms more of a
+    /// frozen picture. The same for fresh damage soon after a repair.
+    private mutating func sent(_ now: UInt64) {
+        sentAt = now
+        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.hostLimitMs { return }
+        askedAt = now
     }
 
     /// Never negative. A caller is free to read the clock before taking the
