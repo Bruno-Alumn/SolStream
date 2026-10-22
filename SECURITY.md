@@ -31,5 +31,13 @@ impact you expect.
   committed. CI runs gitleaks over every push (`.gitleaks.toml`), and
   `.githooks/pre-commit` refuses a commit that would add one -- enable it in
   a clone with `git config core.hooksPath .githooks`.
-- Pairing tokens live in the Mac's login Keychain and in the PC user's local
-  application data, never in the repository.
+- Pairing tokens live on the Mac in
+  `~/Library/Application Support/SolStream/pairing-tokens.json` (the folder and
+  the file readable only by your user, and excluded from backups) and on the PC
+  in `%LOCALAPPDATA%\SolStream\agent.token`, never in the repository. Anyone who
+  can read either file can pair with that PC, so treat them like a password.
+- The Mac's token is not in the Keychain. SolStream is signed ad hoc, so macOS
+  sees every update as a different program, and a Keychain item tied to the old
+  one asked for your password again after each update. A Mac that kept its
+  tokens in the Keychain moves across the ones macOS hands over without
+  asking; for any other you type the token once more.
