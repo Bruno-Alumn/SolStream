@@ -5326,17 +5326,19 @@ int wmain(int argc, wchar_t** argv) {
     // handle is never closed: holding it is the point, and the process exiting
     // is what lets go of it.
     {
-        HANDLE instance = CreateMutexW(nullptr, FALSE, L"Local\\SolStreamAgentHost");
+        constexpr wchar_t kInstanceName[] = L"Local\\SolStreamAgentHost";
+        HANDLE instance = CreateMutexW(nullptr, FALSE, kInstanceName);
         const DWORD created = GetLastError();
         // Access denied is also "somebody has it": an elevated copy's mutex
         // carries a DACL an unelevated one cannot open.
         if ((instance && created == ERROR_ALREADY_EXISTS)
             || (!instance && created == ERROR_ACCESS_DENIED)) {
-            // Let go first: this copy is leaving, and holding the name while it
-            // waits below would make a third launch believe in a host that had
-            // already gone.
+            // Let go first: holding the name while this copy waits below would
+            // make a third launch believe in a host that had already gone, and
+            // would keep this one from ever seeing the name come free.
             if (instance) {
                 CloseHandle(instance);
+                instance = nullptr;
             }
             bool focused = solstream::FocusExistingHostWindow();
             // The other copy may still be starting. It takes this mutex before
@@ -5348,16 +5350,38 @@ int wmain(int argc, wchar_t** argv) {
             // the first one went on to start in the tray, so the press did
             // nothing anybody could see. So wait for the window, unless this
             // copy was itself started for the tray and has nothing to show.
+            //
+            // Or it may be on its way out. Quit in the tray destroys the window
+            // at once but lets go of this name only when the process ends,
+            // after the stream has stopped and the windows it held have been
+            // given back. A press in that gap waited the whole time for a
+            // window that was never coming and then left as well, and nothing
+            // was running. So each pass also asks for the name again: free
+            // means the other copy has gone, and this one is the host now.
             if (!focused && !start_hidden) {
-                for (int waited = 0; waited < 20000 && !focused; waited += 250) {
+                for (int waited = 0; waited < 20000 && !instance; waited += 250) {
                     Sleep(250);
                     focused = solstream::FocusExistingHostWindow();
+                    if (focused) {
+                        break;
+                    }
+                    HANDLE retry = CreateMutexW(nullptr, FALSE, kInstanceName);
+                    const DWORD retried = GetLastError();
+                    if (retry && retried != ERROR_ALREADY_EXISTS) {
+                        instance = retry;
+                    } else if (retry) {
+                        CloseHandle(retry);
+                    }
                 }
             }
-            Log("[agent] another SolStream host is already running in this "
-                "session%s; this copy is exiting",
-                focused ? " (its window was brought forward)" : "");
-            return 0;
+            if (!instance) {
+                Log("[agent] another SolStream host is already running in this "
+                    "session%s; this copy is exiting",
+                    focused ? " (its window was brought forward)" : "");
+                return 0;
+            }
+            Log("[agent] the SolStream host that was running here has exited; "
+                "this copy is starting in its place");
         }
         if (!instance) {
             // Not worth refusing to start over. The port is still exclusive, so
