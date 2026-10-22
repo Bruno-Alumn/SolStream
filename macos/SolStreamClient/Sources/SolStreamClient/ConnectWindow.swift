@@ -290,6 +290,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Everything the row and the button say is derived from one state, so they
     /// can never disagree with each other.
     private func refresh() {
+        // First, before anything below reads it: the hint and the Tailscale
+        // line used to be decided from the last reading and then refreshed,
+        // so coming back from turning Tailscale on still said it was off.
+        readTailscaleIfDue()
         // "Paired" means one thing: this Mac holds the host's agent token.
         state.isPaired = AgentConnection.hasStoredToken(for: state.address)
 
@@ -369,17 +373,21 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         refreshTailscaleAdvice(firstRun: steps != nil, tailscaleOff: tailscaleOff)
     }
 
-    /// The Tailscale line: shown on a first run, and when the PC on show is
-    /// not answering -- exactly when somebody might be away from home, or
-    /// about to be -- unless this Mac is on Tailscale already.
-    private func refreshTailscaleAdvice(firstRun: Bool, tailscaleOff: Bool) {
-        // At most every few seconds. Turning Tailscale on is noticed sooner
-        // than that when it matters: coming back from its app makes this
-        // window key, which asks again (`windowDidBecomeKey`).
+    /// Whether this Mac is on Tailscale, asked at most every few seconds.
+    /// Turning Tailscale on is noticed sooner than that when it matters:
+    /// coming back from its app makes this window key, which asks again
+    /// (`windowDidBecomeKey`).
+    private func readTailscaleIfDue() {
         if tailscaleCheckedAt.map({ Date().timeIntervalSince($0) > 3 }) ?? true {
             tailscale = .current()
             tailscaleCheckedAt = Date()
         }
+    }
+
+    /// The Tailscale line: shown on a first run, and when the PC on show is
+    /// not answering -- exactly when somebody might be away from home, or
+    /// about to be -- unless this Mac is on Tailscale already.
+    private func refreshTailscaleAdvice(firstRun: Bool, tailscaleOff: Bool) {
         if firstRun || tailscaleOff {
             showsTailscaleAdvice = true
         } else if let reachable = state.isReachable {
@@ -672,8 +680,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// the download opened in. Whatever was done there, the window should
     /// say so now rather than in a few seconds.
     func windowDidBecomeKey(_ notification: Notification) {
+        let wasConnected = tailscale.isConnected
         tailscaleCheckedAt = nil
         refresh()
+        // Tailscale just came up or went down under a PC that was not
+        // answering: ask the PC again now, rather than at the next recheck.
+        if tailscale.isConnected != wasConnected, state.isReachable != true {
+            scheduleProbe()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
