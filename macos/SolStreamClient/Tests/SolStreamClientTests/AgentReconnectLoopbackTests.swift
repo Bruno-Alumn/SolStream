@@ -287,6 +287,10 @@ final class AgentReconnectLoopbackTests: XCTestCase {
                           "given up within one retry of the patience running out")
         XCTAssertFalse(agent.willReconnect)
         XCTAssertGreaterThan(states.waits.count, 3, "it knocked again meanwhile, and said so")
+        // Not the host's "still letting go", which promises a wait that is
+        // over: nothing tries again after this.
+        XCTAssertEqual(states.failures, [AgentConnection.heldByThisMacMessage(host: "::1")])
+        XCTAssertFalse(states.failures.contains { $0.contains("letting go") })
 
         // Longer than the longest wait between knocks.
         let knocks = host.connections

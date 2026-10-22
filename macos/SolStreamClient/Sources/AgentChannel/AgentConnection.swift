@@ -484,6 +484,14 @@ public final class AgentConnection {
         return .retry(after: min(2 * pow(1.5, Double(max(retries, 0))), 6))
     }
 
+    /// What is left on screen once a host has said for `busyPatience` that it
+    /// is still holding this Mac's own session. Most likely another copy of
+    /// SolStream on this Mac is using it, live.
+    static func heldByThisMacMessage(host: String) -> String {
+        "\(host) is still holding a connection from this Mac. Close any other SolStream "
+            + "window on this Mac, or try again in a minute."
+    }
+
     /// What a takeover proof is: an HMAC under the pairing token of
     ///
     ///     "SolStream agent takeover v1" || challenge || cnonce || client id
@@ -568,11 +576,15 @@ public final class AgentConnection {
             report(.waiting("Waiting for \(host) to let go of the last connection…"))
             dropConnection(AgentError.hostBusy, after: delay)
         case .giveUp:
+            // The host's words for its own session are about a wait in
+            // progress -- "still letting go" -- and nothing will try again
+            // after this, so they are not the ones to leave on screen.
+            let shown = holder == .thisMac ? Self.heldByThisMacMessage(host: host) : text
             Log.error("[agent] \(text)")
             // Before the report, so whoever hears it already finds
             // `willReconnect` false.
             wantsConnection = false
-            report(.failed(text))
+            report(.failed(shown))
             dropConnection(AgentError.hostBusy, reconnect: false)
         }
     }
