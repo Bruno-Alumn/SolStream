@@ -62,6 +62,7 @@ std::vector<VirtualDisplay> FindVirtualDisplays() {
         if (CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS) {
             display.running = (status & DN_STARTED) != 0 && problem == 0;
             display.restart_pending = WaitsForRestart(status, problem);
+            display.switched_off = IsSwitchedOff(problem);
         }
         found.push_back(display);
     }
@@ -79,6 +80,10 @@ bool WaitsForRestart(unsigned long status, unsigned long problem) {
         return false;
     }
     return problem == CM_PROB_NEED_RESTART || (status & DN_NEED_RESTART) != 0;
+}
+
+bool IsSwitchedOff(unsigned long problem) {
+    return problem == CM_PROB_DISABLED;
 }
 
 bool IsSolStreamDisplayDriver(const std::wstring& name) {

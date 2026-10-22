@@ -6260,17 +6260,21 @@ int wmain(int argc, wchar_t** argv) {
             // answer is worth.
             static ULONGLONG off_checked = 0;
             static bool off = false;
+            static bool failing = false;
             static bool restart_pending = false;
             if (status.virtual_display) {
                 off = false;
+                failing = false;
                 restart_pending = false;
             } else if (off_checked == 0 || GetTickCount64() - off_checked > 10000) {
                 const solstream::DriverState state = solstream::CurrentDriverState();
                 off = state == solstream::DriverState::Off;
+                failing = state == solstream::DriverState::Failing;
                 restart_pending = state == solstream::DriverState::RestartPending;
                 off_checked = GetTickCount64();
             }
             status.driver_off = off;
+            status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
             status.display_detail = status.virtual_display
                 ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())

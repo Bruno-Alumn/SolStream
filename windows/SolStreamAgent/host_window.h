@@ -34,9 +34,14 @@ struct HostStatus {
     std::wstring streaming_why;
     std::wstring display_detail;
     int connected_clients = 0;
-    /// The Virtual Display Driver is here but switched off or failing: the
-    /// user's own, which the window points at rather than offering to install.
+    /// The Virtual Display Driver is here but switched off in Device Manager:
+    /// the user's own, which the window points at rather than offering to
+    /// install.
     bool driver_off = false;
+    /// The Virtual Display Driver is here and switched on, and it didn't start:
+    /// the window says a restart may start it and Device Manager says why, and
+    /// offers nothing to install over it.
+    bool driver_failing = false;
     /// The Virtual Display Driver is installed and Windows starts it once this
     /// PC restarts: the window says to restart, and offers nothing else.
     bool driver_restart_pending = false;

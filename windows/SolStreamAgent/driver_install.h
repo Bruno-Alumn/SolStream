@@ -48,7 +48,8 @@ enum class DriverState {
     Missing,         ///< no device of it at all: setup may install one
     Ready,           ///< present and running
     RestartPending,  ///< installed, and Windows starts it once the PC restarts
-    Off,             ///< present but disabled or failing -- somebody's, and left alone
+    Off,             ///< present and switched off in Device Manager -- left alone
+    Failing,         ///< present and switched on, and it didn't start -- left alone
 };
 DriverState CurrentDriverState();
 

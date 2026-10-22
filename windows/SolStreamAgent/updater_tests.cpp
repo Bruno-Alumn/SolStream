@@ -17,6 +17,8 @@
 // hardware: how commands are started, the install options, what uninstall
 // takes of the virtual display and its settings, when its device is waiting
 // for a restart or switched off, which adapter is Tailscale's, the
+// takes of the virtual display and its settings, when its device is waiting
+// for a restart or switched off, which adapter is Tailscale's, the
 // clipboard's privacy markers and line endings, when the sound capture opens
 // its device again, when the encoder spends a frame id, when a Mac may take
 // back the session it left behind, and how a key the Mac sends by position
@@ -1312,6 +1314,20 @@ void TestWaitsForRestart() {
     CHECK(!WaitsForRestart(DN_HAS_PROBLEM, CM_PROB_FAILED_START));
 }
 
+/// Only a device switched off in Device Manager is one to turn on there. One
+/// that is switched on and didn't start -- SolStream's own, after a set-up
+/// whose driver failed -- was told the same, and sent looking for an Enable
+/// that isn't there.
+void TestSwitchedOff() {
+    CHECK(IsSwitchedOff(CM_PROB_DISABLED));
+    CHECK(!IsSwitchedOff(0));
+    // Code 10, 43 and 52: failing, with nothing to turn on.
+    CHECK(!IsSwitchedOff(CM_PROB_FAILED_START));
+    CHECK(!IsSwitchedOff(CM_PROB_FAILED_POST_START));
+    CHECK(!IsSwitchedOff(CM_PROB_UNSIGNED_DRIVER));
+    CHECK(!IsSwitchedOff(CM_PROB_NEED_RESTART));
+}
+
 // ── Tailscale ────────────────────────────────────────────────────────────────
 
 /// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
@@ -2265,6 +2281,7 @@ int wmain(int argc, wchar_t** argv) {
     TestRemovalClassification();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+    TestSwitchedOff();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();
     TestClipboardLineEndings();

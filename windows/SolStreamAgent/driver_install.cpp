@@ -381,6 +381,11 @@ DriverState CurrentDriverState() {
     // that is not finished yet. Called off, it was sent to Device Manager for
     // an Enable that isn't there.
     bool restart = false;
+    // Nor is one that is switched on and failed to start: told to turn it on,
+    // somebody looked in Device Manager for an Enable that isn't there, when
+    // what is there is why it didn't start. Off only when one is switched off
+    // -- then turning it on is the one click that brings a display.
+    bool off = false;
     for (const VirtualDisplay& display : FindVirtualDisplays()) {
         if (IsSolStreamDisplayDriver(display.friendly_name)) {
             if (display.running) {
@@ -388,20 +393,24 @@ DriverState CurrentDriverState() {
             }
             found = true;
             restart = restart || display.restart_pending;
+            off = off || display.switched_off;
         }
     }
-    ForEachDriverDevice([&found, &restart](HDEVINFO, SP_DEVINFO_DATA& device) {
+    ForEachDriverDevice([&found, &restart, &off](HDEVINFO, SP_DEVINFO_DATA& device) {
         found = true;
         ULONG status = 0, problem = 0;
-        if (CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS
-            && WaitsForRestart(status, problem)) {
-            restart = true;
+        if (CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS) {
+            restart = restart || WaitsForRestart(status, problem);
+            off = off || IsSwitchedOff(problem);
         }
     });
     if (!found) {
         return DriverState::Missing;
     }
-    return restart ? DriverState::RestartPending : DriverState::Off;
+    if (restart) {
+        return DriverState::RestartPending;
+    }
+    return off ? DriverState::Off : DriverState::Failing;
 }
 
 bool HasSolStreamDriver() {
@@ -436,15 +445,23 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
     // that was already there and no backup of it was there yet.
     std::wstring new_backup;
     if (state == DriverState::Off) {
-        // Somebody's own driver, switched off or failing. Theirs: installing
-        // over it would bind a different version to their device, and an
-        // uninstall would later take it. Saying where the switch is costs
-        // them one click and takes nothing. Not "then choose Set up again":
-        // once it is on there is a virtual display, and no Set up is offered.
-        error = "This PC already has the Virtual Display Driver, but it's turned off or "
-                "not working, so SolStream left it alone. Turn it on in Device Manager "
-                "(Display adapters, Virtual Display Driver, Enable device) to stream to "
-                "it.";
+        // Somebody's own driver, switched off. Theirs: installing over it
+        // would bind a different version to their device, and an uninstall
+        // would later take it. Saying where the switch is costs them one
+        // click and takes nothing. Not "then choose Set up again": once it is
+        // on there is a virtual display, and no Set up is offered.
+        error = "This PC already has the Virtual Display Driver, but it's turned off, so "
+                "SolStream left it alone. Turn it on in Device Manager (Display adapters, "
+                "Virtual Display Driver, Enable device) to stream to it.";
+        return false;
+    }
+    if (state == DriverState::Failing) {
+        // Switched on, and it didn't start: not installed over either, and
+        // with no switch to point at. Device Manager says why it didn't
+        // start, and a restart is often what it needs.
+        error = "This PC already has the Virtual Display Driver, but it isn't running, so "
+                "SolStream left it alone. Restarting this PC may start it; if not, Device "
+                "Manager (Display adapters) says why.";
         return false;
     }
     if (state == DriverState::RestartPending) {

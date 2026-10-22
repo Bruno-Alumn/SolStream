@@ -172,14 +172,14 @@ std::wstring g_notice_detail;
 /// `g_driver_state` is read as the setup window opens: the tick box is
 /// offered only when there is no device of the driver's at all, and only on a
 /// PC it can be installed on (`g_can_install_driver`). One that is there but
-/// switched off is somebody's own, and setup says so rather than install over
-/// it; one that waits for a restart only needs the restart, and setup says
-/// that. It is read again when the tick box's set-up fails, for what the
-/// summary says is left to do. `g_driver_ours` is the same question for the
-/// uninstall window, which only promises to remove a driver SolStream put
-/// there. `g_display_result` is the elevated half's answer, "ready <note>",
-/// "ready-restart <note>" or "failed <why>", empty when it was not asked to do
-/// anything -- setup's tick box's, or the host window's Set up's.
+/// switched off or failing is left alone, and setup says which rather than
+/// install over it; one that waits for a restart only needs the restart, and
+/// setup says that. It is read again when the tick box's set-up fails, for
+/// what the summary says is left to do. `g_driver_ours` is the same question
+/// for the uninstall window, which only promises to remove a driver SolStream
+/// put there. `g_display_result` is the elevated half's answer, "ready
+/// <note>", "ready-restart <note>" or "failed <why>", empty when it was not
+/// asked to do anything -- setup's tick box's, or the host window's Set up's.
 DriverState g_driver_state = DriverState::Missing;
 bool g_can_install_driver = true;
 bool g_driver_ours = false;
@@ -919,10 +919,16 @@ Screen Describe(const HostStatus& status) {
                      L"picture is your monitor's size rather than your Mac's. ";
         screen.mark = Mark::NeedsYou;
         // No button where pressing it can only fail: the driver that is here
-        // is somebody's own and switched off, or this is an ARM PC.
+        // is switched off or failing, or this is an ARM PC. Turning it on is
+        // said only of one that is switched off: a failing one has no switch,
+        // and people told to turn it on went looking for one.
         if (status.driver_off) {
             screen.why += L"This PC's Virtual Display Driver is turned off; turn it on in "
                           L"Device Manager (Display adapters) to stream to it.";
+        } else if (status.driver_failing) {
+            screen.why += L"This PC's Virtual Display Driver isn't running. Restarting this "
+                          L"PC may start it; if not, Device Manager (Display adapters) says "
+                          L"why.";
         } else if (!CanInstallDisplayDriver()) {
             screen.why += L"SolStream can't install a virtual display on an ARM PC. "
                         + ToWide(ManualInstallAdvice());
@@ -1067,6 +1073,10 @@ SetupCopy CopyForPhase() {
                     copy.bullets.push_back(L"Leaves this PC's Virtual Display Driver as it "
                                            L"is: it's turned off, so SolStream streams your "
                                            L"main display until you turn it on");
+                } else if (g_driver_state == DriverState::Failing) {
+                    copy.bullets.push_back(L"Leaves this PC's Virtual Display Driver as it "
+                                           L"is: it isn't running, so SolStream streams your "
+                                           L"main display until it does");
                 } else if (!g_can_install_driver) {
                     copy.bullets.push_back(L"Streams your main display: SolStream can't "
                                            L"install a virtual display on an ARM PC");
@@ -1284,6 +1294,11 @@ float DrawSetupSummary(float pad, float top, float right) {
                                   L"display. Until then SolStream streams your main display.";
                 break;
             case DriverState::Off:
+                display.detail += L" The virtual display is installed but turned off, so "
+                                  L"SolStream streams your main display. Turn it on in "
+                                  L"Device Manager (Display adapters) to stream to it.";
+                break;
+            case DriverState::Failing:
                 display.detail += L" The virtual display is installed but didn't start, so "
                                   L"SolStream streams your main display. Restarting this PC "
                                   L"may start it; if not, Device Manager (Display adapters) "
@@ -1309,6 +1324,12 @@ float DrawSetupSummary(float pad, float top, float right) {
         display.detail = L"It's this PC's own Virtual Display Driver, so SolStream left it "
                          L"alone. Turn it on in Device Manager (Display adapters) to stream "
                          L"to it.";
+    } else if (g_driver_state == DriverState::Failing) {
+        display.mark = Mark::NeedsYou;
+        display.title = L"Virtual display not running";
+        display.detail = L"It's this PC's own Virtual Display Driver, so SolStream left it "
+                         L"alone. Restarting this PC may start it; if not, Device Manager "
+                         L"(Display adapters) says why.";
     } else if (!g_can_install_driver) {
         display.mark = Mark::NeedsYou;
         display.title = L"Streaming your main display";
@@ -2644,13 +2665,13 @@ void ShowTrayMenu(HWND window) {
     // The driver advisory's own button is behind the update banner while an
     // update is on offer, so it has a way in here too: neither banner can hide
     // the other's action. Offered exactly where that button is, and nowhere it
-    // can only fail -- somebody's own driver that is switched off, an ARM PC --
-    // or where only a restart is left to do.
+    // can only fail -- a driver that is here, switched off or failing, an ARM
+    // PC -- or where only a restart is left to do.
     bool offer_display = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         offer_display = !g_status.virtual_display && !g_status.driver_off
-                     && !g_status.driver_restart_pending;
+                     && !g_status.driver_failing && !g_status.driver_restart_pending;
     }
     if (offer_display && CanInstallDisplayDriver()) {
         AppendMenuW(menu, when_free, kTraySetUpDisplay, L"Set up virtual display…");
@@ -3274,6 +3295,7 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.display_detail == b.display_detail
         && a.connected_clients == b.connected_clients
         && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off
+        && a.driver_failing == b.driver_failing
         && a.driver_restart_pending == b.driver_restart_pending;
 }
 

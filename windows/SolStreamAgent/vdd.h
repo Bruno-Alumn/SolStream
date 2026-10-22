@@ -28,6 +28,9 @@ struct VirtualDisplay {
     /// Not started, and Windows starts it once the PC restarts: an install it
     /// finishes then, not a driver somebody switched off.
     bool restart_pending = false;
+    /// Switched off in Device Manager (IsSwitchedOff), where turning it on
+    /// starts it again.
+    bool switched_off = false;
 };
 
 /// Is a device with this devnode status and problem code (CM_Get_DevNode_Status)
@@ -36,6 +39,13 @@ struct VirtualDisplay {
 /// running is not waiting for anything, and one that is switched off stays off
 /// after a restart. Exposed for its tests.
 bool WaitsForRestart(unsigned long status, unsigned long problem);
+
+/// Does this devnode problem code (CM_Get_DevNode_Status) say the device is
+/// switched off in Device Manager -- problem 22, CM_PROB_DISABLED? Only then is
+/// "turn it on" the answer. One that is switched on and failing -- Code 10, 43,
+/// 52 and the rest -- has nothing there to turn on, and Device Manager says
+/// why it didn't start instead. Exposed for its tests.
+bool IsSwitchedOff(unsigned long problem);
 
 /// Every indirect display driver this machine has.
 ///
