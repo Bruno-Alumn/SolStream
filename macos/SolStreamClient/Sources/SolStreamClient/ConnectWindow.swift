@@ -26,10 +26,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         var isReachable: Bool?
         var isPaired: Bool
         var latency: TimeInterval?
-        /// Whether this Mac was on Tailscale when the PC was last asked, for
-        /// the answer on its way or the one in `isReachable`. Nil until it
+        /// What this Mac's Tailscale was when the PC was last asked, for the
+        /// answer on its way or the one in `isReachable`: the whole reading,
+        /// tailnet address and all, not only whether it was on. Nil until it
         /// is asked.
-        var askedOnTailscale: Bool?
+        var askedUnderTailscale: TailscaleStatus?
 
         var needsPairing: Bool { !isPaired }
     }
@@ -327,7 +328,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // line used to be decided from the last reading and then refreshed,
         // so coming back from turning Tailscale on still said it was off.
         readTailscaleIfDue()
-        let askedOnAnotherTailscale = forgetAnswerFromAnotherTailscale()
+        let askedUnderAnotherTailscale = forgetAnswerFromAnotherTailscale()
         // "Paired" means one thing: this Mac holds the host's agent token.
         state.isPaired = AgentConnection.hasStoredToken(for: state.address)
 
@@ -406,11 +407,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         if let steps { guide.show(steps) }
         refreshTailscaleAdvice(firstRun: steps != nil, tailscaleOff: tailscaleOff)
 
-        // Tailscale came up or went down since the PC was asked: ask it
-        // again now, rather than at the next recheck, which a PC that
-        // answered never gets. An answer still on its way is dropped
-        // (`probeGeneration`).
-        if askedOnAnotherTailscale, state.isReachable != true {
+        // Tailscale came up, went down or changed tailnet since the PC was
+        // asked: ask it again now, rather than at the next recheck, which a
+        // PC that answered never gets. An answer still on its way is
+        // dropped (`probeGeneration`).
+        if askedUnderAnotherTailscale, state.isReachable != true {
             scheduleProbe()
         }
     }
@@ -426,14 +427,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         tailscaleCheckedAt = Date()
     }
 
-    /// Whether the PC on show was asked while this Mac was on Tailscale and
-    /// it is off now, or the other way round.
+    /// Whether the PC on show was asked under another Tailscale than this
+    /// Mac's now: on and now off, off and now on, or on another tailnet.
     ///
     /// A Tailscale address answered, or did not, through the Tailscale there
     /// was then, and its answer is forgotten. Kept, that went on saying "Not
     /// answering" -- now with "Check the PC is awake" -- after Tailscale came
     /// up, until the next probe; or "Reachable" after it went down, with no
-    /// probe to come. Until the PC is asked again, it is "Checking…".
+    /// probe to come. Until the PC is asked again, it is "Checking…". So too
+    /// after switching to another tailnet from Tailscale's menu, which
+    /// leaves it on throughout: the old tailnet's PC is not on the new one.
     ///
     /// Measured against the Tailscale the probe was sent under, not against
     /// the reading before this one: that could be a few seconds old, and a
@@ -441,7 +444,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// one from before it, thrown away, and asked for again.
     @discardableResult
     private func forgetAnswerFromAnotherTailscale() -> Bool {
-        guard let asked = state.askedOnTailscale, asked != tailscale.isConnected else { return false }
+        guard let asked = state.askedUnderTailscale, asked != tailscale else { return false }
         if StreamSettings.isRemote(host: state.address) {
             state.isReachable = nil
             state.latency = nil
@@ -492,19 +495,19 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let address = state.address
         guard !address.isEmpty else {
             state.isReachable = nil
-            state.askedOnTailscale = nil
+            state.askedUnderTailscale = nil
             refresh()
             return
         }
         // Read now, not a few seconds ago: the answer is kept or forgotten
-        // by whether this Mac was on Tailscale when it was asked
+        // by what this Mac's Tailscale was when it was asked
         // (`forgetAnswerFromAnotherTailscale`). The last answer goes by the
         // same rule here, or a refresh before this one is back would show
         // it beside the hint for the Tailscale there is now.
         tailscaleCheckedAt = nil
         readTailscaleIfDue()
         forgetAnswerFromAnotherTailscale()
-        state.askedOnTailscale = tailscale.isConnected
+        state.askedUnderTailscale = tailscale
         let reach = self.reach
         let work = DispatchWorkItem { [weak self] in
             let started = Date()
@@ -648,7 +651,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // The probe that failed, whose recheck this search may ask for.
         let generation = probeGeneration
         let reach = self.reach
-        let askedOnTailscale = state.askedOnTailscale
+        let askedUnderTailscale = state.askedUnderTailscale
         // All at once, not one after another: a dead address costs its whole
         // timeout, and a `.local` name that will not resolve costs five
         // seconds before the next one is even tried. The most recently used
@@ -695,7 +698,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 self.state.name = nil
                 self.state.isReachable = true
                 self.state.latency = found.latency
-                self.state.askedOnTailscale = askedOnTailscale
+                self.state.askedUnderTailscale = askedUnderTailscale
                 Self.remember(host: found.address)
                 self.refresh()
             }

@@ -236,6 +236,25 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertTrue(shown(in: window).contains("Tailscale is off on this Mac"))
     }
 
+    /// Another tailnet, chosen from Tailscale's menu: Tailscale stays on
+    /// throughout, with another address, and a PC that answered on the old
+    /// tailnet is asked again.
+    func testSwitchingTailnetsAsksATailscaleAddressAgain() throws {
+        let world = World(tailscale: .connected(address: "100.88.1.4"), answering: ["100.101.102.103"])
+        let (connect, window) = try makeWindow(world)
+        try pick("100.101.102.103", in: window)
+        waitUntil { self.shown(in: window).contains("Reachable and paired") }
+        XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
+
+        world.tailscale = .connected(address: "100.77.5.6")
+        world.answering = []
+        let before = world.probes
+        connect.networkChanged()
+        XCTAssertFalse(shown(in: window).contains("Reachable"), "the old tailnet's answer is not kept")
+        waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
+        XCTAssertGreaterThan(world.probes, before)
+    }
+
     /// A probe already under way when Tailscale came up answers for the
     /// tunnel as it was, after the fresh probe has answered for it as it is.
     /// The older answer is dropped.
