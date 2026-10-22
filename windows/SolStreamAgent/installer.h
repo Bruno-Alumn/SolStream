@@ -123,6 +123,11 @@ std::vector<std::wstring> LogonTaskAccounts(const std::wstring& sid);
 std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& program,
                                  const std::wstring& protocol, const std::wstring& ports);
 
+/// The PowerShell command an uninstall runs to remove every firewall rule whose
+/// program is inside `directory`, whatever the rule is called. Exposed for its
+/// tests.
+std::wstring FirewallSweepCommand(const std::wstring& directory);
+
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
 /// than showing the user an exit code.

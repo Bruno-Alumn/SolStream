@@ -590,6 +590,31 @@ void TestFirewallRule() {
     CHECK(rule.find(L" protocol=TCP localport=47630 ") != std::wstring::npos);
 }
 
+/// The uninstall's sweep of rules pointing into the install folder: one query
+/// over the program filters rather than one per rule on the PC, and only
+/// inside the folder, not beside it.
+void TestFirewallSweep() {
+    const std::wstring sweep = FirewallSweepCommand(L"C:\\Program Files\\SolStream");
+    CHECK(sweep.rfind(L"powershell.exe -NoProfile ", 0) == 0);
+    // The prefix ends in a backslash, so "SolStreamOld" beside it is not
+    // matched.
+    CHECK(sweep.find(L"$dir = 'C:\\Program Files\\SolStream\\';") != std::wstring::npos);
+    // Filters first, all at once, then only the rules behind the matches.
+    const size_t filters = sweep.find(L"Get-NetFirewallApplicationFilter");
+    const size_t rules = sweep.find(L"Get-NetFirewallRule");
+    const size_t remove = sweep.find(L"Remove-NetFirewallRule");
+    CHECK(filters != std::wstring::npos && rules != std::wstring::npos
+          && remove != std::wstring::npos);
+    CHECK(filters < rules && rules < remove);
+    CHECK(sweep.find(L"ForEach-Object") == std::wstring::npos);
+    // No wildcard match: a folder name is not a pattern.
+    CHECK(sweep.find(L"-like") == std::wstring::npos);
+    CHECK(sweep.find(L"OrdinalIgnoreCase") != std::wstring::npos);
+    // One quoted -Command, closed at the very end.
+    CHECK(sweep.back() == L'"');
+    CHECK(std::count(sweep.begin(), sweep.end(), L'"') == 2);
+}
+
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -1125,6 +1150,7 @@ int wmain(int argc, wchar_t** argv) {
     TestLogonTask();
     TestLogonTaskAccounts();
     TestFirewallRule();
+    TestFirewallSweep();
     TestQualifyCommand();
     TestNoDowngrade();
     TestDownload();

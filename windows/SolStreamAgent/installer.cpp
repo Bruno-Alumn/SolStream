@@ -501,14 +501,11 @@ void DeleteRulesForProgram(const std::wstring& directory) {
     // Windows also creates its own allow rules, named after the executable, when
     // a program first listens and someone clicks Allow. Those are ours to remove
     // too -- nobody else will, and they outlive the file they name.
-    const DWORD code =
-        RunHidden(L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
-                  L"$dir = '" + directory + L"'; "
-                  L"Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object { "
-                  L"  $r = $_; "
-                  L"  $app = ($r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue).Program; "
-                  L"  if ($app -and $app -like ($dir + '*')) { "
-                  L"    Remove-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue } }\"");
+    //
+    // Three minutes rather than RunHidden's one. One query over every program
+    // filter is quick, but PowerShell loading the firewall module is not, and
+    // a sweep stopped part-way leaves exactly the rules it exists to remove.
+    const DWORD code = RunHidden(FirewallSweepCommand(directory), 180000);
     if (code != 0) {
         // The sweep is the only thing that finds rules this build does not know
         // the names of, so if it did not run, inbound ports are left open for an
@@ -808,6 +805,29 @@ std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& p
            L" localport=" + ports +
            L" profile=any"
            L" description=\"SolStream remote application streaming\"";
+}
+
+/// Every firewall rule whose program is in `directory`, found and removed in
+/// one pass.
+///
+/// The program filters are read once, all together, and only the rules behind
+/// the few that match are looked up. This used to go the other way: every rule
+/// on the PC -- several hundred on a stock Windows 11 -- then each one's
+/// program filter, one query apiece, which was slow enough to run into
+/// RunHidden's time limit and be stopped part-way.
+///
+/// Inside the folder, by a prefix that ends in a backslash: a bare prefix also
+/// matched a neighbour such as "C:\Program Files\SolStreamOld", whose rules
+/// are not ours. Compared without wildcards, as StopInstalled compares paths,
+/// so nothing in a folder's name is read as a pattern.
+std::wstring FirewallSweepCommand(const std::wstring& directory) {
+    return L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
+           L"$dir = '" + directory + L"\\'; "
+           L"Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | "
+           L"Where-Object { $_.Program -and $_.Program.StartsWith($dir, "
+           L"[System.StringComparison]::OrdinalIgnoreCase) } | "
+           L"Get-NetFirewallRule -ErrorAction SilentlyContinue | "
+           L"Remove-NetFirewallRule -ErrorAction SilentlyContinue\"";
 }
 
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
