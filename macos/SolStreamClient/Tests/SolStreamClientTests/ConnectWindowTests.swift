@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import XCTest
 import DesignSystem
 @testable import AgentChannel
@@ -251,6 +252,29 @@ final class ConnectWindowTests: XCTestCase {
         waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
         XCTAssertGreaterThan(world.probes, before)
         XCTAssertTrue(shown(in: window).contains("Tailscale is off on this Mac"))
+    }
+
+    /// A change from a monitor the window no longer has -- one cancelled
+    /// as the window closed, on its way to the main thread all the same --
+    /// is not taken.
+    func testAChangeFromAMonitorTheWindowNoLongerHasIsNotTaken() throws {
+        let world = World(tailscale: .connected(address: "100.88.1.4"), answering: ["100.101.102.103"])
+        let (connect, window) = try makeWindow(world)
+        try pick("100.101.102.103", in: window)
+        waitUntil { self.shown(in: window).contains("Reachable and paired") }
+
+        world.tailscale = .installedButOff
+        world.answering = []
+        let before = world.probes
+        connect.pathChanged(from: NWPathMonitor())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertEqual(world.probes, before)
+        XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
+
+        // The same change through the window's own way in is taken.
+        connect.networkChanged()
+        waitUntil { world.probes > before }
+        XCTAssertGreaterThan(world.probes, before)
     }
 
     /// Another tailnet, chosen from Tailscale's menu: Tailscale stays on

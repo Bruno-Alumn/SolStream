@@ -856,17 +856,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// answered through it stayed "Reachable and paired" until Connect
     /// failed.
     ///
-    /// Watched on a queue of its own, and answered on the main thread --
-    /// only while this monitor is still the window's. Cancelling it does
-    /// not take back a change already on its way to the main thread, which
-    /// would refresh the window after it closed and could probe the PC.
+    /// Watched on a queue of its own, and answered on the main thread
+    /// (`pathChanged`).
     private func watchNetwork() {
         guard pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self, weak monitor] _ in
             DispatchQueue.main.async {
-                guard let self, let monitor, self.pathMonitor === monitor else { return }
-                self.networkChanged()
+                guard let monitor else { return }
+                self?.pathChanged(from: monitor)
             }
         }
         monitor.start(queue: DispatchQueue(label: "SolStream.connect.network"))
@@ -876,6 +874,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func stopWatchingNetwork() {
         pathMonitor?.cancel()
         pathMonitor = nil
+    }
+
+    /// A change `monitor` saw, taken only while it is still the window's.
+    /// Cancelling it does not take back a change already on its way to the
+    /// main thread, which would refresh the window after it closed and
+    /// could probe the PC.
+    func pathChanged(from monitor: NWPathMonitor) {
+        guard pathMonitor === monitor else { return }
+        networkChanged()
     }
 
     /// The network changed: Tailscale is read again now, not once the last
