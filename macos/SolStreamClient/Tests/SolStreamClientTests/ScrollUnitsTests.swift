@@ -49,4 +49,30 @@ final class ScrollUnitsTests: XCTestCase {
         }
         XCTAssertEqual(notches, [-120, -120, -120])
     }
+
+    /// A leftover from the last scroll is never spent against a new direction:
+    /// it made the first notch back 119, which a game counting notches drops.
+    func testTurningTheWheelBackIsStillAWholeNotch() {
+        // An accelerated notch as macOS delivers it, in 16.16 fixed point.
+        let fast = InputCapture.wheelUnits(deltaX: 0, deltaY: 1.399993896484375, precise: false,
+                                           residual: .zero)
+        XCTAssertEqual(fast.vertical, 167)
+        let back = InputCapture.wheelUnits(deltaX: 0, deltaY: -1, precise: false, residual: fast.residual)
+        XCTAssertEqual(back.vertical, -120)
+
+        // A touch on the trackpad, then the wheel the other way.
+        let touch = InputCapture.wheelUnits(deltaX: 0, deltaY: 0.5, precise: true, residual: .zero)
+        XCTAssertEqual(touch.vertical, 0)
+        let notch = InputCapture.wheelUnits(deltaX: 0, deltaY: -1, precise: false, residual: touch.residual)
+        XCTAssertEqual(notch.vertical, -120)
+
+        // The same way, it still counts.
+        let more = InputCapture.wheelUnits(deltaX: 0, deltaY: 1, precise: false, residual: fast.residual)
+        XCTAssertEqual(more.vertical, 120)
+        let sideways = InputCapture.wheelUnits(deltaX: 1.399993896484375, deltaY: 0, precise: false,
+                                               residual: .zero)
+        let sidewaysBack = InputCapture.wheelUnits(deltaX: -1, deltaY: 0, precise: false,
+                                                   residual: sideways.residual)
+        XCTAssertEqual(sidewaysBack.horizontal, 120)
+    }
 }

@@ -115,6 +115,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     deinit {
         if let updateObserver { NotificationCenter.default.removeObserver(updateObserver) }
+        // A window replaced while showing is never closed first.
+        if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
     }
 
     private func build() {
@@ -667,8 +669,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func installEscapeToQuit() {
         guard escapeMonitor == nil else { return }
         escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // Plain Escape only, as the Quit button's key equivalent was:
+            // Command, Control or Option with it is somebody else's shortcut.
             guard let self, event.keyCode == 53, event.window === self.window,
-                  self.window.attachedSheet == nil else { return event }
+                  self.window.attachedSheet == nil,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+            else { return event }
             guard !event.isARepeat, Date().timeIntervalSince(self.becameKeyAt) > 0.5 else {
                 return nil
             }

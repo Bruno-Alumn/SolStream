@@ -1077,8 +1077,15 @@ public final class InputCapture {
                            residual: CGPoint)
         -> (horizontal: Int, vertical: Int, residual: CGPoint) {
         let unit: CGFloat = precise ? unitsPerPoint : unitsPerLine
-        let x = residual.x - deltaX * unit
-        let y = residual.y + deltaY * unit
+        // What is left over is carried only the way it was going. Carried
+        // against a turn of the wheel, a leftover of 0.9 made the first notch
+        // back 119, which Minecraft and anything else counting whole notches
+        // ignores -- one lost step at every change of direction.
+        func carried(_ left: CGFloat, toward delta: CGFloat) -> CGFloat {
+            left != 0 && delta != 0 && (left > 0) != (delta > 0) ? 0 : left
+        }
+        let x = carried(residual.x, toward: -deltaX) - deltaX * unit
+        let y = carried(residual.y, toward: deltaY) + deltaY * unit
         let horizontal = Int(x.rounded(.towardZero))
         let vertical = Int(y.rounded(.towardZero))
         return (horizontal, vertical,
