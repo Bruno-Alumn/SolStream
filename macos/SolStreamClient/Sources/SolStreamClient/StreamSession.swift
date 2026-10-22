@@ -124,23 +124,13 @@ final class StreamSession {
 
     // MARK: - Watchdog
 
+    /// Pictures the decoder has produced. Guarded by `frameCountLock`.
     private var framesDelivered: UInt64 = 0
     private let frameCountLock = NSLock()
     private var watchdog: DispatchSourceTimer?
-    private var lastSeenFrameCount: UInt64 = 0
-    private var stalledSince: Date?
-    private var keyframeRequests = 0
-    private var reportedLost = false
-    private var sawFirstFrame = false
-
-    /// At 60fps a frame is due every 16ms, so a second of silence is not a
-    /// hiccup. Long enough not to fire on a garbage-collection pause, short
-    /// enough that the user has not yet started clicking things twice.
-    private static let stallThreshold: TimeInterval = 1.0
-    /// Most stalls are one undecodable frame, and a keyframe fixes them without
-    /// anybody noticing. Past five seconds of asking, the problem is the
-    /// connection and no amount of further asking will produce a picture.
-    private static let maxKeyframeRequests = 5
+    /// Only ever touched by the watchdog's timer, which runs one event at a
+    /// time; made fresh as the watchdog starts.
+    private var liveness = LivenessWatch(startedAt: Date())
 
     private var counters = MediaCounters()
     private let counterLock = NSLock()
@@ -167,7 +157,17 @@ final class StreamSession {
             guard let self else { return }
             self.frameCountLock.lock()
             self.framesDelivered &+= 1
+            let first = self.framesDelivered == 1
             self.frameCountLock.unlock()
+            // Live when a picture has been DECODED. It was when one was handed
+            // to the decoder, and at the start of a session that was a P-frame
+            // the decoder could do nothing with: "Waiting for video" went, and
+            // the recovery count was reset, over a black window. If the
+            // keyframe that would have fixed it never decoded either, nothing
+            // ever said so.
+            if first {
+                DispatchQueue.main.async { self.onPhase?(.streaming) }
+            }
             self.sinkLock.lock()
             let views = self.sinks
             self.sinkLock.unlock()
@@ -177,13 +177,8 @@ final class StreamSession {
         }
         self.decoder = decoder
 
-        media.onVideo = { [weak self, weak decoder] annexB, isIdr in
+        media.onVideo = { [weak decoder] annexB, isIdr in
             decoder?.decode(annexB, isIDR: isIdr)
-            guard let self else { return }
-            if !self.sawFirstFrame {
-                self.sawFirstFrame = true
-                DispatchQueue.main.async { self.onPhase?(.streaming) }
-            }
         }
         media.onAudio = { [weak self] packet in
             guard let self else { return }
@@ -288,6 +283,8 @@ final class StreamSession {
     /// later frame refers to something the decoder does not have. Asking for a
     /// keyframe fixes that outright, so ask before reporting anything.
     private func startWatchdog() {
+        // Before the timer exists, so its first event sees this session's start.
+        liveness = LivenessWatch(startedAt: Date())
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 1, repeating: .milliseconds(500), leeway: .milliseconds(100))
         timer.setEventHandler { [weak self] in self?.checkLiveness() }
@@ -300,40 +297,22 @@ final class StreamSession {
         let delivered = framesDelivered
         frameCountLock.unlock()
 
-        if delivered != lastSeenFrameCount {
-            lastSeenFrameCount = delivered
-            if stalledSince != nil {
-                Log.info("[watchdog] frames resumed")
-                stalledSince = nil
-                keyframeRequests = 0
-                reportedLost = false
-                report(.live)
-            }
-            return
-        }
-
-        // Nothing has arrived yet at all. That is the phase's story to tell — it
-        // already shows "Waiting for video" — and a watchdog shouting over it
-        // would only be a second opinion on the same fact.
-        guard delivered > 0 else { return }
-
-        guard let since = stalledSince else {
-            stalledSince = Date()
-            return
-        }
-        let stalled = Date().timeIntervalSince(since)
-        guard stalled >= Self.stallThreshold else { return }
-
-        if keyframeRequests < Self.maxKeyframeRequests {
-            keyframeRequests += 1
-            Log.info("[watchdog] no frames for \(String(format: "%.1f", stalled))s; "
-                     + "asking for a keyframe (\(keyframeRequests)/\(Self.maxKeyframeRequests))")
+        let what = delivered == 0 ? "no picture yet" : "no frames"
+        switch liveness.check(delivered: delivered, now: Date()) {
+        case .quiet:
+            break
+        case .resumed:
+            Log.info("[watchdog] frames resumed")
+            report(.live)
+        case .stalled(let stalled, let request):
+            Log.info("[watchdog] \(what) for \(String(format: "%.1f", stalled))s; "
+                     + "asking for a keyframe (\(request)/\(LivenessWatch.maxKeyframeRequests))")
             media.requestKeyframe()
             report(.stalled(seconds: Int(stalled)))
-        } else if !reportedLost {
-            reportedLost = true
-            Log.error("[watchdog] no frames for \(String(format: "%.1f", stalled))s "
-                      + "after \(keyframeRequests) keyframe requests; giving up on recovery")
+        case .lost(let stalled):
+            Log.error("[watchdog] \(what) for \(String(format: "%.1f", stalled))s "
+                      + "after \(LivenessWatch.maxKeyframeRequests) keyframe requests; "
+                      + "giving up on recovery")
             report(.lost)
         }
     }
@@ -481,4 +460,83 @@ final class StreamSession {
         Log.info("[session] \(remaining) window(s) attached")
     }
 
+}
+
+/// The watchdog's arithmetic, apart from its timer and the decoder so it can be
+/// tested with frame counts and clock readings.
+struct LivenessWatch {
+    /// At 60fps a frame is due every 16ms, so a second of silence is not a
+    /// hiccup. Long enough not to fire on a garbage-collection pause, short
+    /// enough that the user has not yet started clicking things twice.
+    static let stallThreshold: TimeInterval = 1.0
+    /// Most stalls are one undecodable frame, and a keyframe fixes them without
+    /// anybody noticing. Past five seconds of asking, the problem is the
+    /// connection and no amount of further asking will produce a picture.
+    static let maxKeyframeRequests = 5
+    /// How long a session may go without decoding its first picture before
+    /// that is treated as a stall that began when it started.
+    ///
+    /// It used to be exempt for as long as it lasted, on the grounds that
+    /// "Waiting for video" was already saying so. But a session whose keyframe
+    /// never decodes -- one that arrives damaged every time on a lossy relay,
+    /// or a decoder that cannot be built -- then waited for ever: a black
+    /// window on a first connection, and a frozen one after a restart, with no
+    /// request from here, no "Lost the stream" and no Try Again. A first
+    /// picture normally takes a round trip and a keyframe, well inside this.
+    static let firstPictureGrace: TimeInterval = 3.0
+
+    enum Action: Equatable {
+        /// Nothing to say.
+        case quiet
+        /// Pictures again after a stall was reported.
+        case resumed
+        /// No pictures for `seconds`; ask for keyframe number `request`.
+        case stalled(seconds: TimeInterval, request: Int)
+        /// Still nothing after every request. Only a new session will help.
+        case lost(seconds: TimeInterval)
+    }
+
+    private let startedAt: Date
+    private var lastSeenFrameCount: UInt64 = 0
+    private var stalledSince: Date?
+    private var keyframeRequests = 0
+    private var reportedLost = false
+
+    init(startedAt: Date) {
+        self.startedAt = startedAt
+    }
+
+    mutating func check(delivered: UInt64, now: Date) -> Action {
+        if delivered != lastSeenFrameCount {
+            lastSeenFrameCount = delivered
+            guard stalledSince != nil else { return .quiet }
+            stalledSince = nil
+            keyframeRequests = 0
+            reportedLost = false
+            return .resumed
+        }
+
+        if stalledSince == nil {
+            if delivered > 0 {
+                stalledSince = now
+                return .quiet
+            }
+            // Nothing decoded yet. "Waiting for video" says so for the grace
+            // period; past it, the stall is counted from the start.
+            guard now.timeIntervalSince(startedAt) >= Self.firstPictureGrace else {
+                return .quiet
+            }
+            stalledSince = startedAt
+        }
+        let stalled = now.timeIntervalSince(stalledSince ?? now)
+        guard stalled >= Self.stallThreshold else { return .quiet }
+
+        if keyframeRequests < Self.maxKeyframeRequests {
+            keyframeRequests += 1
+            return .stalled(seconds: stalled, request: keyframeRequests)
+        }
+        guard !reportedLost else { return .quiet }
+        reportedLost = true
+        return .lost(seconds: stalled)
+    }
 }

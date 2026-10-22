@@ -939,8 +939,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Split out of `presentApps` because a recovered session needs exactly the
     /// same handlers as the first one.
     private func wire(_ session: StreamSession, host: String, agent: AgentConnection) {
-        // The watchdog speaks only once frames have been arriving and then stop,
-        // so it never argues with onPhase about a stream that has not started.
+        // The watchdog speaks once frames have been arriving and then stop, or
+        // once a new session has gone a few seconds without its first picture
+        // -- "Waiting for video" says so until then.
         session.onLiveness = { [weak self, weak agent] liveness in
             guard let self else { return }
             switch liveness {
@@ -953,7 +954,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                  detail: "No picture for \(seconds)s — asking \(host) for a new frame")
                 }
             case .lost:
-                if let agent, agent.isConnected {
+                if self.mediaRecoveryAttempts >= 3 {
+                    // Three restarts in a row and not one picture from any of
+                    // them. A restart that shows one starts the count again
+                    // (`.streaming`), so this is a stream that cannot be got
+                    // back by restarting it, and Try Again is the honest offer
+                    // rather than a fourth "Reconnecting…" and a fifth.
+                    self.appWindows.forEach {
+                        $0.setError("Lost the stream",
+                                    detail: "No picture from \(host) after three restarts.")
+                    }
+                } else if let agent, agent.isConnected {
                     self.recoverMedia(host: host, agent: agent)
                 } else {
                     // The agent channel is down too; `onReconnected` recovers.
