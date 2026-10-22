@@ -919,6 +919,11 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.idrsSent = 0; s.idrBytes = 0;
     s.audioBytesSent = 0;
     s.datagramsReceived = 0; s.rejected = 0; s.idrRequests = 0;
+    // The five-second line's latency and the Mac's reports as well: the mean
+    // is this session's sum over this session's pictures, and the last
+    // session's best and its client's frame count are not this one's.
+    s.lastGlassToWireMs = 0.0; s.minGlassToWireMs = 1e9; s.sumGlassToWireMs = 0.0;
+    s.clientLastFrame = 0; s.clientDamaged = 0; s.lastRttMs = 0.0;
 
     {
         std::lock_guard<std::mutex> guard(s.openLock);
