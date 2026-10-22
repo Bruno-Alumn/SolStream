@@ -46,7 +46,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
     private var allRows: [Row] = []
     private var rows: [Row] = []
-    private var busyRow: Int?
+    /// An open under way, and the row it started from by its `key`. Not the
+    /// row's index: the search stays live, and a query typed meanwhile moved
+    /// the marker to another application -- or, matching nothing, lifted the
+    /// one-open-at-a-time guard with it.
+    private var isBusy = false
+    private var busyKey: String?
     private var iconCache: [String: CGImage] = [:]
     private var requestedIcons: Set<String> = []
     /// Set by the owner so rows can ask the host for their icon.
@@ -247,7 +252,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // A launch already under way owns the list — the row is showing its
         // progress and the window it is waiting for is about to appear, which
         // would rebuild the list out from under it.
-        guard busyRow == nil else { return }
+        guard !isBusy else { return }
         // And nobody asked for this refresh, so it must not move the selection.
         // applyFilter drops it back to the first row, which is right when the
         // person is typing and wrong when something opened Notepad on the PC
@@ -317,18 +322,29 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
         openButton.isEnabled = false
-        busyRow = tableView.selectedRow >= 0 ? tableView.selectedRow : nil
-        if let busyRow { tableView.reloadData(forRowIndexes: [busyRow], columnIndexes: [0]) }
+        // One open says it twice, "Opening…" and then "Starting…", and the
+        // selection may have moved in between: the row is the first one's.
+        if !isBusy {
+            let selected = tableView.selectedRow
+            busyKey = selected >= 0 && selected < rows.count ? rows[selected].key : nil
+        }
+        isBusy = true
+        reloadRows(withKey: busyKey)
     }
 
     func clearBusy() {
         setSpinning(false)
-        let previous = busyRow
-        busyRow = nil
-        if let previous, previous < rows.count {
-            tableView.reloadData(forRowIndexes: [previous], columnIndexes: [0])
-        }
+        let previous = busyKey
+        isBusy = false
+        busyKey = nil
+        reloadRows(withKey: previous)
         openButton.isEnabled = tableView.selectedRow >= 0
+    }
+
+    private func reloadRows(withKey key: String?) {
+        guard let key else { return }
+        let indexes = IndexSet(rows.indices.filter { rows[$0].key == key })
+        if !indexes.isEmpty { tableView.reloadData(forRowIndexes: indexes, columnIndexes: [0]) }
     }
 
     /// Hidden as well as stopped: a stopped spinner that is merely not drawn
@@ -367,7 +383,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         if !rows.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
-        openButton.isEnabled = !rows.isEmpty
+        openButton.isEnabled = !rows.isEmpty && !isBusy
         refreshHover()
     }
 
@@ -405,10 +421,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // button whether it is enabled. Clicking a row that was
         // already starting therefore ran the whole flow a second time: a second
         // media session negotiated over the top of the first, and a second
-        // window for the same application. `busyRow` is what `showBusy` sets and
+        // window for the same application. `isBusy` is what `showBusy` sets and
         // what the selection handler already derives enablement from, so gating
         // on it here covers all three routes with the state that already exists.
-        guard busyRow == nil else { return }
+        guard !isBusy else { return }
         let index = tableView.selectedRow
         guard index >= 0, index < rows.count else { return }
         onChoose(rows[index].choice)
@@ -543,7 +559,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             }
         }
 
-        let busy = row == busyRow
+        let busy = isBusy && entry.key == busyKey
         cell.configure(title: entry.title,
                        subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
                        // Installed applications get no dot at all rather than a
@@ -561,7 +577,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        openButton.isEnabled = tableView.selectedRow >= 0 && busyRow == nil
+        openButton.isEnabled = tableView.selectedRow >= 0 && !isBusy
     }
 }
 

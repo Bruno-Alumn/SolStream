@@ -11,11 +11,15 @@ import DesignSystem
 /// keys are handed to the list and the field's editor directly.
 final class AppPickerTests: XCTestCase {
     private var cancels = 0
+    private var chosen: [String] = []
 
     private func makePicker() -> AppPicker {
         _ = NSApplication.shared
         cancels = 0
-        let picker = AppPicker(host: "pc", onChoose: { _ in }, onCancel: { [weak self] in self?.cancels += 1 })
+        chosen = []
+        let picker = AppPicker(host: "pc", onChoose: { [weak self] choice in
+            if case .launch(let app) = choice { self?.chosen.append(app.name) }
+        }, onCancel: { [weak self] in self?.cancels += 1 })
         let apps = ["Chrome", "Chess", "Calculator", "Notepad"]
             .map { RemoteApp(name: $0, path: "C:\\\($0).lnk") }
         picker.present(windows: [], apps: apps)
@@ -156,5 +160,57 @@ final class AppPickerTests: XCTestCase {
         makeCurrent(held)
         editor.keyDown(with: held)
         XCTAssertEqual(cancels, 0, "and the next repeat, with nothing left to clear, stays")
+    }
+
+    // MARK: - An open under way
+
+    /// The titles of the rows that say an application is starting.
+    private func busyTitles(in table: NSTableView) -> [String] {
+        (0..<table.numberOfRows).compactMap { row in
+            let label = table.view(atColumn: 0, row: row, makeIfNecessary: true)?
+                .accessibilityLabel() ?? ""
+            return label.contains("Starting on the PC")
+                ? String(label.prefix { $0 != "," }) : nil
+        }
+    }
+
+    private func search(_ text: String, in field: DS.Field) throws {
+        let editor = try XCTUnwrap(field.currentEditor())
+        editor.selectAll(nil)
+        if text.isEmpty { editor.deleteBackward(nil) } else { editor.insertText(text) }
+    }
+
+    /// The marker stays on the application being opened while the list is
+    /// searched, and a search that matches nothing does not lift the guard
+    /// against opening a second one.
+    func testASearchDuringAnOpenNeitherMovesTheMarkerNorAllowsASecondOpen() throws {
+        let picker = makePicker()
+        let window = picker.window
+        let field = try XCTUnwrap(find(DS.Field.self, in: window.contentView))
+        let table = try XCTUnwrap(find(NSTableView.self, in: window.contentView))
+        window.makeFirstResponder(field)
+
+        // Calculator is first, and selected.
+        picker.showBusy("Opening Calculator on pc…")
+        XCTAssertEqual(busyTitles(in: table), ["Calculator"])
+
+        try search("no", in: field)
+        XCTAssertEqual(table.numberOfRows, 1)
+        XCTAssertEqual(busyTitles(in: table), [], "Notepad now sits where Calculator was")
+
+        // The second half of the same open, with nothing selected.
+        try search("zzz", in: field)
+        XCTAssertEqual(table.numberOfRows, 0)
+        picker.showBusy("Starting Calculator on pc…")
+
+        try search("", in: field)
+        XCTAssertEqual(busyTitles(in: table), ["Calculator"])
+        table.keyDown(with: key("\r", code: 36, in: window))
+        XCTAssertEqual(chosen, [], "one open at a time")
+
+        picker.clearBusy()
+        XCTAssertEqual(busyTitles(in: table), [])
+        table.keyDown(with: key("\r", code: 36, in: window))
+        XCTAssertEqual(chosen, ["Calculator"])
     }
 }
