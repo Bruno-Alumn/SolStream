@@ -732,6 +732,57 @@ std::wstring XmlEscape(const std::wstring& text) {
     return out;
 }
 
+}  // namespace
+
+std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
+                          bool at_logon) {
+    const std::wstring user = XmlEscape(account);
+    const std::wstring directory = XmlEscape(destination);
+    return
+        L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
+        L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
+        L"  <RegistrationInfo><Description>Starts SolStream so this PC can serve a Mac.</Description></RegistrationInfo>\r\n"
+        + std::wstring(at_logon
+              ? L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
+              : L"  <Triggers />\r\n") +
+        L"  <Principals><Principal id=\"Author\">\r\n"
+        // The account is declared here, beside InteractiveToken, so no password
+        // is ever wanted for it.
+        L"    <UserId>" + user + L"</UserId>\r\n"
+        // Interactive and least-privilege. A process in session 0 sees a phantom
+        // 1024x768 desktop and no windows at all, so it could neither show its
+        // own window nor find the application the Mac asked to stream.
+        L"    <LogonType>InteractiveToken</LogonType>\r\n"
+        L"    <RunLevel>LeastPrivilege</RunLevel>\r\n"
+        L"  </Principal></Principals>\r\n"
+        L"  <Settings>\r\n"
+        L"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n"
+        L"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n"
+        L"    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n"
+        L"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n"
+        L"    <Enabled>true</Enabled>\r\n"
+        // Normal, as if it had been opened from the Start menu. Left out, a task
+        // runs at Task Scheduler's default of 7, which is below normal: capture,
+        // the encoder and the audio all lost the CPU to whatever else was busy
+        // -- a game on the PC, say -- and every application the Mac opened
+        // inherited the same class from the host that started it.
+        L"    <Priority>4</Priority>\r\n"
+        L"  </Settings>\r\n"
+        L"  <Actions Context=\"Author\">\r\n"
+        L"    <Exec>\r\n"
+        L"      <Command>" + directory + L"\\SolStream.exe</Command>\r\n"
+        // --listen-all because an installed host that only answers on loopback is
+        // one no Mac can reach. The socket still requires the pairing token off
+        // loopback; the window shows that token. That is the lock, not the address.
+        L"      <Arguments>--listen-all --background</Arguments>\r\n"
+        L"      <WorkingDirectory>" + directory + L"</WorkingDirectory>\r\n"
+        L"    </Exec>\r\n"
+        L"  </Actions>\r\n"
+        L"</Task>\r\n";
+}
+
+namespace {
+
 /// The Task Scheduler's class and interface ids, spelled out here rather than
 /// taken from taskschd.lib, which the mingw cross-build does not link.
 const CLSID kClsidTaskScheduler = {0x0f87369f, 0xa4e5, 0x4cfc,
@@ -757,44 +808,7 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
     // Whoever asked for the install, not whoever approved it: an administrator
     // setting this up for somebody else must not register a task that runs as
     // themselves. How the difference is worked out is in LogonTaskAccount.
-    const std::wstring account = XmlEscape(LogonTaskAccount());
-    const std::wstring directory = XmlEscape(destination);
-
-    const std::wstring xml =
-        L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
-        L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
-        L"  <RegistrationInfo><Description>Starts SolStream so this PC can serve a Mac.</Description></RegistrationInfo>\r\n"
-        + std::wstring(at_logon
-              ? L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
-              : L"  <Triggers />\r\n") +
-        L"  <Principals><Principal id=\"Author\">\r\n"
-        // The account is declared here, beside InteractiveToken, so no password
-        // is ever wanted for it.
-        L"    <UserId>" + account + L"</UserId>\r\n"
-        // Interactive and least-privilege. A process in session 0 sees a phantom
-        // 1024x768 desktop and no windows at all, so it could neither show its
-        // own window nor find the application the Mac asked to stream.
-        L"    <LogonType>InteractiveToken</LogonType>\r\n"
-        L"    <RunLevel>LeastPrivilege</RunLevel>\r\n"
-        L"  </Principal></Principals>\r\n"
-        L"  <Settings>\r\n"
-        L"    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n"
-        L"    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n"
-        L"    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n"
-        L"    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n"
-        L"    <Enabled>true</Enabled>\r\n"
-        L"  </Settings>\r\n"
-        L"  <Actions Context=\"Author\">\r\n"
-        L"    <Exec>\r\n"
-        L"      <Command>" + directory + L"\\SolStream.exe</Command>\r\n"
-        // --listen-all because an installed host that only answers on loopback is
-        // one no Mac can reach. The socket still requires the pairing token off
-        // loopback; the window shows that token. That is the lock, not the address.
-        L"      <Arguments>--listen-all --background</Arguments>\r\n"
-        L"      <WorkingDirectory>" + directory + L"</WorkingDirectory>\r\n"
-        L"    </Exec>\r\n"
-        L"  </Actions>\r\n"
-        L"</Task>\r\n";
+    const std::wstring xml = LogonTaskXml(LogonTaskAccount(), destination, at_logon);
 
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ITaskService* service = nullptr;

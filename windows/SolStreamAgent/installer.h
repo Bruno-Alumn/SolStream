@@ -105,6 +105,12 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error);
 /// fails on a machine nobody was watching.
 std::wstring InstallLogPath();
 
+/// The definition of the task that starts the installed host, as it is handed
+/// to Task Scheduler: run as `account`, from `destination`, at logon when
+/// `at_logon` and otherwise only when asked to. Exposed for its tests.
+std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
+                          bool at_logon);
+
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
 /// than showing the user an exit code.

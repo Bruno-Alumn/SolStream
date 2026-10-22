@@ -495,6 +495,34 @@ void TestInstallOptions() {
     CHECK(parsed.desktop_shortcut);
 }
 
+/// The task that starts the installed host. Task Scheduler cannot be asked
+/// here, so these read the definition it would be handed.
+void TestLogonTask() {
+    const std::wstring at_logon = LogonTaskXml(L"PC\\me", L"C:\\Program Files\\SolStream", true);
+    const std::wstring on_demand = LogonTaskXml(L"PC\\me", L"C:\\Program Files\\SolStream", false);
+    // Normal priority, inside <Settings>. Left out, Task Scheduler's default
+    // of 7 ran the host below normal, and every application the Mac opened
+    // inherited it.
+    for (const std::wstring& xml : {at_logon, on_demand}) {
+        const size_t settings = xml.find(L"<Settings>");
+        const size_t priority = xml.find(L"<Priority>4</Priority>");
+        CHECK(settings != std::wstring::npos);
+        CHECK(priority != std::wstring::npos);
+        CHECK(priority > settings && priority < xml.find(L"</Settings>"));
+        CHECK(xml.find(L"<Command>C:\\Program Files\\SolStream\\SolStream.exe</Command>")
+              != std::wstring::npos);
+        CHECK(xml.find(L"<RunLevel>LeastPrivilege</RunLevel>") != std::wstring::npos);
+        CHECK(xml.find(L"<LogonType>InteractiveToken</LogonType>") != std::wstring::npos);
+    }
+    CHECK(at_logon.find(L"<LogonTrigger>") != std::wstring::npos);
+    CHECK(on_demand.find(L"<LogonTrigger>") == std::wstring::npos);
+    CHECK(on_demand.find(L"<Triggers />") != std::wstring::npos);
+    // An & is legal in a Windows user name, and unescaped it made the whole
+    // definition malformed.
+    CHECK(LogonTaskXml(L"PC\\R&D", L"C:\\x", false).find(L"<UserId>PC\\R&amp;D</UserId>")
+          != std::wstring::npos);
+}
+
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -1027,6 +1055,7 @@ int wmain(int argc, wchar_t** argv) {
     TestCommandLine(vector, scratch);
     TestEnvironment();
     TestInstallOptions();
+    TestLogonTask();
     TestQualifyCommand();
     TestNoDowngrade();
     TestDownload();

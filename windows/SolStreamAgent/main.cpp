@@ -5251,6 +5251,23 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
+    // Normal priority, however this copy was started. A logon task registered
+    // before it said <Priority> runs its program below normal, and so would
+    // every application the Mac opens from here, because a process started by
+    // one below normal inherits that class. Only ever raised to normal: a host
+    // somebody started high on purpose keeps what they gave it.
+    {
+        const DWORD priority = GetPriorityClass(GetCurrentProcess());
+        if (priority == BELOW_NORMAL_PRIORITY_CLASS || priority == IDLE_PRIORITY_CLASS) {
+            if (SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS)) {
+                Log("[agent] started below normal priority; raised to normal");
+            } else {
+                Log("[agent] started below normal priority and could not raise it: %lu",
+                    (unsigned long) GetLastError());
+            }
+        }
+    }
+
     // An installed SolStream exists to serve a Mac, so it listens like one
     // unless told otherwise. Off loopback the token is still required; the
     // window shows it. That is the lock, not the address.
