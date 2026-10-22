@@ -1958,9 +1958,10 @@ void TestCapsLock() {
 
     // Caps Lock's scan code is what the Mac reports its changes with, and the
     // state is the modifiers byte's 0x10, clear of shift, control, alt and
-    // the Windows key.
-    CHECK(kScanCapsLock == 0x3A);
-    CHECK((kModifierCapsLock & 0x0F) == 0);
+    // the Windows key. Constants, so checked as this compiles: a CHECK of
+    // one is a warning under MSVC's /W4.
+    static_assert(kScanCapsLock == 0x3A);
+    static_assert((kModifierCapsLock & 0x0F) == 0);
 }
 
 }  // namespace
