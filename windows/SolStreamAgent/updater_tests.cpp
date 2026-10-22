@@ -1433,6 +1433,26 @@ void TestSoundReopener() {
     CHECK(!timing.Due(2 * kReopenRetryMs - 1));
     CHECK(timing.Due(2 * kReopenRetryMs));
 
+    // An open that timed out -- an app's activation left unanswered by a
+    // wedged audio service -- is not started again for much longer, and an
+    // open that fails or works the ordinary way afterwards goes back to the
+    // half second.
+    const HRESULT timedOut = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    Reopener wedged;
+    CHECK(wedged.Due(0));
+    CHECK(wedged.OpenFailed(timedOut, 2000));
+    CHECK(!wedged.Due(2000 + kReopenRetryMs));
+    CHECK(!wedged.Due(2000 + media::kTimedOutRetryMs - 1));
+    CHECK(wedged.Due(2000 + media::kTimedOutRetryMs));
+    CHECK(!wedged.OpenFailed(timedOut, 2000 + media::kTimedOutRetryMs));
+    CHECK(!wedged.Due(2000 + 2 * media::kTimedOutRetryMs - 1));
+    const uint64_t later = 2000 + 2 * media::kTimedOutRetryMs;
+    CHECK(wedged.OpenFailed(noDevice, later));
+    CHECK(wedged.Due(later + kReopenRetryMs));
+    CHECK(wedged.OpenFailed(timedOut, later + kReopenRetryMs));
+    CHECK(wedged.Opened(later + kReopenRetryMs + media::kTimedOutRetryMs));
+    CHECK(wedged.Due(later + 2 * kReopenRetryMs + media::kTimedOutRetryMs));
+
     // The first open is said, as the line that gives the device's format.
     // So is losing a device that had been working, and opening the next one.
     Reopener change;

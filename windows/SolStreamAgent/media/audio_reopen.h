@@ -34,6 +34,14 @@ namespace solstream::media {
 /// that opens and fails at once is not opened in a tight loop.
 constexpr uint64_t kReopenRetryMs = 500;
 
+/// The wait after an open that timed out instead of failing. OpenTap gives an
+/// app's activation two seconds; one that has not answered by then belongs to
+/// a wedged audio service, is still outstanding, and holds the audio thread
+/// for the whole of those two seconds. Starting another every half second
+/// would keep the thread in back-to-back waits, piling up activations and
+/// holding up the end of the session by two seconds a tap.
+constexpr uint64_t kTimedOutRetryMs = 10000;
+
 /// How often the whole PC's capture asks which device is the default. A
 /// device that stops being the default still works, and its capture goes on
 /// delivering -- silence -- so asking is the only way to notice.
@@ -95,9 +103,10 @@ private:
 class Reopener {
 public:
     /// Whether an open may be tried at `now`.
-    bool Due(uint64_t now) const { return !tried_ || now - triedAt_ >= kReopenRetryMs; }
+    bool Due(uint64_t now) const { return !tried_ || now - triedAt_ >= wait_; }
 
-    /// An open that worked, at `now`. True when that belongs in the log: the
+    /// An open that worked, at `now` -- when it returned, not when it began,
+    /// since an open can take seconds. True when that belongs in the log: the
     /// first, and the first after trouble that was said.
     bool Opened(uint64_t now) {
         Tried(now);
@@ -108,9 +117,12 @@ public:
         return say;
     }
 
-    /// An open that failed with `hr`, at `now`. True when that belongs in the log.
+    /// An open that failed with `hr`, at `now`, when it returned. True when
+    /// that belongs in the log. One that timed out is not tried again for
+    /// kTimedOutRetryMs.
     bool OpenFailed(HRESULT hr, uint64_t now) {
         Tried(now);
+        if (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT)) { wait_ = kTimedOutRetryMs; }
         return Say(hr, now);
     }
 
@@ -127,6 +139,7 @@ private:
     void Tried(uint64_t now) {
         tried_ = true;
         triedAt_ = now;
+        wait_ = kReopenRetryMs;
     }
 
     bool Say(HRESULT why, uint64_t now) {
@@ -140,6 +153,7 @@ private:
 
     bool tried_ = false;
     uint64_t triedAt_ = 0;
+    uint64_t wait_ = kReopenRetryMs;
     bool open_ = false;
     uint64_t openedAt_ = 0;
     bool said_ = false;

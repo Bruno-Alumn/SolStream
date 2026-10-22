@@ -567,7 +567,7 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                     const HRESULT hr = OpenTap(pid, tap);
                     if (SUCCEEDED(hr)) {
                         Log("[media] hearing %s", ProcessName(pid).c_str());
-                        tap.reopen.Opened(now);
+                        tap.reopen.Opened(GetTickCount64());
                         taps.push_back(std::move(tap));
                     } else {
                         Log("[media] could not hear %s (0x%08lX)", ProcessName(pid).c_str(), hr);
@@ -581,16 +581,20 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
             // Unlike a tap that would not open, one that opened and then
             // stopped working is opened again, every half second until it
             // does: it worked, so what stopped it -- the audio service
-            // restarting, most likely -- passes.
+            // restarting, most likely -- passes. The time is taken after each
+            // open rather than before: one that times out takes two seconds,
+            // and counted from before it, it would be due again at once.
             for (ProcessTap& tap : taps) {
-                if (tap.client || !tap.reopen.Due(now)) { continue; }
+                if (!running()) { break; }
+                if (tap.client || !tap.reopen.Due(GetTickCount64())) { continue; }
                 const HRESULT hr = OpenTap(tap.pid, tap);
+                const ULONGLONG opened = GetTickCount64();
                 if (SUCCEEDED(hr)) {
-                    if (tap.reopen.Opened(now)) {
+                    if (tap.reopen.Opened(opened)) {
                         Log("[media] hearing %s again", ProcessName(tap.pid).c_str());
                     }
-                } else if (tap.reopen.OpenFailed(hr, now)) {
-                    Log("[media] could not hear %s again yet (0x%08lX); trying every half second",
+                } else if (tap.reopen.OpenFailed(hr, opened)) {
+                    Log("[media] could not hear %s again yet (0x%08lX); trying again",
                         ProcessName(tap.pid).c_str(), hr);
                 }
             }
