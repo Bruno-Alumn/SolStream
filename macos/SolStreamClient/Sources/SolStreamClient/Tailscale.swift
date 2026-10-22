@@ -11,16 +11,26 @@ import Darwin
 /// a first run, and when the PC on show is not answering.
 ///
 /// The decision is a pure function of two facts -- the addresses on each of
-/// this Mac's tunnels, and whether Tailscale is installed -- so it can be
-/// tested without either; `current()` is the one place that reads the real
-/// ones.
+/// this Mac's tunnels, and how Tailscale is installed, if it is -- so it can
+/// be tested without either; `current()` is the one place that reads the
+/// real ones.
 enum TailscaleStatus: Equatable {
     /// On, with this address on the tailnet.
     case connected(address: String)
     /// The app is here, but nothing is on the tailnet: switched off, or
     /// signed out.
     case installedButOff
+    /// Only the command line is here -- Homebrew's formula, say -- and
+    /// nothing is on the tailnet. There is no app to open.
+    case commandLineButOff
     case missing
+
+    /// How Tailscale is on this Mac.
+    enum Installation: Equatable {
+        case app
+        /// The command line and its daemon, without the app.
+        case commandLine
+    }
 
     static let downloadURL = URL(string: "https://tailscale.com/download")!
 
@@ -40,8 +50,7 @@ enum TailscaleStatus: Equatable {
     /// - Parameters:
     ///   - tunnels: the addresses on each tunnel interface, one list per
     ///     interface, IPv4 and IPv6 together.
-    ///   - installed: whether Tailscale is on this Mac at all, the app or
-    ///     only its command line.
+    ///   - installed: how Tailscale is on this Mac, or nil if it is not.
     ///
     /// An address in Tailscale's range is not enough by itself. Other
     /// overlay VPNs hand out the same range on a tunnel of their own --
@@ -51,7 +60,7 @@ enum TailscaleStatus: Equatable {
     /// on the PC. Tailscale gives every device an IPv6 address in its own
     /// prefix as well, on the same tunnel, and that prefix is Tailscale's
     /// alone.
-    static func decide(tunnels: [[String]], installed: Bool) -> TailscaleStatus {
+    static func decide(tunnels: [[String]], installed: Installation?) -> TailscaleStatus {
         for addresses in tunnels where addresses.contains(where: isTailscaleIPv6) {
             if let address = addresses.first(where: isTailscaleAddress) {
                 return .connected(address: address)
@@ -65,14 +74,16 @@ enum TailscaleStatus: Equatable {
         // local one included: NetBird gives each peer one of those by default
         // since 0.71. A Headscale server's prefix has to lie inside
         // Tailscale's, so the loop above has already found it.
-        if installed {
-            for addresses in tunnels where !addresses.contains(where: isOwnIPv6) {
-                if let address = addresses.first(where: isTailscaleAddress) {
-                    return .connected(address: address)
-                }
+        guard let installed else { return .missing }
+        for addresses in tunnels where !addresses.contains(where: isOwnIPv6) {
+            if let address = addresses.first(where: isTailscaleAddress) {
+                return .connected(address: address)
             }
         }
-        return installed ? .installedButOff : .missing
+        switch installed {
+        case .app: return .installedButOff
+        case .commandLine: return .commandLineButOff
+        }
     }
 
     /// Tailscale's range, 100.64.0.0/10: the first byte 100 and the top two
@@ -125,7 +136,7 @@ enum TailscaleStatus: Equatable {
     /// lookup and a few file checks -- but not free, so the connect window
     /// asks every few seconds at most rather than on every refresh.
     static func current() -> TailscaleStatus {
-        decide(tunnels: tunnels(), installed: applicationURL() != nil || hasCommandLine())
+        decide(tunnels: tunnels(), installed: installation())
     }
 
     /// The addresses on each of this Mac's tunnel interfaces that are up,
@@ -159,13 +170,16 @@ enum TailscaleStatus: Equatable {
         return names.compactMap { found[$0] }
     }
 
-    /// Whether Tailscale's command line is here without the app. Files only,
-    /// not `tailscale status`: this is asked on the main thread, and a
-    /// process started there would hold up the window.
-    static func hasCommandLine(fileExists: (String) -> Bool = {
-        FileManager.default.fileExists(atPath: $0)
-    }) -> Bool {
-        commandLinePaths.contains(where: fileExists)
+    /// How Tailscale is on this Mac: the app if it is anywhere, or else the
+    /// command line. Files only for that, not `tailscale status`: this is
+    /// asked on the main thread, and a process started there would hold up
+    /// the window.
+    static func installation(app: () -> URL? = applicationURL,
+                             fileExists: (String) -> Bool = {
+                                 FileManager.default.fileExists(atPath: $0)
+                             }) -> Installation? {
+        if app() != nil { return .app }
+        return commandLinePaths.contains(where: fileExists) ? .commandLine : nil
     }
 
     /// Where the Tailscale app is, if it is anywhere.
@@ -183,13 +197,21 @@ enum TailscaleStatus: Equatable {
 
     /// The line and the one thing to do about it, or nil when there is
     /// nothing to say: a Mac already on Tailscale needs no recommending.
-    var advice: (words: String, action: String)? {
+    ///
+    /// The action is the link that does it, and there is none for the
+    /// command line: the one thing to do is a command, and a link that said
+    /// "Open Tailscale" opened the download page for an app somebody had
+    /// chosen not to have.
+    var advice: (words: String, action: String?)? {
         switch self {
         case .connected:
             return nil
         case .installedButOff:
             return ("Tailscale is installed but off. Turn it on to reach your PC away from home.",
                     "Open Tailscale")
+        case .commandLineButOff:
+            return ("Tailscale is installed but off. Run “sudo tailscale up” to reach your PC away from home.",
+                    nil)
         case .missing:
             return ("Away from home? Tailscale connects this Mac and your PC from anywhere, free.",
                     "Get Tailscale")
@@ -204,7 +226,7 @@ enum TailscaleStatus: Equatable {
     /// Do what `advice` offers: open the app, or its download page.
     func act() {
         switch self {
-        case .connected:
+        case .connected, .commandLineButOff:
             return
         case .installedButOff:
             guard let url = Self.applicationURL() else {

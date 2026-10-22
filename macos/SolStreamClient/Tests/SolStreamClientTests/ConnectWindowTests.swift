@@ -165,6 +165,18 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertEqual(window.frame, opened)
     }
 
+    /// With only Tailscale's command line there is no app to open, so the
+    /// line says what to run and offers no link.
+    func testTheCommandLineAloneGetsWordsAndNoLink() throws {
+        let world = World(tailscale: .commandLineButOff, answering: [])
+        let (_, window) = try makeWindow(world)
+        try pick("192.168.1.20", in: window)
+        waitUntil { self.shown(in: window).contains("Not answering") }
+        XCTAssertTrue(shown(in: window).contains("sudo tailscale up"))
+        let link = try XCTUnwrap(find(LinkButton.self, in: window.contentView))
+        XCTAssertTrue(link.isHiddenOrHasHiddenAncestor)
+    }
+
     /// On Tailscale there is nothing to recommend, so the line takes no room.
     func testOnTailscaleTheLineTakesNoRoom() throws {
         let (_, without) = try makeWindow(World(tailscale: .missing, answering: []))

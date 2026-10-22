@@ -466,10 +466,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let advice = tailscale.advice
         tailscaleRow.isHidden = advice == nil
         tailscaleWords.isHidden = !showsTailscaleAdvice
-        tailscaleLink.isHidden = !showsTailscaleAdvice
+        // No link at all where the advice is a command to run.
+        tailscaleLink.isHidden = !showsTailscaleAdvice || advice?.action == nil
         if let advice {
             tailscaleWords.stringValue = advice.words
-            tailscaleLink.words = advice.action
+            tailscaleLink.words = advice.action ?? ""
             tailscaleWords.preferredMaxLayoutWidth = Self.width - DS.Metric.inset * 2
                 - tailscaleLink.intrinsicContentSize.width - tailscaleRow.spacing
         }

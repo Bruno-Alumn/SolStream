@@ -55,9 +55,9 @@ final class TailscaleTests: XCTestCase {
     func testTailscalesTunnelMeansConnectedWhateverIsInstalled() {
         // Installed or not: the daemon can run without the app.
         let tunnels = [["10.7.0.2"], ["fe80::1%utun4", "100.88.1.4", "fd7a:115c:a1e0::1"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: false),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: nil),
                        .connected(address: "100.88.1.4"))
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: true),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: .app),
                        .connected(address: "100.88.1.4"))
     }
 
@@ -66,33 +66,33 @@ final class TailscaleTests: XCTestCase {
     /// that is not Tailscale's.
     func testAnotherVPNInTheSameRangeIsNotTailscale() {
         let netBird = [["fe80::1%utun100", "100.92.3.4"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: false), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: nil), .missing)
         let warp = [["100.96.0.2", "2606:4700:110:8a36::2", "fe80::1%utun5"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: warp, installed: false), .missing)
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: warp, installed: true), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: warp, installed: nil), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: warp, installed: .app), .installedButOff)
     }
 
     /// Tailscale's prefix counts on the same tunnel as the address, not on
     /// another one.
     func testThePrefixMustBeOnTheSameTunnel() {
         let tunnels = [["100.92.3.4"], ["fd7a:115c:a1e0::1"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: false), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: nil), .missing)
     }
 
     /// A tailnet without IPv6 looks like NetBird, so its address counts only
     /// where Tailscale is installed.
     func testWithoutIPv6TheRangeCountsWhereTailscaleIsInstalled() {
         let tunnels = [["fe80::1%utun4", "100.88.1.4"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: true),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: .app),
                        .connected(address: "100.88.1.4"))
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: false), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: nil), .missing)
     }
 
     /// Headscale's prefix has to lie inside Tailscale's, so its tunnels are
     /// Tailscale's by their prefix alone, installed or not.
     func testAHeadscalePrefixInsideTailscalesCounts() {
         let headscale = [["fe80::1%utun4", "100.64.0.7", "fd7a:115c:a1e0:ab12::7"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: headscale, installed: false),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: headscale, installed: nil),
                        .connected(address: "100.64.0.7"))
     }
 
@@ -101,47 +101,66 @@ final class TailscaleTests: XCTestCase {
     /// Tailscale is installed.
     func testNetBirdsOwnIPv6AddressIsNotTailscales() {
         let netBird = [["fe80::1%utun100", "100.64.114.31", "fd00:1234:5678::1f"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: true), .installedButOff)
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: false), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: .app), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: nil), .missing)
     }
 
     /// Homebrew's `tailscale` formula has no app, and is Tailscale all the
-    /// same: a tailnet without IPv6 counts on a Mac that has only that.
+    /// same: the command line, or its daemon running, counts as installed.
+    /// The app counts first wherever it is.
     func testTheCommandLineAloneCountsAsInstalled() {
-        XCTAssertTrue(TailscaleStatus.hasCommandLine { $0 == "/opt/homebrew/bin/tailscale" })
-        XCTAssertTrue(TailscaleStatus.hasCommandLine { $0 == "/usr/local/bin/tailscale" })
-        XCTAssertTrue(TailscaleStatus.hasCommandLine { $0 == "/var/run/tailscaled.socket" },
-                      "a daemon running from anywhere")
-        XCTAssertFalse(TailscaleStatus.hasCommandLine { _ in false })
-        XCTAssertFalse(TailscaleStatus.hasCommandLine { $0 == "/opt/homebrew/bin/netbird" })
+        let noApp: () -> URL? = { nil }
+        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/opt/homebrew/bin/tailscale" },
+                       .commandLine)
+        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/usr/local/bin/tailscale" },
+                       .commandLine)
+        XCTAssertEqual(TailscaleStatus.installation(app: noApp) { $0 == "/var/run/tailscaled.socket" },
+                       .commandLine, "a daemon running from anywhere")
+        XCTAssertNil(TailscaleStatus.installation(app: noApp) { _ in false })
+        XCTAssertNil(TailscaleStatus.installation(app: noApp) { $0 == "/opt/homebrew/bin/netbird" })
 
-        let installed = TailscaleStatus.hasCommandLine { $0 == "/opt/homebrew/bin/tailscale" }
+        let app = URL(fileURLWithPath: "/Applications/Tailscale.app")
+        XCTAssertEqual(TailscaleStatus.installation(app: { app }) { _ in true }, .app)
+        XCTAssertEqual(TailscaleStatus.installation(app: { app }) { _ in false }, .app)
+    }
+
+    /// With the command line alone, a tailnet without IPv6 still counts,
+    /// and off is off without the app: there is nothing to open, so the
+    /// line says what to run and has no link.
+    func testTheCommandLineAloneOnAndOff() throws {
         XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun4", "100.88.1.4"]],
-                                              installed: installed),
+                                              installed: .commandLine),
                        .connected(address: "100.88.1.4"))
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: installed), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: .commandLine), .commandLineButOff)
+        let netBird = [["fe80::1%utun100", "100.64.114.31", "fd00:1234:5678::1f"]]
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: netBird, installed: .commandLine), .commandLineButOff)
+
+        let advice = try XCTUnwrap(TailscaleStatus.commandLineButOff.advice)
+        XCTAssertNil(advice.action)
+        XCTAssertEqual(advice.words,
+                       "Tailscale is installed but off. Run “sudo tailscale up” to reach your PC away from home.")
     }
 
     /// Tailscale's own tunnel wins over a guess at another one, wherever it
     /// comes in the list.
     func testTheSureTunnelWinsOverAGuess() {
         let tunnels = [["100.92.3.4"], ["100.88.1.4", "fd7a:115c:a1e0::1"]]
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: true),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: tunnels, installed: .app),
                        .connected(address: "100.88.1.4"))
     }
 
     func testInstalledWithoutAnAddressIsOff() {
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["10.7.0.2"]], installed: true), .installedButOff)
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun4"]], installed: true),
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["10.7.0.2"]], installed: .app), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun4"]], installed: .app),
                        .installedButOff)
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: true), .installedButOff)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: .app), .installedButOff)
     }
 
     func testNeitherIsMissing() {
         XCTAssertEqual(TailscaleStatus.decide(tunnels: [["100.63.0.1", "100.128.0.1", "fd7a:115c:a1e0::1"]],
-                                              installed: false),
+                                              installed: nil),
                        .missing)
-        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: false), .missing)
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [], installed: nil), .missing)
     }
 
     /// Connected says nothing; the other two say what to do, with the button
