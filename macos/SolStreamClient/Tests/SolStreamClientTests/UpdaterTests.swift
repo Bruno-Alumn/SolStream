@@ -20,7 +20,10 @@ final class UpdaterTests: XCTestCase {
         scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-updater-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        suiteName = "SolStreamUpdaterTests-\(UUID().uuidString)"
+        // A path, not a name: a named suite leaves its plist behind in
+        // ~/Library/Preferences after every run, even once emptied. This one
+        // lives in the scratch folder and goes with it.
+        suiteName = scratch.appendingPathComponent("defaults").path
         StubProtocol.reset()
     }
 
@@ -31,8 +34,8 @@ final class UpdaterTests: XCTestCase {
                 try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
             }
         }
-        try? FileManager.default.removeItem(at: scratch)
         UserDefaults().removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: scratch)
         StubProtocol.reset()
         try super.tearDownWithError()
     }

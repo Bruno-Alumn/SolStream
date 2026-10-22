@@ -22,8 +22,11 @@ final class SettingsWindowTests: XCTestCase {
     private var saved: [String: Any] = [:]
     private let settings = StreamSettings.shared
     /// The Updates card's own defaults, so nothing it shows or remembers is
-    /// the real app's.
-    private let updaterSuite = "SolStreamSettingsUpdaterTests-\(UUID().uuidString)"
+    /// the real app's. Kept in a temporary folder by path: a named suite
+    /// leaves its plist in ~/Library/Preferences after every run.
+    private let updaterFolder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("solstream-settings-defaults-\(UUID().uuidString)", isDirectory: true)
+    private var updaterSuite: String { updaterFolder.appendingPathComponent("defaults").path }
 
     override func setUp() {
         super.setUp()
@@ -42,6 +45,7 @@ final class SettingsWindowTests: XCTestCase {
             }
         }
         UserDefaults().removePersistentDomain(forName: updaterSuite)
+        try? FileManager.default.removeItem(at: updaterFolder)
         super.tearDown()
     }
 
@@ -55,6 +59,7 @@ final class SettingsWindowTests: XCTestCase {
         configuration.protocolClasses = [StubProtocol.self]
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-settings-updates-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: updaterFolder, withIntermediateDirectories: true)
         let updater = Updater(defaults: UserDefaults(suiteName: updaterSuite)!, configuration: configuration,
                               environment: ["SOLSTREAM_PRETEND_VERSION": "1.0.0"],
                               installTarget: nil, publicKey: UpdateSignature.productionKey,
