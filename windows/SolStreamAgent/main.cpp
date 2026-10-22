@@ -62,6 +62,7 @@
 #include "clipboard.h"
 #include "display_setup.h"
 #include "driver_install.h"
+#include "foreground.h"
 #include "tailscale.h"
 #include "host_window.h"
 #include "installer.h"
@@ -840,20 +841,34 @@ bool ForceForeground(HWND window) {
         return true;
     }
 
-    const DWORD self_thread = GetCurrentThreadId();
-    const HWND holder = GetForegroundWindow();
-    const DWORD holder_thread = holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
-    const bool attached = holder_thread && holder_thread != self_thread &&
-                          AttachThreadInput(self_thread, holder_thread, TRUE);
+    // On a thread of its own, with a bound: joined to the holder's queue, the
+    // calls below wait on the holder, and a hung one would hold this thread
+    // and every command behind it. See foreground.h.
+    const bool answered = solstream::RunWithin(solstream::kForegroundWaitMs, [window] {
+        // A message queue of its own, which AttachThreadInput needs.
+        MSG msg;
+        PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+        const DWORD self_thread = GetCurrentThreadId();
+        const HWND holder = GetForegroundWindow();
+        const DWORD holder_thread = holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
+        const bool attached =
+            solstream::JoinsHolderQueue(holder_thread, self_thread,
+                                        holder && IsHungAppWindow(holder))
+            && AttachThreadInput(self_thread, holder_thread, TRUE);
 
-    SetForegroundWindow(window);
-    // Both, because they answer different questions: which top-level window is
-    // active, and which control inside it takes the keys.
-    SetActiveWindow(window);
-    SetFocus(window);
+        SetForegroundWindow(window);
+        // Both, because they answer different questions: which top-level
+        // window is active, and which control inside it takes the keys.
+        SetActiveWindow(window);
+        SetFocus(window);
 
-    if (attached) {
-        AttachThreadInput(self_thread, holder_thread, FALSE);
+        if (attached) {
+            AttachThreadInput(self_thread, holder_thread, FALSE);
+        }
+    });
+    if (!answered) {
+        Log("[focus] the window in front on the PC did not answer within %lu ms; "
+            "not waiting for it", static_cast<unsigned long>(solstream::kForegroundWaitMs));
     }
     return GetForegroundWindow() == window;
 }

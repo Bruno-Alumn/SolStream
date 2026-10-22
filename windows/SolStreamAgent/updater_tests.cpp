@@ -37,6 +37,7 @@
 
 #include "clipboard.h"
 #include "driver_install.h"
+#include "foreground.h"
 #include "media/audio_reopen.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
@@ -2531,6 +2532,38 @@ void TestStrandedWindows() {
     CHECK(RectsOverlap(RECT{10, 10, 11, 11}, RECT{0, 0, 100, 100}));
 }
 
+void TestForegroundBound() {
+    // The holder's queue is joined only when there is a holder, it is another
+    // thread, and Windows does not already call it hung.
+    CHECK(JoinsHolderQueue(20, 10, false));
+    CHECK(!JoinsHolderQueue(20, 10, true));
+    CHECK(!JoinsHolderQueue(0, 10, false));
+    CHECK(!JoinsHolderQueue(10, 10, false));
+
+    // Quick work is waited for, and has happened by the time it returns.
+    bool ran = false;
+    CHECK(RunWithin(kForegroundWaitMs, [&ran] { ran = true; }));
+    CHECK(ran);
+
+    // Work that does not finish is not waited for past the bound, and goes on
+    // to finish by itself.
+    HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CHECK(release != nullptr && done != nullptr);
+    const ULONGLONG start = GetTickCount64();
+    CHECK(!RunWithin(100, [release, done] {
+        WaitForSingleObject(release, 10000);
+        SetEvent(done);
+    }));
+    const ULONGLONG waited = GetTickCount64() - start;
+    CHECK(waited >= 50 && waited < 2000);
+    CHECK(WaitForSingleObject(done, 0) == WAIT_TIMEOUT);
+    SetEvent(release);
+    CHECK(WaitForSingleObject(done, 5000) == WAIT_OBJECT_0);
+    CloseHandle(release);
+    CloseHandle(done);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2612,6 +2645,7 @@ int wmain(int argc, wchar_t** argv) {
     TestCapsLock();
     TestHoldOrder();
     TestStrandedWindows();
+    TestForegroundBound();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
