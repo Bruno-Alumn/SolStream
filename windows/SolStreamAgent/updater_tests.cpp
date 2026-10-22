@@ -33,6 +33,7 @@
 #include "driver_install.h"
 #include "media/audio_reopen.h"
 #include "media/feed_ledger.h"
+#include "media/overflow_gate.h"
 #include "tailscale.h"
 #include "vdd.h"
 
@@ -1574,6 +1575,65 @@ void TestFeedLedger() {
     CHECK(!ledger.TakeIdr(false));
 }
 
+void TestOverflowGate() {
+    using Gate = media::OverflowGate;
+    {
+        // Pictures go straight through while the queue has room.
+        Gate gate;
+        Gate::Decision d = gate.Picture(false, false, 0.0);
+        CHECK(d.send && !d.clear && !d.askIdr);
+        d = gate.Picture(true, false, 16.0);
+        CHECK(d.send && !d.clear && !d.askIdr);
+        CHECK(!gate.Waiting());
+    }
+    {
+        // A P-frame finds the queue full: the backlog goes, so does the P-frame,
+        // and a keyframe is asked for once.
+        Gate gate;
+        Gate::Decision d = gate.Picture(false, true, 100.0);
+        CHECK(d.clear && !d.send && d.askIdr);
+        CHECK(gate.Waiting());
+        // Every P-frame until the keyframe is dropped, and nothing more asked,
+        // with the queue full or not.
+        d = gate.Picture(false, false, 116.0);
+        CHECK(!d.send && !d.clear && !d.askIdr);
+        d = gate.Picture(false, true, 132.0);
+        CHECK(!d.send && !d.clear && !d.askIdr);
+        // The keyframe goes, and ends the wait.
+        d = gate.Picture(true, false, 148.0);
+        CHECK(d.send && !d.clear && !d.askIdr);
+        CHECK(!gate.Waiting());
+        d = gate.Picture(false, false, 164.0);
+        CHECK(d.send && !d.askIdr);
+    }
+    {
+        // A keyframe that finds the queue full goes, over the backlog, and
+        // asks for nothing: asking made a second keyframe straight after it.
+        Gate gate;
+        Gate::Decision d = gate.Picture(true, true, 0.0);
+        CHECK(d.clear && d.send && !d.askIdr);
+        CHECK(!gate.Waiting());
+    }
+    {
+        // An encoder that ignores the request: the wait gives up, the picture
+        // is sent, and the keyframe is asked for again.
+        Gate gate;
+        gate.Picture(false, true, 1000.0);
+        Gate::Decision d = gate.Picture(false, false, 1000.0 + Gate::kGiveUpMs);
+        CHECK(!d.send && !d.askIdr);
+        d = gate.Picture(false, false, 1001.0 + Gate::kGiveUpMs);
+        CHECK(d.send && !d.clear && d.askIdr);
+        CHECK(!gate.Waiting());
+        // A full queue at that moment is an overflow again, and the wait
+        // starts over.
+        Gate again;
+        again.Picture(false, true, 0.0);
+        d = again.Picture(false, true, 1.0 + Gate::kGiveUpMs);
+        CHECK(d.clear && !d.send && d.askIdr);
+        CHECK(again.Waiting());
+    }
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1641,6 +1701,7 @@ int wmain(int argc, wchar_t** argv) {
     TestSoundReopener();
     TestSoundDefaultDevice();
     TestFeedLedger();
+    TestOverflowGate();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

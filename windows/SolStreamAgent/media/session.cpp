@@ -9,6 +9,7 @@
 #include "smt.h"
 #include "audio.h"
 #include "log.h"
+#include "overflow_gate.h"
 
 #include <mfapi.h>
 #include <timeapi.h>
@@ -125,6 +126,8 @@ struct MediaSession::Impl {
     std::mutex queueLock;
     std::condition_variable queueReady;
     std::deque<Picture> queue;
+    /// Under `queueLock`, and new for each pass, whose frame ids start again.
+    OverflowGate overflowGate;
 
     long long startedAt = 0;
     /// Written by the receive thread on every datagram that authenticates and
@@ -425,6 +428,10 @@ void MediaSession::Impl::RunCapture() {
     // returned true and the agent had already told the Mac it was streaming.
     ReportOpened(std::string());
 
+    {
+        std::lock_guard<std::mutex> guard(queueLock);
+        overflowGate = OverflowGate();
+    }
     encoder->OnPicture([this](const CodedPicture& coded) {
         Picture picture;
         picture.bytes.assign(coded.data, coded.data + coded.length);
@@ -432,38 +439,38 @@ void MediaSession::Impl::RunCapture() {
         picture.isIdr = coded.isIdr;
         picture.capturedAt = coded.capturedAt;
         picture.encodedAt = coded.encodedAt;
-        bool wantIdr = false;
+        // A full queue means the sender cannot keep up: the backlog is thrown
+        // away, and so is every P-frame until the keyframe asked for comes
+        // out. See overflow_gate.h.
+        OverflowGate::Decision decision;
         {
             std::lock_guard<std::mutex> guard(queueLock);
-            if (queue.size() >= kSendQueueDepth) {
-                // The sender cannot keep up, so the queue is full of pictures
-                // that will be stale before they leave. Throwing them away and
-                // asking for a keyframe recovers in one frame; sending them
-                // recovers in however long the backlog takes. The keyframe
-                // counts against the client's request limit, as the
-                // first-contact one does: the client sees the pictures thrown
-                // away as lost and rightly asks for one, and on any path slower
-                // than a frame that request used to arrive after this keyframe
-                // was made and bring a second, into the sender that had just
-                // fallen behind.
+            decision = overflowGate.Picture(picture.isIdr,
+                                            queue.size() >= kSendQueueDepth,
+                                            MillisBetween(startedAt, Now()));
+            if (decision.clear) {
                 queue.clear();
                 picturesDropped.fetch_add(1);
-                wantIdr = true;
             }
-            queue.push_back(std::move(picture));
+            if (decision.send) { queue.push_back(std::move(picture)); }
         }
-        queueReady.notify_one();
+        if (decision.send) { queueReady.notify_one(); }
         // Through a copy of the pointer, and outside the queue lock so that the
         // two are never held at once: this runs on an encoder work-queue thread,
         // and the pass it belongs to is one the capture thread can be tearing
         // down at the same moment -- `encoder` is exactly what it clears.
-        if (wantIdr) {
+        if (decision.askIdr) {
             std::shared_ptr<Encoder> encoderPtr;
             {
                 std::lock_guard<std::mutex> guard(mediaLock);
                 encoderPtr = encoder;
             }
             if (encoderPtr) {
+                // Counted against the client's request limit, as the
+                // first-contact keyframe is. The client has no reason to ask
+                // while the P-frames are dropped, but one that does anyway,
+                // over a loss of its own just before, is then not sent a
+                // second keyframe within the limit.
                 lastIdrAt.store(Now());
                 encoderPtr->RequestIdr();
             }
