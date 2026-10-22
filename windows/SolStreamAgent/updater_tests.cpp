@@ -19,8 +19,9 @@
 // for a restart or switched off, which adapter is Tailscale's, the
 // clipboard's privacy markers and line endings, when the sound capture opens
 // its device again, when the encoder spends a frame id, when a Mac may take
-// back the session it left behind, and how a key the Mac sends by position
-// is pressed here.
+// back the session it left behind, how a key the Mac sends by position is
+// pressed here, and the other decisions of the host's that are kept in small
+// headers of their own so that they can be checked here.
 
 #include "updater.cpp"
 
@@ -40,6 +41,7 @@
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "session_takeover.h"
+#include "stranded.h"
 #include "media/keys.h"
 #include "tailscale.h"
 #include "vdd.h"
@@ -2482,6 +2484,53 @@ void TestHoldOrder() {
     CHECK(HoldEventIsNewest(order, 0x1000000u, 1));
 }
 
+void TestStrandedWindows() {
+    const HWND app = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1000));
+    const HWND other_app = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x2000));
+    const HWND dialog = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x3000));
+    const HWND broker_frame = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x4000));
+    StreamedWindow slot;
+    slot.window = app;
+    slot.pid = 100;
+    slot.desired = RECT{0, 0, 1280, 800};
+    slot.held = true;
+    const std::vector<StreamedWindow> streamed{slot};
+    const RECT inside{400, 300, 800, 500};
+    const RECT elsewhere{2000, 1000, 2400, 1200};
+    const std::vector<OwnerLink> none;
+
+    // Nothing streamed: nothing belongs.
+    CHECK(!PartOfTheStream(dialog, 300, none, inside, {}));
+    // The streamed window itself, and its own process's dialogs, wherever they are.
+    CHECK(PartOfTheStream(app, 100, none, elsewhere, streamed));
+    CHECK(PartOfTheStream(dialog, 100, none, elsewhere, streamed));
+    // A credential prompt from another process, owned by the streamed window.
+    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{app, 100}}, elsewhere, streamed));
+    // Owned through a window of its own process first: the chain still reaches it.
+    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{broker_frame, 300}, OwnerLink{app, 100}},
+                          elsewhere, streamed));
+    // Owned by another window of the streamed process.
+    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{other_app, 100}}, elsewhere, streamed));
+    // Owned by something that is not streamed, and out of the picture: carried off.
+    CHECK(!PartOfTheStream(dialog, 300, {OwnerLink{other_app, 200}}, elsewhere, streamed));
+    // Unowned, but over the streamed window: it is in the picture.
+    CHECK(PartOfTheStream(dialog, 300, none, inside, streamed));
+    // Touching the edge is not overlapping it.
+    CHECK(!PartOfTheStream(dialog, 300, none, RECT{1280, 0, 1600, 300}, streamed));
+    CHECK(PartOfTheStream(dialog, 300, none, RECT{1279, 0, 1600, 300}, streamed));
+    // A slot that is not held has no area to be in.
+    StreamedWindow loose = slot;
+    loose.held = false;
+    CHECK(!PartOfTheStream(dialog, 300, none, inside, {loose}));
+    // No pid known never matches another unknown pid.
+    StreamedWindow nameless;
+    nameless.window = app;
+    CHECK(!PartOfTheStream(dialog, 0, {OwnerLink{other_app, 0}}, elsewhere, {nameless}));
+    // An empty rectangle overlaps nothing.
+    CHECK(!RectsOverlap(RECT{10, 10, 10, 20}, RECT{0, 0, 100, 100}));
+    CHECK(RectsOverlap(RECT{10, 10, 11, 11}, RECT{0, 0, 100, 100}));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2562,6 +2611,7 @@ int wmain(int argc, wchar_t** argv) {
     TestScanKeys();
     TestCapsLock();
     TestHoldOrder();
+    TestStrandedWindows();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

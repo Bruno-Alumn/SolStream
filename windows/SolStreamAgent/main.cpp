@@ -67,6 +67,7 @@
 #include "installer.h"
 #include "ports.h"
 #include "session_takeover.h"
+#include "stranded.h"
 #include "updater.h"
 #include "util.h"
 
@@ -2355,6 +2356,9 @@ bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
 struct StrandedSearch {
     std::vector<HWND> found;
     RECT capture{};
+    /// The streamed windows, copied out of their slots once per search rather
+    /// than with the lock taken for every window on the desktop.
+    std::vector<solstream::StreamedWindow> streamed;
 };
 
 BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
@@ -2394,23 +2398,23 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
     if (pid == GetCurrentProcessId()) {
         return TRUE;
     }
-    // The streamed windows live on this display on purpose, and so do their own
-    // menus and dialogs — those reach the user through the video, as part of the
-    // application they are looking at.
-    EnterCriticalSection(&g_lock_cs);
-    bool ours = false;
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && (g_locks[i].window == window || g_locks[i].pid == pid)) {
-            ours = true;
-        }
-    }
-    LeaveCriticalSection(&g_lock_cs);
-    if (ours) {
-        return TRUE;
-    }
-
     RECT rect{};
     if (!GetWindowRect(window, &rect) || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return TRUE;
+    }
+    // The streamed windows live on this display on purpose, and so do their own
+    // menus and dialogs — those reach the user through the video, as part of the
+    // application they are looking at. Including the ones another process puts
+    // up for it, which say so by their owner; see stranded.h.
+    std::vector<solstream::OwnerLink> owners;
+    for (HWND owner = GetWindow(window, GW_OWNER); owner && owners.size() < 8;
+         owner = GetWindow(owner, GW_OWNER)) {
+        solstream::OwnerLink link;
+        link.window = owner;
+        GetWindowThreadProcessId(owner, &link.pid);
+        owners.push_back(link);
+    }
+    if (solstream::PartOfTheStream(window, pid, owners, rect, search->streamed)) {
         return TRUE;
     }
     // By its middle, so a dialog straddling the edge of two displays is judged
@@ -2446,6 +2450,18 @@ void RescueStrandedWindows() {
     if (!CaptureDisplayIsInvisible(search.capture, rescue_to)) {
         return;
     }
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active) {
+            solstream::StreamedWindow slot;
+            slot.window = g_locks[i].window;
+            slot.pid = g_locks[i].pid;
+            slot.desired = g_locks[i].desired;
+            slot.held = g_locks[i].geometry_locked;
+            search.streamed.push_back(slot);
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
     EnumWindows(StrandedProc, reinterpret_cast<LPARAM>(&search));
 
     for (HWND window : search.found) {
