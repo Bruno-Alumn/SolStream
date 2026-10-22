@@ -117,6 +117,9 @@ target_link_libraries(SolStreamAgent PRIVATE
     ole32 uuid
     # The logon task is registered through ITaskService, whose strings are BSTRs.
     oleaut32
+    # WTSQuerySessionInformationW: who is signed in at this desktop, which the
+    # install asks when it was elevated to somebody else's account.
+    wtsapi32
 )
 
 # UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
@@ -226,7 +229,7 @@ if(BUILD_TESTING)
         SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
     target_link_libraries(SolStreamUpdaterTests PRIVATE
         user32 advapi32 shell32 winhttp crypt32 bcrypt ole32 oleaut32 uuid
-        setupapi cfgmgr32 newdev iphlpapi ws2_32)
+        setupapi cfgmgr32 newdev iphlpapi ws2_32 wtsapi32)
     if(MSVC)
         target_compile_options(SolStreamUpdaterTests PRIVATE /W4 /permissive- /utf-8)
     else()

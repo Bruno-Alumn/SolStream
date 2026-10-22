@@ -22,7 +22,7 @@ fi
     installer.cpp updater.cpp media/log.cpp \
     -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32 \
     -lsetupapi -lcfgmgr32 -lcomctl32 -lnewdev -liphlpapi -lole32 -loleaut32 -luuid \
-    -ld2d1 -ldwrite
+    -ld2d1 -ldwrite -lwtsapi32
 echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
 # The updater's tests, compiled so this check covers them too. Run them on
 # Windows (or under Wine) with the test vector:
@@ -33,5 +33,5 @@ echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
     updater_tests.cpp util.cpp installer.cpp media/log.cpp \
     driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp \
     -luser32 -ladvapi32 -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lole32 -loleaut32 -luuid \
-    -lsetupapi -lcfgmgr32 -lnewdev -liphlpapi -lws2_32
+    -lsetupapi -lcfgmgr32 -lnewdev -liphlpapi -lws2_32 -lwtsapi32
 echo "built: $(pwd)/SolStreamUpdaterTests.exe"

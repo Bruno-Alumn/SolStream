@@ -9,6 +9,7 @@
 #include <bcrypt.h>
 #include <oleauto.h>
 #include <taskschd.h>
+#include <wtsapi32.h>
 
 #include <cstdio>
 #include <string>
@@ -89,6 +90,58 @@ std::wstring CurrentUserSid() {
         }
     }
     CloseHandle(token);
+    return out;
+}
+
+/// Whoever is signed in to the session this process runs in, as a SID string,
+/// or empty when nobody is.
+///
+/// The person at this desktop, which is not always the account this process
+/// runs as. "Run as administrator" with somebody else's name and password
+/// typed in elevates to that administrator, inside the session of the person
+/// who typed them, and Windows still knows that session as theirs. Only a user
+/// account counts: whatever else a session might name -- a service account, a
+/// group -- is nobody to start SolStream for.
+std::wstring SessionUserSid() {
+    std::wstring account;
+    wchar_t* user = nullptr;
+    wchar_t* domain = nullptr;
+    DWORD bytes = 0;
+    if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+                                    WTSUserName, &user, &bytes)
+        && user != nullptr && user[0] != L'\0') {
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+                                        WTSDomainName, &domain, &bytes)
+            && domain != nullptr && domain[0] != L'\0') {
+            account = std::wstring(domain) + L"\\";
+        }
+        account += user;
+    }
+    if (user != nullptr) {
+        WTSFreeMemory(user);
+    }
+    if (domain != nullptr) {
+        WTSFreeMemory(domain);
+    }
+    if (account.empty()) {
+        return {};
+    }
+    BYTE sid[SECURITY_MAX_SID_SIZE] = {0};
+    DWORD sid_size = sizeof(sid);
+    wchar_t found_domain[256] = {0};
+    DWORD found_domain_size = 256;
+    SID_NAME_USE kind = SidTypeUnknown;
+    if (!LookupAccountNameW(nullptr, account.c_str(), sid, &sid_size, found_domain,
+                            &found_domain_size, &kind)
+        || kind != SidTypeUser) {
+        return {};
+    }
+    std::wstring out;
+    wchar_t* text = nullptr;
+    if (ConvertSidToStringSidW(sid, &text) && text != nullptr) {
+        out = text;
+        LocalFree(text);
+    }
     return out;
 }
 
@@ -962,10 +1015,17 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
     //
     // With no SID passed -- SolStream.exe --install typed at an elevated
     // prompt, or a setup window started with "Run as administrator", where
-    // there is no unelevated half to have asked -- the account running this
-    // is the only candidate there is, and its own token says exactly which
-    // account that is.
+    // there is no unelevated half to have asked -- the person is whoever is
+    // signed in to this session. Not the account this runs as: elevated with
+    // another administrator's name and password, that is the administrator,
+    // and the task went to them, to start at a logon that was never going to
+    // come. That account is left for when the session names nobody, as in
+    // session 0 with nobody signed in, and its own token says exactly which
+    // account it is.
     std::vector<std::wstring> accounts = LogonTaskAccounts(SwitchValue(kInvokingUserSwitch));
+    if (accounts.empty()) {
+        accounts = LogonTaskAccounts(SessionUserSid());
+    }
     if (accounts.empty()) {
         accounts = LogonTaskAccounts(CurrentUserSid());
     }
@@ -1100,7 +1160,7 @@ std::wstring OptionArguments(const InstallOptions& options) {
     // the half that has not been elevated, so the account this process runs as
     // is the person at the keyboard — which is exactly what the elevated half
     // can no longer work out for itself once somebody else's administrator
-    // credentials have been typed at that prompt. See LogonTaskAccount.
+    // credentials have been typed at that prompt. See LogonTaskAccounts.
     const std::wstring sid = CurrentUserSid();
     if (!sid.empty()) {
         out += L" " + std::wstring(kInvokingUserSwitch) + L" " + sid;
