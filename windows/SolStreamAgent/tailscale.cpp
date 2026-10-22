@@ -8,6 +8,7 @@
 #include <iphlpapi.h>
 #include <shlobj.h>
 
+#include <cstring>
 #include <vector>
 
 #include "util.h"
@@ -32,6 +33,35 @@ bool IsTailscaleAdapter(const std::wstring& friendly_name, const std::wstring& d
         || FoldCase(description).find(L"tailscale") != std::wstring::npos;
 }
 
+std::wstring PickTailscaleAddress(const std::vector<NetworkAdapter>& adapters) {
+    for (const NetworkAdapter& adapter : adapters) {
+        if (!adapter.up) {
+            continue;
+        }
+        // Only this adapter's own addresses say whether it is Tailscale's: an
+        // address of Tailscale's on one adapter vouches for nothing on another.
+        bool tailscale_ipv6 = false;
+        for (const auto& address : adapter.ipv6) {
+            tailscale_ipv6 = tailscale_ipv6 || IsTailscaleIpv6(address.data());
+        }
+        // 100.64.0.0/10 is not Tailscale's alone: Cloudflare WARP, NetBird and
+        // carrier-grade NAT hand out addresses in it too, and calling one of
+        // those Tailscale told somebody they could reach this PC from away
+        // when they could not. So the adapter has to be Tailscale's as well.
+        if (!IsTailscaleAdapter(adapter.friendly_name, adapter.description, tailscale_ipv6)) {
+            continue;
+        }
+        for (const auto& address : adapter.ipv4) {
+            // 100.64.0.0/10, the shared address space Tailscale hands out.
+            if (address[0] == 100 && (address[1] & 0xC0) == 0x40) {
+                return std::to_wstring(address[0]) + L"." + std::to_wstring(address[1]) + L"."
+                     + std::to_wstring(address[2]) + L"." + std::to_wstring(address[3]);
+            }
+        }
+    }
+    return {};
+}
+
 std::wstring TailscaleAddress() {
     ULONG size = 16 * 1024;
     std::vector<unsigned char> buffer;
@@ -48,47 +78,33 @@ std::wstring TailscaleAddress() {
     if (result != NO_ERROR) {
         return {};
     }
+    std::vector<NetworkAdapter> adapters;
     for (auto* adapter = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data()); adapter;
          adapter = adapter->Next) {
-        if (adapter->OperStatus != IfOperStatusUp) {
-            continue;
-        }
-        bool tailscale_ipv6 = false;
-        const in_addr* shared = nullptr;
+        NetworkAdapter facts;
+        facts.friendly_name = adapter->FriendlyName ? adapter->FriendlyName : L"";
+        facts.description = adapter->Description ? adapter->Description : L"";
+        facts.up = adapter->OperStatus == IfOperStatusUp;
         for (auto* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
             const sockaddr* address = unicast->Address.lpSockaddr;
             if (!address) {
                 continue;
             }
-            if (address->sa_family == AF_INET6) {
+            if (address->sa_family == AF_INET) {
+                const auto* in = reinterpret_cast<const sockaddr_in*>(address);
+                std::array<unsigned char, 4> bytes{};
+                std::memcpy(bytes.data(), &in->sin_addr, bytes.size());
+                facts.ipv4.push_back(bytes);
+            } else if (address->sa_family == AF_INET6) {
                 const auto* in6 = reinterpret_cast<const sockaddr_in6*>(address);
-                tailscale_ipv6 = tailscale_ipv6 || IsTailscaleIpv6(in6->sin6_addr.s6_addr);
-                continue;
-            }
-            if (address->sa_family != AF_INET || shared) {
-                continue;
-            }
-            const auto* in = reinterpret_cast<const sockaddr_in*>(address);
-            // 100.64.0.0/10, the shared address space Tailscale hands out.
-            if ((ntohl(in->sin_addr.s_addr) & 0xFFC00000UL) == 0x64400000UL) {
-                shared = &in->sin_addr;
+                std::array<unsigned char, 16> bytes{};
+                std::memcpy(bytes.data(), in6->sin6_addr.s6_addr, bytes.size());
+                facts.ipv6.push_back(bytes);
             }
         }
-        // That range is not Tailscale's alone: Cloudflare WARP, NetBird and
-        // carrier-grade NAT hand out addresses in it too, and calling one of
-        // those Tailscale told somebody they could reach this PC from away
-        // when they could not. So the adapter has to be Tailscale's as well.
-        if (!shared || !IsTailscaleAdapter(adapter->FriendlyName ? adapter->FriendlyName : L"",
-                                           adapter->Description ? adapter->Description : L"",
-                                           tailscale_ipv6)) {
-            continue;
-        }
-        wchar_t text[INET_ADDRSTRLEN] = {0};
-        if (InetNtopW(AF_INET, shared, text, INET_ADDRSTRLEN)) {
-            return text;
-        }
+        adapters.push_back(std::move(facts));
     }
-    return {};
+    return PickTailscaleAddress(adapters);
 }
 
 bool TailscaleInstalled() {

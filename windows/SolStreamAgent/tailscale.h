@@ -9,13 +9,30 @@
 
 #pragma once
 
+#include <array>
 #include <string>
+#include <vector>
 
 namespace solstream {
 
 /// This PC's Tailscale address (100.64.0.0/10 on Tailscale's adapter, while it
 /// is up), or empty when Tailscale is not connected.
 std::wstring TailscaleAddress();
+
+/// One network adapter, as much of it as telling Tailscale's apart takes.
+struct NetworkAdapter {
+    std::wstring friendly_name;
+    std::wstring description;
+    bool up = false;
+    std::vector<std::array<unsigned char, 4>> ipv4;   ///< in network order
+    std::vector<std::array<unsigned char, 16>> ipv6;
+};
+
+/// TailscaleAddress's choice, over adapters already read: the first
+/// 100.64.0.0/10 address on an adapter that is up and is Tailscale's
+/// (IsTailscaleAdapter, asked of that adapter's own addresses), as text; or
+/// empty. Exposed for its tests.
+std::wstring PickTailscaleAddress(const std::vector<NetworkAdapter>& adapters);
 
 /// Whether an adapter is Tailscale's: named for it -- its tunnel is "Tailscale",
 /// described as "Tailscale Tunnel" -- or carrying an address of Tailscale's own

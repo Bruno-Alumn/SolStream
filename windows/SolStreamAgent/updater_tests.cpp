@@ -835,6 +835,75 @@ void TestTailscaleAdapter() {
     CHECK(!IsTailscaleIpv6(other));
 }
 
+/// The choice among adapters, which the checks above don't reach: a WARP or
+/// NetBird address listed first, or an address of Tailscale's on some other
+/// adapter, must never be taken for Tailscale's.
+void TestPickTailscaleAddress() {
+    using Ipv4 = std::array<unsigned char, 4>;
+    using Ipv6 = std::array<unsigned char, 16>;
+    const Ipv6 tailscale_v6{0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0, 0xab, 0x12,
+                            0, 0, 0, 0, 0x4f, 0x01, 0x22, 0x07};
+    const Ipv6 link_local{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x5d, 0x1c, 0x22, 0xa7, 0, 0, 0, 0x12};
+    const Ipv6 warp_v6{0x26, 0x06, 0x47, 0x00, 0x01, 0x10, 0x8a, 0x36,
+                       0, 0, 0, 0, 0, 0, 0, 0x02};
+
+    // What each one looks like on a PC: Tailscale's tunnel, Cloudflare WARP
+    // (which hands out 100.96.0.0/12 now), NetBird's WireGuard tunnel, and an
+    // ordinary network card.
+    const NetworkAdapter tailscale{L"Tailscale", L"Tailscale Tunnel", true,
+                                   {Ipv4{100, 101, 102, 103}}, {tailscale_v6, link_local}};
+    const NetworkAdapter warp{L"CloudflareWARP", L"Cloudflare WARP Interface Tunnel", true,
+                              {Ipv4{100, 96, 0, 2}}, {warp_v6, link_local}};
+    const NetworkAdapter netbird{L"wt0", L"WireGuard Tunnel", true, {Ipv4{100, 92, 14, 7}},
+                                 {link_local}};
+    const NetworkAdapter ethernet{L"Ethernet", L"Realtek PCIe GbE Family Controller", true,
+                                  {Ipv4{192, 168, 1, 20}}, {link_local}};
+
+    // Tailscale's own, past the others listed ahead of it.
+    CHECK(PickTailscaleAddress({ethernet, warp, netbird, tailscale}) == L"100.101.102.103");
+    CHECK(PickTailscaleAddress({tailscale, warp}) == L"100.101.102.103");
+    // Without it, no address is Tailscale's, whatever range it is in.
+    CHECK(PickTailscaleAddress({ethernet, warp}).empty());
+    CHECK(PickTailscaleAddress({netbird}).empty());
+    CHECK(PickTailscaleAddress({warp, netbird, ethernet}).empty());
+    CHECK(PickTailscaleAddress({}).empty());
+
+    // Tailscale's IPv6 prefix on one adapter says nothing about another's
+    // 100.x, before it in the list or after.
+    const NetworkAdapter v6_only{L"vpn", L"Wintun Userspace Tunnel", true, {}, {tailscale_v6}};
+    CHECK(PickTailscaleAddress({v6_only, warp}).empty());
+    CHECK(PickTailscaleAddress({warp, v6_only}).empty());
+    // On the adapter itself it does: Tailscale's tunnel under another name.
+    const NetworkAdapter renamed{L"vpn", L"Wintun Userspace Tunnel", true,
+                                 {Ipv4{100, 70, 1, 2}}, {tailscale_v6}};
+    CHECK(PickTailscaleAddress({warp, renamed}) == L"100.70.1.2");
+
+    // Down is not connected.
+    NetworkAdapter down = tailscale;
+    down.up = false;
+    CHECK(PickTailscaleAddress({down}).empty());
+    CHECK(PickTailscaleAddress({down, warp}).empty());
+
+    // Tailscale's adapter, but only with an address outside the range -- one
+    // Windows gave it while it comes up -- and then with one inside it.
+    NetworkAdapter starting{L"Tailscale", L"Tailscale Tunnel", true,
+                            {Ipv4{169, 254, 83, 107}}, {}};
+    CHECK(PickTailscaleAddress({starting}).empty());
+    starting.ipv4.push_back(Ipv4{100, 64, 0, 1});
+    CHECK(PickTailscaleAddress({starting}) == L"100.64.0.1");
+
+    // The /10's edges.
+    for (const Ipv4& outside :
+         {Ipv4{100, 63, 255, 255}, Ipv4{100, 128, 0, 0}, Ipv4{101, 64, 0, 1}}) {
+        CHECK(PickTailscaleAddress(
+                  {NetworkAdapter{L"Tailscale", L"Tailscale Tunnel", true, {outside}, {}}})
+                  .empty());
+    }
+    CHECK(PickTailscaleAddress({NetworkAdapter{L"Tailscale", L"Tailscale Tunnel", true,
+                                               {Ipv4{100, 127, 255, 254}}, {}}})
+          == L"100.127.255.254");
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -886,6 +955,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsJunction(scratch);
     TestWaitsForRestart();
     TestTailscaleAdapter();
+    TestPickTailscaleAddress();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
