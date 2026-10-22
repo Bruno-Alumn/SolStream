@@ -10,6 +10,10 @@
 // at one before anything runs, so the real Updates folder is never touched. The
 // fetching itself (Get, the redirects, the token's scoping) needs a server and
 // is not covered here.
+//
+// It also carries the tests of a few pieces outside the updater that need no
+// hardware: how commands are started, the install options, and what
+// uninstall takes of the virtual display's settings.
 
 #include "updater.cpp"
 
@@ -17,6 +21,8 @@
 #include <winioctl.h>
 
 #include <cstdio>
+
+#include "driver_install.h"
 
 namespace {
 
@@ -711,6 +717,75 @@ void TestInstallNote() {
     CHECK(!note.recent);
 }
 
+// ── The virtual display's settings, at uninstall ─────────────────────────────
+
+/// A settings folder SolStream made goes with the files it and the driver keep
+/// there -- the backup of the settings among them, which once kept the folder
+/// on the PC for good while its record was let go. One that holds anything
+/// else stays, and says so, so its record can stay too.
+void TestDriverSettingsFolder(const std::wstring& scratch) {
+    const std::wstring folder = scratch + L"\\VirtualDisplayDriver";
+    auto make = [&folder](std::initializer_list<const wchar_t*> files) {
+        CHECK(CreateDirectoryW(folder.c_str(), nullptr));
+        for (const wchar_t* file : files) {
+            CHECK(WriteAll(folder + L"\\" + file, "x"));
+        }
+    };
+
+    make({L"vdd_settings.xml", L"vdd_settings.xml.solstream-backup", L"option.txt",
+          L"adapter.txt"});
+    CHECK(RemoveDriverSettingsFolder(folder));
+    CHECK(!Exists(folder));
+    // Already gone is gone.
+    CHECK(RemoveDriverSettingsFolder(folder));
+
+    make({L"vdd_settings.xml", L"somebody-else.txt"});
+    CHECK(!RemoveDriverSettingsFolder(folder));
+    CHECK(Exists(folder + L"\\somebody-else.txt"));
+    CHECK(!Exists(folder + L"\\vdd_settings.xml"));
+    RemoveTree(folder);
+}
+
+/// In a folder that is somebody else's, the settings file SolStream wrote and
+/// its backup go, and nothing else does -- whatever the record names.
+void TestDriverSettingsFile(const std::wstring& scratch) {
+    const std::wstring folder = scratch + L"\\TheirSettings";
+    CHECK(CreateDirectoryW(folder.c_str(), nullptr));
+    for (const wchar_t* file : {L"vdd_settings.xml", L"vdd_settings.xml.solstream-backup",
+                                L"theirs.xml"}) {
+        CHECK(WriteAll(folder + L"\\" + file, "x"));
+    }
+    CHECK(RemoveDriverSettingsFile(folder + L"\\vdd_settings.xml"));
+    CHECK(!Exists(folder + L"\\vdd_settings.xml"));
+    CHECK(RemoveDriverSettingsFile(folder + L"\\VDD_Settings.xml.SolStream-Backup"));
+    CHECK(!Exists(folder + L"\\vdd_settings.xml.solstream-backup"));
+    // Already gone is gone.
+    CHECK(RemoveDriverSettingsFile(folder + L"\\vdd_settings.xml"));
+    CHECK(!RemoveDriverSettingsFile(folder + L"\\theirs.xml"));
+    CHECK(Exists(folder + L"\\theirs.xml"));
+    CHECK(Exists(folder));
+    RemoveTree(folder);
+}
+
+/// Never through a link: these run elevated, and anybody can make the folder
+/// at C:\ first.
+void TestDriverSettingsJunction(const std::wstring& scratch) {
+    const std::wstring folder = scratch + L"\\LinkedSettings";
+    const std::wstring elsewhere = scratch + L"\\settings-elsewhere";
+    CHECK(CreateDirectoryW(elsewhere.c_str(), nullptr));
+    CHECK(WriteAll(elsewhere + L"\\vdd_settings.xml", "x"));
+    if (!MakeJunction(folder, elsewhere)) {
+        std::printf("  (settings junction test skipped: could not make a junction here)\n");
+        RemoveTree(elsewhere);
+        return;
+    }
+    CHECK(!RemoveDriverSettingsFolder(folder));
+    CHECK(!RemoveDriverSettingsFile(folder + L"\\vdd_settings.xml"));
+    CHECK(Exists(elsewhere + L"\\vdd_settings.xml"));
+    RemoveDirectoryW(folder.c_str());
+    RemoveTree(elsewhere);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -757,6 +832,9 @@ int wmain(int argc, wchar_t** argv) {
     TestDownload();
     TestInstallNote();
     TestJunction(scratch);
+    TestDriverSettingsFolder(scratch);
+    TestDriverSettingsFile(scratch);
+    TestDriverSettingsJunction(scratch);
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

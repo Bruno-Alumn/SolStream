@@ -56,6 +56,10 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 /// for everything that reads, writes or removes it.
 std::wstring VddSettingsFolder();
 
+/// Added to vdd_settings.xml's name for the copy kept of it before SolStream
+/// first changes it. Named once, so what uninstall deletes is what this writes.
+constexpr wchar_t kVddSettingsBackupSuffix[] = L".solstream-backup";
+
 /// Is this path a junction, symbolic link or other reparse point? Elevated
 /// writes and deletes under C:\ refuse those: any user can make folders there.
 bool IsReparsePoint(const std::wstring& path);

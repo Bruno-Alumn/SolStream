@@ -9,6 +9,8 @@
 #define INITGUID
 #include <initguid.h>
 #include <devguid.h>
+// The device property keys too, defined here for the same reason.
+#include <devpkey.h>
 #include <sddl.h>
 #include <shlobj.h>
 #include <bcrypt.h>
@@ -42,12 +44,17 @@ constexpr wchar_t kHardwareId[] = L"Root\\MttVDD";
 /// Where SolStream remembers what it installed, so an uninstall takes back
 /// that and no more.
 constexpr wchar_t kStateKey[] = L"SOFTWARE\\SolStream";
-/// Three things, each recorded only when THIS install made it: the driver
-/// store package (oemNN.inf), the device instance (ROOT\DISPLAY\000N), and the
-/// settings folder. Something that was already there is somebody else's.
+/// Each recorded only when THIS install made it: the driver store package
+/// (oemNN.inf), the device instance (ROOT\DISPLAY\000N), and the settings
+/// folder. Something that was already there is somebody else's.
 constexpr wchar_t kInfValue[] = L"DisplayDriverInf";
 constexpr wchar_t kDeviceValue[] = L"DisplayDriverDevice";
 constexpr wchar_t kSettingsValue[] = L"DisplayDriverSettingsFolder";
+/// When the settings folder was already there, it is somebody else's, but the
+/// settings file this install wrote into it is not, nor the copy
+/// display_setup.cpp keeps of that file if this install is what made it.
+constexpr wchar_t kSettingsFileValue[] = L"DisplayDriverSettingsFile";
+constexpr wchar_t kSettingsBackupValue[] = L"DisplayDriverSettingsBackup";
 
 /// Where the driver project says to get it by hand, said whenever SolStream
 /// cannot do it itself -- so a retry that can only fail the same way is never
@@ -283,6 +290,25 @@ bool IsOemInfName(const std::wstring& name) {
         && folded.find_first_of(L"\\/:") == std::wstring::npos;
 }
 
+/// The present devices of the driver's that Windows installed from this store
+/// package, by instance ID.
+std::vector<std::wstring> DevicesUsingPackage(const std::wstring& oem_name) {
+    std::vector<std::wstring> found;
+    const std::wstring wanted = FoldCase(oem_name);
+    ForEachDriverDevice([&](HDEVINFO set, SP_DEVINFO_DATA& device) {
+        DEVPROPTYPE type = 0;
+        wchar_t inf[MAX_PATH] = {0};
+        wchar_t id[MAX_DEVICE_ID_LEN] = {0};
+        if (SetupDiGetDevicePropertyW(set, &device, &DEVPKEY_Device_DriverInfPath, &type,
+                                      (PBYTE) inf, sizeof(inf) - sizeof(wchar_t), nullptr, 0)
+            && type == DEVPROP_TYPE_STRING && FoldCase(inf) == wanted
+            && SetupDiGetDeviceInstanceIdW(set, &device, id, MAX_DEVICE_ID_LEN, nullptr)) {
+            found.push_back(id);
+        }
+    });
+    return found;
+}
+
 /// The settings folder, made the way an elevated writer's folder at the root of C:
 /// has to be: administrators and SYSTEM write, everybody else reads --
 /// including LOCAL SERVICE, which the driver's user-mode host runs as.
@@ -364,6 +390,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
     restart = false;
     const DriverState state = CurrentDriverState();
     already = state == DriverState::Ready;
+    // The settings file's backup, when this run wrote the file into a folder
+    // that was already there and no backup of it was there yet.
+    std::wstring new_backup;
     if (state == DriverState::Off) {
         // Somebody's own driver, switched off or failing. Theirs: installing
         // over it would bind a different version to their device, and an
@@ -424,17 +453,23 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         }
 
         // Everything this run makes, so a failure further down takes it back.
+        // The settings file on its own as well as the folder: a folder that
+        // was already there is somebody else's, but a file this run wrote into
+        // it is not, and left behind it would be nobody's.
         bool made_folder = false;
+        bool wrote_settings = false;
         std::wstring staged;
         bool staged_here = false;
         const std::wstring settings_folder = VddSettingsFolder();
+        const std::wstring settings = settings_folder + L"\\vdd_settings.xml";
         auto undo = [&] {
             if (staged_here && IsOemInfName(staged)) {
                 SetupUninstallOEMInfW(staged.c_str(), 0, nullptr);
             }
-            if (made_folder && !IsReparsePoint(settings_folder)) {
-                DeleteFileW((settings_folder + L"\\vdd_settings.xml").c_str());
-                RemoveDirectoryW(settings_folder.c_str());
+            if (made_folder) {
+                RemoveDriverSettingsFolder(settings_folder);
+            } else if (wrote_settings) {
+                RemoveDriverSettingsFile(settings);
             }
         };
 
@@ -443,14 +478,14 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         // is kept: ConfigureVirtualDisplay below only adds to it. Never through
         // a junction or link: this runs elevated, and C:\ lets anybody make a
         // folder of that name first.
-        const std::wstring settings = settings_folder + L"\\vdd_settings.xml";
         if (IsReparsePoint(settings_folder) || IsReparsePoint(settings)) {
             note += "The display driver's settings folder is a link to somewhere else, so "
                     "SolStream did not write to it.\n";
         } else if (!Exists(settings)) {
             made_folder = !Exists(settings_folder) && MakeSettingsFolder(settings_folder);
-            if (!CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(), settings.c_str(),
-                           TRUE)) {
+            wrote_settings = CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(),
+                                       settings.c_str(), TRUE) != FALSE;
+            if (!wrote_settings) {
                 note += "Couldn't write the display driver's settings to "
                       + ToUtf8(settings_folder) + ", so it starts with its own sizes.\n";
             }
@@ -507,6 +542,15 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         }
         if (made_folder) {
             WriteState(kSettingsValue, settings_folder);
+        } else if (wrote_settings) {
+            WriteState(kSettingsFileValue, settings);
+            // ConfigureVirtualDisplay keeps a copy of the file before it first
+            // changes it. One made below is a copy of this run's file; one that
+            // is already there came from something earlier, and stays.
+            const std::wstring backup = settings + kVddSettingsBackupSuffix;
+            if (!Exists(backup)) {
+                new_backup = backup;
+            }
         }
         note += "Installed the Virtual Display Driver " + std::string(kDriverVersion) + ".\n";
         if (reboot) {
@@ -523,8 +567,13 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
     progress(DriverStep::Configuring);
     std::string configured;
     std::string configure_error;
-    if (!ConfigureVirtualDisplay(kDefaultCanvasWidth, kDefaultCanvasHeight,
-                                 kDefaultScalePercent, configured, configure_error)) {
+    const bool configured_ok = ConfigureVirtualDisplay(
+        kDefaultCanvasWidth, kDefaultCanvasHeight, kDefaultScalePercent, configured,
+        configure_error);
+    if (!new_backup.empty() && Exists(new_backup)) {
+        WriteState(kSettingsBackupValue, new_backup);
+    }
+    if (!configured_ok) {
         error = configure_error;
         return false;
     }
@@ -533,9 +582,31 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
 }
 
 void RemoveInstalledDriver(std::string& note) {
+    std::wstring instance = ReadState(kDeviceValue);
+    const std::wstring staged = ReadState(kInfValue);
+
+    // A PC set up by an earlier build has the package recorded and not the
+    // device: that build took every device of the driver's away instead. Its
+    // device is the one Windows installed from that package -- when exactly
+    // one is. With two or more, which is SolStream's would be a guess, so the
+    // devices, the package they use, their settings and the record all stay.
+    if (instance.empty() && IsOemInfName(staged)) {
+        const std::vector<std::wstring> using_package = DevicesUsingPackage(staged);
+        if (using_package.size() > 1) {
+            note += std::to_string(using_package.size())
+                  + " virtual displays use the driver package an earlier SolStream "
+                    "installed (" + ToUtf8(staged) + "), and it didn't record which one "
+                    "it added, so SolStream left them, the package and their settings as "
+                    "they are.\n";
+            return;
+        }
+        if (using_package.size() == 1) {
+            instance = using_package.front();
+        }
+    }
+
     // The device first, and only the one SolStream created: a device of the
     // same driver somebody added themselves stays.
-    const std::wstring instance = ReadState(kDeviceValue);
     if (!instance.empty()) {
         note += RemoveDevice(instance) ? "Removed the virtual display SolStream added.\n"
                                        : "The virtual display SolStream added was already "
@@ -544,7 +615,6 @@ void RemoveInstalledDriver(std::string& note) {
     }
     // Then the package, and only one this install put in the store. No force:
     // if some other device is using it, it stays.
-    const std::wstring staged = ReadState(kInfValue);
     if (!staged.empty()) {
         if (IsOemInfName(staged) && SetupUninstallOEMInfW(staged.c_str(), 0, nullptr)) {
             note += "Removed the virtual display driver SolStream installed.\n";
@@ -556,20 +626,71 @@ void RemoveInstalledDriver(std::string& note) {
     }
 
     // The settings folder only when SolStream made it, only what it holds of
-    // the driver's, and never through a link.
+    // the driver's and SolStream's, and never through a link. Its record goes
+    // only with the folder: let go while the folder stays, nothing would say
+    // again that the folder was SolStream's.
     const std::wstring folder = ReadState(kSettingsValue);
     if (!folder.empty()) {
-        if (!IsReparsePoint(folder)) {
-            for (const wchar_t* file : {L"vdd_settings.xml", L"option.txt", L"adapter.txt"}) {
-                const std::wstring path = folder + L"\\" + file;
-                if (!IsReparsePoint(path)) {
-                    DeleteFileW(path.c_str());
-                }
-            }
-            RemoveDirectoryW(folder.c_str());
+        if (RemoveDriverSettingsFolder(folder)) {
+            DeleteState(kSettingsValue);
+        } else {
+            note += "Left the display driver's settings folder, " + ToUtf8(folder)
+                  + ", because it is a link or holds files SolStream didn't put there.\n";
         }
-        DeleteState(kSettingsValue);
     }
+    // The settings file written into somebody else's folder, and the copy of
+    // it, on the same terms.
+    for (const wchar_t* value : {kSettingsFileValue, kSettingsBackupValue}) {
+        const std::wstring path = ReadState(value);
+        if (path.empty()) {
+            continue;
+        }
+        if (RemoveDriverSettingsFile(path)) {
+            DeleteState(value);
+        } else {
+            note += "Left " + ToUtf8(path) + ": it is a link, isn't the display driver's "
+                    "settings, or couldn't be deleted.\n";
+        }
+    }
+}
+
+bool RemoveDriverSettingsFolder(const std::wstring& folder) {
+    if (!Exists(folder)) {
+        return true;
+    }
+    if (IsReparsePoint(folder)) {
+        return false;
+    }
+    // The backup is display_setup.cpp's copy of the file from before it first
+    // changed it. In a folder SolStream made, that file was SolStream's too.
+    const std::wstring settings = L"vdd_settings.xml";
+    for (const std::wstring& file : {settings, settings + kVddSettingsBackupSuffix,
+                                     std::wstring(L"option.txt"), std::wstring(L"adapter.txt")}) {
+        const std::wstring path = folder + L"\\" + file;
+        if (!IsReparsePoint(path)) {
+            DeleteFileW(path.c_str());
+        }
+    }
+    RemoveDirectoryW(folder.c_str());
+    return !Exists(folder);
+}
+
+bool RemoveDriverSettingsFile(const std::wstring& path) {
+    // Only the settings file or its backup, by name: the path came out of the
+    // registry, as IsOemInfName's does, and must never name anything else.
+    const size_t slash = path.find_last_of(L'\\');
+    const std::wstring name = FoldCase(slash == std::wstring::npos ? path
+                                                                    : path.substr(slash + 1));
+    if (name != L"vdd_settings.xml"
+        && name != L"vdd_settings.xml" + FoldCase(kVddSettingsBackupSuffix)) {
+        return false;
+    }
+    if ((slash != std::wstring::npos && IsReparsePoint(path.substr(0, slash)))
+        || IsReparsePoint(path)) {
+        return false;
+    }
+    DeleteFileW(path.c_str());
+    return !Exists(path);
 }
 
 }  // namespace solstream

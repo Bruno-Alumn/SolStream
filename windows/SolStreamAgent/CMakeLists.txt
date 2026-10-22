@@ -207,13 +207,15 @@ endif()
 
 # The updater's own tests: version, JSON, SHA256SUMS and base64 parsing, the
 # signature against tests/update-vector, the host allow-list, the anti-rollback
-# name check, the download's hold, and the note an install leaves. No network,
-# and nothing outside a temporary folder: it never sees the real
-# %LOCALAPPDATA%. updater_tests.cpp includes updater.cpp to reach its internals,
-# so that is not listed again here. Not built by package-windows.ps1, which
-# configures with BUILD_TESTING off.
+# name check, the download's hold, and the note an install leaves; and beside
+# them what uninstall takes of the virtual display's settings. No network, and
+# nothing outside a temporary folder: it never sees the real %LOCALAPPDATA%.
+# updater_tests.cpp includes updater.cpp to reach its internals, so that is not
+# listed again here. Not built by package-windows.ps1, which configures with
+# BUILD_TESTING off.
 if(BUILD_TESTING)
-    add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp installer.cpp media/log.cpp)
+    add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp installer.cpp media/log.cpp
+        driver_install.cpp display_setup.cpp vdd.cpp)
     set_target_properties(SolStreamUpdaterTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON
@@ -221,7 +223,8 @@ if(BUILD_TESTING)
     target_compile_definitions(SolStreamUpdaterTests PRIVATE UNICODE _UNICODE
         SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
     target_link_libraries(SolStreamUpdaterTests PRIVATE
-        user32 advapi32 shell32 winhttp crypt32 bcrypt ole32 oleaut32 uuid)
+        user32 advapi32 shell32 winhttp crypt32 bcrypt ole32 oleaut32 uuid
+        setupapi cfgmgr32 newdev)
     if(MSVC)
         target_compile_options(SolStreamUpdaterTests PRIVATE /W4 /permissive- /utf-8)
     else()

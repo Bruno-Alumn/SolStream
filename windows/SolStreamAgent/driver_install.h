@@ -64,8 +64,9 @@ std::string ManualInstallAdvice();
 /// Only on a PC with no device of the driver's at all: a device that is there
 /// but switched off is somebody's own, and this says so rather than install
 /// over it. What it does install it records -- the store package only if this
-/// call added it, the device it created, the settings folder if it made it --
-/// and on failure it takes those back.
+/// call added it, the device it created, the settings folder if it made it, or
+/// else the settings file if it wrote one into a folder that was already there
+/// -- and on failure it takes those back.
 ///
 /// `owner` is the window waiting on this, for Windows' own prompts to come up
 /// over. True when a virtual display is ready at the end, including when one
@@ -81,9 +82,20 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
 bool InstalledDriverHere();
 
 /// Undo InstallDisplayDriver: the device it created, the package it added and
-/// the settings folder it made -- each only if recorded, and nothing else with
-/// the same driver. Needs administrator rights. What could not be done goes to
-/// `note`.
+/// the settings folder it made or the settings file it wrote -- each only if
+/// recorded, and nothing else with the same driver. A record is let go only
+/// once what it names is gone. Needs administrator rights. What could not be
+/// done goes to `note`.
 void RemoveInstalledDriver(std::string& note);
+
+/// The settings folder's part of that, for a folder SolStream made: the files
+/// the driver and SolStream keep in it, then the folder itself -- never
+/// through a link. True when the folder is gone, false when it is a link or
+/// holds something else. Exposed for its tests.
+bool RemoveDriverSettingsFolder(const std::wstring& folder);
+
+/// One file SolStream wrote into a settings folder that is not its own, never
+/// through a link. True when the file is gone. Exposed for its tests.
+bool RemoveDriverSettingsFile(const std::wstring& path);
 
 }  // namespace solstream

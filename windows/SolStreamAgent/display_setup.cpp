@@ -293,7 +293,7 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
 
     // Keep the original, once. A driver that will not start after this is a
     // machine with no virtual display and no way back to the file that caused it.
-    CopyFileW(path.c_str(), (path + L".solstream-backup").c_str(), TRUE);
+    CopyFileW(path.c_str(), (path + kVddSettingsBackupSuffix).c_str(), TRUE);
     if (!WriteFileText(path, xml)) {
         error = "Could not write " + ToUtf8(path)
               + ". Installing the display driver needs administrator rights.";
