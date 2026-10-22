@@ -143,8 +143,9 @@ public final class InputCapture {
     /// nil for not over it. Unset, the window server is asked.
     var pointerStandIn: (() -> CGPoint?)?
 
-    /// Modifier flags as of the last `.flagsChanged`, so transitions can be
-    /// turned into individual key down/up events.
+    /// Modifier flags as the host was last brought to them, so transitions can
+    /// be turned into individual key down/up events. `lastDeviceFlags` holds
+    /// only the modifier keys' device bits; see `heldModifierBits`.
     private var lastModifierFlags: NSEvent.ModifierFlags = []
     private var lastDeviceFlags: UInt = 0
 
@@ -265,6 +266,57 @@ public final class InputCapture {
                 && $0.macKeyCode != key.macKeyCode
                 && (flags & $0.deviceMask) != 0
         }
+    }
+
+    /// Each modifier's shared flag, and the device bits of its left and
+    /// right keys.
+    private static let modifierFamilies: [(flag: UInt, left: UInt, right: UInt)] = [
+        (NSEvent.ModifierFlags.shift.rawValue, 0x0000_0002, 0x0000_0004),
+        (NSEvent.ModifierFlags.control.rawValue, 0x0000_0001, 0x0000_2000),
+        (NSEvent.ModifierFlags.option.rawValue, 0x0000_0020, 0x0000_0040),
+        (NSEvent.ModifierFlags.command.rawValue, 0x0000_0008, 0x0000_0010),
+    ]
+
+    /// Which modifier keys an event's flags say are down, as device bits.
+    ///
+    /// The device bits name the key, left or right; the shared flag only says
+    /// one of the two is down. An event that sets the flag without a device
+    /// bit for it -- one made by software rather than by a keyboard -- is
+    /// taken to hold whichever of the two was already known to be down, or
+    /// else the left one. Without the flag, neither is down.
+    static func heldModifierBits(_ flags: UInt, last: UInt) -> UInt {
+        var held: UInt = 0
+        for family in modifierFamilies where flags & family.flag != 0 {
+            let both = family.left | family.right
+            if flags & both != 0 {
+                held |= flags & both
+            } else if last & both != 0 {
+                held |= last & both
+            } else {
+                held |= family.left
+            }
+        }
+        return held
+    }
+
+    /// The modifier key events that take the host from `old` to `new`, both
+    /// device bits from `heldModifierBits`: releases first, then presses, and
+    /// each Windows key once, since Control and Command share one -- so letting
+    /// go of one while the other is held sends nothing, as `otherKeyHolds`
+    /// describes.
+    static func modifierChanges(from old: UInt, to new: UInt,
+                                among keys: [ModifierKey]) -> [(key: ModifierKey, pressed: Bool)] {
+        func held(_ bits: UInt) -> [UInt16: ModifierKey] {
+            var result: [UInt16: ModifierKey] = [:]
+            for key in keys where bits & key.deviceMask != 0 && result[key.windowsKeyCode] == nil {
+                result[key.windowsKeyCode] = key
+            }
+            return result
+        }
+        let before = held(old), after = held(new)
+        let ups = before.keys.sorted().filter { after[$0] == nil }.map { (before[$0]!, false) }
+        let downs = after.keys.sorted().filter { before[$0] == nil }.map { (after[$0]!, true) }
+        return ups + downs
     }
 
     /// Combinations that belong to SolStream rather than to the streamed
@@ -456,6 +508,9 @@ public final class InputCapture {
                 noteUnmapped(event.keyCode)
                 return false
             }
+            // The modifiers this key is typed with, as the event says they
+            // are, before the key itself: see `syncModifiers`.
+            syncModifiers(to: event.modifierFlags)
             let pressed = event.type == .keyDown
             if pressed {
                 heldKeys[event.keyCode] = key
@@ -484,7 +539,6 @@ public final class InputCapture {
             // and it must be diffed against the device-dependent bit for this
             // exact key, not the shared .shift/.control/... flag.
             let flags = event.modifierFlags
-            let deviceFlags = flags.rawValue
             if event.keyCode == Self.capsLockKeyCode {
                 syncCapsLock(to: flags.contains(.capsLock))
             }
@@ -496,16 +550,7 @@ public final class InputCapture {
                 apply(policy.wantsCapture(after: .releaseChord, moment(pointerInside: true)),
                       because: "⌃⌥")
             }
-            if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
-               !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
-                let isDown = (deviceFlags & key.deviceMask) != 0
-                onInput?(keyPacket(key.hostKey, pressed: isDown, modifiers: modifiers(from: flags)))
-            }
-            if lastModifierFlags.contains(.command) && !flags.contains(.command) {
-                releaseChordKeys()
-            }
-            lastModifierFlags = flags
-            lastDeviceFlags = deviceFlags
+            syncModifiers(to: flags)
             // Never swallowed: AppKit tracks modifier state from these, and a
             // window that stops seeing them is one that thinks ⌘ is still down
             // long after it was let go.
@@ -593,6 +638,32 @@ public final class InputCapture {
     public func inputBecameLive() {
         guard isCapturing else { return }
         syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
+    }
+
+    /// Bring the host's modifier keys to what `flags` says is held, sending
+    /// only what changed.
+    ///
+    /// Called for every modifier change, and also for every key and every
+    /// click, with the flags that event carries. A modifier's own
+    /// `.flagsChanged` is not always seen: local monitors miss what a nested
+    /// tracking loop takes -- hold ⌥, open a menu in the menu bar, let go of
+    /// ⌥ there -- and a modifier already held when the window took the
+    /// keyboard sent nothing at all. Either way the host was left with Alt
+    /// held, or without the Shift the letter was typed with, until that key
+    /// was pressed again. Every event says what is really held, so the next
+    /// one puts it right.
+    private func syncModifiers(to flags: NSEvent.ModifierFlags) {
+        let held = Self.heldModifierBits(flags.rawValue, last: lastDeviceFlags)
+        let modifiers = modifiers(from: flags)
+        for change in Self.modifierChanges(from: lastDeviceFlags, to: held, among: modifierKeys) {
+            onInput?(keyPacket(change.key.hostKey, pressed: change.pressed, modifiers: modifiers))
+        }
+        let commandWentUp = lastModifierFlags.contains(.command) && !flags.contains(.command)
+        lastModifierFlags = flags
+        lastDeviceFlags = held
+        if commandWentUp {
+            releaseChordKeys()
+        }
     }
 
     /// Let go of anything pressed during a ⌘ chord, now that ⌘ itself is up.
@@ -762,6 +833,8 @@ public final class InputCapture {
             // whatever coordinate the pointer was last moved to.
             guard sendPosition(for: event, in: view) else { return }
             if let button = button(for: event) {
+                // A Shift-click is a Shift-click only if the host has Shift.
+                syncModifiers(to: event.modifierFlags)
                 heldButtons.insert(button)
                 onInput?(SMTInput.mouseButton(button, pressed: true))
             }
@@ -1106,6 +1179,7 @@ public final class InputCapture {
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             if let button = button(for: event) {
+                syncModifiers(to: event.modifierFlags)
                 heldButtons.insert(button)
                 onInput?(SMTInput.mouseButton(button, pressed: true))
             }

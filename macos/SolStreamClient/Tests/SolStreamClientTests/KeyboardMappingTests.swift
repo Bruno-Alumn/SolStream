@@ -298,6 +298,75 @@ final class KeyboardMappingTests: XCTestCase {
         }
     }
 
+    // MARK: - Modifiers put right by the next event
+
+    private let shiftFlag: UInt = 0x0002_0000
+    private let leftShiftBit: UInt = 0x0000_0002
+    private let rightShiftBit: UInt = 0x0000_0004
+    private let optionFlag: UInt = 0x0008_0000
+    private let leftOptionBit: UInt = 0x0000_0020
+
+    /// The device bits name the key; the shared flag alone is taken as the
+    /// key already known to be down, or the left one; no flag, no key.
+    func testWhichModifierKeysAnEventHolds() {
+        XCTAssertEqual(InputCapture.heldModifierBits(shiftFlag | rightShiftBit, last: 0), rightShiftBit)
+        XCTAssertEqual(InputCapture.heldModifierBits(shiftFlag, last: rightShiftBit), rightShiftBit)
+        XCTAssertEqual(InputCapture.heldModifierBits(shiftFlag, last: 0), leftShiftBit)
+        XCTAssertEqual(InputCapture.heldModifierBits(0, last: leftShiftBit | leftOptionBit), 0)
+        // Nothing but the modifiers' own bits: Caps Lock and the rest are not keys held.
+        XCTAssertEqual(InputCapture.heldModifierBits(NSEvent.ModifierFlags.capsLock.rawValue
+                                                     | NSEvent.ModifierFlags.function.rawValue,
+                                                     last: 0), 0)
+        XCTAssertEqual(InputCapture.heldModifierBits(commandFlag | controlFlag
+                                                     | leftCommandBit | leftControlBit, last: 0),
+                       leftCommandBit | leftControlBit)
+    }
+
+    /// Control and Command share Windows Control: the changes say it once.
+    func testTheChangesSayEachWindowsKeyOnce() {
+        let keys = capture.modifierKeys
+        let both = leftCommandBit | leftControlBit
+        XCTAssertEqual(InputCapture.modifierChanges(from: 0, to: both, among: keys)
+                        .map { [$0.key.windowsKeyCode, $0.pressed ? 1 : 0] }, [[0xA2, 1]])
+        XCTAssertTrue(InputCapture.modifierChanges(from: both, to: leftControlBit, among: keys).isEmpty)
+        XCTAssertEqual(InputCapture.modifierChanges(from: leftShiftBit, to: leftOptionBit, among: keys)
+                        .map { [$0.key.windowsKeyCode, $0.pressed ? 1 : 0] },
+                       [[0xA0, 0], [0xA4, 1]], "releases go before presses")
+    }
+
+    /// ⌥ let go of while a menu was tracking never reached the monitor. The
+    /// next key says ⌥ is up, and the host hears so before the key.
+    func testAMissedReleaseIsPutRightByTheNextKey() {
+        let wire = Wire()
+        wire.send(.flagsChanged, keyCode: 0x3A, deviceFlags: optionFlag | leftOptionBit)
+        // No .flagsChanged for ⌥ coming up.
+        wire.send(.keyDown, keyCode: 0x00, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.map(\.code), [0xA4, 0xA4, 0x41])
+        XCTAssertEqual(wire.packets.map(\.pressed), [true, false, true])
+    }
+
+    /// ⇧ held as the window took the keyboard sent nothing; the letter typed
+    /// with it brings it down first, and its release takes it up again.
+    func testAModifierAlreadyHeldIsSentWithTheFirstKey() {
+        let wire = Wire()
+        wire.send(.keyDown, keyCode: 0x00, deviceFlags: shiftFlag | leftShiftBit)
+        XCTAssertEqual(wire.packets.map(\.code), [0xA0, 0x41])
+        XCTAssertEqual(wire.packets.map(\.pressed), [true, true])
+        wire.send(.flagsChanged, keyCode: 0x38, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.last?.code, 0xA0)
+        XCTAssertEqual(wire.packets.last?.pressed, false)
+    }
+
+    /// Nothing changed, nothing sent: a key typed with the modifiers already
+    /// in step goes alone.
+    func testModifiersInStepSendNothingExtra() {
+        let wire = Wire()
+        wire.send(.flagsChanged, keyCode: 0x38, deviceFlags: shiftFlag | leftShiftBit)
+        wire.send(.keyDown, keyCode: 0x00, deviceFlags: shiftFlag | leftShiftBit)
+        wire.send(.keyUp, keyCode: 0x00, deviceFlags: shiftFlag | leftShiftBit)
+        XCTAssertEqual(wire.packets.map(\.code), [0xA0, 0x41, 0x41])
+    }
+
     // MARK: - Caps Lock, to a host that predates scan codes
 
     /// Caps Lock is a toggle on Windows, so each change on the Mac is one
