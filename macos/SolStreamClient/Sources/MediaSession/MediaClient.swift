@@ -96,9 +96,9 @@ public final class MediaClient {
     /// worst on text, which is most of what a desktop application is. The
     /// last good picture stays on screen instead, for the round trip an IDR
     /// takes. And the request is repeated until one arrives, because a
-    /// keyframe request is one datagram on the same lossy link.
-    private var awaitingKeyframe = false
-    private var keyframeAskedAt: UInt64 = 0
+    /// keyframe request is one datagram on the same lossy link. Guarded by
+    /// `stateLock`; the rule itself is in KeyframeHold.swift.
+    private var hold = KeyframeHold()
     private var timer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "solstream.media.timer")
 
@@ -113,28 +113,40 @@ public final class MediaClient {
             guard let self else { return }
             self.stateLock.lock()
             self.stats.framesComplete = self.reassembler.complete
+            // Here as well as on damage: a picture an IDR made unnecessary is
+            // counted without being reported.
+            self.stats.framesDamaged = self.reassembler.damaged
             self.lastCompleteFrame = picture.frameId
-            if picture.isIdr { self.awaitingKeyframe = false }
-            let hold = self.awaitingKeyframe
+            let verdict = self.hold.picture(frameId: picture.frameId, isIdr: picture.isIdr,
+                                            now: DispatchTime.now().uptimeNanoseconds)
             self.stateLock.unlock()
-            if hold { return }
+            guard verdict == .decode else { return }
             self.onVideo?(picture.bytes, picture.isIdr)
         }
         reassembler.onDamaged = { [weak self] frameId in
             guard let self else { return }
             self.stateLock.lock()
             self.stats.framesDamaged = self.reassembler.damaged
-            self.needKeyframe = true
-            self.awaitingKeyframe = true
-            // Now, from this thread, not on the next 50 ms feedback tick: the
-            // tick added up to half a frame-period of recovery on top of the
-            // damage itself. Once per burst -- a lost run reports every frame
-            // in it, and the host takes one request per 200 ms anyway.
-            let askNow = Self.millis(since: self.keyframeAskedAt) > 20
-            if askNow { self.keyframeAskedAt = DispatchTime.now().uptimeNanoseconds }
+            let verdict = self.hold.damaged(frameId: frameId,
+                                            now: DispatchTime.now().uptimeNanoseconds)
+            if verdict != .ignore { self.needKeyframe = true }
             self.stateLock.unlock()
-            if askNow { self.sendFeedback() }
-            Log.debug("[media] frame \(frameId) never completed; asking for a keyframe")
+            switch verdict {
+            case .ignore:
+                Log.debug("[media] frame \(frameId) never completed; a keyframe since "
+                          + "has already replaced it")
+            case .holdAndAsk:
+                // Now, from this thread, not on the next 50 ms feedback tick:
+                // the tick added up to half a frame-period of recovery on top
+                // of the damage itself. Once per burst -- a lost run reports
+                // every frame in it, and the host takes one request per 200 ms
+                // anyway.
+                self.sendFeedback()
+                Log.debug("[media] frame \(frameId) never completed; asking for a keyframe")
+            case .hold, .decode:
+                Log.debug("[media] frame \(frameId) never completed; a keyframe is "
+                          + "already asked for")
+            }
         }
     }
 
@@ -510,9 +522,8 @@ public final class MediaClient {
             // request or the IDR was lost. Ask again -- just past the host's
             // 200 ms rate limit, so the repeat is never the one it ignores.
             self.stateLock.lock()
-            if self.awaitingKeyframe && Self.millis(since: self.keyframeAskedAt) > 250 {
+            if self.hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds) {
                 self.needKeyframe = true
-                self.keyframeAskedAt = DispatchTime.now().uptimeNanoseconds
             }
             self.stateLock.unlock()
 
