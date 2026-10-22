@@ -36,11 +36,14 @@ and starting at logon, all three on by default and all three reversible.
    a person can use.
 3. **Firewall** — two `netsh advfirewall` rules, each naming both the program and
    its ports: TCP 47630 for the agent channel, and UDP 47631 and 47629 for the
-   media transport and discovery, on the private and public profiles. Naming the
-   program is what stops Windows raising its own allow prompt, which on this
-   project once landed on a display with no monitor and blocked every click for
-   days. Naming the ports as well is what stops the rule opening every port the
-   executable might ever bind.
+   media transport and discovery, on every profile (`profile=any`). The Domain
+   profile has to be there: a PC on a company network meets its default Block
+   on it, and a rule that names the program stops Windows asking, so nothing
+   would say why the Mac got no answer. Naming the program is what stops
+   Windows raising its own allow prompt, which on this project once landed on a
+   display with no monitor and blocked every click for days. Naming the ports
+   as well is what stops the rule opening every port the executable might ever
+   bind.
 4. **Shortcuts and Add/Remove Programs** — written to the all-users folders,
    because the install itself is machine-wide.
 5. **The agent** — registered as a **logon-triggered scheduled task** named

@@ -28,7 +28,7 @@ case "${1:-build}" in
     $SSH 'taskkill /IM SolStreamAgent.exe /F 2>nul & exit 0'
     ;;
   log)
-    $SSH 'type %TEMP%\solstream_agent.log'
+    $SSH 'type "%LOCALAPPDATA%\SolStream\solstream.log"'
     ;;
   restart)
     "$0" stop || true
