@@ -182,6 +182,46 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(states.failures, [])
     }
 
+    /// A request already on its way when the offer comes. The host reads one
+    /// line and takes it for the answer, so asking now would hand it the
+    /// request instead, and its reply slot to whatever came next. The offer is
+    /// left alone and the `busy` is the refusal it otherwise is.
+    func testNoTakeoverIsAskedForWithARequestAlreadyOnTheWire() throws {
+        let seen = Observations()
+        let host = ScriptedHost { _, connection in
+            // Offered only once the request has arrived, so it was on the wire
+            // before the offer was.
+            seen.set("first", ScriptedHost.json(connection.readLine(timeout: 5)))
+            connection.send(ScriptedHost.busy(offering: ScriptedHost.randomHex(32)))
+            seen.set("after", connection.readLine(timeout: 1.5))
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port, token: Self.token)
+        defer { agent.disconnect() }
+        let states = StateRecord(agent)
+        let failed = expectation(description: "failed")
+        states.onFailure = { _ in failed.fulfill() }
+        let answered = expectation(description: "windows answered")
+        var titles: [String]?
+        agent.connect()
+        agent.windows { windows in
+            titles = windows.map(\.title)
+            answered.fulfill()
+        }
+        wait(for: [failed, answered], timeout: 5)
+
+        let first = try XCTUnwrap(seen.get("first") as? [String: Any])
+        XCTAssertEqual(first["cmd"] as? String, "windows", "the request was on the wire first")
+        XCTAssertEqual(states.failures, [ScriptedHost.anotherMac],
+                       "the busy was handled as a refusal")
+        XCTAssertEqual(titles, [], "and the request failed with the connection")
+        // Long enough for a takeover request to have followed.
+        Thread.sleep(forTimeInterval: 2)
+        XCTAssertNil(seen.get("after"), "no takeover was asked for")
+        XCTAssertEqual(host.connections, 1)
+    }
+
     /// Back during a slow launch, and the same PC chosen again: the host is
     /// still letting go of this Mac's own session, so even a first connection
     /// waits for it rather than being told another Mac is streaming.
