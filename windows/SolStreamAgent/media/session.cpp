@@ -737,16 +737,36 @@ void MediaSession::Impl::ReceiveLoop() {
         // The peer is learned from a packet that AUTHENTICATED, never from one
         // that merely arrived. A host that starts sending video to whatever
         // address spoke to it first is a reflector.
+        bool firstContact = false;
         {
             std::lock_guard<std::mutex> guard(peerLock);
             if (!havePeer || from.sin_addr.s_addr != peer.sin_addr.s_addr
                 || from.sin_port != peer.sin_port) {
+                firstContact = !havePeer;
                 peer = from;
                 havePeer = true;
                 char who[64] = {};
                 inet_ntop(AF_INET, &from.sin_addr, who, sizeof(who));
                 Log("[media] client at %s:%u", who, ntohs(from.sin_port));
             }
+        }
+        if (firstContact) {
+            // The session's first keyframe has already been encoded by now, and
+            // sent nowhere: the capture thread starts encoding the moment the
+            // pass opens, and the client only learns the port, and speaks,
+            // after Start has answered. Keyframes come only on request, so
+            // every session began with P-frames the client could not decode,
+            // until it asked -- and on a still window the next picture was the
+            // 250 ms refresh. One is asked for here instead, and the request
+            // limit is started from it, so a client that asks as it opens is
+            // not sent a second one.
+            lastIdrAt = Now();
+            std::shared_ptr<Encoder> encoderPtr;
+            {
+                std::lock_guard<std::mutex> guard(mediaLock);
+                encoderPtr = encoder;
+            }
+            if (encoderPtr) { encoderPtr->RequestIdr(); }
         }
         lastHeardAt.store(Now());
         HandlePlaintext(plaintext, plaintextLen);
