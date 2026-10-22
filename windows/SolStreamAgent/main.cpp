@@ -66,6 +66,7 @@
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
+#include "session_takeover.h"
 #include "updater.h"
 #include "util.h"
 
@@ -4457,6 +4458,74 @@ constexpr ULONGLONG kPreAuthDeadlineMs = 120000;
 /// a proof comes back refused.
 constexpr int kMaxAuthFailures = 3;
 
+// ── The session's holder ─────────────────────────────────────────────────────
+//
+// Which Mac holds the one session, so that the same Mac coming back from a
+// network change can take it over rather than be told it is busy with itself
+// (session_takeover.h).
+//
+// All three fields are guarded by g_holder_mutex. The socket is cleared under
+// it BEFORE the serving thread closes the socket, so a takeover that shuts the
+// holder down can never reach a handle Winsock has since given to somebody
+// else -- it reuses SOCKET values freely.
+std::mutex g_holder_mutex;
+SOCKET g_holder_socket = INVALID_SOCKET;
+/// The id that Mac sent with its auth proof; empty for one that sent none.
+std::string g_holder_id;
+/// Set by a takeover, read by the serving thread on its next wakeup.
+bool g_holder_retiring = false;
+/// When the holder last sent anything, by GetTickCount64. Written on every
+/// receive, so it is atomic rather than under the mutex.
+std::atomic<unsigned long long> g_holder_heard_at{0};
+
+/// Record `client` as the session's holder, the moment it is authenticated.
+void BecomeHolder(SOCKET client, const std::string& id) {
+    std::lock_guard<std::mutex> lock(g_holder_mutex);
+    g_holder_socket = client;
+    g_holder_id = id;
+    g_holder_retiring = false;
+    g_holder_heard_at.store(GetTickCount64());
+}
+
+/// Whether a takeover has asked `client`'s session to end.
+bool SessionRetired(SOCKET client) {
+    std::lock_guard<std::mutex> lock(g_holder_mutex);
+    return g_holder_socket == client && g_holder_retiring;
+}
+
+enum class ClientWait { Readable, Idle, Retired, Failed };
+
+/// Wait for `client` to send something, for at most `idle_ms` of silence.
+///
+/// A select() on a short tick rather than one recv() blocking for the whole of
+/// the idle timeout, because a session that the same Mac has taken over has to
+/// END: its recv() would otherwise sit there for thirty seconds holding the
+/// slot the Mac is waiting for. shutdown() from another thread is not promised
+/// to wake a blocked recv() on Windows, and closesocket() from another thread
+/// would free a handle this thread is still using. Polling a flag is neither.
+ClientWait AwaitClient(SOCKET client, DWORD idle_ms) {
+    const ULONGLONG since = GetTickCount64();
+    for (;;) {
+        if (SessionRetired(client)) {
+            return ClientWait::Retired;
+        }
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(client, &readable);
+        timeval tick{0, 250 * 1000};
+        const int ready = select(0, &readable, nullptr, nullptr, &tick);
+        if (ready == SOCKET_ERROR) {
+            return ClientWait::Failed;
+        }
+        if (ready > 0) {
+            return ClientWait::Readable;
+        }
+        if (GetTickCount64() - since >= idle_ms) {
+            return ClientWait::Idle;
+        }
+    }
+}
+
 void ServeClient(SOCKET client) {
     // Raised to kIdleTimeoutMs the moment the client authenticates, below.
     DWORD timeout_ms = g_require_auth ? kPreAuthTimeoutMs : kIdleTimeoutMs;
@@ -4528,9 +4597,24 @@ void ServeClient(SOCKET client) {
             }
         }
     } counted{authenticated};
+    // And the holder's record goes with it, under its lock and before the
+    // caller closes this socket -- see g_holder_mutex.
+    struct Holding {
+        SOCKET socket;
+        ~Holding() {
+            std::lock_guard<std::mutex> lock(g_holder_mutex);
+            if (g_holder_socket == socket) {
+                g_holder_socket = INVALID_SOCKET;
+                g_holder_id.clear();
+                g_holder_retiring = false;
+            }
+        }
+    } holding{client};
     if (authenticated) {
         // Loopback, which needs no token and is therefore already a session.
+        // It names nobody, so nothing can take it over.
         g_clients_authenticated.fetch_add(1);
+        BecomeHolder(client, std::string());
         if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
             return;
         }
@@ -4547,8 +4631,23 @@ void ServeClient(SOCKET client) {
     // recv() chunks — so this cannot be a one-off scan of what is in hand.
     bool discarding = false;
     for (;;) {
-        const int n = recv(client, chunk, sizeof(chunk), 0);
-        if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) {
+        const ClientWait waited = AwaitClient(client, timeout_ms);
+        if (waited == ClientWait::Retired) {
+            Log("[agent] ending this session: the Mac that held it has taken it over");
+            return;
+        }
+        if (waited == ClientWait::Failed) {
+            return;
+        }
+        bool idle = waited == ClientWait::Idle;
+        int n = SOCKET_ERROR;
+        if (!idle) {
+            // The receive timeout set above still stands behind this, for a
+            // recv() that blocks although select() said there was something.
+            n = recv(client, chunk, sizeof(chunk), 0);
+            idle = n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT;
+        }
+        if (idle) {
             Log("[agent] client idle for %lus%s, dropping",
                 (unsigned long) (timeout_ms / 1000),
                 authenticated ? "" : " without authenticating");
@@ -4557,6 +4656,7 @@ void ServeClient(SOCKET client) {
         if (n <= 0) {
             return;
         }
+        g_holder_heard_at.store(GetTickCount64());
         // Here, on every wakeup, and before a single byte of what arrived is
         // looked at. Anywhere further down and some framing state ducks it: the
         // oversized-line discard below leaves the loop early, so a client that
@@ -4643,6 +4743,14 @@ void ServeClient(SOCKET client) {
                 timeout_ms = kIdleTimeoutMs;
                 setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
                            (const char*) &timeout_ms, sizeof(timeout_ms));
+                // Who this is, from the line that proved it. A Mac that
+                // predates the field sends none, and its session is then one
+                // nobody can take over.
+                std::string id;
+                if (!FieldString(line, "client", id) || !solstream::IsClientId(id)) {
+                    id.clear();
+                }
+                BecomeHolder(client, id);
                 InterlockedExchange(&g_push_authorised, 1);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
@@ -4692,6 +4800,250 @@ void ServeClient(SOCKET client) {
                 return;
             }
         }
+    }
+}
+
+/// Take the one client slot for a connection, if it is free.
+///
+/// A compare-and-swap rather than a check and an increment, because two
+/// threads now admit clients: the accept loop, and a takeover waiting for the
+/// session it ended to let go. Whichever gets there first has the slot.
+bool ClaimClientSlot() {
+    int expected = 0;
+    return g_clients_connected.compare_exchange_strong(expected, 1);
+}
+
+/// Sessions whose windows are still being put back where they were, after the
+/// slot was freed. See ServeAndRetire.
+std::atomic<int> g_windows_restoring{0};
+
+/// Serve a client that holds the slot, then put everything back. Runs on a
+/// thread of its own; the slot must already have been claimed for it.
+void ServeAndRetire(SOCKET client) {
+    // Loopback needs no token, so it is authorised from the start.
+    StartCursorWatcher(client, !g_require_auth);
+    ServeClient(client);
+#ifdef SOLSTREAM_MEDIA
+    // Destroy the session keys with the session. The point of the
+    // ephemeral half is that it stops existing when the connection
+    // does; holding the derived keys until the NEXT client happens
+    // to connect keeps a recorded session decryptable for exactly
+    // as long as nobody reconnects.
+    EnterCriticalSection(&g_send_cs);
+    g_channel.Reset();
+    g_pending_channel.Reset();
+    g_channel_socket = INVALID_SOCKET;
+    LeaveCriticalSection(&g_send_cs);
+#endif
+    // Stopped before the socket closes: the watcher writes to it.
+    StopCursorWatcher();
+    closesocket(client);
+#ifdef SOLSTREAM_MEDIA
+    // And stop streaming to a Mac that has gone, rather than leave
+    // capture, encode and send running -- and whatever key or button
+    // it was holding still down on the host -- until the media
+    // path's own silence timeout notices.
+    solstream::media::MediaSession::Instance().Stop();
+#endif
+    // Every managed window is owed its frame, z-order and placement
+    // back. The slots are released first and the client slot freed
+    // before the windows are touched: restoring crosses into other
+    // processes, and if one of those is hung, a cleanup stuck there
+    // must not keep every later Mac turned away.
+    const std::vector<WindowLock> owed = TakeAllSlots();
+    // Counted before the slot is freed, so nobody can see the slot free and
+    // this count still zero while the windows are being moved.
+    g_windows_restoring.fetch_add(1);
+    g_clients_connected.fetch_sub(1);
+    for (const WindowLock& saved : owed) {
+        RestoreWindow(saved);
+    }
+    g_windows_restoring.fetch_sub(1);
+    Log("[agent] client disconnected");
+}
+
+// ── Taking over a session ────────────────────────────────────────────────────
+
+/// Knocks being given the chance to take over, at most this many at once. Each
+/// holds a thread for a few seconds at most, and a Mac that cannot take over
+/// closes straight away; the cap is for anything that connects and then sits.
+constexpr int kMaxTakeoverListeners = 4;
+std::atomic<int> g_takeover_listeners{0};
+/// How long a knock has to ask, once it has been offered.
+constexpr DWORD kTakeoverListenMs = 5000;
+/// How long a takeover waits for the session it ended to let go of the slot.
+/// The teardown joins the cursor watcher (up to two seconds) and stops the
+/// media session; a session stuck in a command takes as long as the command.
+/// The Mac waits twelve seconds for an answer, so this has to be well inside.
+constexpr DWORD kTakeoverWaitMs = 8000;
+
+/// The refusal a Mac gets while somebody holds the session. `extra` is more
+/// fields, each with its leading comma.
+std::string BusyLine(const std::string& message, const std::string& extra) {
+    std::string busy = "{\"type\":\"busy\",\"message\":\"" + JsonEscape(message) + "\"";
+    busy += ",\"virtualDisplay\":"
+         + std::string(solstream::HasVirtualDisplayCached() ? "true" : "false");
+    busy += extra;
+    busy += "}";
+    return busy;
+}
+
+std::string AnotherMacMessage() {
+    return ComputerName() + " is already streaming to another Mac. Disconnect there first.";
+}
+
+std::string SameMacMessage() {
+    return ComputerName() + " is still letting go of this Mac's last connection.";
+}
+
+/// One line from a socket nobody else is reading: within `budget_ms` in all,
+/// at most `max_bytes`, and nothing after it. False if the peer closed, went
+/// quiet, or sent more -- this side is about to hand the socket to
+/// ServeClient, which starts with an empty buffer, so a byte read past the
+/// line here would be a byte lost.
+bool ReadOnlyLine(SOCKET socket, DWORD budget_ms, size_t max_bytes, std::string& line) {
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, (const char*) &budget_ms, sizeof(budget_ms));
+    const ULONGLONG started = GetTickCount64();
+    std::string buffer;
+    char chunk[512];
+    for (;;) {
+        const int n = recv(socket, chunk, sizeof(chunk), 0);
+        if (n <= 0) {
+            return false;
+        }
+        buffer.append(chunk, static_cast<size_t>(n));
+        const size_t newline = buffer.find('\n');
+        if (newline != std::string::npos) {
+            if (newline + 1 != buffer.size()) {
+                return false;
+            }
+            line = buffer.substr(0, newline);
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            return true;
+        }
+        if (buffer.size() > max_bytes || GetTickCount64() - started >= budget_ms) {
+            return false;
+        }
+    }
+}
+
+/// Offer a knock the chance to show it is the Mac whose session this is, and
+/// let it in if so. True when it has been given the slot.
+///
+/// The offer rides on the same `busy` line every Mac has always been sent,
+/// as two fields a Mac that predates them ignores: it reports the refusal and
+/// closes, exactly as before. A Mac that understands them answers with a
+/// takeover proof over a fresh challenge and the id it gave in its own auth.
+bool ListenForTakeover(SOCKET client) {
+    const std::string challenge = RandomHex(32);
+    if (challenge.empty()) {
+        SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
+        return false;
+    }
+    if (!SendLine(client, BusyLine(AnotherMacMessage(),
+                                   ",\"takeover\":1,\"challenge\":\"" + challenge + "\""))) {
+        return false;
+    }
+    std::string line;
+    if (!ReadOnlyLine(client, kTakeoverListenMs, 4096, line)) {
+        return false;
+    }
+    std::string command, proof, cnonce, id;
+    if (!FieldString(line, "cmd", command) || command != "takeover") {
+        return false;
+    }
+    FieldString(line, "proof", proof);
+    FieldString(line, "cnonce", cnonce);
+    FieldString(line, "client", id);
+    const bool proof_ok = solstream::TakeoverProofMatches(g_token, challenge, cnonce, id, proof);
+
+    solstream::TakeoverVerdict verdict;
+    unsigned long long silent_ms = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_holder_mutex);
+        const bool present = g_holder_socket != INVALID_SOCKET;
+        // Read in this order, and never subtracted the other way round: the
+        // serving thread writes the stamp on every receive, and one written
+        // after `now` was taken would wrap the difference to an enormous
+        // silence -- which is exactly the answer that ends a session.
+        const unsigned long long heard = g_holder_heard_at.load();
+        const unsigned long long now = GetTickCount64();
+        silent_ms = now > heard ? now - heard : 0;
+        verdict = solstream::DecideTakeover(proof_ok, id, present, g_holder_id, silent_ms);
+        if (verdict == solstream::TakeoverVerdict::Take && present) {
+            // Under the lock, so this is still the holder's socket and not a
+            // handle reissued since. The flag is what ends its wait for the
+            // next request; the shutdown is what fails a command or a push
+            // in the middle of writing to a Mac that is not there.
+            g_holder_retiring = true;
+            shutdown(g_holder_socket, SD_BOTH);
+        }
+    }
+    switch (verdict) {
+        case solstream::TakeoverVerdict::Refused:
+            Log("[agent] refused a takeover that did not prove the token");
+            SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
+            return false;
+        case solstream::TakeoverVerdict::Another:
+            Log("[agent] refused a takeover: the session belongs to another Mac");
+            SendLine(client, BusyLine(AnotherMacMessage(), ",\"holder\":\"other\""));
+            return false;
+        case solstream::TakeoverVerdict::NotYet:
+            Log("[agent] the Mac that holds the session reconnected while it was still "
+                "live (heard %llus ago); asking it to try again",
+                silent_ms / 1000);
+            SendLine(client, BusyLine(SameMacMessage(), ",\"holder\":\"self\""));
+            return false;
+        case solstream::TakeoverVerdict::Take:
+            break;
+    }
+    Log("[agent] the Mac that held the session is taking it over (silent for %llus)",
+        silent_ms / 1000);
+
+    const ULONGLONG deadline = GetTickCount64() + kTakeoverWaitMs;
+    for (;;) {
+        // An update about to stop this host lets nobody in, as on arrival.
+        if (solstream::update::InstallStarting()) {
+            return false;
+        }
+        // And not while the ended session is still putting its windows back.
+        // This Mac re-places the same windows the moment it is in, a round
+        // trip from now, and a restore landing after that would carry a window
+        // off the capture display under a stream that looks perfectly healthy.
+        // A Mac arriving the ordinary way comes seconds later and never meets
+        // this; one let in here would meet it every time.
+        if (g_windows_restoring.load() == 0 && ClaimClientSlot()) {
+            return true;
+        }
+        if (GetTickCount64() >= deadline) {
+            break;
+        }
+        Sleep(25);
+    }
+    // Still held: by the old session, stuck in a command that has not returned,
+    // or by somebody who got into the slot first. Say which as best this side
+    // knows; the Mac tries again either way, and is told then.
+    bool another = false;
+    {
+        std::lock_guard<std::mutex> lock(g_holder_mutex);
+        another = g_holder_socket != INVALID_SOCKET && g_holder_id != id;
+    }
+    Log("[agent] the session did not let go within %lus", (unsigned long) (kTakeoverWaitMs / 1000));
+    SendLine(client, another ? BusyLine(AnotherMacMessage(), ",\"holder\":\"other\"")
+                             : BusyLine(SameMacMessage(), ",\"holder\":\"self\""));
+    return false;
+}
+
+/// ListenForTakeover on a thread of its own, then serve or close.
+void OfferTakeover(SOCKET client) {
+    const bool admitted = ListenForTakeover(client);
+    g_takeover_listeners.fetch_sub(1);
+    if (admitted) {
+        ServeAndRetire(client);
+    } else {
+        closesocket(client);
     }
 }
 
@@ -5683,9 +6035,10 @@ int wmain(int argc, wchar_t** argv) {
             // can still tell whether the host is healthy — and so can anyone
             // diagnosing it, which is how this was noticed at all.
             //
-            // Keyed on clients that have PROVED the token, not on open sockets: the
-            // Mac treats `busy` as final, so counting any accepted socket let a port
-            // scanner or a single stray connect() lock the paired Mac out.
+            // Keyed on clients that have PROVED the token, not on open sockets: a
+            // Mac connecting afresh treats `busy` as final, so counting any
+            // accepted socket let a port scanner or a single stray connect()
+            // lock the paired Mac out.
             // An update waiting on its permission prompt, or already running:
             // the installer is about to stop this host, so a Mac let in now
             // would have its stream cut. Closed without a word, like the
@@ -5698,15 +6051,20 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             if (g_clients_authenticated.load() > 0) {
-                std::string busy = "{\"type\":\"busy\",\"message\":\"";
-                busy += JsonEscape(ComputerName() + " is already streaming to "
-                                   "another Mac. Disconnect there first.");
-                busy += "\"";
-                busy += ",\"virtualDisplay\":"
-                     + std::string(solstream::HasVirtualDisplayCached() ? "true" : "false");
-                busy += "}";
+                // The session may be this very Mac's, left behind by a network
+                // change that no FIN ever reported (session_takeover.h). Such
+                // a Mac is offered the chance to say so, on a thread of its
+                // own: the answer takes a round trip, and this loop must go on
+                // accepting meanwhile.
+                if (g_require_auth && !g_token.empty()
+                    && g_takeover_listeners.load() < kMaxTakeoverListeners) {
+                    g_takeover_listeners.fetch_add(1);
+                    Log("[agent] a client knocked while one is connected; offering a takeover");
+                    std::thread([client]() { OfferTakeover(client); }).detach();
+                    continue;
+                }
                 Log("[agent] refused a second client: one is already connected");
-                SendLine(client, busy);
+                SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
                 closesocket(client);
                 continue;
             }
@@ -5727,7 +6085,10 @@ int wmain(int argc, wchar_t** argv) {
             // ever authenticating kept this client out indefinitely. Saying
             // `busy` here would be saying something untrue —
             // nobody is streaming — to a client that would believe it for good.
-            if (g_clients_connected.load() > 0) {
+            //
+            // Claimed rather than checked: a takeover admits clients too, from
+            // its own thread, and the two must not both get the slot.
+            if (!ClaimClientSlot()) {
                 Log("[agent] closed a client on arrival: the socket is held by "
                     "one that has not authenticated yet");
                 closesocket(client);
@@ -5735,45 +6096,7 @@ int wmain(int argc, wchar_t** argv) {
             }
 
             Log("[agent] client connected");
-            g_clients_connected.fetch_add(1);
-            std::thread([client]() {
-                // Loopback needs no token, so it is authorised from the start.
-                StartCursorWatcher(client, !g_require_auth);
-                ServeClient(client);
-#ifdef SOLSTREAM_MEDIA
-                // Destroy the session keys with the session. The point of the
-                // ephemeral half is that it stops existing when the connection
-                // does; holding the derived keys until the NEXT client happens
-                // to connect keeps a recorded session decryptable for exactly
-                // as long as nobody reconnects.
-                EnterCriticalSection(&g_send_cs);
-                g_channel.Reset();
-                g_pending_channel.Reset();
-                g_channel_socket = INVALID_SOCKET;
-                LeaveCriticalSection(&g_send_cs);
-#endif
-                // Stopped before the socket closes: the watcher writes to it.
-                StopCursorWatcher();
-                closesocket(client);
-#ifdef SOLSTREAM_MEDIA
-                // And stop streaming to a Mac that has gone, rather than leave
-                // capture, encode and send running -- and whatever key or button
-                // it was holding still down on the host -- until the media
-                // path's own silence timeout notices.
-                solstream::media::MediaSession::Instance().Stop();
-#endif
-                // Every managed window is owed its frame, z-order and placement
-                // back. The slots are released first and the client slot freed
-                // before the windows are touched: restoring crosses into other
-                // processes, and if one of those is hung, a cleanup stuck there
-                // must not keep every later Mac turned away.
-                const std::vector<WindowLock> owed = TakeAllSlots();
-                g_clients_connected.fetch_sub(1);
-                for (const WindowLock& saved : owed) {
-                    RestoreWindow(saved);
-                }
-                Log("[agent] client disconnected");
-            }).detach();
+            std::thread([client]() { ServeAndRetire(client); }).detach();
         }
     });
     server.detach();

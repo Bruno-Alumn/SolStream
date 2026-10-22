@@ -62,6 +62,24 @@ The reply also carries `hostAuth`, twelve bytes of the same expansion. That is
 the only thing in the handshake that authenticates the **host** to the Mac; the
 challenge-response runs the other way. The Mac refuses to switch if it disagrees.
 
+**One Mac at a time.** A knock while a Mac holds the session is answered with
+`busy` before any `hello`. A Mac whose network changed under it leaves a socket
+the PC cannot see is dead, so its reconnect meets its own old session. Two
+things deal with that, each working without the other:
+
+- The Mac sends `client`, a random id kept per install, with its auth proof.
+  The host's `busy` offers `"takeover":1` and a fresh `challenge`; a Mac that
+  understands answers `{"cmd":"takeover","client","cnonce","proof"}`, where
+  `proof = HMAC-SHA256(token, "SolStream agent takeover v1" || challenge ||
+  cnonce || client)`. The host ends the old session only if the ids match and
+  it has been silent for 15 s (a missed heartbeat), then greets the Mac on the
+  same socket with an ordinary `hello`. Otherwise it answers `busy` again with
+  `"holder":"self"` (wait) or `"holder":"other"` (final). A Mac that never sent
+  an id is never taken over, and a Mac that predates the offer ignores it.
+- A Mac reconnecting after losing a session treats a `busy` that names nobody
+  (an older host) as "wait", and knocks again for 45 s, past the host's 30 s
+  idle timeout, before showing it. A first connection still treats it as final.
+
 ## The media path — UDP 47631
 
 `docs/transport-smt1.md` is the protocol. In summary: eight cleartext bytes

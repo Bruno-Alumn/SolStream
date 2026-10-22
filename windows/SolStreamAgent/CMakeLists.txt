@@ -85,6 +85,8 @@ add_executable(SolStreamAgent
     driver_install.cpp
     # Whether this PC is on Tailscale, for the window's away-from-home advice.
     tailscale.cpp
+    # Whether a Mac knocking on a busy host may take back the session it left.
+    session_takeover.cpp
     host_window.cpp
     installer.cpp
     # Finds, verifies and installs updates from GitHub releases.
@@ -216,16 +218,17 @@ endif()
 # them what uninstall takes of the virtual display's settings and records, which
 # adapter is Tailscale's, the clipboard's line endings and privacy markers, and
 # when the sound capture opens its device again (media/audio_reopen.h, a header
-# of its own because audio.cpp builds only with MSVC), this being the one C++
-# test program. No network, and nothing outside a temporary folder and a
-# volatile registry key of its own under HKCU: it never sees the real
-# %LOCALAPPDATA%, nor SolStream's records in HKLM.
-# updater_tests.cpp includes updater.cpp to reach its internals, so that is not
-# listed again here. Not built by package-windows.ps1, which configures with
-# BUILD_TESTING off.
+# of its own because audio.cpp builds only with MSVC), and when a Mac may take
+# back the session it left behind, this being the one C++ test program. No
+# network, and nothing outside a temporary folder and a volatile registry key
+# of its own under HKCU: it never sees the real %LOCALAPPDATA%, nor SolStream's
+# records in HKLM. updater_tests.cpp includes updater.cpp to reach its
+# internals, so that is not listed again here. Not built by
+# package-windows.ps1, which configures with BUILD_TESTING off.
 if(BUILD_TESTING)
     add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp clipboard.cpp
-        installer.cpp media/log.cpp driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp)
+        installer.cpp media/log.cpp driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp
+        session_takeover.cpp)
     set_target_properties(SolStreamUpdaterTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON

@@ -268,6 +268,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .failed(let message):
                 // `explain` already names the host and says what to do.
                 picker?.showFailure(message)
+            case .waiting(let message):
+                picker?.showWaiting(message)
             case .needsToken(let host, let rejected):
                 // A sheet on the picker the person is already looking at.
                 // `report` delivers on the main queue.
@@ -338,6 +340,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch state {
         case .failed(let message):
             Log.error("[app] \(message)")
+        case .waiting(let message):
+            Log.info("[app] \(message)")
         case .needsToken(let host, _):
             Log.error("[app] \(host) needs a pairing token. It is on SolStream's own window "
                       + "on that PC, under \"Pairing token\"; start SolStream here once with "
@@ -890,6 +894,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case .failed(let message) where agent?.willReconnect == false:
                 self.appWindows.forEach { $0.setError("Lost the connection", detail: message) }
+            case .waiting(let message):
+                // The host is still holding the connection this Mac lost; the
+                // channel knocks again by itself and says when it gives up.
+                self.appWindows.forEach { $0.setStatus("Reconnecting…", detail: message) }
             default:
                 break
             }

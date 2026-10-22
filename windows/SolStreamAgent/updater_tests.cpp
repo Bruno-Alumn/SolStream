@@ -18,7 +18,8 @@
 // takes of the virtual display's settings, when its device is waiting for a
 // restart, which adapter is Tailscale's, the clipboard's privacy
 // markers and line endings, when the sound capture opens its device
-// again, and when the encoder spends a frame id.
+// again, when the encoder spends a frame id, and when a Mac may take
+// back the session it left behind.
 
 #include "updater.cpp"
 
@@ -27,6 +28,7 @@
 #include <winioctl.h>
 #include <cfgmgr32.h>
 
+#include <cctype>
 #include <cstdio>
 
 #include "clipboard.h"
@@ -34,6 +36,7 @@
 #include "media/audio_reopen.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
+#include "session_takeover.h"
 #include "tailscale.h"
 #include "vdd.h"
 
@@ -1634,6 +1637,104 @@ void TestOverflowGate() {
     }
 }
 
+/// The takeover proof, against the same frozen vector the Mac's tests check
+/// (AgentReconnectTests.swift): if either end changes what it HMACs, one of
+/// the two fails here rather than every takeover failing on a real PC.
+void TestTakeoverProof() {
+    const std::string token = "00112233445566778899aabbccddeeff";
+    const std::string challenge =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const std::string cnonce =
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+    const std::string id = "0123456789abcdef0123456789abcdef";
+    const std::string proof =
+        "2e9724ecddb956360f9455f33d31d1157c2a3d13aac41a4c8085879862b2bc38";
+
+    CHECK(ToHex(TakeoverHmac(FromHex(token),
+                             TakeoverProofMessage(FromHex(challenge), FromHex(cnonce), id)))
+          == proof);
+    CHECK(TakeoverProofMatches(token, challenge, cnonce, id, proof));
+    // Upper-case hex is the same bytes.
+    std::string shouted = proof;
+    std::transform(shouted.begin(), shouted.end(), shouted.begin(),
+                   [](char c) { return (char) std::toupper((unsigned char) c); });
+    CHECK(TakeoverProofMatches(token, challenge, cnonce, id, shouted));
+
+    // The id is inside the proof: the same proof under another id is no proof.
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce, "fedcba9876543210fedcba9876543210",
+                                proof));
+    // Nor is the auth v2 proof over the same challenge and nonce, which a
+    // listener on the wire would have seen.
+    CHECK(!TakeoverProofMatches(
+        token, challenge, cnonce, id,
+        "8088d61292cfe919910042d796548189e271424c40025e35719b0e6369c3eacc"));
+    // Another token, challenge or nonce.
+    CHECK(!TakeoverProofMatches("ffeeddccbbaa99887766554433221100", challenge, cnonce, id, proof));
+    CHECK(!TakeoverProofMatches(token, cnonce, challenge, id, proof));
+    std::string flipped = proof;
+    flipped[0] = flipped[0] == '2' ? '3' : '2';
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce, id, flipped));
+
+    // Malformed in every way the wire can deliver.
+    CHECK(!TakeoverProofMatches("", challenge, cnonce, id, proof));
+    CHECK(!TakeoverProofMatches(token, challenge.substr(2), cnonce, id, proof));
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce + "00", id, proof));
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce, id, proof.substr(0, 62)));
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce, id, ""));
+    CHECK(!TakeoverProofMatches(token, challenge, cnonce, "", proof));
+    CHECK(!TakeoverProofMatches(token, "zz" + challenge.substr(2), cnonce, id, proof));
+}
+
+void TestClientId() {
+    CHECK(IsClientId("0123456789abcdef0123456789abcdef"));
+    CHECK(IsClientId("00000000000000000000000000000000"));
+    CHECK(!IsClientId(""));
+    CHECK(!IsClientId("0123456789abcdef0123456789abcde"));
+    CHECK(!IsClientId("0123456789abcdef0123456789abcdef0"));
+    // Lowercase only: the Mac never sends anything else, and one spelling is
+    // what lets the host compare two ids as strings.
+    CHECK(!IsClientId("0123456789ABCDEF0123456789ABCDEF"));
+    CHECK(!IsClientId("0123456789abcdef0123456789abcdeg"));
+    CHECK(!IsClientId("0123456789abcdef\"123456789abcdef"));
+}
+
+/// Who may take a session over. Above all: never a Mac other than the one
+/// that holds it, and never the session of a Mac that did not say who it was.
+void TestDecideTakeover() {
+    const std::string mine = "0123456789abcdef0123456789abcdef";
+    const std::string theirs = "fedcba9876543210fedcba9876543210";
+    const unsigned long long quiet = kTakeoverSilenceMs;
+    const unsigned long long live = kTakeoverSilenceMs - 1;
+
+    // The same Mac, and its session has missed a heartbeat: it may have it.
+    CHECK(DecideTakeover(true, mine, true, mine, quiet) == TakeoverVerdict::Take);
+    CHECK(DecideTakeover(true, mine, true, mine, 10 * 60 * 1000) == TakeoverVerdict::Take);
+    // The same Mac, but the session was heard from recently: not yet.
+    CHECK(DecideTakeover(true, mine, true, mine, live) == TakeoverVerdict::NotYet);
+    CHECK(DecideTakeover(true, mine, true, mine, 0) == TakeoverVerdict::NotYet);
+
+    // Another Mac, however long the session has been quiet.
+    CHECK(DecideTakeover(true, theirs, true, mine, quiet) == TakeoverVerdict::Another);
+    CHECK(DecideTakeover(true, theirs, true, mine, 10 * 60 * 1000) == TakeoverVerdict::Another);
+    CHECK(DecideTakeover(true, theirs, true, mine, 0) == TakeoverVerdict::Another);
+    // A session whose Mac gave no id -- every Mac built before this -- is
+    // nobody's to take, even with an id that is empty too.
+    CHECK(DecideTakeover(true, mine, true, "", quiet) == TakeoverVerdict::Another);
+    CHECK(DecideTakeover(true, "", true, "", quiet) == TakeoverVerdict::Another);
+    // A knock with a malformed id cannot be anybody's holder.
+    CHECK(DecideTakeover(true, "MINE", true, "MINE", quiet) == TakeoverVerdict::Another);
+
+    // Without the token, nothing -- and nothing said about whose session it is.
+    CHECK(DecideTakeover(false, mine, true, mine, quiet) == TakeoverVerdict::Refused);
+    CHECK(DecideTakeover(false, theirs, true, mine, quiet) == TakeoverVerdict::Refused);
+    CHECK(DecideTakeover(false, mine, false, "", quiet) == TakeoverVerdict::Refused);
+
+    // The session ended while the request was on its way: a Mac with the token
+    // may have the free slot, as it would have on its next knock.
+    CHECK(DecideTakeover(true, mine, false, "", 0) == TakeoverVerdict::Take);
+    CHECK(DecideTakeover(true, theirs, false, "", 0) == TakeoverVerdict::Take);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1702,6 +1803,9 @@ int wmain(int argc, wchar_t** argv) {
     TestSoundDefaultDevice();
     TestFeedLedger();
     TestOverflowGate();
+    TestTakeoverProof();
+    TestClientId();
+    TestDecideTakeover();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

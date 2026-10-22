@@ -124,6 +124,10 @@ public final class AgentConnection {
         /// saying differently from never having had one.
         case needsToken(host: String, rejected: Bool)
         case failed(String)
+        /// Turned away for now, and trying again by itself: the host is still
+        /// holding the connection this Mac lost. Not a failure -- the words
+        /// say what is being waited for.
+        case waiting(String)
     }
 
     private let host: String
@@ -367,6 +371,239 @@ public final class AgentConnection {
         self.host = host
         self.port = port
         self.token = token ?? Self.storedToken(for: host)
+        self.clientID = Self.installClientID
+    }
+
+    // MARK: - Coming back to a host that is still holding the last connection
+
+    /// This copy of SolStream's name for itself, sent with every auth proof.
+    ///
+    /// The host serves one Mac at a time and learns that one has gone only
+    /// when its socket says so. A Mac whose network changes under it -- Wi-Fi
+    /// to Ethernet, a new address after waking, a Wi-Fi drop long enough for a
+    /// request to time out -- leaves a socket behind that no FIN ever closes,
+    /// and reconnects into a host that is still counting it. Knowing which Mac
+    /// holds the session is what lets a host hand it back to that Mac and to
+    /// no other. Random, so it says nothing about this Mac; kept per install
+    /// rather than per launch, so a relaunched app can take back a session the
+    /// last one left there. A host that predates it ignores the field.
+    private let clientID: String
+
+    static let clientIDKey = "SolStream.agentClientID"
+
+    /// Made once per process, from what `clientID(in:)` keeps.
+    static let installClientID = clientID(in: .standard)
+
+    /// The id kept in `defaults`, made and kept there the first time.
+    static func clientID(in defaults: UserDefaults) -> String {
+        if let stored = defaults.string(forKey: clientIDKey), isClientID(stored) {
+            return stored
+        }
+        var bytes = Data(count: 16)
+        let generated = bytes.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+        }
+        let fresh = generated == errSecSuccess
+            ? hex(bytes)
+            : UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        defaults.set(fresh, forKey: clientIDKey)
+        return fresh
+    }
+
+    /// 32 lowercase hex digits, the only shape the host accepts as an id.
+    static func isClientID(_ text: String) -> Bool {
+        text.utf8.count == 32 && text.utf8.allSatisfy {
+            (0x30...0x39).contains($0) || (0x61...0x66).contains($0)
+        }
+    }
+
+    /// Who the host says holds its one session, when it turns this Mac away.
+    enum BusyHolder: Equatable {
+        /// A host that cannot say: it predates the question, or the request
+        /// that would have asked it proved nothing.
+        case unknown
+        /// This Mac's own last connection, which the host is letting go of.
+        case thisMac
+        /// Somebody else. Final: waiting will not change it.
+        case anotherMac
+
+        init(field: Any?) {
+            switch field as? String {
+            case "self": self = .thisMac
+            case "other": self = .anotherMac
+            default: self = .unknown
+            }
+        }
+    }
+
+    enum BusyAction: Equatable {
+        case retry(after: TimeInterval)
+        case giveUp
+    }
+
+    /// How long to go on knocking on a host that says it is busy.
+    ///
+    /// Past the host's own 30-second idle timeout, after which it lets go of a
+    /// session that has gone silent whatever else it knows, with room for the
+    /// reconnect that notices. A host still busy after this is busy with
+    /// somebody else, or stuck, and the person is better told.
+    static let busyPatience: TimeInterval = 45
+
+    /// What to do about a `busy`.
+    ///
+    /// Final for a Mac connecting afresh to a host that cannot say whose the
+    /// session is -- coming back in two seconds finds the same Mac connected,
+    /// and a loop against a busy host looks just like one against a broken
+    /// one. But a Mac REconnecting is almost always being turned away by its
+    /// own last connection, which the host has not yet noticed is dead, so it
+    /// knocks again for `busyPatience` before saying anything final. A host
+    /// that can say settles it either way.
+    /// - Parameter reconnecting: whether this follows the loss of a session
+    ///   this connection had, rather than a first connection.
+    /// - Parameter waited: since that session was lost, or since the first
+    ///   `busy` when there was none.
+    static func busyAction(holder: BusyHolder, reconnecting: Bool, waited: TimeInterval,
+                           retries: Int) -> BusyAction {
+        switch holder {
+        case .anotherMac:
+            return .giveUp
+        case .thisMac:
+            break
+        case .unknown:
+            guard reconnecting else { return .giveUp }
+        }
+        guard waited < busyPatience else { return .giveUp }
+        // Soon at first, because the host may let go at any moment; then every
+        // few seconds, so the wait ends close to when the host frees the slot.
+        return .retry(after: min(2 * pow(1.5, Double(max(retries, 0))), 6))
+    }
+
+    /// What a takeover proof is: an HMAC under the pairing token of
+    ///
+    ///     "SolStream agent takeover v1" || challenge || cnonce || client id
+    ///
+    /// A label of its own, so it can never stand in for an auth proof, and the
+    /// id inside it, so it cannot be replayed under another id. Nil for a
+    /// token or challenge that is not hex of the right length.
+    static func takeoverProof(token: String, challenge: String, clientNonce: Data,
+                              clientID: String) -> Data? {
+        guard let tokenBytes = bytes(fromHex: token), !tokenBytes.isEmpty,
+              let challengeBytes = bytes(fromHex: challenge), challengeBytes.count == 32,
+              clientNonce.count == 32, isClientID(clientID) else { return nil }
+        var message = Data("SolStream agent takeover v1".utf8)
+        message += challengeBytes
+        message += clientNonce
+        message += Data(clientID.utf8)
+        return Data(HMAC<SHA256>.authenticationCode(for: message,
+                                                    using: SymmetricKey(data: tokenBytes)))
+    }
+
+    /// The request that answers a host's offer of a takeover.
+    static func takeoverRequest(token: String, challenge: String, clientNonce: Data,
+                                clientID: String) -> [String: Any]? {
+        guard let proof = takeoverProof(token: token, challenge: challenge,
+                                        clientNonce: clientNonce, clientID: clientID) else {
+            return nil
+        }
+        return ["cmd": "takeover", "client": clientID,
+                "cnonce": hex(clientNonce), "proof": hex(proof)]
+    }
+
+    /// How long a takeover may take to be answered. The host waits up to eight
+    /// seconds for the old session to let go before it says anything.
+    private static let takeoverTimeout: TimeInterval = 12
+
+    /// Whether the connection now open has completed its greeting.
+    private var sessionUp = false
+    /// When the last session this object held was lost without being asked
+    /// to close. Nil while one is up, and before there has been one.
+    private var sessionLostAt: Date?
+    /// When the first `busy` of the present wait came, for a wait that has no
+    /// lost session to count from.
+    private var busySince: Date?
+    private var busyRetries = 0
+    /// Whether this connection has been offered a takeover and has asked for
+    /// one, and whether the answer is still to come. Everything sent meanwhile
+    /// is held, as it is while the auth proof is out: the host reads exactly
+    /// one line from a Mac it has offered a takeover to.
+    private var takeoverAsked = false
+    private var takeoverInFlight = false
+
+    /// Note that the socket has gone, for `busyAction`'s sake.
+    private func noteConnectionLost() {
+        guard sessionUp else { return }
+        sessionUp = false
+        sessionLostAt = Date()
+    }
+
+    /// The host is serving somebody and has said so, before any greeting.
+    private func handleBusy(_ message: [String: Any]) {
+        let text = message["message"] as? String
+            ?? "\(host) is already streaming to another Mac."
+        // A host that can tell its sessions apart offers to hand back one this
+        // Mac left there. A host that predates the offer never makes it.
+        if !takeoverAsked, (message["takeover"] as? NSNumber)?.intValue == 1,
+           let challenge = message["challenge"] as? String {
+            takeoverAsked = true
+            if askToTakeOver(challenge: challenge) { return }
+        }
+        takeoverInFlight = false
+
+        let now = Date()
+        if busySince == nil { busySince = now }
+        let waited = now.timeIntervalSince(sessionLostAt ?? busySince ?? now)
+        let holder = BusyHolder(field: message["holder"])
+        switch Self.busyAction(holder: holder, reconnecting: sessionLostAt != nil,
+                               waited: waited, retries: busyRetries) {
+        case .retry(let delay):
+            busyRetries += 1
+            Log.info("[agent] \(host) is still holding a session (\(holder)); "
+                     + "trying again in \(String(format: "%.1f", delay))s")
+            report(.waiting("Waiting for \(host) to let go of the last connection…"))
+            dropConnection(AgentError.hostBusy, after: delay)
+        case .giveUp:
+            Log.error("[agent] \(text)")
+            // Before the report, so whoever hears it already finds
+            // `willReconnect` false.
+            wantsConnection = false
+            report(.failed(text))
+            dropConnection(AgentError.hostBusy, reconnect: false)
+        }
+    }
+
+    /// Answer a host's offer of a takeover, if this Mac can.
+    /// - Returns: whether the request went out. False leaves the `busy` to be
+    ///   handled as the refusal it otherwise is.
+    private func askToTakeOver(challenge: String) -> Bool {
+        // Only with nothing already on the wire. The host reads one line here,
+        // and a request that went out before the `busy` arrived would be read
+        // in its place and never answered -- and its reply slot then filled by
+        // the answer to whatever was asked next.
+        guard let connection, pending.isEmpty, !authInFlight,
+              let token, !token.isEmpty else { return false }
+        var clientNonce = Data(count: 32)
+        let generated = clientNonce.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+        }
+        guard generated == errSecSuccess,
+              let request = Self.takeoverRequest(token: token, challenge: challenge,
+                                                 clientNonce: clientNonce, clientID: clientID),
+              var line = try? JSONSerialization.data(withJSONObject: request) else {
+            return false
+        }
+        line.append(0x0A)
+        Log.info("[agent] \(host) is holding a session; asking for it in case it is this Mac's")
+        takeoverInFlight = true
+        connection.send(content: line, completion: .contentProcessed { error in
+            if let error { Log.error("[agent] could not send the takeover request: \(error)") }
+        })
+        queue.asyncAfter(deadline: .now() + Self.takeoverTimeout) { [weak self, weak connection] in
+            guard let self, let connection, self.connection === connection,
+                  self.takeoverInFlight else { return }
+            Log.error("[agent] \(self.host) did not answer the takeover; dropping the connection")
+            self.dropConnection(AgentError.timedOut)
+        }
+        return true
     }
 
     deinit {
@@ -390,8 +627,8 @@ public final class AgentConnection {
 
     /// Whether this connection is up or will come back by itself. False once
     /// it has been disconnected, or the host has refused it in a way a retry
-    /// cannot fix (busy, impersonation, downgrade) — a caller waiting for it
-    /// should then say so rather than wait.
+    /// cannot fix (busy with another Mac, impersonation, downgrade) — a caller
+    /// waiting for it should then say so rather than wait.
     public var willReconnect: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -440,7 +677,15 @@ public final class AgentConnection {
         // runs the receive callback at the same moment — so the check for an
         // existing connection, the clearing of the buffer and the assignment of
         // the new socket all ran against it.
-        queue.async { [weak self] in self?.openConnection() }
+        queue.async { [weak self] in
+            guard let self else { return }
+            // Asked for, so not a reconnect: a `busy` from here is counted
+            // afresh rather than against a session lost some time ago.
+            self.sessionLostAt = nil
+            self.busySince = nil
+            self.busyRetries = 0
+            self.openConnection()
+        }
     }
 
     private func openConnection() {
@@ -469,6 +714,9 @@ public final class AgentConnection {
         // with it.
         greetingDisplaysPending = true
         reconnectedNeedsAnnouncing = false
+        sessionUp = false
+        takeoverAsked = false
+        takeoverInFlight = false
 
         guard let port = NWEndpoint.Port(rawValue: port) else {
             report(.failed("bad port"))
@@ -508,6 +756,7 @@ public final class AgentConnection {
                 Log.error("[agent] connection failed: \(error)")
                 self.report(.failed(error.localizedDescription))
                 self.failPending(error)
+                self.noteConnectionLost()
                 // Nil it, or `connect()` early-returns on a dead NWConnection
                 // for the rest of this object's life and no reconnect — manual
                 // or automatic — can ever succeed.
@@ -579,7 +828,10 @@ public final class AgentConnection {
     /// Backed off, because the usual causes — the host asleep, the agent
     /// restarting, the network gone — are not fixed by asking faster. Capped so
     /// a machine that comes back after an hour is still picked up.
-    private func scheduleReconnect() {
+    /// - Parameter fixedDelay: when to try, in place of the backoff -- for a
+    ///   host that is known to be about to let go, where doubling the wait
+    ///   only delays the moment it has.
+    private func scheduleReconnect(after fixedDelay: TimeInterval? = nil) {
         // Two paths report the same death — the receive completion and the
         // connection's own state handler — and both call this. Without the
         // guard a single drop counts as two attempts, so the backoff doubles
@@ -587,7 +839,7 @@ public final class AgentConnection {
         guard wantsConnection, connection == nil, !reconnectPending else { return }
         reconnectPending = true
         reconnectAttempt += 1
-        let delay = min(pow(2.0, Double(min(reconnectAttempt, 5))), 30.0)
+        let delay = fixedDelay ?? min(pow(2.0, Double(min(reconnectAttempt, 5))), 30.0)
         Log.info("[agent] reconnecting to \(host) in \(Int(delay))s (attempt \(reconnectAttempt))")
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
@@ -733,6 +985,10 @@ public final class AgentConnection {
             "cmd": "auth",
             "proof": Self.hex(Data(proof)),
             "cnonce": Self.hex(clientNonce),
+            // Which Mac this is, so the host can hand this session back to it
+            // -- and to no other -- if it reconnects while the host is still
+            // holding it. See `clientID`.
+            "client": clientID,
         ]
         // The same message that proves the token also carries an ephemeral
         // public point, so the channel's keys cost no extra round trip. The
@@ -1364,8 +1620,10 @@ public final class AgentConnection {
                 return
             }
             // Held, not dropped and not sent: see `authInFlight`. The wait is
-            // one round trip on a socket that is already open.
-            if self.authInFlight {
+            // one round trip on a socket that is already open. A takeover in
+            // flight holds them the same way, and for the same kind of reason:
+            // the host reads exactly one line before it answers.
+            if self.authInFlight || self.takeoverInFlight {
                 self.heldWhileAuthenticating.append((request, completion))
                 return
             }
@@ -1420,6 +1678,7 @@ public final class AgentConnection {
             }
             if isComplete || error != nil {
                 Log.info("[agent] connection closed")
+                self.noteConnectionLost()
                 self.stopHeartbeat()
                 // Nil it here too, not just fail the waiters: connect() refuses
                 // to run while `connection` is non-nil, so a closed-but-retained
@@ -1500,15 +1759,18 @@ public final class AgentConnection {
     ///   for a desync — a fresh connection is exactly what resynchronises — and
     ///   it is not for a host that failed the impersonation check, where
     ///   retrying just hands the same secret to the same stranger again.
-    private func dropConnection(_ error: Error, reconnect: Bool = true) {
+    /// - Parameter delay: when to come back, in place of the usual backoff.
+    private func dropConnection(_ error: Error, reconnect: Bool = true,
+                                after delay: TimeInterval? = nil) {
         if !reconnect { wantsConnection = false }
+        noteConnectionLost()
         connection?.cancel()
         connection = nil
         buffer.removeAll()
         stopHeartbeat()
         failPending(error)
         report(.disconnected)
-        if reconnect { scheduleReconnect() }
+        if reconnect { scheduleReconnect(after: delay) }
     }
 
     private func handle(_ message: [String: Any]) {
@@ -1518,6 +1780,18 @@ public final class AgentConnection {
         // must not consume a pending reply slot.
         switch type {
         case "hello":
+            // A takeover the host granted is answered by the greeting itself:
+            // from here the connection is an ordinary new one. What was held
+            // meanwhile goes once the framing has settled -- with the auth
+            // reply when a proof goes out below, and here when none does.
+            let tookOver = takeoverInFlight
+            takeoverInFlight = false
+            if tookOver {
+                Log.info("[agent] \(self.host) handed back this Mac's last session")
+            }
+            defer {
+                if tookOver, !authInFlight { releaseHeldRequests() }
+            }
             let host = message["host"] as? String ?? self.host
             let version = message["version"] as? Int ?? 0
             // Before any branch below needs it: a token supplied later by the
@@ -1672,16 +1946,10 @@ public final class AgentConnection {
             }
             return
         case "busy":
-            // The host is already serving another Mac and said so instead of
-            // leaving us in its accept backlog. Not a retryable failure: coming
-            // back in two seconds finds the same Mac still connected, and a
-            // reconnect loop against a busy host is indistinguishable from one
-            // against a broken one.
-            let message = message["message"] as? String
-                ?? "\(host) is already streaming to another Mac."
-            Log.error("[agent] \(message)")
-            report(.failed(message))
-            dropConnection(AgentError.hostBusy, reconnect: false)
+            // The host is already serving a Mac and said so instead of leaving
+            // us in its accept backlog. Which Mac, and so whether to wait, is
+            // `handleBusy`'s question.
+            handleBusy(message)
             return
         case "closed":
             // Also unsolicited. Distinct from the `window` reply, which carries
@@ -1720,6 +1988,12 @@ public final class AgentConnection {
             // connection — a window's dimensions arriving as the answer to a
             // clipboard read, and so on down the queue.
             greetingDisplaysPending = false
+            // A session again: whatever was lost has been got back, and the
+            // next `busy` starts a wait of its own.
+            sessionUp = true
+            sessionLostAt = nil
+            busySince = nil
+            busyRetries = 0
             let snapshot = Self.parseDisplays(message)
             setDisplays(snapshot)
             Log.info("[agent] \(snapshot.count) display(s): "
@@ -1785,8 +2059,8 @@ public final class AgentConnection {
     /// same windows under the same covering window, so the push comes again.
     ///
     /// Not `hello` or `auth`, which carry the handshake; not `displays`, which
-    /// is a reply as often as it is the greeting's push; and not `busy`, after
-    /// which the host closes the socket whatever is done with it.
+    /// is a reply as often as it is the greeting's push; and not `busy`, which
+    /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged"]
 
     static func read(line: Data) -> LineReading {
@@ -1876,9 +2150,10 @@ public enum AgentError: Error {
     case oversizedResponse
     /// The host stopped asking for a token it had previously required.
     case unexpectedDowngrade
-    /// The host is already serving another Mac. There is one capture, one encoder
-    /// and one media socket on that PC, so this is a fact about the host rather
-    /// than a transient failure.
+    /// The host is already serving a Mac. There is one capture, one encoder and
+    /// one media socket on that PC, so when the Mac is another one this is a
+    /// fact about the host rather than a transient failure; when it is this
+    /// Mac's own lost connection, it passes once the host lets go of it.
     case hostBusy
     /// The host did not answer in time. The connection is dropped and rebuilt.
     case timedOut

@@ -301,6 +301,14 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         statusLabel.textColor = DS.danger
     }
 
+    /// Something is being waited for and will resolve by itself -- the PC
+    /// letting go of this Mac's last connection -- so a spinner, not red.
+    func showWaiting(_ message: String) {
+        setSpinning(true)
+        statusLabel.stringValue = message
+        statusLabel.textColor = DS.textMuted
+    }
+
     /// A launch is slow — a cold start is many seconds — so the row grows a
     /// progress line in place rather than a modal taking the window over. The
     /// list stays interactive; nothing about it moves.
