@@ -226,6 +226,25 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertFalse(shown(in: window).contains("Not answering"))
     }
 
+    /// A probe sent after Tailscale came up answers for the tunnel as it is,
+    /// however late the window's own reading of Tailscale is by the time the
+    /// answer comes back. That answer is kept, not taken for one from before
+    /// and asked for again.
+    func testAnAnswerFromAfterTailscaleCameUpIsKept() throws {
+        let world = World(tailscale: .installedButOff, answering: [])
+        let (_, window) = try makeWindow(world)
+        // Up since the window last looked, and the probe slow enough for
+        // the window's reading to be due again when it answers.
+        world.tailscale = .connected(address: "100.88.1.4")
+        world.answering = ["100.101.102.103"]
+        world.delayNext("100.101.102.103", by: 3.2)
+        try pick("100.101.102.103", in: window)
+        waitUntil(5) { self.shown(in: window).contains("Reachable and paired") }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
+        XCTAssertEqual(world.probes, 1)
+    }
+
     /// Tailscale changing under an address on the home network says nothing
     /// new about it once it has answered, so it is not asked again.
     func testAHomeAddressThatAnsweredIsNotAskedAgain() throws {
