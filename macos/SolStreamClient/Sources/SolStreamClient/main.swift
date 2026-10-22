@@ -240,6 +240,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Flow
 
     private func showConnectWindow() {
+        // One at a time. Replacing one that was still open dropped its
+        // controller and left its window up, with nothing behind its buttons.
+        if let connectWindow, connectWindow.isOpen {
+            connectWindow.bringToFront()
+            return
+        }
         let window = ConnectWindow { [weak self] host in
             self?.showPicker(host: host)
         }
@@ -1522,6 +1528,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showConnectWindow()
     }
 
+    /// Whether a Host menu item has anything to act on. Disconnect was on with
+    /// nothing connected, and choosing it built a second connect window.
+    static func hostMenuAllows(_ action: Selector?, connected: Bool, streaming: Bool) -> Bool {
+        switch action {
+        case #selector(disconnectHost): return connected || streaming
+        case #selector(switchApp): return streaming
+        default: return true
+        }
+    }
+
 
     /// Flush before revealing: the point of the menu item is that someone is
     /// about to open the file, and the last few lines are usually the ones that
@@ -1583,5 +1599,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("Test screenshot saved to \(path) (\(data.count) bytes)")
         }
         NSApp.terminate(nil)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        Self.hostMenuAllows(menuItem.action,
+                            connected: agent != nil || picker != nil || session != nil,
+                            streaming: !appWindows.isEmpty)
     }
 }

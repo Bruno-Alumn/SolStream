@@ -312,6 +312,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         scheduleProbe()
     }
 
+    /// On screen or in the Dock, as opposed to closed or handed off to the
+    /// picker.
+    var isOpen: Bool { window.isVisible || window.isMiniaturized }
+
+    /// Forward again, for a window that is already open: `show` would start
+    /// a second discovery over the first.
+    func bringToFront() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     /// Open the host list, for `--test-dropdown`.
     func openDropdownForTesting() -> NSWindow? {
         hostDropdown.openForTesting()
