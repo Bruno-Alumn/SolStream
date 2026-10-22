@@ -24,9 +24,10 @@ fi
     -lsetupapi -lcfgmgr32 -lcomctl32 -lnewdev -liphlpapi -lole32 -loleaut32 -luuid \
     -ld2d1 -ldwrite -lwtsapi32
 echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
-# The updater's tests, with the clipboard's beside them since it is the one
-# C++ test program, compiled so this check covers them too. Run them on
-# Windows (or under Wine) with the test vector:
+# The updater's tests, with the clipboard's and the sound capture's reopening
+# (media/audio_reopen.h) beside them since it is the one C++ test program,
+# compiled so this check covers them too. Run them on Windows (or under Wine)
+# with the test vector:
 #   SolStreamUpdaterTests.exe ..\..\tests\update-vector
 "$CXX" -std=c++20 -municode -O2 -Wall -Wextra -static \
     "-DSOLSTREAM_VERSION_STRING=\"$VERSION\"" \

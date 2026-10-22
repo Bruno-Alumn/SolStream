@@ -16,8 +16,9 @@
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
 // takes of the virtual display's settings, when its device is waiting for a
-// restart, which adapter is Tailscale's, and the clipboard's privacy
-// markers and line endings.
+// restart, which adapter is Tailscale's, the clipboard's privacy
+// markers and line endings, and when the sound capture opens its device
+// again.
 
 #include "updater.cpp"
 
@@ -30,6 +31,7 @@
 
 #include "clipboard.h"
 #include "driver_install.h"
+#include "media/audio_reopen.h"
 #include "tailscale.h"
 #include "vdd.h"
 
@@ -1375,6 +1377,130 @@ void TestClipboardMarkers() {
     GlobalFree(data);
 }
 
+// ── The sound capture opening its device again ───────────────────────────────
+
+// Here because this is the one C++ test program; audio.cpp itself builds only
+// with MSVC. See media/audio_reopen.h.
+
+void TestSoundReadTrouble() {
+    using media::kPersistentFailureMs;
+    using media::ReadTrouble;
+
+    // A device that has gone, or an audio service that has stopped, is given
+    // up on at the first failed read: waiting brings neither back.
+    ReadTrouble gone;
+    CHECK(gone.GiveUp(AUDCLNT_E_DEVICE_INVALIDATED, 1000));
+    CHECK(gone.GiveUp(AUDCLNT_E_SERVICE_NOT_RUNNING, 1000));
+
+    // Any other failure only once it has gone on that long.
+    ReadTrouble other;
+    CHECK(!other.GiveUp(E_FAIL, 1000));
+    CHECK(!other.GiveUp(E_FAIL, 1000 + kPersistentFailureMs - 1));
+    CHECK(other.GiveUp(E_FAIL, 1000 + kPersistentFailureMs));
+    // Giving up ends the run, so the capture opened next starts afresh.
+    CHECK(!other.GiveUp(E_FAIL, 2000));
+
+    // A read that works in between ends the run too.
+    ReadTrouble interrupted;
+    CHECK(!interrupted.GiveUp(E_FAIL, 0));
+    interrupted.Worked();
+    CHECK(!interrupted.GiveUp(E_FAIL, kPersistentFailureMs + 10));
+    CHECK(!interrupted.GiveUp(E_FAIL, 2 * kPersistentFailureMs + 9));
+    CHECK(interrupted.GiveUp(E_FAIL, 2 * kPersistentFailureMs + 10));
+
+    // A device going in the middle of other failures is still given up on at once.
+    ReadTrouble mixed;
+    CHECK(!mixed.GiveUp(E_FAIL, 0));
+    CHECK(mixed.GiveUp(AUDCLNT_E_DEVICE_INVALIDATED, 1));
+}
+
+void TestSoundReopener() {
+    using media::kReopenRetryMs;
+    using media::kRepeatQuietMs;
+    using media::kSteadyMs;
+    using media::Reopener;
+    const HRESULT gone = AUDCLNT_E_DEVICE_INVALIDATED;
+    const HRESULT noDevice = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+
+    // Opened at once the first time, and then never more than twice a
+    // second, counting an open that worked as well as one that did not.
+    Reopener timing;
+    CHECK(timing.Due(0));
+    CHECK(timing.OpenFailed(noDevice, 0));
+    CHECK(!timing.Due(kReopenRetryMs - 1));
+    CHECK(timing.Due(kReopenRetryMs));
+    CHECK(timing.Opened(kReopenRetryMs));
+    CHECK(!timing.Due(2 * kReopenRetryMs - 1));
+    CHECK(timing.Due(2 * kReopenRetryMs));
+
+    // The first open is said, as the line that gives the device's format.
+    // So is losing a device that had been working, and opening the next one.
+    Reopener change;
+    CHECK(change.Opened(0));
+    CHECK(change.Lost(gone, 60000));
+    CHECK(change.Due(60000));
+    CHECK(change.Opened(60000));
+    // A second change soon after, once the new device has worked a while, is
+    // said again: it is new trouble, not a repeat.
+    CHECK(change.Lost(gone, 60000 + kSteadyMs));
+    CHECK(change.Opened(60000 + kSteadyMs));
+    // Another device becoming the default is said the same way.
+    CHECK(change.Lost(S_OK, 60000 + 2 * kSteadyMs));
+    CHECK(change.Opened(60000 + 2 * kSteadyMs));
+
+    // A device that opens and fails at once, over and over, is said once a
+    // minute rather than twice a second. In 130 rounds, 65 seconds, that is
+    // the first opening again, then the loss a minute on and the opening
+    // after it.
+    Reopener flapping;
+    CHECK(flapping.Opened(0));
+    CHECK(flapping.Lost(gone, 10));
+    int lines = 0;
+    uint64_t at = 0;
+    for (int round = 1; round <= 130; ++round) {
+        at = (uint64_t) round * kReopenRetryMs;
+        CHECK(flapping.Due(at));
+        if (flapping.Opened(at)) { ++lines; }
+        if (flapping.Lost(gone, at + 10)) { ++lines; }
+    }
+    CHECK(lines == 3);
+    // A different error is said whenever it comes.
+    CHECK(flapping.Due(at + kReopenRetryMs));
+    CHECK(flapping.OpenFailed(noDevice, at + kReopenRetryMs));
+
+    // A PC whose one sound device is a monitor that has been switched off: the
+    // loss is said, then the first failed open, then a repeat once a minute,
+    // and the open that finally works.
+    Reopener off;
+    CHECK(off.Opened(0));
+    CHECK(off.Lost(gone, 10000));
+    lines = 0;
+    int tries = 0;
+    for (uint64_t now = 10000; now < 10000 + 3 * kRepeatQuietMs; now += kReopenRetryMs) {
+        if (!off.Due(now)) { continue; }
+        ++tries;
+        if (off.OpenFailed(noDevice, now)) { ++lines; }
+    }
+    CHECK(tries == (int) (3 * kRepeatQuietMs / kReopenRetryMs));
+    CHECK(lines == 3);
+    CHECK(off.Opened(10000 + 3 * kRepeatQuietMs));
+    // Nothing more to say until the next trouble.
+    CHECK(!off.Opened(10000 + 3 * kRepeatQuietMs + kReopenRetryMs));
+}
+
+void TestSoundDefaultDevice() {
+    using media::DefaultDeviceMoved;
+    const std::wstring speakers = L"{0.0.0.00000000}.{speakers}";
+    const std::wstring headset = L"{0.0.0.00000000}.{headset}";
+    CHECK(!DefaultDeviceMoved(speakers, speakers));
+    CHECK(DefaultDeviceMoved(speakers, headset));
+    // No default device at all, or no answer, is not a move: the open
+    // device's own reads say whether it has gone.
+    CHECK(!DefaultDeviceMoved(speakers, L""));
+    // Nor is anything, when the open device's id was never known.
+    CHECK(!DefaultDeviceMoved(L"", headset));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1438,6 +1564,9 @@ int wmain(int argc, wchar_t** argv) {
     TestPickTailscaleAddress();
     TestClipboardLineEndings();
     TestClipboardMarkers();
+    TestSoundReadTrouble();
+    TestSoundReopener();
+    TestSoundDefaultDevice();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

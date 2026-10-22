@@ -6,6 +6,7 @@
 #include <objbase.h>
 #include <audioclientactivationparams.h>
 #include <opus.h>
+#include "audio_reopen.h"
 #include "log.h"
 
 #include <algorithm>
@@ -573,96 +574,195 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
     started.store(false);
 }
 
-/// Everything the PC plays, as the default output device is sent it.
-void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
-                std::atomic<bool>& started, std::atomic<uint64_t>& silent) {
+// ── The whole PC's sound ────────────────────────────────────────────────────
+
+/// The default output device, opened for loopback.
+struct Loopback {
     IMMDeviceEnumerator* enumerator = nullptr;
     IMMDevice* device = nullptr;
     IAudioClient* client = nullptr;
     IAudioCaptureClient* capture = nullptr;
     WAVEFORMATEX* format = nullptr;
+    /// The device's id, to tell when another one has become the default.
+    std::wstring id;
+};
 
+void CloseLoopback(Loopback& loopback) {
+    if (loopback.client) { loopback.client->Stop(); }
+    Release(loopback.capture);
+    Release(loopback.client);
+    Release(loopback.device);
+    Release(loopback.enumerator);
+    if (loopback.format) {
+        CoTaskMemFree(loopback.format);
+        loopback.format = nullptr;
+    }
+    loopback.id.clear();
+}
+
+/// Open whatever is the default output device now. Everything is asked for
+/// afresh, the enumerator included, because what is being replaced may have
+/// gone with the audio service that handed it out.
+HRESULT OpenLoopback(Loopback& loopback) {
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                                  __uuidof(IMMDeviceEnumerator), (void**) &enumerator);
+                                  __uuidof(IMMDeviceEnumerator), (void**) &loopback.enumerator);
     if (SUCCEEDED(hr)) {
-        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        hr = loopback.enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &loopback.device);
     }
     if (SUCCEEDED(hr)) {
-        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**) &client);
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(loopback.device->GetId(&id)) && id) {
+            loopback.id = id;
+            CoTaskMemFree(id);
+        }
+        hr = loopback.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                       (void**) &loopback.client);
     }
     if (SUCCEEDED(hr)) {
-        hr = client->GetMixFormat(&format);
+        hr = loopback.client->GetMixFormat(&loopback.format);
     }
     if (SUCCEEDED(hr)) {
         // LOOPBACK, so what is captured is what the speakers are being sent --
         // including the audio of the application being streamed, which is the
         // whole point. A 200 ms buffer is far more than the 5 ms packets need
         // and costs nothing, because it is drained every poll.
-        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                2000000, 0, format, nullptr);
+        hr = loopback.client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                         2000000, 0, loopback.format, nullptr);
     }
     if (SUCCEEDED(hr)) {
-        hr = client->GetService(__uuidof(IAudioCaptureClient), (void**) &capture);
+        hr = loopback.client->GetService(__uuidof(IAudioCaptureClient),
+                                         (void**) &loopback.capture);
     }
     if (SUCCEEDED(hr)) {
-        hr = client->Start();
+        hr = loopback.client->Start();
     }
-    if (FAILED(hr)) {
-        Log("[media] audio loopback unavailable (0x%08lX); streaming video only", hr);
-        Release(capture);
-        Release(client);
-        Release(device);
-        Release(enumerator);
-        if (format) { CoTaskMemFree(format); }
-        return;
+    if (FAILED(hr)) { CloseLoopback(loopback); }
+    return hr;
+}
+
+/// The id of the default output device, or nothing when there is none or the
+/// question fails.
+std::wstring DefaultDeviceId(IMMDeviceEnumerator* enumerator) {
+    std::wstring id;
+    IMMDevice* device = nullptr;
+    if (enumerator && SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device))) {
+        LPWSTR text = nullptr;
+        if (SUCCEEDED(device->GetId(&text)) && text) {
+            id = text;
+            CoTaskMemFree(text);
+        }
+        device->Release();
     }
+    return id;
+}
 
-    started.store(true);
-    Log("[media] audio loopback at %lu Hz, %u channels, %u bits",
-        format->nSamplesPerSec, format->nChannels, format->wBitsPerSample);
-
-    // To 48 kHz, whatever the endpoint is running at. The Mac's renderer is
-    // fixed at 48 kHz, and a rate field it ignores would be a silent half-speed
-    // bug rather than a loud one. It is also the rate Opus works at internally.
-    const double ratio = (double) format->nSamplesPerSec / (double) kWireRate;
+/// Everything the PC plays, as the default output device is sent it.
+///
+/// Whichever device that is at the moment. It used to be opened once, and
+/// a failed read taken for nothing yet: so when the device changed under a
+/// session -- a headset plugged in, a Bluetooth one taking over, the HDMI
+/// monitor carrying the sound switched off -- the capture failed, or went on
+/// capturing a device nothing played to, and the Mac heard nothing for the
+/// rest of the session without a line in the log to say why. Now the capture
+/// is opened again, at most twice a second, when its reads fail (see
+/// ReadTrouble) and when another device becomes the default. The Mac takes
+/// the pause in between as it takes any silence: it plays from its cushion,
+/// then waits for the next sound and cushions again.
+void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
+                std::atomic<bool>& started, std::atomic<uint64_t>& silent) {
+    Loopback loopback;
+    Reopener reopen;
+    ReadTrouble trouble;
     Resampler resampler;
+    double ratio = 1.0;
+    ULONGLONG nextDeviceCheck = 0;
     std::vector<float> converted, pending;
 
     while (running()) {
+        const ULONGLONG now = GetTickCount64();
+        if (!loopback.capture) {
+            if (!reopen.Due(now)) {
+                Sleep(kPacketMs);
+                continue;
+            }
+            const HRESULT hr = OpenLoopback(loopback);
+            if (FAILED(hr)) {
+                if (reopen.OpenFailed(hr, now)) {
+                    Log("[media] audio loopback unavailable (0x%08lX); trying again every half second",
+                        hr);
+                }
+                Sleep(kPacketMs);
+                continue;
+            }
+            if (reopen.Opened(now)) {
+                Log("[media] audio loopback at %lu Hz, %u channels, %u bits",
+                    loopback.format->nSamplesPerSec, loopback.format->nChannels,
+                    loopback.format->wBitsPerSample);
+            }
+            started.store(true);
+            // To 48 kHz, whatever the endpoint is running at. The Mac's renderer
+            // is fixed at 48 kHz, and a rate field it ignores would be a silent
+            // half-speed bug rather than a loud one. It is also the rate Opus
+            // works at internally. Worked out again for every device opened,
+            // since the next one need not run at the same rate, and nothing
+            // part-built by the last device's resampling is carried over.
+            ratio = (double) loopback.format->nSamplesPerSec / (double) kWireRate;
+            resampler = Resampler{};
+            nextDeviceCheck = now + kDefaultDeviceCheckMs;
+        }
+
+        if (now >= nextDeviceCheck) {
+            nextDeviceCheck = now + kDefaultDeviceCheckMs;
+            if (DefaultDeviceMoved(loopback.id, DefaultDeviceId(loopback.enumerator))) {
+                if (reopen.Lost(S_OK, now)) {
+                    Log("[media] another output device is now the default; capturing that one");
+                }
+                CloseLoopback(loopback);
+                continue;
+            }
+        }
+
         UINT32 available = 0;
-        if (FAILED(capture->GetNextPacketSize(&available)) || available == 0) {
+        HRESULT hr = loopback.capture->GetNextPacketSize(&available);
+        if (SUCCEEDED(hr) && available == 0) {
+            trouble.Worked();
             Sleep(kPacketMs);
             continue;
         }
-        while (available > 0) {
+        while (SUCCEEDED(hr) && available > 0) {
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD flags = 0;
-            if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
+            hr = loopback.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            if (FAILED(hr)) {
                 break;
             }
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 // Nothing is playing; see Packetizer on why nothing is sent.
                 silent.fetch_add(1);
             } else if (frames > 0) {
-                Convert(format, data, frames, converted);
+                Convert(loopback.format, data, frames, converted);
                 resampler.Run(converted, ratio, pending);
             }
-            capture->ReleaseBuffer(frames);
-            if (FAILED(capture->GetNextPacketSize(&available))) {
-                break;
-            }
+            loopback.capture->ReleaseBuffer(frames);
+            hr = loopback.capture->GetNextPacketSize(&available);
         }
         packetizer.Drain(pending);
+        if (SUCCEEDED(hr)) {
+            trouble.Worked();
+        } else if (trouble.GiveUp(hr, now)) {
+            if (reopen.Lost(hr, now)) {
+                Log("[media] the output device stopped answering (0x%08lX); opening the default one again",
+                    hr);
+            }
+            CloseLoopback(loopback);
+        } else {
+            Sleep(kPacketMs);
+        }
     }
 
-    client->Stop();
+    CloseLoopback(loopback);
     started.store(false);
-    Release(capture);
-    Release(client);
-    Release(device);
-    Release(enumerator);
-    if (format) { CoTaskMemFree(format); }
 }
 
 }  // namespace
