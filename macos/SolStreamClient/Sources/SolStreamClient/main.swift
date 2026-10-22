@@ -419,7 +419,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // "Starting…" to reach the same place. Checking first makes it
             // instant, and picking an application that is already running is a
             // request to see it, not to start a second copy. Only a window
-            // that is surely its own, though; see `LaunchMatch`.
+            // that is surely its own, though, or the one that could be; see
+            // `LaunchMatch`.
             picker?.showBusy("Opening \(app.name) on \(host)…")
             agent.windows { [weak self] windows in
                 DispatchQueue.main.async {
