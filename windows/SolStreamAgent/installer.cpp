@@ -1658,10 +1658,12 @@ bool UninstallSelf(std::string& error) {
         return false;
     }
     const std::wstring destination = InstallDirectory();
-    // Asked before the task is ended, for the reason StopInstalled asks before
-    // it forces: Task Scheduler ending the host is not the host quitting, and
-    // only quitting takes its icon away and gives the streamed windows back.
-    AskInstalledHostsToQuit(destination);
+    // Stopped before the task is ended, and asked first, as an update stops
+    // it: Task Scheduler ending the host is not the host quitting, and only
+    // quitting takes its icon away and gives the streamed windows back. Once
+    // it has, /end has nothing left to end.
+    StopInstalled(destination);
+    InstallLog("stopped what was running from the install directory");
     RunHidden(L"schtasks.exe /end /tn \"" + std::wstring(kTaskName) + L"\"");
     RunHidden(L"schtasks.exe /delete /tn \"" + std::wstring(kTaskName) + L"\" /f");
     // /delete answers non-zero both for "there was no such task", which is the
@@ -1684,8 +1686,6 @@ bool UninstallSelf(std::string& error) {
     } else {
         InstallLog("logon task removed");
     }
-    StopInstalled(destination);
-    InstallLog("stopped what was running from the install directory");
     // By program first, which catches every rule whatever it is called --
     // including the ones Windows writes itself when someone clicks Allow.
     DeleteRulesForProgram(destination);

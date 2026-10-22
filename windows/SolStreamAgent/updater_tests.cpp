@@ -749,9 +749,9 @@ void TestHostTaskStart() {
     CHECK(result.started == 1);
 }
 
-/// An update or an uninstall asks the running host to quit before anything is
-/// stopped by force: only quitting takes its tray icon away and gives back the
-/// windows it was streaming.
+/// An update or an uninstall, both through StopInstalled, asks the running
+/// host to quit before anything is stopped by force: only quitting takes its
+/// tray icon away and gives back the windows it was streaming.
 void TestStopInstalled() {
     std::vector<std::wstring> steps;
     StopInstalled(
