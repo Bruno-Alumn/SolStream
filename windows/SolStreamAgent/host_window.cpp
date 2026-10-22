@@ -768,12 +768,20 @@ Mark g_notice_mark = Mark::None;
 /// "Check for updates" chosen from the tray must get an answer in the window it
 /// opened.
 bool g_notice_about_update = false;
+/// The notice is the virtual display's set-up: its progress, which may be
+/// waiting on a Windows prompt that is explained only here, or its answer.
+/// Said over the hard failures too, for the same reason as an update's: Set up
+/// chosen from the tray must get its answer -- a restart to make, or why it
+/// failed -- in the window it opened, not hours later once the failure clears.
+bool g_notice_about_display = false;
 
-void SetNotice(std::wstring what, std::wstring why, Mark mark, bool about_update) {
+void SetNotice(std::wstring what, std::wstring why, Mark mark, bool about_update,
+               bool about_display = false) {
     g_notice = std::move(what);
     g_notice_detail = std::move(why);
     g_notice_mark = mark;
     g_notice_about_update = about_update;
+    g_notice_about_display = about_display;
 }
 
 /// Derive what to show from what the agent last reported. One banner at a time:
@@ -784,7 +792,8 @@ Screen Describe(const HostStatus& status) {
 
     // The two hard failures keep the headline and subtitle whatever else is
     // said. Their rows give way only to an update (g_notice_about_update), and
-    // to the virtual display's set-up while it runs.
+    // to the virtual display's set-up until its answer is dismissed
+    // (g_notice_about_display).
     bool failing = true;
     if (status.address.empty()) {
         screen.headline = L"Not reachable yet.";
@@ -820,12 +829,10 @@ Screen Describe(const HostStatus& status) {
     // offered — showing the question again underneath its own answer would be
     // absurd — but not the two hard failures above, which are still true.
     //
-    // Except while the virtual display is being set up: that may be waiting on
-    // a Windows prompt, and what to answer and where to look for it are said
-    // only here. Once it has finished, its answer waits behind them like any
-    // other.
-    const bool setting_up_display = g_job_running && g_host_job == HostJob::Display;
-    if (!g_notice.empty() && (!failing || g_notice_about_update || setting_up_display)) {
+    // Except an update's and the virtual display's set-up's, from the moment
+    // they start until their answer is dismissed (g_notice_about_update,
+    // g_notice_about_display).
+    if (!g_notice.empty() && (!failing || g_notice_about_update || g_notice_about_display)) {
         screen.what = g_notice;
         screen.why = g_notice_detail + (g_job_running ? PromptHint() : std::wstring());
         screen.mark = g_notice_mark;
@@ -2135,7 +2142,7 @@ void StartDisplayJob(HWND window) {
     g_display_result.clear();
     SetNotice(L"Setting the virtual display up…",
               L"Waiting for you to allow this in the Windows prompt.", Mark::NeedsYou,
-              false);
+              false, true);
     InvalidateRect(window, nullptr, FALSE);
 
     std::thread([window] {
@@ -2826,11 +2833,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     // Not called ready: until the restart the display may
                     // not have started at all.
                     SetNotice(L"Restart this PC to finish setting up the virtual display.",
-                              *text, Mark::NeedsYou, false);
+                              *text, Mark::NeedsYou, false, true);
                 } else {
                     SetNotice(ok ? L"The virtual display is ready."
                                  : L"SolStream couldn't set the virtual display up.",
-                              *text, ok ? Mark::Live : Mark::Failed, false);
+                              *text, ok ? Mark::Live : Mark::Failed, false, true);
                 }
                 g_host_job = HostJob::None;
             } else {
