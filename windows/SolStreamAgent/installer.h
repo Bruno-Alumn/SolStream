@@ -17,6 +17,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace solstream {
 
@@ -110,6 +111,11 @@ std::wstring InstallLogPath();
 /// `at_logon` and otherwise only when asked to. Exposed for its tests.
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
                           bool at_logon);
+
+/// The ways to name, for that task, the account whose SID `sid` spells, best
+/// first: DOMAIN\name when Windows can name it, then the SID itself. Empty
+/// when `sid` is not a SID. Exposed for its tests.
+std::vector<std::wstring> LogonTaskAccounts(const std::wstring& sid);
 
 /// The netsh command that writes one inbound allow rule for `program` on
 /// `ports`. Exposed for its tests.

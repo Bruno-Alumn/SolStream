@@ -20,6 +20,7 @@
 
 #include "updater.cpp"
 
+#include <sddl.h>
 #include <shellapi.h>
 #include <winioctl.h>
 #include <cfgmgr32.h>
@@ -521,6 +522,43 @@ void TestLogonTask() {
     // definition malformed.
     CHECK(LogonTaskXml(L"PC\\R&D", L"C:\\x", false).find(L"<UserId>PC\\R&amp;D</UserId>")
           != std::wstring::npos);
+}
+
+/// Who the logon task is registered for: the account a SID names, spelled as
+/// Windows names it and then as the SID. Never a guess -- the computer's name
+/// pasted in front of a user name named nobody on a domain PC.
+void TestLogonTaskAccounts() {
+    CHECK(LogonTaskAccounts(L"").empty());
+    CHECK(LogonTaskAccounts(L"PC\\me").empty());
+    CHECK(LogonTaskAccounts(L"S-1-5-18 & <x>").empty());
+
+    const std::vector<std::wstring> system = LogonTaskAccounts(L"S-1-5-18");
+    CHECK(!system.empty() && system.back() == L"S-1-5-18");
+    for (const std::wstring& account : system) {
+        CHECK(!account.empty());
+    }
+    if (system.size() == 2) {
+        CHECK(system.front().rfind(L"S-1-", 0) != 0);
+    }
+
+    // This process's own account, which is the candidate when no SID was
+    // passed: whatever Windows calls it, the SID itself is always offered.
+    HANDLE token = nullptr;
+    std::wstring own;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        alignas(TOKEN_USER) unsigned char buffer[256] = {0};
+        DWORD size = sizeof(buffer);
+        wchar_t* text = nullptr;
+        if (GetTokenInformation(token, TokenUser, buffer, size, &size)
+            && ConvertSidToStringSidW(((TOKEN_USER*) buffer)->User.Sid, &text)) {
+            own = text;
+            LocalFree(text);
+        }
+        CloseHandle(token);
+    }
+    CHECK(!own.empty());
+    const std::vector<std::wstring> mine = LogonTaskAccounts(own);
+    CHECK(!mine.empty() && mine.back() == own);
 }
 
 /// The two rules the installer writes. Every profile: on a PC at its
@@ -1072,6 +1110,7 @@ int wmain(int argc, wchar_t** argv) {
     TestEnvironment();
     TestInstallOptions();
     TestLogonTask();
+    TestLogonTaskAccounts();
     TestFirewallRule();
     TestQualifyCommand();
     TestNoDowngrade();

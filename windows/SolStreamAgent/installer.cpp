@@ -644,58 +644,6 @@ void RemoveUninstallEntry() {
     }
 }
 
-/// The account the logon task belongs to: whoever is sitting at this PC.
-///
-/// This was GetUserNameW, under a comment saying it picked the console user. It
-/// did not, and the case where the two differ is the ordinary one on a managed
-/// machine. UAC is allowed to elevate to a DIFFERENT account — that is what
-/// happens whenever a standard user, who cannot elevate at all on their own, has
-/// somebody type an administrator's name and password at the prompt for them —
-/// and from inside the elevated half GetUserNameW then answers with that
-/// administrator. So the task that starts SolStream at logon was registered
-/// against the wrong person: it would start when the administrator logged on,
-/// into a session with no Mac waiting for it, and never for the user who asked.
-///
-/// The unelevated half cannot get this wrong, because it IS the person at the
-/// keyboard, so it puts its own SID on the command line it elevates with (see
-/// OptionArguments) and this reads it back. A SID rather than a name because a
-/// name is ambiguous without the domain it came from, and the old code guessed
-/// that domain by pasting the computer name in front — which is simply untrue
-/// for a domain account. ConvertStringSidToSidW also refuses anything that is
-/// not a SID, which is worth having when the result is pasted into XML.
-///
-/// GetUserNameW remains the fallback, for the case where no SID was passed:
-/// SolStream.exe --install typed at an already-elevated prompt, where the
-/// account running the install is the only candidate there is. It is still the
-/// wrong answer for a setup window that was itself started with "Run as
-/// administrator" under a second account, because then there is no unelevated
-/// half of SolStream anywhere to have been asked.
-std::wstring LogonTaskAccount() {
-    const std::wstring passed = SwitchValue(kInvokingUserSwitch);
-    PSID sid = nullptr;
-    if (!passed.empty() && ConvertStringSidToSidW(passed.c_str(), &sid)) {
-        wchar_t name[256] = {0};
-        DWORD name_size = 256;
-        wchar_t domain[256] = {0};
-        DWORD domain_size = 256;
-        SID_NAME_USE kind = SidTypeUnknown;
-        const bool named = LookupAccountSidW(nullptr, sid, name, &name_size, domain,
-                                             &domain_size, &kind) != 0;
-        LocalFree(sid);
-        if (named) {
-            return domain[0] != L'\0' ? std::wstring(domain) + L"\\" + name
-                                      : std::wstring(name);
-        }
-    }
-    wchar_t user[256] = {0};
-    DWORD user_size = 256;
-    GetUserNameW(user, &user_size);
-    wchar_t machine[256] = {0};
-    DWORD machine_size = 256;
-    GetComputerNameW(machine, &machine_size);
-    return std::wstring(machine) + L"\\" + user;
-}
-
 /// Text safe to put between XML tags. The account comes from LookupAccountSidW
 /// and the path from the environment, and an `&` in either -- legal in a
 /// Windows user name -- made the whole definition malformed.
@@ -716,6 +664,60 @@ std::wstring XmlEscape(const std::wstring& text) {
 }
 
 }  // namespace
+
+/// Who the logon task belongs to: whoever is sitting at this PC.
+///
+/// This was GetUserNameW, under a comment saying it picked the console user. It
+/// did not, and the case where the two differ is the ordinary one on a managed
+/// machine. UAC is allowed to elevate to a DIFFERENT account — that is what
+/// happens whenever a standard user, who cannot elevate at all on their own, has
+/// somebody type an administrator's name and password at the prompt for them —
+/// and from inside the elevated half GetUserNameW then answers with that
+/// administrator. So the task that starts SolStream at logon was registered
+/// against the wrong person: it would start when the administrator logged on,
+/// into a session with no Mac waiting for it, and never for the user who asked.
+///
+/// The unelevated half cannot get this wrong, because it IS the person at the
+/// keyboard, so it puts its own SID on the command line it elevates with (see
+/// OptionArguments) and RegisterLogonTask reads it back. A SID rather than a
+/// name because a name is ambiguous without the domain it came from.
+/// ConvertStringSidToSidW also refuses anything that is not a SID, which is
+/// worth having when the result is pasted into XML.
+///
+/// Two spellings of that one account, best first. DOMAIN\name as Windows
+/// itself names it, which is the form every install so far has registered
+/// with; then the SID as it is, which Task Scheduler takes too and which needs
+/// nobody to answer for the name -- the lookup can fail for a domain account
+/// whose domain controller is out of reach. Whenever the lookup failed, or no
+/// SID was passed, this used to paste the computer's name in front of what
+/// GetUserNameW said, which for a domain or Entra ID account names an account
+/// that does not exist, or a local one that happens to share the name.
+std::vector<std::wstring> LogonTaskAccounts(const std::wstring& sid_text) {
+    PSID sid = nullptr;
+    if (sid_text.empty() || !ConvertStringSidToSidW(sid_text.c_str(), &sid)) {
+        return {};
+    }
+    std::vector<std::wstring> accounts;
+    wchar_t name[256] = {0};
+    DWORD name_size = 256;
+    wchar_t domain[256] = {0};
+    DWORD domain_size = 256;
+    SID_NAME_USE kind = SidTypeUnknown;
+    if (LookupAccountSidW(nullptr, sid, name, &name_size, domain, &domain_size, &kind)
+        && name[0] != L'\0') {
+        accounts.push_back(domain[0] != L'\0' ? std::wstring(domain) + L"\\" + name
+                                              : std::wstring(name));
+    }
+    // Written back out by Windows rather than passed through, so what goes into
+    // the XML is a SID in Windows' own spelling and nothing else.
+    wchar_t* text = nullptr;
+    if (ConvertSidToStringSidW(sid, &text) && text != nullptr) {
+        accounts.push_back(text);
+        LocalFree(text);
+    }
+    LocalFree(sid);
+    return accounts;
+}
 
 /// One rule, naming both the program and the ports it may use.
 ///
@@ -809,17 +811,7 @@ const IID kIidTaskService = {0x2faba4c7, 0x4da9, 0x4013,
 /// to sit in %TEMP% -- writable by every unelevated process of the same user,
 /// any of which could rewrite RunLevel or Command between the write and the
 /// read and come away with an elevated task that runs at every logon.
-/// Register the task that starts the installed host. With `at_logon` it runs at
-/// every logon; without, it has no trigger at all and only runs when asked to --
-/// which is still how an install or an update starts the new copy, so turning
-/// "start when I log in" off no longer means an update leaves nothing running.
-bool RegisterLogonTask(const std::wstring& destination, std::string& error,
-                       bool at_logon = true) {
-    // Whoever asked for the install, not whoever approved it: an administrator
-    // setting this up for somebody else must not register a task that runs as
-    // themselves. How the difference is worked out is in LogonTaskAccount.
-    const std::wstring xml = LogonTaskXml(LogonTaskAccount(), destination, at_logon);
-
+bool RegisterTaskDefinition(const std::wstring& xml, std::string& error) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ITaskService* service = nullptr;
     ITaskFolder* root = nullptr;
@@ -866,6 +858,49 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
         return false;
     }
     return true;
+}
+
+/// Register the task that starts the installed host. With `at_logon` it runs at
+/// every logon; without, it has no trigger at all and only runs when asked to --
+/// which is still how an install or an update starts the new copy, so turning
+/// "start when I log in" off no longer means an update leaves nothing running.
+bool RegisterLogonTask(const std::wstring& destination, std::string& error,
+                       bool at_logon = true) {
+    // Whoever asked for the install, not whoever approved it: an administrator
+    // setting this up for somebody else must not register a task that runs as
+    // themselves. How the difference is worked out is in LogonTaskAccounts.
+    //
+    // With no SID passed -- SolStream.exe --install typed at an elevated
+    // prompt, or a setup window started with "Run as administrator", where
+    // there is no unelevated half to have asked -- the account running this
+    // is the only candidate there is, and its own token says exactly which
+    // account that is.
+    std::vector<std::wstring> accounts = LogonTaskAccounts(SwitchValue(kInvokingUserSwitch));
+    if (accounts.empty()) {
+        accounts = LogonTaskAccounts(CurrentUserSid());
+    }
+    if (accounts.empty()) {
+        error = "Could not tell which account to start SolStream for.";
+        return false;
+    }
+    // Each spelling in turn, keeping the first one's answer: it is the form
+    // that has always worked, so its failure is the one worth reporting.
+    for (size_t i = 0; i < accounts.size(); ++i) {
+        std::string attempt;
+        if (RegisterTaskDefinition(LogonTaskXml(accounts[i], destination, at_logon),
+                                   attempt)) {
+            if (i > 0) {
+                InstallLog("registered the task for " + ToUtf8(accounts[i]));
+            }
+            return true;
+        }
+        InstallLog("could not register the task for " + ToUtf8(accounts[i]) + ": "
+                   + attempt);
+        if (i == 0) {
+            error = attempt;
+        }
+    }
+    return false;
 }
 
 /// The name of this run's result file, chosen by the process that is going to
