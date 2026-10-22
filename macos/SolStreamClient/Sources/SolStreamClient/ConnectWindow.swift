@@ -72,7 +72,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var probe: DispatchWorkItem?
     /// Which probe is the latest. Cancelling one that is already connecting
     /// does not stop it, and its answer -- given before Tailscale came up,
-    /// say -- would otherwise land after the fresh probe was asked for.
+    /// say -- would otherwise land after the fresh probe was asked for. The
+    /// same goes for a recheck an older probe asked for (`recheckLater`).
     private var probeGeneration = 0
     /// Set once a host is picked or typed in this window. Until then the host on
     /// show is only what was remembered from last time, and discovery is allowed
@@ -667,9 +668,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// shown and still not answering. A Mac that just woke, or a tunnel still
     /// coming up, answers a moment later; the window should notice rather than
     /// wait for somebody to reopen it.
+    ///
+    /// Only if no probe was asked for meanwhile: that one has the next
+    /// recheck. Every failed probe asks for one, so a probe asked for in
+    /// between -- Tailscale going on or off, say -- started a second round
+    /// of rechecks beside the first, and each change added another to the
+    /// connections the agent saw for as long as the window was up.
     private func recheckLater(_ address: String) {
+        let generation = probeGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-            guard let self, self.window.isVisible, self.state.address == address,
+            guard let self, self.probeGeneration == generation,
+                  self.window.isVisible, self.state.address == address,
                   self.state.isReachable != true, !self.searchingRoutes else { return }
             self.scheduleProbe()
         }
