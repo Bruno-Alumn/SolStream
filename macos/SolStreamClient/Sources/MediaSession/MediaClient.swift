@@ -93,6 +93,9 @@ public final class MediaClient {
     private var unacked: [(seq: UInt32, blob: Data)] = []
     private var inputAck: UInt32 = 0
     private var lastInputSentAt: UInt64 = 0
+    /// When each release kept past a give-up was first kept, by sequence; see
+    /// `keptPastGivingUp`. Guarded by `stateLock`.
+    private var releasesKeptSince: [UInt32: UInt64] = [:]
 
     private var needKeyframe = false
     /// Set by damage, cleared by the IDR that repairs it. While it is set,
@@ -487,6 +490,32 @@ public final class MediaClient {
         sendInputBatch(Array(batch))
     }
 
+    /// How long a release is kept, and repeated, once the host has stopped
+    /// acknowledging: long enough to outlast a Wi-Fi roam, and as long as this
+    /// side waits on a silent host before ending the session -- after which
+    /// the host lets go of everything the session held anyway.
+    static let releaseKeepNanos: UInt64 = 5_000_000_000
+
+    /// What of the unacknowledged input outlives a give-up, and since when
+    /// each of it has been kept.
+    ///
+    /// The releases still owed -- see `SMTInput.releasesStillOwed` -- each
+    /// until `releaseKeepNanos` after it was first kept. Pure, so the rule
+    /// can be tested without a session or a clock.
+    static func keptPastGivingUp(_ pending: [(seq: UInt32, blob: Data)],
+                                 keptSince: [UInt32: UInt64], now: UInt64)
+        -> (events: [(seq: UInt32, blob: Data)], keptSince: [UInt32: UInt64]) {
+        var events: [(seq: UInt32, blob: Data)] = []
+        var since: [UInt32: UInt64] = [:]
+        for event in SMTInput.releasesStillOwed(pending) {
+            let first = keptSince[event.seq] ?? now
+            guard now <= first || now - first < releaseKeepNanos else { continue }
+            events.append(event)
+            since[event.seq] = first
+        }
+        return (events, since)
+    }
+
     private func sendInputBatch(_ events: [(seq: UInt32, blob: Data)]) {
         guard !events.isEmpty else { return }
         var packet = Data(capacity: 4 + events.reduce(0) { $0 + $1.blob.count + 4 })
@@ -553,18 +582,23 @@ public final class MediaClient {
             let pending = self.unacked.filter { $0.seq > self.inputAck }
             let sinceSent = Self.millis(since: self.lastInputSentAt)
             let giveUp = sinceSent > 300
+            var repeats: [(seq: UInt32, blob: Data)] = []
             if !pending.isEmpty && !giveUp {
-                self.stateLock.unlock()
-                self.sendInputBatch(Array(pending.suffix(8)))
-            } else {
-                if giveUp && !pending.isEmpty {
-                    // 300 ms of a host that will not acknowledge is a host that
-                    // is not listening. Holding the events forever would repeat
-                    // them into a session that has moved on.
-                    self.unacked.removeAll()
-                }
-                self.stateLock.unlock()
+                repeats = Array(pending.suffix(8))
+            } else if giveUp && !pending.isEmpty {
+                // 300 ms of a host that will not acknowledge is a host that
+                // is not listening. Holding the events forever would repeat
+                // them into a session that has moved on -- all but the
+                // releases still owed, which are repeated ten times a second
+                // until the host has them or they are five seconds old.
+                let kept = Self.keptPastGivingUp(pending, keptSince: self.releasesKeptSince,
+                                                 now: DispatchTime.now().uptimeNanoseconds)
+                self.unacked = kept.events
+                self.releasesKeptSince = kept.keptSince
+                if ticks % 10 == 0 { repeats = Array(kept.events.suffix(8)) }
             }
+            self.stateLock.unlock()
+            if !repeats.isEmpty { self.sendInputBatch(repeats) }
 
             // Still holding for a keyframe a quarter-second after asking, with
             // none of it arriving: the request or the IDR was lost. Ask again

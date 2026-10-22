@@ -136,6 +136,53 @@ public enum SMTInput {
         event(.keyScan, be16(code) + Data([pressed ? 1 : 0, modifiers.rawValue]))
     }
 
+    /// The key or button an event presses or lets go of, and whether it lets
+    /// go; nil for an event that holds nothing down -- a move, a scroll, text.
+    ///
+    /// A key by virtual key and the same key by scan code are different
+    /// targets, which costs nothing: a session sends one kind or the other.
+    static func holdTarget(of event: Data) -> (target: UInt32, releases: Bool)? {
+        let bytes = [UInt8](event)
+        guard bytes.count >= 2, let kind = Kind(rawValue: bytes[0]) else { return nil }
+        let body = bytes.dropFirst(2)
+        guard body.count == Int(bytes[1]) else { return nil }
+        let kindBits = UInt32(kind.rawValue) << 16
+        switch kind {
+        case .button where body.count >= 2:
+            return (kindBits | UInt32(body[body.startIndex]), body[body.startIndex + 1] == 0)
+        case .key, .keyScan:
+            guard body.count >= 3 else { return nil }
+            let code = UInt32(body[body.startIndex]) << 8 | UInt32(body[body.startIndex + 1])
+            return (kindBits | code, body[body.startIndex + 2] == 0)
+        default:
+            return nil
+        }
+    }
+
+    /// The releases among `events` that nothing after them has superseded:
+    /// for each key and button, its last event, if that event lets it go.
+    ///
+    /// What must outlive the moment MediaClient stops repeating a host that
+    /// is not acknowledging. Everything else can go: a move or a scroll is
+    /// stale by then, and a press no longer wanted. But a release dropped
+    /// there was a key or button held on the PC with nothing left anywhere to
+    /// let it go -- let go of W during a Wi-Fi roam and the character walked
+    /// on until W was pressed again. Only the last event for each, so an old
+    /// release can never arrive after a newer press of the same key and let
+    /// go of a key the hand is holding. `events` must be in sequence order.
+    static func releasesStillOwed(_ events: [(seq: UInt32, blob: Data)])
+        -> [(seq: UInt32, blob: Data)] {
+        var last: [UInt32: Int] = [:]
+        for (index, event) in events.enumerated() {
+            if let hold = holdTarget(of: event.blob) { last[hold.target] = index }
+        }
+        return events.enumerated().compactMap { index, event in
+            guard let hold = holdTarget(of: event.blob), hold.releases,
+                  last[hold.target] == index else { return nil }
+            return event
+        }
+    }
+
     /// Characters no keycode can express, as UTF-16 code units.
     ///
     /// Several events rather than one, because the length byte above stops at
