@@ -529,7 +529,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 // not a host anyone wants offered back to them.
                 if reachable { Self.remember(host: address) }
                 self.refresh()
-                if !reachable { self.recheckLater(address) }
+                if !reachable { self.recheckLater(address, generation: generation) }
             }
         }
         probe = work
@@ -645,6 +645,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         guard !candidates.isEmpty else { return false }
         searchingRoutes = true
+        // The probe that failed, whose recheck this search may ask for.
+        let generation = probeGeneration
         let reach = self.reach
         let askedOnTailscale = state.askedOnTailscale
         // All at once, not one after another: a dead address costs its whole
@@ -684,7 +686,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                     // -- and try the shown address again shortly, since the
                     // likeliest cause is a network that is still coming up.
                     self.refresh()
-                    self.recheckLater(failed)
+                    self.recheckLater(failed, generation: generation)
                     return
                 }
                 Log.info("[connect] \(failed) is not answering from this network; "
@@ -706,13 +708,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// coming up, answers a moment later; the window should notice rather than
     /// wait for somebody to reopen it.
     ///
-    /// Only if no probe was asked for meanwhile: that one has the next
-    /// recheck. Every failed probe asks for one, so a probe asked for in
-    /// between -- Tailscale going on or off, say -- started a second round
-    /// of rechecks beside the first, and each change added another to the
-    /// connections the agent saw for as long as the window was up.
-    private func recheckLater(_ address: String) {
-        let generation = probeGeneration
+    /// Only if no probe was asked for since the one that failed, given as
+    /// its `generation`: that one has the next recheck. Every failed probe
+    /// asks for one, so a probe asked for in between -- Tailscale going on
+    /// or off, say -- started a second round of rechecks beside the first,
+    /// and each change added another to the connections the agent saw for
+    /// as long as the window was up. The failed probe's own generation, not
+    /// the latest when this is asked: the refresh before it can ask for a
+    /// probe, which was then rechecked when the failed one's five seconds
+    /// were up rather than its own.
+    private func recheckLater(_ address: String, generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, self.probeGeneration == generation,
                   self.window.isVisible, self.state.address == address,
