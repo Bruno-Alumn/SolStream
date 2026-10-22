@@ -67,6 +67,43 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertFalse(hold.reaskDue(now: ms(2000)))
     }
 
+    /// A session opens holding, and asks at once. Before the first IDR there is
+    /// nothing a P-frame could be decoded against.
+    func testNothingIsDecodedBeforeTheFirstIdrAndTheFirstRequestIsImmediate() {
+        var hold = KeyframeHold()
+        XCTAssertTrue(hold.holding)
+        XCTAssertTrue(hold.reaskDue(now: ms(0)), "the opening request")
+        XCTAssertFalse(hold.reaskDue(now: ms(10)))
+
+        XCTAssertEqual(hold.picture(frameId: 3, isIdr: false, now: ms(20)), .hold)
+        XCTAssertEqual(hold.picture(frameId: 4, isIdr: false, now: ms(36)), .hold)
+        XCTAssertTrue(hold.reaskDue(now: ms(251)))
+
+        XCTAssertEqual(hold.picture(frameId: 5, isIdr: true, now: ms(260)), .decode)
+        XCTAssertEqual(hold.picture(frameId: 6, isIdr: false, now: ms(276)), .decode)
+    }
+
+    /// A P-frame whose predecessor never reached the decoder is not decoded,
+    /// even if nothing reported the predecessor lost.
+    func testOnlyThePictureStraightAfterTheLastOneDecodedIsDecoded() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.picture(frameId: 2, isIdr: false, now: ms(16)), .decode)
+        XCTAssertEqual(hold.picture(frameId: 4, isIdr: false, now: ms(48)), .holdAndAsk)
+        XCTAssertEqual(hold.picture(frameId: 5, isIdr: false, now: ms(64)), .hold)
+        XCTAssertEqual(hold.picture(frameId: 6, isIdr: true, now: ms(90)), .decode)
+        XCTAssertEqual(hold.picture(frameId: 7, isIdr: false, now: ms(106)), .decode)
+    }
+
+    func testAPictureOlderThanOneAlreadyDecodedIsIgnored() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 5, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.picture(frameId: 6, isIdr: false, now: ms(16)), .decode)
+        XCTAssertEqual(hold.picture(frameId: 4, isIdr: false, now: ms(20)), .ignore)
+        XCTAssertFalse(hold.holding)
+        XCTAssertEqual(hold.picture(frameId: 7, isIdr: false, now: ms(32)), .decode)
+    }
+
     /// The clock is read before the lock is taken, so `now` can be older than a
     /// stamp another thread has just written. That must read as no time at all
     /// rather than trap.
@@ -162,6 +199,19 @@ final class VideoRecoveryPipelineTests: XCTestCase {
         pipe.send(13)
         XCTAssertEqual(pipe.decoded, [1, 2, 3, 4, 5, 10, 11, 12, 13])
         XCTAssertEqual(pipe.asks, 1)
+    }
+
+    /// The host's first IDR went nowhere, because it was encoded before the
+    /// Mac had said where it was, so the session's first pictures are
+    /// P-frames. None of them reaches the decoder.
+    func testPFramesBeforeTheFirstIdrAreHeld() {
+        let pipe = Pipeline()
+        pipe.send(2)
+        pipe.send(3)
+        XCTAssertEqual(pipe.decoded, [])
+        pipe.send(4, idr: true)
+        pipe.send(5)
+        XCTAssertEqual(pipe.decoded, [4, 5])
     }
 
     /// A datagram of a picture older than the IDR turns up after the IDR has

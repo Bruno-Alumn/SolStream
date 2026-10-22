@@ -119,7 +119,13 @@ public final class MediaClient {
             self.lastCompleteFrame = picture.frameId
             let verdict = self.hold.picture(frameId: picture.frameId, isIdr: picture.isIdr,
                                             now: DispatchTime.now().uptimeNanoseconds)
+            if verdict == .holdAndAsk { self.needKeyframe = true }
             self.stateLock.unlock()
+            if verdict == .holdAndAsk {
+                self.sendFeedback()
+                Log.debug("[media] frame \(picture.frameId) does not follow the last one "
+                          + "decoded; asking for a keyframe")
+            }
             guard verdict == .decode else { return }
             self.onVideo?(picture.bytes, picture.isIdr)
         }
@@ -254,8 +260,17 @@ public final class MediaClient {
         thread.start()
         receiveThread = thread
 
-        startTimer()
         sendPing()
+        // And the first keyframe request straight after it, rather than on the
+        // first feedback tick or once a P-frame has shown the decoder it has
+        // nothing to start from. See `KeyframeHold.holding`. Before the timer
+        // starts, so it is this request and not the timer's.
+        stateLock.lock()
+        let askNow = hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds)
+        if askNow { needKeyframe = true }
+        stateLock.unlock()
+        if askNow { sendFeedback() }
+        startTimer()
         Log.info("[media] streaming from \(host):\(port)")
         return true
     }

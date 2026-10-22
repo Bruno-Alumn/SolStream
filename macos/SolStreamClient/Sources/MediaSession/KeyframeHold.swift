@@ -32,10 +32,23 @@ struct KeyframeHold {
     static let reaskMs: Double = 250
 
     /// P-frames are being kept from the decoder until an IDR arrives.
-    private(set) var holding = false
+    ///
+    /// From the start, too: a P-frame before the first IDR has nothing to be
+    /// decoded against. And at the start of every session the first picture to
+    /// arrive WAS a P-frame, because a host that predates asking itself for an
+    /// IDR when the Mac first speaks encodes its first one before it knows
+    /// where the Mac is, and sends it nowhere. The decoder found no parameter
+    /// sets in that P-frame and asked for an IDR on the next feedback tick,
+    /// after the stream had already been called live. MediaClient now asks
+    /// as the session opens instead, which such a host answers at once and a
+    /// newer one, already sending, ignores under its rate limit.
+    private(set) var holding = true
     /// The last IDR handed to the decoder.
     private(set) var lastIdr: UInt32?
-    /// When the host was last asked for a keyframe, in uptime nanoseconds.
+    /// The last picture handed to the decoder.
+    private(set) var lastDecoded: UInt32?
+    /// When the host was last asked for a keyframe, in uptime nanoseconds, or
+    /// nil before the first request.
     private var askedAt: UInt64?
 
     /// A complete picture.
@@ -43,9 +56,23 @@ struct KeyframeHold {
         if isIdr {
             holding = false
             lastIdr = frameId
+            lastDecoded = frameId
             return .decode
         }
-        return holding ? .hold : .decode
+        // Older than a picture already decoded: nothing can use it.
+        if let lastDecoded, frameId <= lastDecoded { return .ignore }
+        if holding { return .hold }
+        // Only the picture straight after the last one decoded. Every way a
+        // picture can fail to arrive is reported as damage before the next one
+        // gets here, and the hold is already on by then; this is what keeps a
+        // P-frame from being decoded against a missing reference if one of them
+        // ever is not.
+        if let lastDecoded, frameId == lastDecoded &+ 1 {
+            self.lastDecoded = frameId
+            return .decode
+        }
+        holding = true
+        return ask(now) ? .holdAndAsk : .hold
     }
 
     /// A picture that will never be complete.
@@ -64,11 +91,15 @@ struct KeyframeHold {
         return ask(now) ? .holdAndAsk : .hold
     }
 
-    /// Whether the timer should ask again.
+    /// Whether to ask (again) now: at once when nothing has been asked yet,
+    /// which is the session opening, and otherwise once the last request has
+    /// gone unanswered for a quarter-second.
     mutating func reaskDue(now: UInt64) -> Bool {
-        guard holding, let askedAt else { return false }
-        guard Self.millis(from: askedAt, to: now) > Self.reaskMs else { return false }
-        self.askedAt = now
+        guard holding else { return false }
+        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.reaskMs {
+            return false
+        }
+        askedAt = now
         return true
     }
 
