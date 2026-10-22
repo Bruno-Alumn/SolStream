@@ -370,17 +370,7 @@ void InputInjector::Reset() {
 
 void InputInjector::MatchCapsLock(bool wanted) {
     const uint64_t now = GetTickCount64();
-    if (CapsLockNeedsReading(capsLock_, now)) {
-        const std::optional<bool> on = CapsLockIsOn();
-        if (!on) {
-            // Nothing to go on, so nothing is pressed and nothing believed:
-            // the next key asks again.
-            capsLock_ = CapsLockBelief{};
-            return;
-        }
-        CapsLockNoted(capsLock_, *on, now);
-    }
-    if (capsLock_.on == wanted) {
+    if (!CapsLockPressNeeded(capsLock_, CapsLockIsOn, wanted, now)) {
         return;
     }
     INPUT toggle[2];

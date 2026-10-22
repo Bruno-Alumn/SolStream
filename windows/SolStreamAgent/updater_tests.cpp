@@ -1946,6 +1946,40 @@ void TestCapsLock() {
     belief = CapsLockBelief{};
     CHECK(!belief.known && CapsLockNeedsReading(belief, 0));
 
+    // Whether to press. Windows is asked when the belief needs it, and what
+    // it says decides.
+    int asked = 0;
+    const auto says = [&asked](std::optional<bool> answer) {
+        return [&asked, answer]() { ++asked; return answer; };
+    };
+    CHECK(CapsLockPressNeeded(belief, says(false), true, 20000));
+    CHECK(asked == 1 && belief.known && !belief.on);
+    belief = CapsLockBelief{};
+    CHECK(!CapsLockPressNeeded(belief, says(true), true, 20000));
+    CHECK(belief.known && belief.on);
+
+    // Windows cannot be asked and nothing is known: nothing pressed, and
+    // still nothing known, so the next key asks again.
+    belief = CapsLockBelief{};
+    asked = 0;
+    CHECK(!CapsLockPressNeeded(belief, says(std::nullopt), true, 20000));
+    CHECK(!CapsLockPressNeeded(belief, says(std::nullopt), false, 20000));
+    CHECK(asked == 2 && !belief.known);
+
+    // A belief past its second is not acted on when Windows cannot be asked:
+    // nothing pressed, and it is forgotten rather than trusted.
+    CapsLockNoted(belief, false, 30000);
+    CHECK(!CapsLockPressNeeded(belief, says(std::nullopt), true, 30000 + kCapsLockTrustMs));
+    CHECK(!belief.known);
+
+    // Within its second, the belief decides and Windows is not asked: just
+    // after a press from here, it may not have caught up.
+    CapsLockNoted(belief, true, 40000);
+    asked = 0;
+    CHECK(!CapsLockPressNeeded(belief, says(false), true, 40500));
+    CHECK(CapsLockPressNeeded(belief, says(std::nullopt), false, 40500));
+    CHECK(asked == 0 && belief.known && belief.on);
+
     // The press itself: Caps Lock down and up by virtual key, so a Japanese
     // layout's 英数 at that place is not what it presses.
     INPUT toggle[2];

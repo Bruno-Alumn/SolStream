@@ -23,6 +23,8 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 
 namespace solstream::media {
 
@@ -98,6 +100,16 @@ bool CapsLockNeedsReading(const CapsLockBelief& belief, uint64_t nowMs);
 /// Record the PC's Caps Lock: what Windows said, or what a press from here has
 /// just made it.
 void CapsLockNoted(CapsLockBelief& belief, bool on, uint64_t nowMs);
+
+/// Whether Caps Lock has to be pressed for the PC's to be `wanted`.
+///
+/// `read` asks Windows, and is asked only when the belief needs it. It answers
+/// nothing when it cannot be asked -- see CapsLockIsOn in input.cpp -- and then
+/// nothing is pressed and nothing believed, so the next key asks again. After
+/// a press that Windows took, the caller notes `wanted` as what the PC now is.
+bool CapsLockPressNeeded(CapsLockBelief& belief,
+                         const std::function<std::optional<bool>()>& read,
+                         bool wanted, uint64_t nowMs);
 
 /// The press and release that toggle Caps Lock.
 ///

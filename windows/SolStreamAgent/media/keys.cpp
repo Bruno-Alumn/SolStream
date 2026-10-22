@@ -103,6 +103,20 @@ void CapsLockNoted(CapsLockBelief& belief, bool on, uint64_t nowMs) {
     belief.atMs = nowMs;
 }
 
+bool CapsLockPressNeeded(CapsLockBelief& belief,
+                         const std::function<std::optional<bool>()>& read,
+                         bool wanted, uint64_t nowMs) {
+    if (CapsLockNeedsReading(belief, nowMs)) {
+        const std::optional<bool> on = read();
+        if (!on) {
+            belief = CapsLockBelief{};
+            return false;
+        }
+        CapsLockNoted(belief, *on, nowMs);
+    }
+    return belief.on != wanted;
+}
+
 void BuildCapsLockToggle(INPUT out[2]) {
     for (int i = 0; i < 2; ++i) {
         out[i] = INPUT{};
