@@ -37,6 +37,47 @@ final class HostDropdownTests: XCTestCase {
         return nil
     }
 
+    /// The rows marked as the host on show, by their titles.
+    private func checkedRows(in panel: NSWindow) -> [String] {
+        var found: [String] = []
+        func walk(_ view: NSView) {
+            if view.isAccessibilitySelected(),
+               let title = view.subviews.lazy.compactMap({ $0 as? NSTextField }).first {
+                found.append(title.stringValue)
+            }
+            view.subviews.forEach(walk)
+        }
+        panel.contentView.map(walk)
+        return found
+    }
+
+    private func returnKey(in window: NSWindow) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                         windowNumber: window.windowNumber, context: nil, characters: "\r",
+                         charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+    }
+
+    /// The host on show changes under the open list while its rows stay the
+    /// same -- the window giving up on one address for another -- and the
+    /// list follows without a rebuild: Enter chooses the new host, not the
+    /// one it replaced.
+    func testAnOpenListFollowsTheHostOnShow() throws {
+        let (dropdown, _) = makeDropdown()
+        dropdown.items = [Self.item("100.101.102.103"), Self.item("192.168.1.20")]
+        dropdown.setSelection(address: "100.101.102.103", name: nil, detail: [], dotState: .live)
+        var picked: [String] = []
+        dropdown.onPick = { picked.append($0) }
+        dropdown.openForTesting()
+        let panel = try XCTUnwrap(dropdown.listWindow)
+        XCTAssertEqual(checkedRows(in: panel), ["100.101.102.103"])
+
+        dropdown.setSelection(address: "192.168.1.20", name: nil, detail: [], dotState: .live)
+        XCTAssertTrue(dropdown.listWindow === panel, "not rebuilt")
+        XCTAssertEqual(checkedRows(in: panel), ["192.168.1.20"])
+        panel.contentView?.keyDown(with: returnKey(in: panel))
+        XCTAssertEqual(picked, ["192.168.1.20"])
+    }
+
     /// The list open, and an address half typed into its last row.
     private func typeIntoTheList(_ dropdown: HostDropdown, _ text: String) throws -> (NSWindow, DS.Field) {
         dropdown.openForTesting()

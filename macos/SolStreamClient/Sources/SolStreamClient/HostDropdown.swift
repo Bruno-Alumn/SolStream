@@ -141,13 +141,25 @@ final class HostDropdown: DS.Box {
     }
 
     /// Update what the closed control shows.
+    ///
+    /// An open list follows a new host too, its check mark and its
+    /// highlight, as it did when every refresh rebuilt it -- but without a
+    /// rebuild, which would take an address being typed with it. Left
+    /// behind, the list went on marking the host the window had just given
+    /// up on, and Enter chose it again.
     func setSelection(address: String, name: String?, detail: [Detail], dotState: DS.Dot.State) {
+        let moved = address != selectedAddress
         selectedAddress = address
         titleLabel.stringValue = name ?? (address.isEmpty ? "Choose a PC" : address)
         // Without a name the title IS the address, and addresses are set in mono.
         titleLabel.font = (name == nil && !address.isEmpty) ? DS.mono : DS.body
         detailLabel.attributedStringValue = Detail.line(detail, colour: DS.textMuted)
         dot.state = dotState
+        if isOpen, moved {
+            // The same rule as opening the list: the selected row, or the first.
+            highlighted = rows.firstIndex { $0.address == address } ?? 0
+            applyHighlight()
+        }
     }
 
     // Hover lifts the hairline to `edge`, the same thing a secondary button
