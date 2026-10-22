@@ -24,7 +24,9 @@ namespace solstream {
 
 /// The Virtual Display Driver release SolStream installs. MIT licensed, signed
 /// by SignPath Foundation, and user-mode (UMDF): it cannot bugcheck a PC.
-/// Changing it means checking the new zip's contents and hash by hand.
+/// Changing it means checking the new zip's contents and hash by hand, and
+/// putting that hash in kPackageSha256 (driver_install.cpp); the download's
+/// URL is built from this.
 constexpr char kDriverVersion[] = "25.7.23";
 constexpr wchar_t kDriverProject[] = L"github.com/VirtualDrivers/Virtual-Display-Driver";
 

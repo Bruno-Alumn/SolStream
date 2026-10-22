@@ -143,8 +143,10 @@ Tailscale address beside the local one when there is one.
   the Virtual Display Driver by URL and checks it against a hash compiled in. If
   the project removes or replaces that asset, every download fails with a
   pointer to installing the driver by hand. The fix is to pin a new release:
-  download it, check its contents and signer, and update `kPackageUrl`,
-  `kPackageSha256` and `kDriverVersion` in `driver_install.cpp`.
+  download it, check its contents and signer, then update `kDriverVersion` in
+  `driver_install.h` and `kPackageSha256` in `driver_install.cpp`. `kPackageUrl`
+  is built from `kDriverVersion`; it needs changing only if the project renames
+  the asset.
 
 ## Constraints worth knowing before changing any of this
 

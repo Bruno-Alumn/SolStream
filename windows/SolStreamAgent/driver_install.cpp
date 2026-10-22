@@ -29,10 +29,11 @@ namespace {
 /// one GitHub reports for the asset, checked against a download by hand when
 /// it was pinned: four files, MttVDD.inf / .dll / .cat and vdd_settings.xml,
 /// the catalog signed by SignPath Foundation. The "x86" in the name is the
-/// project's, and it is the 64-bit (amd64) build.
-constexpr char kPackageUrl[] =
-    "https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/"
-    "25.7.23/VirtualDisplayDriver-x86.Driver.Only.zip";
+/// project's, and it is the 64-bit (amd64) build. Built from kDriverVersion,
+/// so the release fetched and the version the screens name cannot drift apart.
+const std::string kPackageUrl =
+    std::string("https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/download/")
+    + kDriverVersion + "/VirtualDisplayDriver-x86.Driver.Only.zip";
 constexpr char kPackageSha256[] =
     "e24210692b442b39af763536330ce78b423f19342b7a7792c26de3944e418b3a";
 /// The zip is 132 KB. Anything near a megabyte is not it.
