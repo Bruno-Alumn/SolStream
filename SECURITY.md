@@ -33,7 +33,7 @@ impact you expect.
   a clone with `git config core.hooksPath .githooks`.
 - Pairing tokens live on the Mac in
   `~/Library/Application Support/SolStream/pairing-tokens.json` (the folder and
-  the file readable only by your user, and excluded from backups) and on the PC
+  the file readable only by your user, the file excluded from backups) and on the PC
   in `%LOCALAPPDATA%\SolStream\agent.token`, never in the repository. Anyone who
   can read either file can pair with that PC, so treat them like a password.
 - The Mac's token is not in the Keychain. SolStream is signed ad hoc, so macOS

@@ -69,7 +69,10 @@ driver on a PC that has none, and then `ConfigureVirtualDisplay`
 2. It restarts the device (`pnputil /restart-device`) so the driver re-reads the
    file, when the file changed.
 3. It attaches the display to the desktop at 3600×2338, to the right of every
-   other display, so it never overlaps a real monitor's coordinates.
+   other display, so it never overlaps a real monitor's coordinates. If it is
+   already attached at any ladder mode it is left alone, and if the driver does
+   not offer 3600×2338 yet, the largest smaller ladder mode it does offer is
+   used and the log says so.
 4. It sets the display's DPI scaling to 200%.
 5. It turns "Use HDR" off on the display itself.
 
@@ -177,9 +180,11 @@ Each of these cost real time; they are recorded so they do not have to again.
   with a nested `DISPLAYCONFIG_DEVICE_INFO_HEADER` writes to a temporary that is
   discarded, so the call goes out with a zeroed header and fails with
   `ERROR_GEN_FAILURE` (31). The structs in the setup script are flat for this
-  reason. The C++ keeps them flat as well, because the SDK headers it is
-  cross-compiled against lack some of the requests, and a header whose `size` is
-  wrong fails the same way.
+  reason. The C++ does not have the problem: it nests its own 20-byte
+  `InfoHeader` (`display_setup.cpp`) in each request and passes the request by
+  pointer, so nothing is copied. It declares them itself because the SDK headers
+  it is cross-compiled against lack some of the requests, and a header whose
+  `size` is wrong fails the same way.
 - **Display names get renumbered by a device restart** (`\\.\DISPLAY5` became
   `\\.\DISPLAY6` here). The host never caches one: it looks the monitor up by name
   each time (`MonitorFromDeviceName`) and tells the Mac which display it captures
@@ -188,10 +193,12 @@ Each of these cost real time; they are recorded so they do not have to again.
   would be of the wrong pixels.
 - **Another product's virtual display is not ours.** A root-enumerated display is
   "a virtual display", and phone-as-monitor and remote-desktop products add theirs
-  too. SolStream treats only the Virtual Display Driver, under any of the names it
-  has shipped as, as its own: it patches, restarts and captures that one
-  (`IsSolStreamDisplayDriver`) and falls back to the primary monitor rather than a
-  display it did not size.
+  too. Only the patching and restarting are limited to the Virtual Display Driver,
+  under any of the names it has shipped as (`IsSolStreamDisplayDriver`). Choosing
+  is not: `FindVirtualAdapter`, `VirtualDisplayDevice`, `ChooseCaptureDisplay` and
+  the host's `canvas` check can still pick, attach and capture another product's
+  display, and the scoring only prefers ours. On a PC with two, check which one
+  the log says is being captured.
 - **Nobody is looking at that display.** A Windows Firewall prompt once landed on
   it and sat unanswered for days, and its dimmer took every click meanwhile. The
   host carries windows that are not SolStream's off the capture display and onto
@@ -216,6 +223,10 @@ one is left alone: SolStream captures the primary monitor, and the host window
 says the display is off rather than installing another over it.
 
 The copy of the driver's settings from before SolStream first changed them is
-`vdd_settings.xml.solstream-backup`, beside the original. The setup script keeps
-the same one. Copy it back over `vdd_settings.xml` and restart the device to put
-the driver's own mode list back.
+`vdd_settings.xml.solstream-backup`, beside the original. SolStream copies it
+once and never overwrites it. The setup script writes a file of the same name, but
+overwrites it on every change, so after running the script the copy is of the
+file as it stood before that run; and it looks only in its `-VddPath`
+(`C:\VirtualDisplayDriver` by default), never at the driver's `VDDPATH`. Copy the
+backup back over `vdd_settings.xml` and restart the device to put the driver's
+own mode list back.

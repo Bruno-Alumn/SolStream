@@ -226,10 +226,12 @@ how the Mac asks) or `window`, and may carry `fps` (60 unless told otherwise),
 `bitrate` (bits per second, 20 million unless told otherwise), `width` and
 `height` (the canvas, each held to 4096), `audio` (`1` or `0`) and `audioSource`
 (`"apps"` for the streamed apps' sound alone, which needs Windows build 20348 or
-later; anything else, and older Windows, sends the whole PC's). For compressed
-sound it takes `audioCodec` (`"opus"`), `audioBitrate` and `audioFrameMs`. With
-neither a display nor a window it still agrees the keys, but `streaming` is false
-and `message` says why. The reply says whether capture and encoding really opened
+later; anything else, and older Windows, sends the whole PC's). The reply's
+`audioSource` says what was asked for: below build 20348 a request for `"apps"`
+is answered `"apps"` and the whole PC's sound is sent anyway, and only the host's
+log says so. For compressed sound it takes `audioCodec` (`"opus"`),
+`audioBitrate` and `audioFrameMs`. With neither a display nor a window it still
+agrees the keys, but `streaming` is false and `message` says why. The reply says whether capture and encoding really opened
 (`streaming`, with a `message` when they did not), names the UDP port in `hport`,
 and, when there is sound, says how it will be sent (`audioCodec`, `audioSource`).
 
