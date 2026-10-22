@@ -148,49 +148,52 @@ public final class InputCapture {
     private var lastModifierFlags: NSEvent.ModifierFlags = []
     private var lastDeviceFlags: UInt = 0
 
-    /// macOS virtual key code → Windows virtual key code.
-    private let keyCodeMap: [UInt16: UInt16] = [
-        // Letters
-        0x00: 0x41, 0x0B: 0x42, 0x08: 0x43, 0x02: 0x44, 0x0E: 0x45, 0x03: 0x46,
-        0x05: 0x47, 0x04: 0x48, 0x22: 0x49, 0x26: 0x4A, 0x28: 0x4B, 0x25: 0x4C,
-        0x2E: 0x4D, 0x2D: 0x4E, 0x1F: 0x4F, 0x23: 0x50, 0x0C: 0x51, 0x0F: 0x52,
-        0x01: 0x53, 0x11: 0x54, 0x20: 0x55, 0x09: 0x56, 0x0D: 0x57, 0x07: 0x58,
-        0x10: 0x59, 0x06: 0x5A,
+    /// The host takes keys by position, as scan codes, and so is sent them
+    /// that way: the PC's own layout then decides what a key types. Set by the
+    /// owner from the session's answer. A host that predates it is sent the
+    /// Windows virtual key at the key's place on a US keyboard, which is all it
+    /// takes. See `KeyboardMap`.
+    public var sendsScanCodes = false
 
-        // Digits
-        0x1D: 0x30, 0x12: 0x31, 0x13: 0x32, 0x14: 0x33, 0x15: 0x34,
-        0x17: 0x35, 0x16: 0x36, 0x1A: 0x37, 0x1C: 0x38, 0x19: 0x39,
+    /// Whether a key event came from an ISO keyboard, which decides two keys'
+    /// places. Replaceable so the tests do not depend on the keyboard of the
+    /// Mac that runs them.
+    var keyboardIsISO: (NSEvent) -> Bool = InputCapture.isISOKeyboard
 
-        // Editing and navigation
-        0x24: 0x0D,  // Return
-        0x30: 0x09,  // Tab
-        0x31: 0x20,  // Space
-        0x33: 0x08,  // Backspace
-        0x35: 0x1B,  // Escape
-        0x75: 0x2E,  // Forward delete
-        0x73: 0x24,  // Home
-        0x77: 0x23,  // End
-        0x74: 0x21,  // Page up
-        0x79: 0x22,  // Page down
-        0x7B: 0x25, 0x7C: 0x27, 0x7D: 0x28, 0x7E: 0x26,  // ← → ↓ ↑
+    /// One key, named both ways a host can be told it.
+    struct HostKey: Hashable {
+        let windowsKey: UInt16
+        let scanCode: UInt16
+    }
 
-        // Punctuation (US layout)
-        0x1B: 0xBD,  // -
-        0x18: 0xBB,  // =
-        0x21: 0xDB,  // [
-        0x1E: 0xDD,  // ]
-        0x2A: 0xDC,  // \
-        0x29: 0xBA,  // ;
-        0x27: 0xDE,  // '
-        0x2B: 0xBC,  // ,
-        0x2F: 0xBE,  // .
-        0x2C: 0xBF,  // /
-        0x32: 0xC0,  // `
+    /// The host key for a macOS key code, or nil for one with no PC key.
+    static func hostKey(forMacKey code: UInt16, isISO: Bool) -> HostKey? {
+        guard let windowsKey = KeyboardMap.windowsKey(forMacKey: code, isISO: isISO),
+              let scanCode = KeyboardMap.scanCode(forMacKey: code, isISO: isISO) else {
+            return nil
+        }
+        return HostKey(windowsKey: windowsKey, scanCode: scanCode)
+    }
 
-        // Function keys
-        0x7A: 0x70, 0x78: 0x71, 0x63: 0x72, 0x76: 0x73, 0x60: 0x74, 0x61: 0x75,
-        0x62: 0x76, 0x64: 0x77, 0x65: 0x78, 0x6D: 0x79, 0x67: 0x7A, 0x6F: 0x7B,
-    ]
+    /// The kind of keyboard an event was typed on. The event says, for the
+    /// keyboard that sent it, and a Mac can have an ANSI one built in and an
+    /// ISO one plugged in; the last keyboard used stands in when it does not.
+    static func isISOKeyboard(_ event: NSEvent) -> Bool {
+        var type = Int64(LMGetKbdType())
+        if let fromEvent = event.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType),
+           fromEvent > 0 {
+            type = fromEvent
+        }
+        return KBGetLayoutType(Int16(truncatingIfNeeded: type))
+            == PhysicalKeyboardLayoutType(kKeyboardISO)
+    }
+
+    /// The packet for one key, in whichever form the host takes.
+    func keyPacket(_ key: HostKey, pressed: Bool, modifiers: SMTInput.Modifiers) -> Data {
+        sendsScanCodes
+            ? SMTInput.scanKey(code: key.scanCode, pressed: pressed, modifiers: modifiers)
+            : SMTInput.key(code: key.windowsKey, pressed: pressed, modifiers: modifiers)
+    }
 
     /// Key codes already reported by `noteUnmapped`, so a held key says it once.
     private var reportedUnmappedKeys: Set<UInt16> = []
@@ -200,11 +203,15 @@ public final class InputCapture {
     struct ModifierKey {
         let macKeyCode: UInt16
         let windowsKeyCode: UInt16
+        /// The same key by position, for a host that takes scan codes.
+        let scanCode: UInt16
         /// The DEVICE-DEPENDENT mask for this specific physical key. The public
         /// flags (.shift, .control…) are shared by the left and right keys, so
         /// releasing one while the other is held reads as "still down" and
         /// would emit a key DOWN — leaving that key stuck on the host forever.
         let deviceMask: UInt
+
+        var hostKey: HostKey { HostKey(windowsKey: windowsKeyCode, scanCode: scanCode) }
     }
 
     /// Command carries Windows Control, and nothing carries the Windows key.
@@ -224,14 +231,22 @@ public final class InputCapture {
     /// either side works. That makes two physical keys share one Windows key,
     /// which `otherKeyHolds` exists to handle.
     let modifierKeys: [ModifierKey] = [
-        ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, deviceMask: 0x0000_0002),  // L shift
-        ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, deviceMask: 0x0000_0004),  // R shift
-        ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, deviceMask: 0x0000_0001),  // L ctrl
-        ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, deviceMask: 0x0000_2000),  // R ctrl
-        ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, deviceMask: 0x0000_0020),  // L alt
-        ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, deviceMask: 0x0000_0040),  // R alt
-        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0xA2, deviceMask: 0x0000_0008),  // L cmd → L ctrl
-        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0xA3, deviceMask: 0x0000_0010),  // R cmd → R ctrl
+        ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, scanCode: 0x2A,
+                    deviceMask: 0x0000_0002),  // L shift
+        ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, scanCode: 0x36,
+                    deviceMask: 0x0000_0004),  // R shift
+        ModifierKey(macKeyCode: 0x3B, windowsKeyCode: 0xA2, scanCode: 0x1D,
+                    deviceMask: 0x0000_0001),  // L ctrl
+        ModifierKey(macKeyCode: 0x3E, windowsKeyCode: 0xA3, scanCode: 0xE01D,
+                    deviceMask: 0x0000_2000),  // R ctrl
+        ModifierKey(macKeyCode: 0x3A, windowsKeyCode: 0xA4, scanCode: 0x38,
+                    deviceMask: 0x0000_0020),  // L alt
+        ModifierKey(macKeyCode: 0x3D, windowsKeyCode: 0xA5, scanCode: 0xE038,
+                    deviceMask: 0x0000_0040),  // R alt
+        ModifierKey(macKeyCode: 0x37, windowsKeyCode: 0xA2, scanCode: 0x1D,
+                    deviceMask: 0x0000_0008),  // L cmd → L ctrl
+        ModifierKey(macKeyCode: 0x36, windowsKeyCode: 0xA3, scanCode: 0xE01D,
+                    deviceMask: 0x0000_0010),  // R cmd → R ctrl
     ]
 
     /// Is some *other* physical Mac key that maps to the same Windows key still
@@ -294,10 +309,10 @@ public final class InputCapture {
     /// releases everything it is holding when a session ends, which covers the
     /// session going away; this covers the window merely losing focus, which it
     /// does not.
-    private var heldKeys: Set<UInt16> = []
+    private var heldKeys: Set<HostKey> = []
 
     /// The subset of `heldKeys` pressed while ⌘ was down — see `releaseChordKeys`.
-    private var chordKeys: Set<UInt16> = []
+    private var chordKeys: Set<HostKey> = []
 
     /// Buttons currently down, for exactly the reason above. Capture stops the
     /// moment the window resigns key, so the matching mouse-up is never seen and
@@ -416,25 +431,25 @@ public final class InputCapture {
             guard !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
-            guard let windowsKey = keyCodeMap[event.keyCode] else {
+            guard let key = Self.hostKey(forMacKey: event.keyCode,
+                                         isISO: keyboardIsISO(event)) else {
                 noteUnmapped(event.keyCode)
                 return false
             }
             let pressed = event.type == .keyDown
             if pressed {
-                heldKeys.insert(windowsKey)
+                heldKeys.insert(key)
                 // macOS does not reliably deliver the key-up for a key released
                 // while ⌘ is still held, and a key-down the host never sees
                 // released auto-repeats forever. Which keys were part of a ⌘
                 // chord is recorded here so they can be let go when ⌘ is.
-                if event.modifierFlags.contains(.command) { chordKeys.insert(windowsKey) }
+                if event.modifierFlags.contains(.command) { chordKeys.insert(key) }
             } else {
-                heldKeys.remove(windowsKey)
-                chordKeys.remove(windowsKey)
+                heldKeys.remove(key)
+                chordKeys.remove(key)
             }
-            onInput?(SMTInput.key(code: windowsKey,
-                                       pressed: pressed,
-                                       modifiers: modifiers(from: event.modifierFlags)))
+            onInput?(keyPacket(key, pressed: pressed,
+                               modifiers: modifiers(from: event.modifierFlags)))
             // Everything that reached the host is consumed. The window is a
             // Windows application as far as the keyboard is concerned, so ⇥ must
             // not move focus around our own view tree and Space must not press
@@ -462,9 +477,7 @@ public final class InputCapture {
             if let key = modifierKeys.first(where: { $0.macKeyCode == event.keyCode }),
                !Self.otherKeyHolds(key, flags: deviceFlags, among: modifierKeys) {
                 let isDown = (deviceFlags & key.deviceMask) != 0
-                onInput?(SMTInput.key(code: key.windowsKeyCode,
-                                           pressed: isDown,
-                                           modifiers: modifiers(from: flags)))
+                onInput?(keyPacket(key.hostKey, pressed: isDown, modifiers: modifiers(from: flags)))
             }
             if lastModifierFlags.contains(.command) && !flags.contains(.command) {
                 releaseChordKeys()
@@ -483,19 +496,20 @@ public final class InputCapture {
 
     /// Say, once per key code, that a key was dropped instead of sent.
     ///
-    /// `keyCodeMap` is a US layout and nothing more: no numpad, nothing from F13
-    /// upwards, and not the extra key an ISO keyboard carries beside the left
-    /// shift. Anything missing from it is handed back to AppKit and never
-    /// reaches the host, and from the user's side of the picture that is
-    /// indistinguishable from the streamed application ignoring the key — a
-    /// dead key, with nothing in any log to say so. This does not map anything;
-    /// it only turns a silent drop into a line naming the macOS key code, which
-    /// is the one fact needed to add it. Once per code, because a key held down
-    /// repeats and the report is worth no more the hundredth time.
+    /// `KeyboardMap` covers every key a Mac or PC keyboard plugged into one
+    /// sends, but not the ones nothing on a PC corresponds to -- fn, the media
+    /// keys when they arrive as keys at all -- nor any a future keyboard adds.
+    /// Anything missing from it is handed back to AppKit and never reaches the
+    /// host, and from the user's side of the picture that is indistinguishable
+    /// from the streamed application ignoring the key — a dead key, with
+    /// nothing in any log to say so. This does not map anything; it only turns
+    /// a silent drop into a line naming the macOS key code, which is the one
+    /// fact needed to add it. Once per code, because a key held down repeats
+    /// and the report is worth no more the hundredth time.
     private func noteUnmapped(_ keyCode: UInt16) {
         guard reportedUnmappedKeys.insert(keyCode).inserted else { return }
         let hex = String(keyCode, radix: 16, uppercase: true)
-        Log.warning("[input] macOS key code 0x\(hex) is not in the US-layout key map,"
+        Log.warning("[input] macOS key code 0x\(hex) is not in the key map,"
                     + " so it was not sent to the host")
     }
 
@@ -527,9 +541,9 @@ public final class InputCapture {
     /// stuck down on the host: key-up delivery while Command is held. If the
     /// key-ups did arrive there is nothing here to release.
     private func releaseChordKeys() {
-        for code in chordKeys {
-            heldKeys.remove(code)
-            onInput?(SMTInput.key(code: code, pressed: false, modifiers: []))
+        for key in chordKeys {
+            heldKeys.remove(key)
+            onInput?(keyPacket(key, pressed: false, modifiers: []))
         }
         chordKeys.removeAll()
     }
@@ -538,8 +552,8 @@ public final class InputCapture {
     /// keeps the key down — and Windows auto-repeats a key it never sees
     /// released, so a single missed key-up types forever.
     private func releaseHeldInput() {
-        for code in heldKeys {
-            onInput?(SMTInput.key(code: code, pressed: false, modifiers: []))
+        for key in heldKeys {
+            onInput?(keyPacket(key, pressed: false, modifiers: []))
         }
         heldKeys.removeAll()
         chordKeys.removeAll()
@@ -554,7 +568,7 @@ public final class InputCapture {
         var released: Set<UInt16> = []
         for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             guard released.insert(key.windowsKeyCode).inserted else { continue }
-            onInput?(SMTInput.key(code: key.windowsKeyCode, pressed: false, modifiers: []))
+            onInput?(keyPacket(key.hostKey, pressed: false, modifiers: []))
         }
         lastModifierFlags = []
         lastDeviceFlags = 0

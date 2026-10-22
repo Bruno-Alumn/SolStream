@@ -108,6 +108,11 @@ final class StreamSession {
         config.audio && config.audioEncoding.codec != .pcm && codec == .pcm
     }
 
+    /// The host said it takes keys by position, so the PC's own keyboard
+    /// layout decides what they type. Fixed for the session, as the host's
+    /// answer is; a host that predates it is sent keys by virtual key.
+    let hostTakesScanCodes: Bool
+
     var onPhase: ((StreamPhase) -> Void)?
 
     /// What the watchdog has to say about the picture.
@@ -148,6 +153,12 @@ final class StreamSession {
         self.requestedAudio = config.audioEncoding
         self.hostIgnoresSoundQuality = Self.hostIgnoresSoundQuality(asked: config,
                                                                     answered: session.audioCodec)
+        self.hostTakesScanCodes = session.takesScanCodes
+        // Said once a session, because it decides what every key types and
+        // nothing on screen shows which way they are going.
+        Log.info("[input] keys go to \(host) "
+                 + (session.takesScanCodes ? "by position, so the PC's layout decides what they type"
+                                           : "by US-layout name; it predates sending them by position"))
         self.media = MediaClient(keys: session.keys, host: host, port: session.port)
 
         // One decoder, fanned out to every attached window. Each window carries

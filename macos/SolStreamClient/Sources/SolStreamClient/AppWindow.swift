@@ -445,6 +445,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
         let capture = InputCapture()
         capture.attach(to: view)
+        capture.sendsScanCodes = session.hostTakesScanCodes
         capture.onInput = { [weak self] packet in
             self?.session.sendInput(packet)
         }
@@ -830,6 +831,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
         session.detach(metalView)
         session = fresh
         fresh.attach(metalView)
+        // The host may have been updated in between, and the new session's
+        // answer is the one that holds.
+        inputCapture?.sendsScanCodes = fresh.hostTakesScanCodes
         setTile(tile)
         lastFrameCount = 0
         lastByteCount = 0

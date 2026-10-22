@@ -1158,6 +1158,9 @@ public final class AgentConnection {
         /// Whose sound the host said it will send; the whole PC's from a host
         /// that said nothing.
         public var audioSource: AudioSource = .system
+        /// The host takes keys by position, as scan codes. False for a host
+        /// that said nothing, which takes them only by virtual key.
+        public var takesScanCodes = false
     }
 
     /// The `media open` command's fields beyond the key material.
@@ -1198,6 +1201,12 @@ public final class AgentConnection {
     /// this build would play, so the packets' own format bytes decide.
     static func audioCodec(inReply reply: [String: Any]) -> AudioEncoding.Codec {
         (reply["audioCodec"] as? String).flatMap(AudioEncoding.Codec.init(rawValue:)) ?? .pcm
+    }
+
+    /// Whether a `media open` reply says the host takes keys by position. A
+    /// host that predates scan codes says nothing, and is sent virtual keys.
+    static func takesScanCodes(inReply reply: [String: Any]) -> Bool {
+        (reply["scancodes"] as? Int ?? 0) >= 1
     }
 
     /// Stop the host's media session, leaving the agent channel up.
@@ -1304,7 +1313,8 @@ public final class AgentConnection {
                      + "the whole PC's" + (reply["audioSource"] == nil ? " (it predates the choice)" : ""))
         }
         return MediaSession(keys: keys, port: port, streaming: streaming, message: message2,
-                            audioCodec: audioCodec, audioSource: audioSource)
+                            audioCodec: audioCodec, audioSource: audioSource,
+                            takesScanCodes: Self.takesScanCodes(inReply: reply))
     }
 
     /// Ask for the host's displays.

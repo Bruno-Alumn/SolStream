@@ -22,6 +22,9 @@ public enum SMTInput {
         case scrollH = 5
         case key = 6
         case text = 7
+        /// A key by position: a set-1 scan code. Only for a host whose
+        /// `media open` reply said "scancodes"; see `scanKey`.
+        case keyScan = 8
     }
 
     /// Mouse buttons, numbered the way the host's SendInput switch expects.
@@ -114,6 +117,17 @@ public enum SMTInput {
     /// A key event carrying a Windows virtual key code.
     public static func key(code: UInt16, pressed: Bool, modifiers: Modifiers) -> Data {
         event(.key, be16(code) + Data([pressed ? 1 : 0, modifiers.rawValue]))
+    }
+
+    /// A key event carrying the key's position: a set-1 scan code, with 0xE0 in
+    /// the high byte for an extended key.
+    ///
+    /// The same shape as `key`, under a kind of its own, so that a host which
+    /// predates it counts it as one it does not know rather than pressing the
+    /// wrong key -- although it is only ever sent to a host that said it takes
+    /// it, and every host still takes `key`.
+    public static func scanKey(code: UInt16, pressed: Bool, modifiers: Modifiers) -> Data {
+        event(.keyScan, be16(code) + Data([pressed ? 1 : 0, modifiers.rawValue]))
     }
 
     /// Characters no keycode can express, as UTF-16 code units.
