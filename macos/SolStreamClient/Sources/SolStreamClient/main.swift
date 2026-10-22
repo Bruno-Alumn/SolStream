@@ -221,6 +221,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// A click on the Dock icon with nothing on screen brings back whichever
+    /// window the app is at. Closing the connect window while Settings was
+    /// open, then Settings, used to leave a running app with no window and no
+    /// way back to one but ⌘Q.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Stream windows are only out of sight when minimised, and AppKit's
+        // own answer to the click is to bring one of those back.
+        guard !flag, appWindows.isEmpty, !testMode else { return true }
+        if let picker {
+            picker.show()
+        } else {
+            showConnectWindow()
+        }
+        return false
+    }
+
     // MARK: - Flow
 
     private func showConnectWindow() {
