@@ -1135,7 +1135,9 @@ std::string ClipboardGetJson() {
     if (!wide) {
         return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
     }
-    std::string text = ToUtf8(wide);
+    // In the Mac's line endings, so every Mac gets them whatever its version.
+    // Before the size check, which then counts what is actually sent.
+    std::string text = solstream::ToMacLineEndings(ToUtf8(wide));
     GlobalUnlock(handle);
 
     // A clipboard can hold a whole document; this channel is for text people
@@ -1158,7 +1160,11 @@ std::string ClipboardGetJson() {
 }
 
 std::string ClipboardSetJson(const std::string& text) {
-    const std::wstring wide = ToWide(text);
+    // Windows' line endings whatever the Mac sent: one from before it learned
+    // to convert sends bare LF. No echo follows from changing the text: the
+    // Mac adopts the sequence number this write produces, so it never reads
+    // the converted copy back as a change of its own.
+    const std::wstring wide = ToWide(solstream::ToWindowsLineEndings(text));
     const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
     if (!memory) {

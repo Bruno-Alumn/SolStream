@@ -48,4 +48,64 @@ final class ClipboardSyncTests: XCTestCase {
         XCTAssertTrue(pasteboard.writeObjects([plain, secret]))
         XCTAssertTrue(ClipboardBridge.isPrivate(types: pasteboard.types))
     }
+
+    // MARK: - Line endings
+
+    func testTheMacsLinesBecomeWindowsLines() {
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings("one\ntwo\n"), "one\r\ntwo\r\n")
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings("\n\n"), "\r\n\r\n")
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings("no line break"), "no line break")
+    }
+
+    func testWindowsLinesBecomeTheMacs() {
+        XCTAssertEqual(ClipboardBridge.macLineEndings("one\r\ntwo\r\n"), "one\ntwo\n")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("\r\n\r\n"), "\n\n")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("one\ntwo"), "one\ntwo")
+    }
+
+    /// Both ends convert, so either may meet text the other has already
+    /// converted: doing it twice must be doing it once.
+    func testConvertingTwiceChangesNothingMore() {
+        let mixed = "a\nb\r\nc"
+        let once = ClipboardBridge.windowsLineEndings(mixed)
+        XCTAssertEqual(once, "a\r\nb\r\nc")
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings(once), once)
+        let folded = ClipboardBridge.macLineEndings(mixed)
+        XCTAssertEqual(folded, "a\nb\nc")
+        XCTAssertEqual(ClipboardBridge.macLineEndings(folded), folded)
+    }
+
+    /// A CR on its own is not a Windows line ending, and is left where it is.
+    func testALoneReturnIsLeftAlone() {
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings("a\rb"), "a\rb")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("a\rb"), "a\rb")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("ends in a CR\r"), "ends in a CR\r")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("\r\r\n"), "\r\n")
+    }
+
+    /// Swift counts CRLF as one Character, so a conversion that searched by
+    /// Character would never see the LF inside it, and one that cut by
+    /// Character could not separate the two.
+    func testCRLFIsTwoScalarsToTheConversion() {
+        XCTAssertEqual("\r\n".count, 1)
+        XCTAssertEqual(ClipboardBridge.macLineEndings("x\r\ny").unicodeScalars.count, 3)
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings("x\ny").unicodeScalars.count, 4)
+    }
+
+    func testThereAndBackIsTheMacsTextAsItWas() {
+        let text = "first line\nsecond, with a tab\there\n\nafter a blank line"
+        XCTAssertEqual(ClipboardBridge.macLineEndings(ClipboardBridge.windowsLineEndings(text)), text)
+    }
+
+    func testTextBeyondASCIIPassesThrough() {
+        let text = "café\n漢字\n🇪🇸 and 👩‍👩‍👧"
+        let windows = ClipboardBridge.windowsLineEndings(text)
+        XCTAssertEqual(windows, "café\r\n漢字\r\n🇪🇸 and 👩‍👩‍👧")
+        XCTAssertEqual(ClipboardBridge.macLineEndings(windows), text)
+    }
+
+    func testEmptyStaysEmpty() {
+        XCTAssertEqual(ClipboardBridge.windowsLineEndings(""), "")
+        XCTAssertEqual(ClipboardBridge.macLineEndings(""), "")
+    }
 }

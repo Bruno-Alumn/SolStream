@@ -34,6 +34,12 @@ import AgentChannel
 /// PC is narrower still: a Mac copy is sent only once one of SolStream's
 /// windows has the keyboard — copying in another application is not a request
 /// to put it on the PC, but switching to the stream and pasting is.
+///
+/// Each machine gets its own line endings: CRLF on the PC, where a bare LF is
+/// no line break at all to a classic edit control, and LF here, where a CR
+/// left over from Windows shows up in a terminal or an editor. Converted at
+/// both ends, because either end may be a version that does not: the
+/// conversions change nothing when applied twice.
 final class ClipboardBridge {
     private let agent: AgentConnection
     private let pasteboard = NSPasteboard.general
@@ -42,7 +48,8 @@ final class ClipboardBridge {
     private var lastLocalChangeCount: Int
     private var lastRemoteSequence: Int?
     /// The last value this bridge put on either clipboard. An echo of it is ours,
-    /// not the user's.
+    /// not the user's. Kept in the Mac's line endings, so the PC's copy of the
+    /// same text is recognised as the same.
     private var lastSyncedText: String?
     private var inFlight = false
     /// The next answer from the host is a baseline to remember, not a change
@@ -63,6 +70,40 @@ final class ClipboardBridge {
     /// one of them keeps the whole copy here.
     static func isPrivate(types: [NSPasteboard.PasteboardType]?) -> Bool {
         !privateTypes.isDisjoint(with: types ?? [])
+    }
+
+    // Both walk Unicode scalars rather than Characters: Swift treats CRLF as a
+    // single Character, so a Character-wise search for "\n" never finds the
+    // one inside it.
+
+    /// Text as Windows keeps it: every LF preceded by a CR. One already
+    /// preceded by a CR is left alone.
+    static func windowsLineEndings(_ text: String) -> String {
+        guard text.unicodeScalars.contains("\n") else { return text }
+        var out = String.UnicodeScalarView()
+        var previous: Unicode.Scalar?
+        for scalar in text.unicodeScalars {
+            if scalar == "\n" && previous != "\r" { out.append("\r") }
+            out.append(scalar)
+            previous = scalar
+        }
+        return String(out)
+    }
+
+    /// Text as the Mac keeps it: CRLF folded to LF. A CR on its own is left
+    /// alone.
+    static func macLineEndings(_ text: String) -> String {
+        guard text.unicodeScalars.contains("\r") else { return text }
+        var out = String.UnicodeScalarView()
+        var heldReturn = false
+        for scalar in text.unicodeScalars {
+            // A CR is held until the next scalar says whether it began a CRLF.
+            if heldReturn && scalar != "\n" { out.append("\r") }
+            heldReturn = scalar == "\r"
+            if !heldReturn { out.append(scalar) }
+        }
+        if heldReturn { out.append("\r") }
+        return String(out)
     }
 
     init(agent: AgentConnection, mayPush: @escaping () -> Bool) {
@@ -125,7 +166,7 @@ final class ClipboardBridge {
                 Log.info("[clipboard] a private item was copied; not sending it to the host")
                 return
             }
-            let local = pasteboard.string(forType: .string)
+            let local = pasteboard.string(forType: .string).map(Self.macLineEndings)
             // Nothing to send is not the same as nothing to say, and neither is
             // sent: a Mac clipboard holding an image has no string on it at all
             // and `local` is nil, while one the user has emptied has a string of
@@ -135,7 +176,7 @@ final class ClipboardBridge {
             if let local, !local.isEmpty, local != lastSyncedText {
                 lastSyncedText = local
                 inFlight = true
-                agent.setClipboard(local) { [weak self] sequence in
+                agent.setClipboard(Self.windowsLineEndings(local)) { [weak self] sequence in
                     DispatchQueue.main.async {
                         self?.inFlight = false
                         // Adopt the sequence our own write produced, so it is not
@@ -170,12 +211,13 @@ final class ClipboardBridge {
                 // Empty text is not an empty clipboard — it is also how an image
                 // on the host arrives. See the note on the class: this is why the
                 // Mac's clipboard is left alone rather than cleared.
-                guard !remote.isUnchanged, !remote.text.isEmpty,
-                      remote.text != self.lastSyncedText else { return }
+                let text = Self.macLineEndings(remote.text)
+                guard !remote.isUnchanged, !text.isEmpty,
+                      text != self.lastSyncedText else { return }
 
-                self.lastSyncedText = remote.text
+                self.lastSyncedText = text
                 self.pasteboard.clearContents()
-                self.pasteboard.setString(remote.text, forType: .string)
+                self.pasteboard.setString(text, forType: .string)
                 // Writing bumps the local counter; record it now so this write is
                 // not mistaken for the user copying something next tick.
                 self.lastLocalChangeCount = self.pasteboard.changeCount

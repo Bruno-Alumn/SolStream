@@ -1,9 +1,10 @@
 // clipboard.h — what the clipboard's text needs on its way between the Mac and
 // Windows, apart from the JSON it travels in.
 //
-// An application can mark what it copies as not for clipboard tools, which is
-// how a password manager keeps a password out of clipboard history -- and has
-// to keep it off the Mac too.
+// Two things. The machines end a line differently, and each side's
+// applications expect their own. And an application can mark what it copies
+// as not for clipboard tools, which is how a password manager keeps a password
+// out of clipboard history -- and has to keep it off the Mac too.
 //
 // Kept out of main.cpp so the tests can reach it. The transfer itself, and the
 // lock around Windows' clipboard, stay there.
@@ -13,8 +14,23 @@
 #include <windows.h>
 
 #include <optional>
+#include <string>
 
 namespace solstream {
+
+/// Text as Windows keeps it on the clipboard: every line ending CRLF.
+///
+/// A Mac line ends in a bare LF, and a classic multi-line edit control --
+/// WinForms' TextBox and most dialogs -- shows a bare LF as no line break at
+/// all, so a pasted paragraph arrives as one long line. An LF that already
+/// follows a CR is left alone, so converting twice changes nothing.
+std::string ToWindowsLineEndings(const std::string& text);
+
+/// Text as the Mac keeps it: CRLF folded to LF.
+///
+/// Left as CRLF, every line pasted into a terminal or a code editor carries a
+/// stray CR. A CR on its own is not a Windows line ending and is left alone.
+std::string ToMacLineEndings(const std::string& text);
 
 /// The formats Windows defines for an application to say "clipboard tools,
 /// leave this alone". Password managers set them on everything they copy.

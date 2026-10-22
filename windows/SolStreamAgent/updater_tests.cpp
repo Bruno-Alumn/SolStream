@@ -1262,6 +1262,39 @@ HGLOBAL GlobalBytes(const void* bytes, size_t size) {
     return memory;
 }
 
+void TestClipboardLineEndings() {
+    // A Mac's lines become Windows' lines.
+    CHECK(ToWindowsLineEndings("one\ntwo\n") == "one\r\ntwo\r\n");
+    CHECK(ToWindowsLineEndings("\n") == "\r\n");
+    CHECK(ToWindowsLineEndings("\n\n") == "\r\n\r\n");
+    // What is already Windows' is left alone, so a Mac that converts and a
+    // host that converts again agree with either one doing it alone.
+    CHECK(ToWindowsLineEndings("one\r\ntwo") == "one\r\ntwo");
+    CHECK(ToWindowsLineEndings(ToWindowsLineEndings("a\nb\r\nc")) == "a\r\nb\r\nc");
+    // A CR on its own is not a line ending either side converts.
+    CHECK(ToWindowsLineEndings("a\rb") == "a\rb");
+
+    // Windows' lines become a Mac's.
+    CHECK(ToMacLineEndings("one\r\ntwo\r\n") == "one\ntwo\n");
+    CHECK(ToMacLineEndings("one\ntwo") == "one\ntwo");
+    CHECK(ToMacLineEndings("a\rb") == "a\rb");
+    CHECK(ToMacLineEndings("ends in a CR\r") == "ends in a CR\r");
+    CHECK(ToMacLineEndings("\r\r\n") == "\r\n");
+
+    // There and back again is the Mac's text as it was.
+    const std::string mac = "first line\nsecond, with a tab\there\n\nafter a blank line";
+    CHECK(ToMacLineEndings(ToWindowsLineEndings(mac)) == mac);
+
+    // Characters beyond ASCII pass through untouched.
+    const std::string accented = "caf\xC3\xA9\n\xE6\xBC\xA2\xE5\xAD\x97\n\xF0\x9F\x87\xAA\xF0\x9F\x87\xB8";
+    CHECK(ToWindowsLineEndings(accented)
+          == "caf\xC3\xA9\r\n\xE6\xBC\xA2\xE5\xAD\x97\r\n\xF0\x9F\x87\xAA\xF0\x9F\x87\xB8");
+    CHECK(ToMacLineEndings(ToWindowsLineEndings(accented)) == accented);
+
+    CHECK(ToWindowsLineEndings("").empty());
+    CHECK(ToMacLineEndings("").empty());
+}
+
 ClipboardMarkers Markers(bool exclude_from_monitors, bool viewer_ignore,
                          std::optional<DWORD> history, std::optional<DWORD> cloud) {
     ClipboardMarkers markers;
@@ -1378,6 +1411,7 @@ int wmain(int argc, wchar_t** argv) {
     TestWaitsForRestart();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();
+    TestClipboardLineEndings();
     TestClipboardMarkers();
 
     RemoveTree(scratch);
