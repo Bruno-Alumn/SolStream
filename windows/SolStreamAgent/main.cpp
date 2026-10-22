@@ -4851,8 +4851,10 @@ void ServeAndRetire(SOCKET client) {
     // processes, and if one of those is hung, a cleanup stuck there
     // must not keep every later Mac turned away.
     const std::vector<WindowLock> owed = TakeAllSlots();
-    // Counted before the slot is freed, so nobody can see the slot free and
-    // this count still zero while the windows are being moved.
+    // Counted before the slot is freed, so nobody who claims the slot and
+    // then reads this count can find it zero while the windows are being
+    // moved. That holds only for a reader that claims first: see
+    // ListenForTakeover.
     g_windows_restoring.fetch_add(1);
     g_clients_connected.fetch_sub(1);
     for (const WindowLock& saved : owed) {
@@ -5014,8 +5016,18 @@ bool ListenForTakeover(SOCKET client) {
         // off the capture display under a stream that looks perfectly healthy.
         // A Mac arriving the ordinary way comes seconds later and never meets
         // this; one let in here would meet it every time.
-        if (g_windows_restoring.load() == 0 && ClaimClientSlot()) {
-            return true;
+        //
+        // The slot is claimed first and the count read after, never the other
+        // way round. The ended session raises the count before it frees the
+        // slot, so a claim that succeeds has already seen it raised. Read
+        // first, the count can be zero a moment before that session raises it
+        // and frees the slot, and the claim that follows then succeeds in the
+        // middle of the restore.
+        if (ClaimClientSlot()) {
+            if (g_windows_restoring.load() == 0) {
+                return true;
+            }
+            g_clients_connected.fetch_sub(1);
         }
         if (GetTickCount64() >= deadline) {
             break;
