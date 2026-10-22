@@ -5247,7 +5247,28 @@ int wmain(int argc, wchar_t** argv) {
         // carries a DACL an unelevated one cannot open.
         if ((instance && created == ERROR_ALREADY_EXISTS)
             || (!instance && created == ERROR_ACCESS_DENIED)) {
-            const bool focused = solstream::FocusExistingHostWindow();
+            // Let go first: this copy is leaving, and holding the name while it
+            // waits below would make a third launch believe in a host that had
+            // already gone.
+            if (instance) {
+                CloseHandle(instance);
+            }
+            bool focused = solstream::FocusExistingHostWindow();
+            // The other copy may still be starting. It takes this mutex before
+            // anything else and makes its window only once it is listening and
+            // the virtual display is set up, which takes seconds -- more when
+            // the display has to be cycled. "Open SolStream" at the end of setup
+            // lands in exactly that gap, as can a shortcut pressed just after
+            // logon: there was no window to bring forward, this copy left, and
+            // the first one went on to start in the tray, so the press did
+            // nothing anybody could see. So wait for the window, unless this
+            // copy was itself started for the tray and has nothing to show.
+            if (!focused && !start_hidden) {
+                for (int waited = 0; waited < 20000 && !focused; waited += 250) {
+                    Sleep(250);
+                    focused = solstream::FocusExistingHostWindow();
+                }
+            }
             Log("[agent] another SolStream host is already running in this "
                 "session%s; this copy is exiting",
                 focused ? " (its window was brought forward)" : "");
