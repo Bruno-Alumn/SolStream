@@ -211,6 +211,25 @@ public final class VideoReassembler {
         if flags & SMT.flagFrameEnd != 0 { assembly.total = end }
 
         if assembly.isComplete {
+            // Every older picture still being built is given up on FIRST, and
+            // reported before this one is handed on. The host sends pictures one
+            // after another, so an older one that is still open when a newer one
+            // has finished has lost a fragment that is not coming. Leaving it to
+            // the idle timer was the most common loss of all -- one datagram of
+            // a moving picture -- decoded wrongly: the timer cannot fire until
+            // 25 ms after that picture's last fragment, the next picture has
+            // finished well before then, and it went to the decoder against a
+            // reference that never arrived. VideoToolbox does not call that an
+            // error; it shows a smeared picture, and the hold that the late
+            // report then set kept exactly that picture on screen until the
+            // keyframe came. Reported first, the hold is already on when this
+            // picture arrives at it.
+            //
+            // Silently when this picture is an IDR: nothing after an IDR refers
+            // to anything before it, so there is nothing to repair and a report
+            // would only ask for another keyframe and hold the one that just
+            // arrived.
+            retire(olderThan: frameId, reporting: !assembly.isIdr)
             let picture = Picture(
                 frameId: frameId,
                 bytes: Data(assembly.bytes[0..<assembly.total]),
@@ -243,6 +262,19 @@ public final class VideoReassembler {
             }
         }
         pruneFinished()
+    }
+
+    /// Give up on every picture older than `frameId` that is still being built.
+    /// Each one counts as damaged; `reporting` says whether it is also passed to
+    /// `onDamaged`, oldest first.
+    private func retire(olderThan frameId: UInt32, reporting: Bool) {
+        let older = building.keys.filter { $0 < frameId }.sorted()
+        for lost in older {
+            building.removeValue(forKey: lost)
+            finished.insert(lost)
+            damaged &+= 1
+            if reporting { onDamaged?(lost) }
+        }
     }
 
     private func pruneFinished() {

@@ -336,6 +336,81 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertTrue(damaged.isEmpty)
     }
 
+    /// One lost datagram of a moving picture. The next picture finishes long
+    /// before the idle timer could retire the broken one, and it used to reach
+    /// the decoder first, decoded against a reference that never arrived. The
+    /// broken one is now reported before the next is handed on, so whatever
+    /// holds pictures back on damage is already holding when it arrives.
+    func testAnOlderPictureStillOpenIsReportedBeforeANewerOneIsHandedOn() {
+        let reassembler = VideoReassembler()
+        var events: [String] = []
+        reassembler.onPicture = { events.append("picture \($0.frameId)") }
+        reassembler.onDamaged = { events.append("damaged \($0)") }
+        let payload = Data(repeating: 7, count: 1432)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        // Frame 2's second datagram is lost; frame 3 arrives whole.
+        reassembler.ingest(fragment(frameId: 2, offset: 0, payload: payload,
+                                    start: true, end: false))
+        reassembler.ingest(fragment(frameId: 3, offset: 0, payload: payload,
+                                    start: true, end: true))
+        XCTAssertEqual(events, ["picture 1", "damaged 2", "picture 3"])
+        XCTAssertEqual(reassembler.damaged, 1)
+
+        // Retired for good: the missing datagram turning up late starts
+        // nothing, and the idle timer has nothing left to report.
+        reassembler.ingest(fragment(frameId: 2, offset: 1432, payload: payload,
+                                    start: false, end: true))
+        reassembler.tick()
+        XCTAssertEqual(events, ["picture 1", "damaged 2", "picture 3"])
+    }
+
+    /// Nothing after an IDR refers to anything before it, so a broken picture
+    /// older than an IDR that has arrived is not damage worth a keyframe. It is
+    /// still counted, because it was lost, but it is not reported.
+    func testAnIdrRetiresOlderPicturesWithoutReportingThem() {
+        let reassembler = VideoReassembler()
+        var events: [String] = []
+        reassembler.onPicture = { events.append("picture \($0.frameId)") }
+        reassembler.onDamaged = { events.append("damaged \($0)") }
+        let payload = Data(repeating: 7, count: 1432)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        reassembler.ingest(fragment(frameId: 2, offset: 0, payload: payload,
+                                    start: true, end: false))
+        reassembler.ingest(fragment(frameId: 3, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        reassembler.tick()
+        XCTAssertEqual(events, ["picture 1", "picture 3"])
+        XCTAssertEqual(reassembler.damaged, 1)
+    }
+
+    /// Only OLDER pictures are given up on. A newer one still arriving when an
+    /// older one finishes -- a datagram overtaken on the way -- is left to
+    /// finish.
+    func testANewerPictureStillOpenIsLeftToFinish() {
+        let reassembler = VideoReassembler()
+        var events: [String] = []
+        reassembler.onPicture = { events.append("picture \($0.frameId)") }
+        reassembler.onDamaged = { events.append("damaged \($0)") }
+        let payload = Data(repeating: 7, count: 1432)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        reassembler.ingest(fragment(frameId: 2, offset: 0, payload: payload,
+                                    start: true, end: false))
+        // Frame 3's first datagram overtakes frame 2's last.
+        reassembler.ingest(fragment(frameId: 3, offset: 0, payload: payload,
+                                    start: true, end: false))
+        reassembler.ingest(fragment(frameId: 2, offset: 1432, payload: payload,
+                                    start: false, end: true))
+        reassembler.ingest(fragment(frameId: 3, offset: 1432, payload: payload,
+                                    start: false, end: true))
+        XCTAssertEqual(events, ["picture 1", "picture 2", "picture 3"])
+    }
+
     /// The buffer grows now, so "larger than the buffer" is no longer a
     /// condition — 512 KB was a starting size, not a limit, and a picture past
     /// it used to be dropped for ever. What is still a refusal is a picture
