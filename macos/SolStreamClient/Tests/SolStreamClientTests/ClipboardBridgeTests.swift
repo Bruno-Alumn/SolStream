@@ -85,6 +85,15 @@ final class ClipboardBridgeTests: XCTestCase {
         pasteboard.setString(text, forType: .string)
     }
 
+    /// Copied the way a password manager copies: marked concealed.
+    private func copyAPasswordOnTheMac(_ text: String) {
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        pasteboard.writeObjects([item])
+    }
+
     // MARK: - Mac to PC
 
     /// The case that pasted the old clipboard: copied in another application,
@@ -144,11 +153,7 @@ final class ClipboardBridgeTests: XCTestCase {
     func testAPrivateMacCopyIsNeverSent() {
         bridge.start(resuming: false)
         streamHasKeyboard = true
-        pasteboard.clearContents()
-        let item = NSPasteboardItem()
-        item.setString("hunter2", forType: .string)
-        item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
-        pasteboard.writeObjects([item])
+        copyAPasswordOnTheMac("hunter2")
         bridge.syncNow()
         XCTAssertEqual(fake.writes, [])
     }
@@ -206,6 +211,102 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(pasteboard.string(forType: .string), "what the Mac had")
     }
 
+    /// A copy made on the Mac while the PC's answer was on its way is the
+    /// newer of the two, and the answer does not overwrite it.
+    func testAnAnswerDoesNotOverwriteAMacCopyMadeWhileItWasOnItsWay() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        copyOnTheMac("copied in Safari")
+        fake.answerRead(text: "copied on the PC before", sequence: 5)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "copied in Safari")
+
+        // And it goes to the PC in its turn.
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["copied in Safari"])
+    }
+
+    // MARK: - The same text again
+
+    /// What both clipboards held is forgotten once the PC holds a password:
+    /// the same text copied again on the Mac goes, or ⌘V in the stream would
+    /// paste the password.
+    func testTheSameTextCopiedAgainGoesAfterAPasswordOnThePC() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        fake.answerWrite(sequence: 10)
+        settle()
+
+        bridge.syncNow()
+        fake.answerRead(sequence: 11, isPrivate: true)
+        settle()
+
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
+    }
+
+    /// The same for an image copied on the PC, which arrives as no text.
+    func testTheSameTextCopiedAgainGoesAfterAnImageOnThePC() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        fake.answerWrite(sequence: 10)
+        settle()
+
+        bridge.syncNow()
+        fake.answerRead(text: "", sequence: 11)
+        settle()
+
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
+    }
+
+    /// The other way round: a password copied on the Mac, then the PC copies
+    /// what it had sent before. That is the newer copy, and ⌘V on the Mac
+    /// gets it rather than the password.
+    func testThePCsCopyReplacesAMacPasswordEvenWhenItCrossedBefore() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(text: "make deploy", sequence: 2)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+
+        copyAPasswordOnTheMac("hunter2")
+        bridge.syncNow()
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.last, 2)
+        fake.answerRead(text: "make deploy", sequence: 3)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
+    }
+
+    /// Turned on mid-stream, sync starts from nothing having crossed: either
+    /// side may have copied anything while it was off.
+    func testTurningSyncBackOnForgetsWhatCrossedBefore() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        fake.answerWrite(sequence: 10)
+        settle()
+        bridge.stop()
+
+        bridge.start(resuming: true)
+        bridge.syncNow()
+        fake.answerRead(text: "copied on the PC while sync was off", sequence: 14)
+        settle()
+
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
+    }
+
     // MARK: - Pace
 
     /// A sync asked for while a question is on the wire is not dropped: it
@@ -248,6 +349,21 @@ final class ClipboardBridgeTests: XCTestCase {
         streamHasKeyboard = false
         bridge.syncNow()
         XCTAssertEqual(fake.reads.count, asked + 1)
+    }
+
+    /// Nor is a change of keyboard that came while a read was on the wire
+    /// held back when that read fails: it asks again the moment it can.
+    func testAChangeOfKeyboardQueuedBehindAFailedReadStillAsks() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.count, 1)
+
+        streamHasKeyboard = false
+        bridge.syncNow()
+        fake.failRead()
+        settle()
+        XCTAssertEqual(fake.reads.count, 2)
     }
 
     func testAStoppedBridgeAsksNothing() {

@@ -25,6 +25,9 @@ import AgentChannel
 /// exactly like the user having copied something — so a naive version ping-pongs
 /// the same string between the two machines forever. Every write records what was
 /// written, and an observed change matching the last thing we wrote is ignored.
+/// That record means "what both clipboards hold" and nothing else: the moment
+/// either side holds something that did not cross, it is forgotten, so that
+/// copying the old text again is a change worth sending.
 ///
 /// One thing it deliberately does not carry, in either direction: a clipboard
 /// that has become empty. The agent reports the host's clipboard as text, and a
@@ -76,9 +79,14 @@ final class ClipboardBridge {
     private var timer: Timer?
     private var lastLocalChangeCount: Int
     private var lastRemoteSequence: Int?
-    /// The last value this bridge put on either clipboard. An echo of it is ours,
-    /// not the user's. Kept in the Mac's line endings, so the PC's copy of the
-    /// same text is recognised as the same.
+    /// The last value this bridge put on either clipboard, while both still
+    /// hold it. An echo of it is ours, not the user's. Kept in the Mac's line
+    /// endings, so the PC's copy of the same text is recognised as the same.
+    ///
+    /// Forgotten once either side holds something that did not cross — a
+    /// password, an image, a copy made while sync was off. Kept, it would turn
+    /// away the same text copied again, and the paste would get what the
+    /// other machine has instead.
     private var lastSyncedText: String?
     private var inFlight = false
     /// A sync asked for while a request was on the wire, run as soon as it is
@@ -195,6 +203,7 @@ final class ClipboardBridge {
         if resuming {
             lastLocalChangeCount = pasteboard.changeCount
             adoptsRemoteBaseline = true
+            lastSyncedText = nil
         }
         schedule(every: Self.idleInterval)
         Log.info("[clipboard] syncing with the host")
@@ -263,6 +272,7 @@ final class ClipboardBridge {
             if !isPrivate && !streamHasKeyboard { return }
             lastLocalChangeCount = pasteboard.changeCount
             if isPrivate {
+                lastSyncedText = nil
                 Log.info("[clipboard] a private item was copied; not sending it to the host")
                 return
             }
@@ -298,13 +308,18 @@ final class ClipboardBridge {
 
         guard now >= quietUntil else { return }
         inFlight = true
+        // A copy made here while the answer is on its way is newer than
+        // anything the answer can say.
+        let changeCountAsked = pasteboard.changeCount
         host.read(lastRemoteSequence) { [weak self] remote in
             DispatchQueue.main.async {
                 guard let self else { return }
                 // After the answer is applied, so a sync waiting on it starts
                 // from what it said.
                 defer { self.settle() }
-                if remote == nil {
+                // Not with a sync waiting on this answer: that was asked for
+                // because a paste is about to depend on it.
+                if remote == nil && !self.syncAgain {
                     self.quietUntil = Date().addingTimeInterval(Self.idleInterval)
                 }
                 // Asked for before a stop and answered after it: sync is off
@@ -315,9 +330,11 @@ final class ClipboardBridge {
                     self.adoptsRemoteBaseline = false
                     return
                 }
+                guard !remote.isUnchanged else { return }
                 // Said once per copy: the next poll passes this sequence back,
                 // and the host answers "unchanged" without looking again.
                 if remote.isPrivate {
+                    self.lastSyncedText = nil
                     Log.info("[clipboard] a private item was copied on the host; "
                              + "not bringing it to the Mac")
                     return
@@ -326,8 +343,17 @@ final class ClipboardBridge {
                 // on the host arrives. See the note on the class: this is why the
                 // Mac's clipboard is left alone rather than cleared.
                 let text = Self.macLineEndings(remote.text)
-                guard !remote.isUnchanged, !text.isEmpty,
-                      text != self.lastSyncedText else { return }
+                guard !text.isEmpty else {
+                    self.lastSyncedText = nil
+                    return
+                }
+                guard text != self.lastSyncedText else { return }
+                // Local change wins when both moved, here too: the Mac's copy
+                // goes to the PC in its turn.
+                guard self.pasteboard.changeCount == changeCountAsked else {
+                    self.lastSyncedText = nil
+                    return
+                }
 
                 self.lastSyncedText = text
                 self.pasteboard.clearContents()
