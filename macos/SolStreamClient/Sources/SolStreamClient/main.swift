@@ -523,8 +523,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Resolve the capture display, size it to this Mac, then open the windows.
+    ///
+    /// The displays are asked for again first. The connection outlives each
+    /// visit to the picker, and the list from its greeting never saw a virtual
+    /// display set up on the PC since -- so the Mac went on warning that there
+    /// was none, and streaming the real monitor. A plain request, which every
+    /// host answers; failing that, the list already held.
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
-        guard let capture = Self.selectDisplay(from: agent.displays, preferring: displayQuery) else {
+        agent.refreshDisplays { [weak self] displays in
+            DispatchQueue.main.async {
+                self?.start(host: host, agent: agent, targets: targets,
+                            displays: displays.isEmpty ? agent.displays : displays)
+            }
+        }
+    }
+
+    private func start(host: String, agent: AgentConnection, targets: [RemoteWindow],
+                       displays: [RemoteDisplay]) {
+        guard let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
             picker?.clearBusy()
             picker?.showFailure("\(host) did not offer a display to capture.")
