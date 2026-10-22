@@ -5590,11 +5590,17 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
         std::string error;
-        const bool ok = solstream::UninstallSelf(error);
-        solstream::WriteInstallResult(ok, error);
+        std::string left;
+        const bool ok = solstream::UninstallSelf(error, left);
+        // What of the virtual display stayed goes back as the warning on an
+        // uninstall that otherwise went through, for the window to say.
+        solstream::WriteInstallResult(ok, ok ? left : error);
         if (!ok) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
+        }
+        if (!left.empty()) {
+            std::fprintf(stdout, "%s\n", left.c_str());
         }
         std::fputs("SolStream has been removed. Your pairing token and "
                    "settings are kept in %LOCALAPPDATA%\\SolStream.\n", stdout);

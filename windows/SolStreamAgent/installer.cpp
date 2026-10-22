@@ -1651,7 +1651,8 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     return true;
 }
 
-bool UninstallSelf(std::string& error) {
+bool UninstallSelf(std::string& error, std::string& left) {
+    left.clear();
     InstallLog("uninstall requested");
     if (!IsElevated()) {
         error = "Removing SolStream needs administrator rights.";
@@ -1694,7 +1695,7 @@ bool UninstallSelf(std::string& error) {
     // way into an uninstall does it: the window's own, already elevated,
     // called only this and left the display on the PC.
     std::string driver_note;
-    RemoveInstalledDriver(driver_note);
+    const bool display_gone = RemoveInstalledDriver(driver_note);
     for (size_t start = 0; start < driver_note.size();) {
         size_t end = driver_note.find('\n', start);
         if (end == std::string::npos) {
@@ -1704,6 +1705,14 @@ bool UninstallSelf(std::string& error) {
             InstallLog(driver_note.substr(start, end - start));
         }
         start = end + 1;
+    }
+    // The window promised to remove the display, so what stays is said there
+    // too, not only here.
+    if (!display_gone) {
+        left = driver_note;
+        while (!left.empty() && left.back() == '\n') {
+            left.pop_back();
+        }
     }
     // By program first, which catches every rule whatever it is called --
     // including the ones Windows writes itself when someone clicks Allow.

@@ -2136,16 +2136,25 @@ void StartUninstallJob(HWND window) {
 
     std::thread([window] {
         std::string error;
+        // What of the virtual display stayed on the PC. The window promised
+        // to remove it, so when it didn't, that is what the end says.
+        std::string left;
         bool ok = false;
         if (IsElevated()) {
-            ok = UninstallSelf(error);
+            ok = UninstallSelf(error, left);
         } else if (RelaunchElevated(L"--uninstall --now", error)) {
+            // Carried as the warning on an uninstall that went through.
             ok = ReadInstallResult(error);
+            if (ok) {
+                left = error;
+            }
         }
         PostDone(window, ok,
-                 ok ? L"Your pairing token and settings are still here, so "
-                      L"installing SolStream again won't make your Mac pair twice."
-                    : ToWide(error));
+                 !ok            ? ToWide(error)
+                 : left.empty() ? L"Your pairing token and settings are still here, so "
+                                  L"installing SolStream again won't make your Mac pair "
+                                  L"twice."
+                                : ToWide(left));
     }).detach();
 }
 

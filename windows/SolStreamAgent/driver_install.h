@@ -93,8 +93,10 @@ bool InstalledDriverHere();
 /// remove stays recorded, and its package and settings stay with it; so does
 /// one Windows removes only when the PC restarts, which uses them until then.
 /// A settings record is let go only once what it names is gone. Needs
-/// administrator rights. What could not be done goes to `note`.
-void RemoveInstalledDriver(std::string& note);
+/// administrator rights. What was done goes to `note`, a line each. True when
+/// nothing it installed is left, or it installed nothing; false when something
+/// stays on the PC, which `note` then says.
+bool RemoveInstalledDriver(std::string& note);
 
 /// What became of a recorded device that uninstall asked to remove.
 enum class DeviceRemoval {
@@ -127,19 +129,20 @@ DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers);
 /// settings follow, as RemoveRecordedDriverSettings says. What became of the
 /// device decides the rest: one that is still there -- refused, or removed
 /// only at the restart -- keeps its record, its package and its settings, and
-/// their records. Exposed, with the two Windows steps as parameters, for its
-/// tests.
-void RemoveRecordedDriver(
+/// their records. True when nothing recorded is left. Exposed, with the two
+/// Windows steps as parameters, for its tests.
+bool RemoveRecordedDriver(
     HKEY root, const wchar_t* key, const std::wstring& instance,
     const std::function<DeviceRemoval(const std::wstring& instance, DWORD& code)>& remove,
     const std::function<bool(const std::wstring& package)>& uninstall, std::string& note);
 
 /// The settings part of that: the folder SolStream made, or the settings file
 /// it wrote into somebody else's and its backup, each record let go only once
-/// what it names is gone. The records are read from and let go in
-/// `root`\`key`: HKLM\SOFTWARE\SolStream for RemoveInstalledDriver, and a key
-/// of their own for the tests, which are why it is exposed.
-void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note);
+/// what it names is gone, and true when every one was. The records are read
+/// from and let go in `root`\`key`: HKLM\SOFTWARE\SolStream for
+/// RemoveInstalledDriver, and a key of their own for the tests, which are why
+/// it is exposed.
+bool RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note);
 
 /// The settings folder's part of that, for a folder SolStream made: the files
 /// the driver and SolStream keep in it, then the folder itself -- never

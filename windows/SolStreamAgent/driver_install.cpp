@@ -653,7 +653,7 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
     return true;
 }
 
-void RemoveInstalledDriver(std::string& note) {
+bool RemoveInstalledDriver(std::string& note) {
     std::wstring instance = ReadState(kDeviceValue);
     const std::wstring staged = ReadState(kInfValue);
 
@@ -670,7 +670,7 @@ void RemoveInstalledDriver(std::string& note) {
                     "installed (" + ToUtf8(staged) + "), and it didn't record which one "
                     "it added, so SolStream left them, the package and their settings as "
                     "they are.\n";
-            return;
+            return false;
         }
         if (using_package.size() == 1) {
             instance = using_package.front();
@@ -678,7 +678,7 @@ void RemoveInstalledDriver(std::string& note) {
     }
 
     // No force: if some other device is using the package, it stays.
-    RemoveRecordedDriver(
+    return RemoveRecordedDriver(
         HKEY_LOCAL_MACHINE, kStateKey, instance, RemoveDevice,
         [](const std::wstring& package) {
             return SetupUninstallOEMInfW(package.c_str(), 0, nullptr) != FALSE;
@@ -713,7 +713,7 @@ DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
     return DeviceRemoval::Removed;
 }
 
-void RemoveRecordedDriver(
+bool RemoveRecordedDriver(
     HKEY root, const wchar_t* key, const std::wstring& instance,
     const std::function<DeviceRemoval(const std::wstring& instance, DWORD& code)>& remove,
     const std::function<bool(const std::wstring& package)>& uninstall, std::string& note) {
@@ -740,7 +740,7 @@ void RemoveRecordedDriver(
                         "this PC restarts. Until then the display still uses its driver and "
                         "its settings, so SolStream left them in place, still recorded as "
                         "SolStream's.\n";
-                return;
+                return false;
             case DeviceRemoval::Failed:
                 // Still here, and still SolStream's. Its records stay, so a
                 // later uninstall knows it; so do the package it runs on and
@@ -749,11 +749,12 @@ void RemoveRecordedDriver(
                 note += "Windows wouldn't remove the virtual display SolStream added (error "
                       + std::to_string(code) + "), so SolStream left it, its driver and its "
                         "settings in place, still recorded as SolStream's.\n";
-                return;
+                return false;
         }
         DeleteStateIn(root, key, kDeviceValue);
     }
     // Then the package, and only one this install put in the store.
+    bool all_gone = true;
     const std::wstring staged = ReadStateIn(root, key, kInfValue);
     if (!staged.empty()) {
         if (IsOemInfName(staged) && uninstall(staged)) {
@@ -761,14 +762,16 @@ void RemoveRecordedDriver(
         } else {
             note += "Windows kept the virtual display driver package (" + ToUtf8(staged)
                   + "), which something else may be using.\n";
+            all_gone = false;
         }
         DeleteStateIn(root, key, kInfValue);
     }
 
-    RemoveRecordedDriverSettings(root, key, note);
+    return RemoveRecordedDriverSettings(root, key, note) && all_gone;
 }
 
-void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note) {
+bool RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note) {
+    bool all_gone = true;
     // The settings folder only when SolStream made it, only what it holds of
     // the driver's and SolStream's, and never through a link. Its record goes
     // only with the folder: let go while the folder stays, nothing would say
@@ -780,6 +783,7 @@ void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& no
         } else {
             note += "Left the display driver's settings folder, " + ToUtf8(folder)
                   + ", because it is a link or holds files SolStream didn't put there.\n";
+            all_gone = false;
         }
     }
     // The settings file written into somebody else's folder, and the copy of
@@ -794,8 +798,10 @@ void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& no
         } else {
             note += "Left " + ToUtf8(path) + ": it is a link, isn't the display driver's "
                     "settings, or couldn't be deleted.\n";
+            all_gone = false;
         }
     }
+    return all_gone;
 }
 
 bool RemoveDriverSettingsFolder(const std::wstring& folder) {

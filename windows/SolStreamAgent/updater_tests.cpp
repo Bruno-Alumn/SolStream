@@ -1105,9 +1105,10 @@ void TestDriverSettingsRecords(const std::wstring& scratch) {
             == ERROR_SUCCESS;
     };
     std::string note;
-    auto take_back = [&key, &note] {
+    bool all_gone = false;
+    auto take_back = [&key, &note, &all_gone] {
         note.clear();
-        RemoveRecordedDriverSettings(HKEY_CURRENT_USER, key.c_str(), note);
+        all_gone = RemoveRecordedDriverSettings(HKEY_CURRENT_USER, key.c_str(), note);
     };
 
     // A folder SolStream made, where somebody has since put a file the
@@ -1121,12 +1122,14 @@ void TestDriverSettingsRecords(const std::wstring& scratch) {
     CHECK(Exists(folder + L"\\user_edid.bin"));
     CHECK(recorded(L"DisplayDriverSettingsFolder"));
     CHECK(note.find("Left the display driver's settings folder") != std::string::npos);
+    CHECK(!all_gone);
     // With theirs gone, the folder goes, and its record with it.
     CHECK(DeleteFileW((folder + L"\\user_edid.bin").c_str()));
     take_back();
     CHECK(!Exists(folder));
     CHECK(!recorded(L"DisplayDriverSettingsFolder"));
     CHECK(note.empty());
+    CHECK(all_gone);
 
     // The settings file written into somebody else's folder, held open so it
     // can't be deleted, beside a record that names their own file.
@@ -1143,6 +1146,7 @@ void TestDriverSettingsRecords(const std::wstring& scratch) {
     take_back();
     CHECK(Exists(settings));
     CHECK(recorded(L"DisplayDriverSettingsFile"));
+    CHECK(!all_gone);
     CloseHandle(held);
     take_back();
     CHECK(!Exists(settings));
@@ -1151,6 +1155,7 @@ void TestDriverSettingsRecords(const std::wstring& scratch) {
     CHECK(Exists(theirs + L"\\theirs.xml"));
     CHECK(recorded(L"DisplayDriverSettingsBackup"));
     CHECK(note.find("theirs.xml") != std::string::npos);
+    CHECK(!all_gone);
 
     RegCloseKey(records);
     RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());
@@ -1226,20 +1231,21 @@ void TestDriverRecords(const std::wstring& scratch) {
     std::vector<std::wstring> asked;
     std::vector<std::wstring> uninstalled;
     std::string note;
-    auto uninstall = [&](DeviceRemoval outcome) {
+    bool all_gone = false;
+    auto uninstall = [&](DeviceRemoval outcome, bool package_goes = true) {
         asked.clear();
         uninstalled.clear();
         note.clear();
-        RemoveRecordedDriver(
+        all_gone = RemoveRecordedDriver(
             HKEY_CURRENT_USER, key.c_str(), instance,
             [&asked, outcome](const std::wstring& device, DWORD& code) {
                 asked.push_back(device);
                 code = outcome == DeviceRemoval::Failed ? ERROR_ACCESS_DENIED : 0;
                 return outcome;
             },
-            [&uninstalled](const std::wstring& package) {
+            [&uninstalled, package_goes](const std::wstring& package) {
                 uninstalled.push_back(package);
-                return true;
+                return package_goes;
             },
             note);
     };
@@ -1255,6 +1261,8 @@ void TestDriverRecords(const std::wstring& scratch) {
         CHECK(uninstalled.empty());
         CHECK(Exists(folder + L"\\vdd_settings.xml"));
         CHECK(note.find("still recorded as SolStream's") != std::string::npos);
+        // What the uninstall window then says, in place of "removed".
+        CHECK(!all_gone);
     }
     // The restart is what finishes it, and the note says so.
     CHECK(note.find("restarts") != std::string::npos);
@@ -1268,7 +1276,17 @@ void TestDriverRecords(const std::wstring& scratch) {
         CHECK(!recorded(L"DisplayDriverSettingsFolder"));
         CHECK(uninstalled.size() == 1 && uninstalled.front() == L"oem42.inf");
         CHECK(!Exists(folder));
+        CHECK(all_gone);
     }
+
+    // A package Windows keeps -- some other device uses it -- is somebody's
+    // now: its record goes, and the window says it stayed.
+    install();
+    uninstall(DeviceRemoval::Removed, false);
+    CHECK(!recorded(L"DisplayDriverInf"));
+    CHECK(note.find("Windows kept the virtual display driver package (oem42.inf)")
+          != std::string::npos);
+    CHECK(!all_gone);
 
     RegCloseKey(records);
     RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());

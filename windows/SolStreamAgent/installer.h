@@ -86,7 +86,11 @@ bool StartsAtLogon();
 /// are deliberately kept: they hold the pairing token and the media session
 /// counter, and making every Mac pair again after a reinstall is a worse
 /// default than leaving a few kilobytes behind.
-bool UninstallSelf(std::string& error);
+///
+/// `left` is empty when all of the virtual display SolStream installed went,
+/// and otherwise says what stayed on the PC: a display Windows wouldn't
+/// remove, or removes only when it restarts, and what that keeps with it.
+bool UninstallSelf(std::string& error, std::string& left);
 
 /// Where an install lives.
 std::wstring InstallDirectory();
