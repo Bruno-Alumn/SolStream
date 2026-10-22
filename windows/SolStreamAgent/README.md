@@ -272,20 +272,18 @@ preference:
 
 Without one, SolStream captures a real screen and all three stop being true.
 
-No driver is bundled with this repository — a signed kernel driver is not
-something to vendor casually, and installing one should be the user's decision.
-To set one up:
+No driver is bundled with this repository. Setup offers to install one, ticked
+by default, when the PC has none: the
+[Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+(MIT, user-mode UMDF, signed by SignPath Foundation). It downloads one pinned
+release, keeps it only if its SHA-256 matches the one in `driver_install.cpp`,
+installs it, and creates the `Root\MttVDD` device `pnputil` never made. The host
+window's **Set up** button and `SolStream.exe --install-display-driver` run the
+same steps. Uninstalling removes only what that install added.
+`installer/README.md` has the whole sequence, and how ownership is recorded.
 
-1. Install any indirect display driver. The one SolStream is tested against is
-   the Virtual Display Driver, <https://github.com/itsmikethetech/Virtual-Display-Driver>.
-2. Start SolStream. It reports the driver in its window and picks that display
-   automatically; the media session names it when a Mac connects.
-
-To have SolStream install one for you instead, put the driver package in a
-`driver\` folder beside `SolStream.exe`, named `SolStreamDisplay.inf`. The app
-then offers an Install button, which runs `pnputil` elevated so the user sees
-the UAC prompt — installing a kernel driver behind a prompt nobody sees is not
-something this should be able to do.
+A driver installed by hand works just as well: start SolStream and it picks
+that display, and the media session names it when a Mac connects.
 
 ## One Mac at a time
 

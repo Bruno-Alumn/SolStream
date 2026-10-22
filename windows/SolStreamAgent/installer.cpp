@@ -1058,7 +1058,7 @@ bool IsElevated() {
     return ok && elevation.TokenIsElevated != 0;
 }
 
-bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
+bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool may_prompt) {
     const std::wstring exe = ExePath();
     // The name of the postbox is settled here, in the process that is going to
     // read it, rather than agreed in advance by both halves — see ResultToken.
@@ -1076,10 +1076,15 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
     execute.lpVerb = L"runas";
     execute.lpFile = exe.c_str();
     execute.lpParameters = parameters.c_str();
-    // Hidden, because the elevated half has no window worth showing: it is the
-    // same binary running its install path, and the window the user is looking
-    // at is the one that asked for it.
-    execute.nShow = SW_HIDE;
+    // Hidden, because the elevated half has no window worth showing -- except
+    // when it may raise a prompt of Windows' own. The show state a process is
+    // started with is applied to the first window it shows, and installing the
+    // display driver can make that Windows' "install this device software?"
+    // question: started hidden, the one thing the install is waiting on could
+    // come up hidden too, with the setup screen waiting on it for ever. Shown,
+    // a Windows older than 24H2 flashes the console this program then
+    // releases; a lost prompt is the worse of the two.
+    execute.nShow = may_prompt ? SW_SHOWNORMAL : SW_HIDE;
     if (!ShellExecuteExW(&execute)) {
         // Not "to install": this is the same call the uninstaller makes, and it
         // told somebody removing SolStream that it needed rights to install.
@@ -1095,6 +1100,10 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error) {
         return false;
     }
     if (execute.hProcess) {
+        // And allowed to come to the front: the prompt belongs to a process
+        // that has no foreground of its own to give it, while this one -- the
+        // window the person is looking at -- does.
+        AllowSetForegroundWindow(GetProcessId(execute.hProcess));
         WaitForSingleObject(execute.hProcess, INFINITE);
         CloseHandle(execute.hProcess);
     }

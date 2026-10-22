@@ -91,12 +91,23 @@ up virtual display…", run the same steps elevated
 (`SolStream.exe --install-display-driver`), and the running host then switches
 its capture to the new display without restarting.
 
-What SolStream installed it remembers (`HKLM\SOFTWARE\SolStream`), and
-uninstalling takes back exactly that: the device, the driver package, and the
-settings folder if SolStream made it. A driver somebody installed themselves is
-theirs, and stays. ARM PCs are told where to get the driver instead: the
-project's ARM64 build needs test signing, which is not something to switch on
-for somebody.
+Setup installs only on a PC with no device of the driver's at all. One that is
+there but switched off or failing is somebody's own: setup says it is off and
+where to turn it on, and installs nothing over it. What SolStream does install
+it records under `HKLM\SOFTWARE\SolStream`, each piece only if this install made
+it: the store package only if `SetupCopyOEMInf` (with `SP_COPY_NOOVERWRITE`)
+actually added it, the device by its instance ID, and the settings folder if it
+created one. That folder is created with a protected access list (administrators
+and SYSTEM write, everyone else reads), and nothing elevated writes or deletes
+through a junction or link there. A failed or declined install takes those
+pieces back at once. Uninstalling removes exactly the recorded pieces, without
+forcing: another device with the same driver, or a package something else is
+using, stays.
+
+ARM PCs aren't offered the tick box at all. The project's ARM64 build needs
+test signing, which is not something to switch on for somebody, so setup and
+the host window say where to get the driver instead. They say the same when
+the download fails.
 
 ## After setup
 
@@ -120,6 +131,12 @@ Tailscale address beside the local one when there is one.
   "SolStream is signed" is a statement that needs a platform attached to it.
 - **No installer is tested automatically.** The clean-VM run is a manual
   procedure.
+- **The driver is a pinned upstream asset.** Setup fetches one release asset of
+  the Virtual Display Driver by URL and checks it against a hash compiled in. If
+  the project removes or replaces that asset, every download fails with a
+  pointer to installing the driver by hand. The fix is to pin a new release:
+  download it, check its contents and signer, and update `kPackageUrl`,
+  `kPackageSha256` and `kDriverVersion` in `driver_install.cpp`.
 
 ## Constraints worth knowing before changing any of this
 

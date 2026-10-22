@@ -161,18 +161,35 @@ std::wstring g_notice_detail;
 
 /// The virtual display, as setup found it and as the install left it.
 ///
-/// `g_had_driver` is read once as the setup window opens: whether to offer the
-/// tick box at all. `g_driver_ours` is the same question for the uninstall
-/// window, which only promises to remove a driver SolStream put there.
-/// `g_display_result` is the elevated half's answer, "ready <note>" or
+/// `g_driver_state` is read once as the setup window opens: the tick box is
+/// offered only when there is no device of the driver's at all, and only on a
+/// PC it can be installed on (`g_can_install_driver`). One that is there but
+/// switched off is somebody's own, and setup says so rather than install over
+/// it. `g_driver_ours` is the same question for the uninstall window, which
+/// only promises to remove a driver SolStream put there. `g_display_result` is
+/// the elevated half's answer, "ready <note>", "ready-restart <note>" or
 /// "failed <why>", empty when it was not asked to do anything.
-bool g_had_driver = false;
+DriverState g_driver_state = DriverState::Missing;
+bool g_can_install_driver = true;
 bool g_driver_ours = false;
 std::string g_display_result;
 /// What was ticked when Install was pressed, for the summary afterwards.
 InstallOptions g_chosen;
 /// Registered: the elevated half's progress, a DriverStep in wParam.
 UINT g_progress_message = 0;
+/// When the driver install reached the step where Windows may ask about the
+/// publisher, or 0. A wait there of more than a few seconds is almost always
+/// that question, possibly behind this window, and the screen says so.
+ULONGLONG g_installing_since = 0;
+
+/// What to add while the install has sat on that step for a while.
+std::wstring PromptHint() {
+    if (g_installing_since == 0 || GetTickCount64() - g_installing_since < 12000) {
+        return {};
+    }
+    return L" Still here? Windows may be waiting for an answer in a window behind this "
+           L"one: look on the taskbar for Windows Security.";
+}
 /// main.cpp's, run once a virtual display has been installed into a running
 /// host, so it starts capturing it. On the worker thread.
 std::function<void()> g_display_ready;
@@ -800,7 +817,7 @@ Screen Describe(const HostStatus& status) {
     // absurd — but not the two hard failures above, which are still true.
     if (!g_notice.empty() && (!failing || g_notice_about_update)) {
         screen.what = g_notice;
-        screen.why = g_notice_detail;
+        screen.why = g_notice_detail + (g_job_running ? PromptHint() : std::wstring());
         screen.mark = g_notice_mark;
         screen.code.clear();
         // Nothing to dismiss until it has finished saying it. Dismissing is not
@@ -859,13 +876,23 @@ Screen Describe(const HostStatus& status) {
         screen.what = L"Streaming your main display.";
         screen.why = L"That works, but everything on that display goes to your Mac — "
                      L"including anything you drag over the application — and the "
-                     L"picture is your monitor's size rather than your Mac's. A "
-                     L"virtual display fixes both: SolStream downloads the free "
-                     L"Virtual Display Driver, checks it, and sets it up.";
-        screen.fix = L"Set up";
+                     L"picture is your monitor's size rather than your Mac's. ";
         screen.mark = Mark::NeedsYou;
-        screen.shield = true;
-        screen.action = BannerAction::InstallDriver;
+        // No button where pressing it can only fail: the driver that is here
+        // is somebody's own and switched off, or this is an ARM PC.
+        if (status.driver_off) {
+            screen.why += L"This PC's Virtual Display Driver is turned off; turn it on in "
+                          L"Device Manager (Display adapters) to stream to it.";
+        } else if (!CanInstallDisplayDriver()) {
+            screen.why += L"SolStream can't install a virtual display on an ARM PC. "
+                        + ToWide(ManualInstallAdvice());
+        } else {
+            screen.why += L"A virtual display fixes both: SolStream downloads the free "
+                          L"Virtual Display Driver, checks it, and sets it up.";
+            screen.fix = L"Set up";
+            screen.shield = true;
+            screen.action = BannerAction::InstallDriver;
+        }
     }
     return screen;
 }
@@ -990,9 +1017,16 @@ SetupCopy CopyForPhase() {
                     // and the thing a person installing a host most worries about.
                     L"Waits beside the clock, so nothing on this PC is interrupted",
                 };
-                if (g_had_driver) {
+                if (g_driver_state == DriverState::Ready) {
                     copy.bullets.push_back(L"Streams from the virtual display already on "
                                            L"this PC");
+                } else if (g_driver_state == DriverState::Off) {
+                    copy.bullets.push_back(L"Leaves this PC's Virtual Display Driver as it "
+                                           L"is: it's turned off, so SolStream streams your "
+                                           L"main display until you turn it on");
+                } else if (!g_can_install_driver) {
+                    copy.bullets.push_back(L"Streams your main display: SolStream can't "
+                                           L"install a virtual display on an ARM PC");
                 }
                 copy.go = L"Install";
             }
@@ -1000,7 +1034,7 @@ SetupCopy CopyForPhase() {
             break;
         case Phase::Working:
             copy.headline = removing ? L"Removing SolStream…" : L"Installing SolStream…";
-            copy.lead = g_step;
+            copy.lead = g_step + PromptHint();
             break;
         case Phase::Done:
             copy.headline = removing ? L"SolStream has been removed."
@@ -1179,12 +1213,13 @@ float DrawSetupSummary(float pad, float top, float right) {
     SummaryLine display;
     const std::string& result = g_display_result;
     if (result.rfind("ready", 0) == 0) {
-        const bool restart = result.find("restart") != std::string::npos;
+        // Said by the elevated half in so many words, not guessed from what
+        // its notes happen to contain.
+        const bool restart = result.rfind("ready-restart", 0) == 0;
         display.mark = restart ? Mark::NeedsYou : Mark::Live;
         display.title = L"Virtual display ready";
         display.detail = restart
-            ? L"Restart this PC to finish installing it. Until then SolStream streams "
-              L"your main display."
+            ? L"Windows wants this PC restarted to finish installing it."
             : L"Your Mac gets a screen of its own on this PC, so nothing on your monitor "
               L"is streamed.";
     } else if (result.rfind("failed", 0) == 0) {
@@ -1193,10 +1228,21 @@ float DrawSetupSummary(float pad, float top, float right) {
         display.detail = ToWide(result.size() > 7 ? result.substr(7) : std::string())
                        + L" Until then SolStream streams your main display, and its "
                          L"window offers Set up again.";
-    } else if (g_had_driver) {
+    } else if (g_driver_state == DriverState::Ready) {
         display.mark = Mark::Live;
         display.title = L"Virtual display ready";
         display.detail = L"Using the one already on this PC.";
+    } else if (g_driver_state == DriverState::Off) {
+        display.mark = Mark::NeedsYou;
+        display.title = L"Virtual display turned off";
+        display.detail = L"It's this PC's own Virtual Display Driver, so SolStream left it "
+                         L"alone. Turn it on in Device Manager (Display adapters) to stream "
+                         L"to it.";
+    } else if (!g_can_install_driver) {
+        display.mark = Mark::NeedsYou;
+        display.title = L"Streaming your main display";
+        display.detail = L"SolStream can't install a virtual display on an ARM PC. "
+                       + ToWide(ManualInstallAdvice());
     } else {
         display.mark = Mark::NeedsYou;
         display.title = L"Streaming your main display";
@@ -1964,14 +2010,15 @@ void StartInstallJob(HWND window) {
             // Already elevated -- setup run as administrator -- so the work
             // happens here, in the order the elevated half does it.
             if (options.display_driver) {
-                bool already = false;
+                bool already = false, restart = false;
                 std::string note, driver_error;
                 const bool ready = InstallDisplayDriver(
                     [window](DriverStep step) {
                         PostMessageW(window, g_progress_message, (WPARAM) step, 0);
                     },
-                    already, note, driver_error);
-                display = ready ? "ready " + note : "failed " + driver_error;
+                    window, already, restart, note, driver_error);
+                display = ready ? (restart ? "ready-restart " : "ready ") + note
+                                : "failed " + driver_error;
                 PostMessageW(window, g_progress_message, (WPARAM) DriverStep::Done, 0);
             }
             ok = InstallSelf(options, error);
@@ -1981,7 +2028,8 @@ void StartInstallJob(HWND window) {
             // its reason in a file, and posts its progress to this window.
             const std::wstring progress = L" --progress-window "
                 + std::to_wstring((unsigned long long) (uintptr_t) window);
-            if (RelaunchElevated(L"--install" + OptionArguments(options) + progress, error)) {
+            if (RelaunchElevated(L"--install" + OptionArguments(options) + progress, error,
+                                 options.display_driver)) {
                 ok = ReadInstallResult(error, &display);
             }
         }
@@ -2042,18 +2090,18 @@ void StartDisplayJob(HWND window) {
         std::string error;
         std::string display;
         if (IsElevated()) {
-            bool already = false;
+            bool already = false, restart = false;
             std::string note;
             const bool ready = InstallDisplayDriver(
                 [window](DriverStep step) {
                     PostMessageW(window, g_progress_message, (WPARAM) step, 0);
                 },
-                already, note, error);
-            display = ready ? "ready " + note : "failed " + error;
+                window, already, restart, note, error);
+            display = ready ? (restart ? "ready-restart " : "ready ") + note : "failed " + error;
         } else {
             const std::wstring progress = L"--install-display-driver --progress-window "
                 + std::to_wstring((unsigned long long) (uintptr_t) window);
-            if (RelaunchElevated(progress, error)) {
+            if (RelaunchElevated(progress, error, true)) {
                 ReadInstallResult(error, &display);
             } else {
                 display = "failed " + error;
@@ -2068,7 +2116,7 @@ void StartDisplayJob(HWND window) {
         if (display.empty()) {
             display = "failed " + (error.empty() ? std::string("The setup did not run.") : error);
         }
-        const bool restart = display.find("restart") != std::string::npos;
+        const bool restart = display.rfind("ready-restart", 0) == 0;
         PostDone(window, ok,
                  ok ? (restart ? L"Restart this PC to finish installing it."
                                : L"Your Mac gets a screen of its own from the next time it "
@@ -2594,6 +2642,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             default:
                 return 0;
         }
+        g_installing_since = (DriverStep) wparam == DriverStep::Installing ? GetTickCount64()
+                                                                            : 0;
         g_step = text;
         if (g_mode == WindowMode::Host) {
             g_notice_detail = text;
@@ -2618,8 +2668,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 // what makes the picture fit the Mac, and the one thing setup
                 // can do that a person would otherwise have to go and find.
                 // Not offered at all when one is here already.
-                g_had_driver = HasSolStreamDriver();
-                if (!g_had_driver) {
+                g_driver_state = CurrentDriverState();
+                g_can_install_driver = CanInstallDisplayDriver();
+                if (g_driver_state == DriverState::Missing && g_can_install_driver) {
                     g_checks.push_back({kIdCheckDisplay,
                                         L"Set up a virtual display (recommended)",
                                         L"", true, false, {}});
@@ -2687,6 +2738,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             std::wstring* text = (std::wstring*) lparam;
             const bool ok = wparam != 0;
             g_job_running = false;
+            g_installing_since = 0;
             if (g_mode == WindowMode::Host) {
                 // The host window has no phases: the answer replaces the
                 // question in the same banner the button was in.
@@ -3088,7 +3140,7 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.streaming_ready == b.streaming_ready && a.virtual_display == b.virtual_display
         && a.streaming_detail == b.streaming_detail && a.display_detail == b.display_detail
         && a.connected_clients == b.connected_clients
-        && a.tailscale_address == b.tailscale_address;
+        && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off;
 }
 
 void UpdateHostStatus(const HostStatus& status) {

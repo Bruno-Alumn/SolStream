@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <windows.h>
+
 #include <functional>
 #include <string>
 
@@ -38,29 +40,50 @@ enum class DriverStep {
     Done,         ///< the display's part is over; SolStream's own install follows
 };
 
-/// Is the Virtual Display Driver -- SolStream's, not another product's virtual
-/// display -- on this PC and running? A device left behind with no working
-/// driver does not count: that is a PC setup should still offer to fix.
+/// Where SolStream's driver stands on this PC.
+enum class DriverState {
+    Missing,  ///< no device of it at all: setup may install one
+    Ready,    ///< present and running
+    Off,      ///< present but disabled or failing -- somebody's, and left alone
+};
+DriverState CurrentDriverState();
+
+/// CurrentDriverState() == Ready.
 bool HasSolStreamDriver();
+
+/// False on an ARM PC: the driver SolStream fetches is the amd64 build.
+bool CanInstallDisplayDriver();
+
+/// Where to get the driver by hand, as one sentence, for whenever SolStream
+/// can't install it itself.
+std::string ManualInstallAdvice();
 
 /// Fetch, check and install the driver, create its device, and set the display
 /// up for streaming. Needs administrator rights and the interactive session.
 ///
-/// True when a virtual display is ready at the end, including when the driver
-/// was already here (`already` is then true and nothing was downloaded).
-/// `note` collects what was done and anything worth knowing; `error` says why
-/// not, in words a person can act on.
-bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
-                          bool& already, std::string& note, std::string& error);
+/// Only on a PC with no device of the driver's at all: a device that is there
+/// but switched off is somebody's own, and this says so rather than install
+/// over it. What it does install it records -- the store package only if this
+/// call added it, the device it created, the settings folder if it made it --
+/// and on failure it takes those back.
+///
+/// `owner` is the window waiting on this, for Windows' own prompts to come up
+/// over. True when a virtual display is ready at the end, including when one
+/// already was (`already`). `restart` is Windows saying the install needs a
+/// restart to finish. `note` collects what was done; `error` says why not, in
+/// words a person can act on.
+bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND owner,
+                          bool& already, bool& restart, std::string& note,
+                          std::string& error);
 
-/// Whether InstallDisplayDriver installed the driver on this PC, and so whether
-/// uninstalling SolStream should take it away again. A driver somebody
-/// installed for themselves is theirs, and is left alone.
+/// Whether InstallDisplayDriver installed anything on this PC, and so whether
+/// uninstalling SolStream has anything of the driver's to take away.
 bool InstalledDriverHere();
 
-/// Undo InstallDisplayDriver: remove the device, the driver package, and the
-/// settings folder if SolStream created it. Needs administrator rights.
-/// Best effort; what could not be done goes to `note`.
+/// Undo InstallDisplayDriver: the device it created, the package it added and
+/// the settings folder it made -- each only if recorded, and nothing else with
+/// the same driver. Needs administrator rights. What could not be done goes to
+/// `note`.
 void RemoveInstalledDriver(std::string& note);
 
 }  // namespace solstream

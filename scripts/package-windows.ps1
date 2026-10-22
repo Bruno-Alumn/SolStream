@@ -27,17 +27,13 @@
 # picture itself, so there is no second program to ship, no GPL obligation to
 # carry, and no payload to embed.
 #
-# THE DISPLAY DRIVER IS NOT SHIPPED AND IS NOT DOWNLOADED. This is worth saying
-# plainly because the line that used to sit here said the application "downloads
-# it itself when the user asks", and there is no code anywhere in SolStream that
-# fetches a driver, or anything else, from the internet. What
-# InstallBundledDriver in vdd.cpp actually does
-# is run pnputil on driver\SolStreamDisplay.inf sitting beside the executable —
-# a file this script does not produce — and when it is absent, which is always
-# for a packaged build, the "Install driver" button explains that no driver is
-# bundled and points the user at the Virtual Display Driver to install by hand.
-# So a packaged SolStream streams a real monitor until somebody installs an
-# indirect display driver themselves.
+# THE DISPLAY DRIVER IS NOT SHIPPED IN THIS PACKAGE. Setup downloads it, but only
+# when its "Set up a virtual display" box is ticked (or the host window's Set up
+# button is pressed) on a PC with no Virtual Display Driver device: one pinned
+# release of github.com/VirtualDrivers/Virtual-Display-Driver, kept only if its
+# SHA-256 matches the one compiled into driver_install.cpp. Apart from that and
+# the updater's GitHub checks, SolStream fetches nothing from the internet. See
+# installer/README.md for the whole sequence and what uninstall takes back.
 #
 # NOTHING HERE SIGNS THE EXECUTABLE with a certificate. The release workflow
 # (.github/workflows/release.yml) runs this same script on a GitHub Windows

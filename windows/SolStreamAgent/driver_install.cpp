@@ -42,13 +42,19 @@ constexpr wchar_t kHardwareId[] = L"Root\\MttVDD";
 /// Where SolStream remembers what it installed, so an uninstall takes back
 /// that and no more.
 constexpr wchar_t kStateKey[] = L"SOFTWARE\\SolStream";
+/// Three things, each recorded only when THIS install made it: the driver
+/// store package (oemNN.inf), the device instance (ROOT\DISPLAY\000N), and the
+/// settings folder. Something that was already there is somebody else's.
 constexpr wchar_t kInfValue[] = L"DisplayDriverInf";
+constexpr wchar_t kDeviceValue[] = L"DisplayDriverDevice";
 constexpr wchar_t kSettingsValue[] = L"DisplayDriverSettingsFolder";
 
-/// The driver's own settings location: VDDPATH under this key when somebody
-/// has set one, otherwise C:\VirtualDisplayDriver -- both read out of
-/// MttVDD.dll itself, not out of its documentation.
-constexpr wchar_t kDriverKey[] = L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver";
+/// Where the driver project says to get it by hand, said whenever SolStream
+/// cannot do it itself -- so a retry that can only fail the same way is never
+/// the whole answer.
+const std::string kManualInstall =
+    " You can install the Virtual Display Driver yourself from "
+    "github.com/VirtualDrivers/Virtual-Display-Driver, then open SolStream again.";
 
 std::wstring ReadState(const wchar_t* name) {
     wchar_t value[MAX_PATH] = {0};
@@ -80,20 +86,6 @@ void DeleteState(const wchar_t* name) {
         RegDeleteValueW(key, name);
         RegCloseKey(key);
     }
-}
-
-std::wstring DriverSettingsFolder() {
-    wchar_t value[MAX_PATH] = {0};
-    DWORD size = sizeof(value);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, kDriverKey, L"VDDPATH",
-                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value, &size)
-            == ERROR_SUCCESS
-        && value[0] != L'\0') {
-        return value;
-    }
-    wchar_t drive[8] = L"C:";
-    GetEnvironmentVariableW(L"SystemDrive", drive, 8);
-    return std::wstring(drive) + L"\\VirtualDisplayDriver";
 }
 
 /// A directory only SYSTEM and administrators can write to, for the download
@@ -200,11 +192,13 @@ bool HasDriverHardwareId(HDEVINFO set, SP_DEVINFO_DATA& device) {
     return false;
 }
 
-/// Every display-class device with the driver's hardware ID -- present or
-/// not, since a device left behind by an earlier install still counts.
+/// Every PRESENT display-class device with the driver's hardware ID: working,
+/// disabled or failing. A non-present one is a leftover from a device that
+/// was removed, which nothing can switch on again.
 template <typename Visit>
 void ForEachDriverDevice(Visit visit) {
-    HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVCLASS_DISPLAY, nullptr, nullptr, 0);
+    HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVCLASS_DISPLAY, nullptr, nullptr,
+                                        DIGCF_PRESENT);
     if (set == INVALID_HANDLE_VALUE) {
         return;
     }
@@ -225,7 +219,8 @@ void ForEachDriverDevice(Visit visit) {
 /// a software device has no bus to announce it, so there are none. The same
 /// sequence devcon's `install` uses: make a device node with the hardware ID,
 /// register it, and let UpdateDriverForPlugAndPlayDevices bind the driver.
-bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::string& error) {
+bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::wstring& instance,
+                  std::string& error) {
     set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
     if (set == INVALID_HANDLE_VALUE) {
         error = "could not start a device list (error " + std::to_string(GetLastError()) + ")";
@@ -255,7 +250,57 @@ bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::string& error) {
         set = INVALID_HANDLE_VALUE;
         return false;
     }
+    // Which device this is, so an uninstall removes it and only it.
+    wchar_t id[MAX_DEVICE_ID_LEN] = {0};
+    if (SetupDiGetDeviceInstanceIdW(set, &created, id, MAX_DEVICE_ID_LEN, nullptr)) {
+        instance = id;
+    }
     return true;
+}
+
+/// Remove one device by its instance ID. Nothing else with the same hardware
+/// ID is touched.
+bool RemoveDevice(const std::wstring& instance) {
+    HDEVINFO set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
+    if (set == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    SP_DEVINFO_DATA device{};
+    device.cbSize = sizeof(device);
+    const bool removed = SetupDiOpenDeviceInfoW(set, instance.c_str(), nullptr, 0, &device)
+                      && HasDriverHardwareId(set, device)
+                      && SetupDiCallClassInstaller(DIF_REMOVE, set, &device);
+    SetupDiDestroyDeviceInfoList(set);
+    return removed;
+}
+
+/// Only a name of the driver store's own form, oemNN.inf: what is passed here
+/// came out of the registry, and must never name some other package's INF.
+bool IsOemInfName(const std::wstring& name) {
+    const std::wstring folded = FoldCase(name);
+    return folded.rfind(L"oem", 0) == 0 && folded.size() > 7
+        && folded.compare(folded.size() - 4, 4, L".inf") == 0
+        && folded.find_first_of(L"\\/:") == std::wstring::npos;
+}
+
+/// The settings folder, made the way an elevated writer's folder at the root of C:
+/// has to be: administrators and SYSTEM write, everybody else reads --
+/// including LOCAL SERVICE, which the driver's user-mode host runs as.
+/// Inheriting C:\'s own access list instead gives every signed-in user
+/// Modify, and these files are written and deleted with administrator rights.
+bool MakeSettingsFolder(const std::wstring& path) {
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength = sizeof(attributes);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;AU)(A;OICI;FRFX;;;LS)",
+            SDDL_REVISION_1, &descriptor, nullptr)) {
+        return false;
+    }
+    attributes.lpSecurityDescriptor = descriptor;
+    const BOOL made = CreateDirectoryW(path.c_str(), &attributes);
+    LocalFree(descriptor);
+    return made != FALSE;
 }
 
 std::string InstallProblem(const char* what, DWORD code) {
@@ -277,33 +322,62 @@ std::string InstallProblem(const char* what, DWORD code) {
 
 }  // namespace
 
-bool HasSolStreamDriver() {
+DriverState CurrentDriverState() {
+    bool found = false;
     for (const VirtualDisplay& display : FindVirtualDisplays()) {
-        if (display.running && IsSolStreamDisplayDriver(display.friendly_name)) {
-            return true;
+        if (IsSolStreamDisplayDriver(display.friendly_name)) {
+            if (display.running) {
+                return DriverState::Ready;
+            }
+            found = true;
         }
     }
-    return false;
+    ForEachDriverDevice([&found](HDEVINFO, SP_DEVINFO_DATA&) { found = true; });
+    return found ? DriverState::Off : DriverState::Missing;
+}
+
+bool HasSolStreamDriver() {
+    return CurrentDriverState() == DriverState::Ready;
+}
+
+bool CanInstallDisplayDriver() {
+    // The package is the amd64 build. On an ARM PC SolStream itself runs
+    // under emulation, but a driver cannot, and the project's ARM64 build
+    // needs test signing on current Windows -- not something to switch on
+    // behind somebody's back.
+    USHORT process_machine = 0, native_machine = 0;
+    return !(IsWow64Process2(GetCurrentProcess(), &process_machine, &native_machine)
+             && native_machine == IMAGE_FILE_MACHINE_ARM64);
+}
+
+std::string ManualInstallAdvice() {
+    return kManualInstall.substr(1);
 }
 
 bool InstalledDriverHere() {
-    return !ReadState(kInfValue).empty();
+    return !ReadState(kInfValue).empty() || !ReadState(kDeviceValue).empty();
 }
 
-bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
-                          bool& already, std::string& note, std::string& error) {
-    already = HasSolStreamDriver();
-    if (!already) {
-        // The package is the amd64 build. On an ARM PC SolStream itself runs
-        // under emulation, but a driver cannot, and the project's ARM64 build
-        // needs test signing on current Windows -- not something to switch on
-        // behind somebody's back.
-        USHORT process_machine = 0, native_machine = 0;
-        if (IsWow64Process2(GetCurrentProcess(), &process_machine, &native_machine)
-            && native_machine == IMAGE_FILE_MACHINE_ARM64) {
-            error = "SolStream can't install the virtual display on an ARM PC. Install "
-                    "the Virtual Display Driver from "
-                  + ToUtf8(kDriverProject) + " instead, then open SolStream again.";
+bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND owner,
+                          bool& already, bool& restart, std::string& note,
+                          std::string& error) {
+    restart = false;
+    const DriverState state = CurrentDriverState();
+    already = state == DriverState::Ready;
+    if (state == DriverState::Off) {
+        // Somebody's own driver, switched off or failing. Theirs: installing
+        // over it would bind a different version to their device, and an
+        // uninstall would later take it. Saying where the switch is costs
+        // them one click and takes nothing.
+        error = "This PC already has the Virtual Display Driver, but it's turned off or "
+                "not working, so SolStream left it alone. Turn it on in Device Manager "
+                "(Display adapters, Virtual Display Driver, Enable device), then choose "
+                "Set up again.";
+        return false;
+    }
+    if (state == DriverState::Missing) {
+        if (!CanInstallDisplayDriver()) {
+            error = "SolStream can't install the virtual display on an ARM PC." + kManualInstall;
             return false;
         }
 
@@ -312,7 +386,10 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
         std::string fetch_error;
         if (!update::FetchPinned(kPackageUrl, kPackageSha256, kPackageCap, package,
                                  fetch_error)) {
-            error = "Couldn't download the virtual display driver: " + fetch_error + ".";
+            // Network trouble or the release gone: either way a pointer to the
+            // project itself, which is the way round both.
+            error = "Couldn't download the virtual display driver: " + fetch_error + "."
+                  + kManualInstall;
             return false;
         }
 
@@ -334,7 +411,7 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
         }
         // tar has been in System32 since Windows 10 1803 and reads zip. The
         // archive's hash was checked above, so what it unpacks is what was
-        // reviewed.
+        // reviewed; RunHidden runs System32's tar by full path.
         const DWORD unpacked =
             RunHidden(L"tar.exe -xf \"" + zip + L"\" -C \"" + work + L"\"", 60000);
         const std::wstring package_dir = work + L"\\VirtualDisplayDriver";
@@ -346,19 +423,34 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
             return false;
         }
 
+        // Everything this run makes, so a failure further down takes it back.
+        bool made_folder = false;
+        std::wstring staged;
+        bool staged_here = false;
+        const std::wstring settings_folder = VddSettingsFolder();
+        auto undo = [&] {
+            if (staged_here && IsOemInfName(staged)) {
+                SetupUninstallOEMInfW(staged.c_str(), 0, nullptr);
+            }
+            if (made_folder && !IsReparsePoint(settings_folder)) {
+                DeleteFileW((settings_folder + L"\\vdd_settings.xml").c_str());
+                RemoveDirectoryW(settings_folder.c_str());
+            }
+        };
+
         // The driver reads its mode list from its settings folder when the
         // device starts, so the file is put there first. Somebody else's file
-        // is kept: ConfigureVirtualDisplay below only adds to it.
-        const std::wstring settings_folder = DriverSettingsFolder();
+        // is kept: ConfigureVirtualDisplay below only adds to it. Never through
+        // a junction or link: this runs elevated, and C:\ lets anybody make a
+        // folder of that name first.
         const std::wstring settings = settings_folder + L"\\vdd_settings.xml";
-        if (!Exists(settings)) {
-            const bool made = CreateDirectoryW(settings_folder.c_str(), nullptr) != FALSE;
-            if (CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(), settings.c_str(),
-                          TRUE)) {
-                if (made) {
-                    WriteState(kSettingsValue, settings_folder);
-                }
-            } else {
+        if (IsReparsePoint(settings_folder) || IsReparsePoint(settings)) {
+            note += "The display driver's settings folder is a link to somewhere else, so "
+                    "SolStream did not write to it.\n";
+        } else if (!Exists(settings)) {
+            made_folder = !Exists(settings_folder) && MakeSettingsFolder(settings_folder);
+            if (!CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(), settings.c_str(),
+                           TRUE)) {
                 note += "Couldn't write the display driver's settings to "
                       + ToUtf8(settings_folder) + ", so it starts with its own sizes.\n";
             }
@@ -367,47 +459,58 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
         progress(DriverStep::Installing);
         // Into the driver store first, which is where Windows checks the
         // signature and -- for a publisher this PC has not trusted before --
-        // asks the person whether to. SetupCopyOEMInf also says what the store
-        // named the package, which is what an uninstall needs to remove it.
+        // asks the person whether to. NOOVERWRITE, so a package that is
+        // already in the store answers ERROR_FILE_EXISTS rather than quietly
+        // handing back its name: that one is somebody else's, and an uninstall
+        // must never delete it.
         wchar_t oem_path[MAX_PATH] = {0};
         PWSTR oem_name = nullptr;
-        if (!SetupCopyOEMInfW(inf.c_str(), nullptr, SPOST_PATH, 0, oem_path, MAX_PATH,
-                              nullptr, &oem_name)) {
-            error = InstallProblem("add the driver", GetLastError());
+        if (SetupCopyOEMInfW(inf.c_str(), nullptr, SPOST_PATH, SP_COPY_NOOVERWRITE, oem_path,
+                             MAX_PATH, nullptr, &oem_name)) {
+            staged_here = true;
+        } else if (GetLastError() != ERROR_FILE_EXISTS) {
+            const DWORD code = GetLastError();
+            undo();
+            error = InstallProblem("add the driver", code);
             return false;
         }
-        const std::wstring staged = oem_name ? oem_name : L"";
+        staged = oem_name ? oem_name : L"";
 
+        // No device of the driver's is present (CurrentDriverState said so),
+        // so this one is new and SolStream's.
         HDEVINFO created_set = INVALID_HANDLE_VALUE;
         SP_DEVINFO_DATA created{};
-        bool device_exists = false;
-        ForEachDriverDevice([&device_exists](HDEVINFO, SP_DEVINFO_DATA&) {
-            device_exists = true;
-        });
-        if (!device_exists && !CreateDevice(created, created_set, error)) {
+        std::wstring instance;
+        if (!CreateDevice(created, created_set, instance, error)) {
+            undo();
             return false;
         }
+        // The owner is the window waiting on this, so whatever Windows asks
+        // about the driver comes up over it rather than behind it.
         BOOL reboot = FALSE;
-        if (!UpdateDriverForPlugAndPlayDevicesW(nullptr, kHardwareId, inf.c_str(),
-                                                INSTALLFLAG_FORCE, &reboot)) {
+        if (!UpdateDriverForPlugAndPlayDevicesW(owner, kHardwareId, inf.c_str(), 0, &reboot)) {
             const DWORD code = GetLastError();
             // A device with no driver is a yellow triangle in Device Manager
             // and nothing else; take back the one this just made.
-            if (created_set != INVALID_HANDLE_VALUE) {
-                SetupDiCallClassInstaller(DIF_REMOVE, created_set, &created);
-                SetupDiDestroyDeviceInfoList(created_set);
-            }
+            SetupDiCallClassInstaller(DIF_REMOVE, created_set, &created);
+            SetupDiDestroyDeviceInfoList(created_set);
+            undo();
             error = InstallProblem("install the driver", code);
             return false;
         }
-        if (created_set != INVALID_HANDLE_VALUE) {
-            SetupDiDestroyDeviceInfoList(created_set);
+        SetupDiDestroyDeviceInfoList(created_set);
+        if (!instance.empty()) {
+            WriteState(kDeviceValue, instance);
         }
-        if (!staged.empty()) {
+        if (staged_here && !staged.empty()) {
             WriteState(kInfValue, staged);
+        }
+        if (made_folder) {
+            WriteState(kSettingsValue, settings_folder);
         }
         note += "Installed the Virtual Display Driver " + std::string(kDriverVersion) + ".\n";
         if (reboot) {
+            restart = true;
             note += "Windows wants a restart to finish installing it.\n";
         }
 
@@ -430,38 +533,41 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress,
 }
 
 void RemoveInstalledDriver(std::string& note) {
+    // The device first, and only the one SolStream created: a device of the
+    // same driver somebody added themselves stays.
+    const std::wstring instance = ReadState(kDeviceValue);
+    if (!instance.empty()) {
+        note += RemoveDevice(instance) ? "Removed the virtual display SolStream added.\n"
+                                       : "The virtual display SolStream added was already "
+                                         "gone.\n";
+        DeleteState(kDeviceValue);
+    }
+    // Then the package, and only one this install put in the store. No force:
+    // if some other device is using it, it stays.
     const std::wstring staged = ReadState(kInfValue);
-    if (staged.empty()) {
-        return;
-    }
-    int removed = 0;
-    ForEachDriverDevice([&removed](HDEVINFO set, SP_DEVINFO_DATA& device) {
-        if (SetupDiCallClassInstaller(DIF_REMOVE, set, &device)) {
-            ++removed;
+    if (!staged.empty()) {
+        if (IsOemInfName(staged) && SetupUninstallOEMInfW(staged.c_str(), 0, nullptr)) {
+            note += "Removed the virtual display driver SolStream installed.\n";
+        } else {
+            note += "Windows kept the virtual display driver package (" + ToUtf8(staged)
+                  + "), which something else may be using.\n";
         }
-    });
-    // Only a name of the store's own form: this value came out of the registry,
-    // and SetupUninstallOEMInf must never be handed some other package's INF.
-    const std::wstring folded = FoldCase(staged);
-    const bool oem_form = folded.rfind(L"oem", 0) == 0 && folded.size() > 7
-                       && folded.compare(folded.size() - 4, 4, L".inf") == 0
-                       && folded.find_first_of(L"\\/:") == std::wstring::npos;
-    if (oem_form && SetupUninstallOEMInfW(staged.c_str(), SUOI_FORCEDELETE, nullptr)) {
-        note += "Removed the virtual display driver SolStream installed.\n";
-    } else {
-        note += "Removed " + std::to_string(removed) + " virtual display device(s), but "
-                "Windows kept the driver package (" + ToUtf8(staged) + ").\n";
+        DeleteState(kInfValue);
     }
-    DeleteState(kInfValue);
 
-    // The settings folder only when SolStream made it, and only what it holds
-    // of the driver's -- never a folder somebody had before.
+    // The settings folder only when SolStream made it, only what it holds of
+    // the driver's, and never through a link.
     const std::wstring folder = ReadState(kSettingsValue);
     if (!folder.empty()) {
-        for (const wchar_t* file : {L"vdd_settings.xml", L"option.txt", L"adapter.txt"}) {
-            DeleteFileW((folder + L"\\" + file).c_str());
+        if (!IsReparsePoint(folder)) {
+            for (const wchar_t* file : {L"vdd_settings.xml", L"option.txt", L"adapter.txt"}) {
+                const std::wstring path = folder + L"\\" + file;
+                if (!IsReparsePoint(path)) {
+                    DeleteFileW(path.c_str());
+                }
+            }
+            RemoveDirectoryW(folder.c_str());
         }
-        RemoveDirectoryW(folder.c_str());
         DeleteState(kSettingsValue);
     }
 }

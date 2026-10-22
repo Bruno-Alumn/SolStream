@@ -31,6 +31,9 @@ struct HostStatus {
     std::wstring streaming_detail;
     std::wstring display_detail;
     int connected_clients = 0;
+    /// The Virtual Display Driver is here but switched off or failing: the
+    /// user's own, which the window points at rather than offering to install.
+    bool driver_off = false;
     /// This PC's Tailscale address, or empty when it is not on Tailscale.
     std::wstring tailscale_address;
 };

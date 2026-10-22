@@ -73,7 +73,9 @@ A few things to expect:
 ### While this repository is private
 
 GitHub hides the releases of a private repository from anyone who isn't signed
-in, so the updaters find nothing and stay quiet. To test updates in the
+in, so the updaters find nothing and stay quiet. The same goes for the *Get it*
+links in both apps' setup guides: they open the releases page, which shows a
+404 until you sign in to GitHub with an account that can see the repository. To test updates in the
 meantime, create a fine-grained personal access token limited to this
 repository, with *Contents: Read-only* and an expiry date. Give it to the
 program as `SOLSTREAM_GITHUB_TOKEN`.

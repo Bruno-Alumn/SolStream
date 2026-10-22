@@ -106,37 +106,49 @@ void Add(std::string& note, const std::string& line) {
 
 // ── The driver's settings file ───────────────────────────────────────────────
 
-/// Where MikeTheTech's driver keeps its mode list. The driver itself reads
-/// VDDPATH under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when somebody
-/// has set it, and C:\VirtualDisplayDriver otherwise -- both read out of
-/// MttVDD.dll -- so those come first, then the places older builds used.
-std::wstring FindVddSettings() {
-    std::vector<std::wstring> candidates;
+}  // namespace
+
+std::wstring VddSettingsFolder() {
     wchar_t configured[MAX_PATH] = {0};
     DWORD size = sizeof(configured);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver",
                      L"VDDPATH", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, configured,
                      &size) == ERROR_SUCCESS
         && configured[0] != L'\0') {
-        candidates.push_back(std::wstring(configured) + L"\\vdd_settings.xml");
+        return configured;
     }
-    candidates.push_back(L"C:\\VirtualDisplayDriver\\vdd_settings.xml");
-    candidates.push_back(L"C:\\IddSampleDriver\\vdd_settings.xml");
+    // The literal the driver falls back to, not %SystemDrive%: MttVDD.dll
+    // carries "C:\\VirtualDisplayDriver" as a string, and a folder anywhere
+    // else is one it never reads.
+    return L"C:\\VirtualDisplayDriver";
+}
+
+bool IsReparsePoint(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES
+        && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+namespace {
+
+/// Where MikeTheTech's driver keeps its mode list: its own folder first (see
+/// VddSettingsFolder), then the places older builds used.
+std::wstring FindVddSettings() {
+    std::vector<std::wstring> candidates = {
+        VddSettingsFolder() + L"\\vdd_settings.xml",
+        L"C:\\IddSampleDriver\\vdd_settings.xml",
+    };
     wchar_t root[MAX_PATH] = {0};
     if (GetEnvironmentVariableW(L"ProgramW6432", root, MAX_PATH) != 0
         || GetEnvironmentVariableW(L"ProgramFiles", root, MAX_PATH) != 0) {
         candidates.push_back(std::wstring(root) + L"\\VirtualDisplayDriver\\vdd_settings.xml");
     }
-    wchar_t here[MAX_PATH] = {0};
-    if (GetModuleFileNameW(nullptr, here, MAX_PATH) != 0) {
-        std::wstring dir = here;
-        const size_t slash = dir.find_last_of(L'\\');
-        if (slash != std::wstring::npos) {
-            candidates.push_back(dir.substr(0, slash) + L"\\driver\\vdd_settings.xml");
-        }
-    }
     for (const std::wstring& path : candidates) {
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        // Never one that is a link somewhere else: this file is rewritten with
+        // administrator rights, and C:\\ lets any user make folders.
+        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES
+            && !IsReparsePoint(path)
+            && !IsReparsePoint(path.substr(0, path.find_last_of(L'\\')))) {
             return path;
         }
     }

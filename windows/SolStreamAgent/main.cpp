@@ -4860,13 +4860,14 @@ void ReportDriverStep(solstream::DriverStep step) {
 }
 
 /// The virtual display's line in the result the waiting window reads; see
-/// WriteInstallResult.
-std::string DisplayResult(bool ok, bool already, const std::string& note,
+/// WriteInstallResult. "ready-restart" when Windows said the install needs a
+/// restart: carried as its own word, not guessed from what the notes say.
+std::string DisplayResult(bool ok, bool already, bool restart, const std::string& note,
                           const std::string& error) {
     if (!ok) {
         return "failed " + error;
     }
-    return std::string("ready ")
+    return std::string(restart ? "ready-restart " : "ready ")
          + (already ? "This PC already had the Virtual Display Driver, so SolStream set "
                       "it up for streaming.\n"
                     : "")
@@ -5074,7 +5075,8 @@ int wmain(int argc, wchar_t** argv) {
             // their back.
             std::string error;
             if (!solstream::RelaunchElevated(
-                    L"--install" + solstream::OptionArguments(options), error)) {
+                    L"--install" + solstream::OptionArguments(options), error,
+                    options.display_driver)) {
                 std::fprintf(stderr, "%s\n", error.c_str());
                 return 1;
             }
@@ -5116,12 +5118,12 @@ int wmain(int argc, wchar_t** argv) {
         // so it is reported beside the install's answer, not instead of it.
         std::string display;
         if (options.display_driver) {
-            bool already = false;
+            bool already = false, restart = false;
             std::string note, driver_error;
-            const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, already,
-                                                               note, driver_error);
+            const bool ready = solstream::InstallDisplayDriver(
+                ReportDriverStep, g_progress_window, already, restart, note, driver_error);
             ReportDriverStep(solstream::DriverStep::Done);
-            display = DisplayResult(ready, already, note, driver_error);
+            display = DisplayResult(ready, already, restart, note, driver_error);
             for (const std::string& line : SplitLines(ready ? note : driver_error)) {
                 Log("[display] %s", line.c_str());
             }
@@ -5146,7 +5148,7 @@ int wmain(int argc, wchar_t** argv) {
         // setup's tick box, for a PC that was installed without them.
         if (!solstream::IsElevated()) {
             std::string error;
-            if (!solstream::RelaunchElevated(L"--install-display-driver", error)) {
+            if (!solstream::RelaunchElevated(L"--install-display-driver", error, true)) {
                 std::fprintf(stderr, "%s\n", error.c_str());
                 return 1;
             }
@@ -5155,12 +5157,12 @@ int wmain(int argc, wchar_t** argv) {
             std::fprintf(stdout, "%s\n", display.c_str());
             return display.rfind("ready", 0) == 0 ? 0 : 1;
         }
-        bool already = false;
+        bool already = false, restart = false;
         std::string note, error;
-        const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, already, note,
-                                                           error);
+        const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, g_progress_window,
+                                                           already, restart, note, error);
         solstream::WriteInstallResult(ready, ready ? std::string() : error,
-                                      DisplayResult(ready, already, note, error));
+                                      DisplayResult(ready, already, restart, note, error));
         std::fprintf(ready ? stdout : stderr, "%s\n", (ready ? note : error).c_str());
         return ready ? 0 : 1;
     }
@@ -5674,6 +5676,18 @@ int wmain(int argc, wchar_t** argv) {
 #endif
 
             status.virtual_display = solstream::HasVirtualDisplayCached();
+            // Asked only when there is no display, and at most every ten
+            // seconds: a device scan once a second would cost more than the
+            // answer is worth.
+            static ULONGLONG off_checked = 0;
+            static bool off = false;
+            if (status.virtual_display) {
+                off = false;
+            } else if (off_checked == 0 || GetTickCount64() - off_checked > 10000) {
+                off = solstream::CurrentDriverState() == solstream::DriverState::Off;
+                off_checked = GetTickCount64();
+            }
+            status.driver_off = off;
             status.display_detail = status.virtual_display
                 ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
                 : L"not installed";

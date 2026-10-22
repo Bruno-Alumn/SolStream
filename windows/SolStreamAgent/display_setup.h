@@ -50,6 +50,16 @@ constexpr int kDefaultScalePercent = 200;
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                              std::string& note, std::string& error);
 
+/// The folder the Virtual Display Driver reads vdd_settings.xml from: VDDPATH
+/// under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when set, otherwise
+/// C:\VirtualDisplayDriver -- both read out of MttVDD.dll itself. One answer
+/// for everything that reads, writes or removes it.
+std::wstring VddSettingsFolder();
+
+/// Is this path a junction, symbolic link or other reparse point? Elevated
+/// writes and deletes under C:\ refuse those: any user can make folders there.
+bool IsReparsePoint(const std::wstring& path);
+
 /// The attached virtual display SolStream streams from, as \\.\DISPLAYn, or
 /// empty when there is none. The same choice ConfigureVirtualDisplay makes, so
 /// the display that was set up is the display that gets captured.

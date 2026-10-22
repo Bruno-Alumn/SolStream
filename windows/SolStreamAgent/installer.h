@@ -63,7 +63,12 @@ bool IsElevated();
 /// Deliberately visible: the UAC prompt is the moment the user agrees to a
 /// program writing to Program Files, creating firewall rules and registering a
 /// logon task. Suppressing it would mean doing all of that behind their back.
-bool RelaunchElevated(const std::wstring& arguments, std::string& error);
+///
+/// `may_prompt`: the elevated half may raise a prompt of Windows' own -- the
+/// driver install's "install this device software?" -- so it is started shown
+/// rather than hidden, and allowed to take the foreground.
+bool RelaunchElevated(const std::wstring& arguments, std::string& error,
+                      bool may_prompt = false);
 
 /// Copy this program into Program Files, open the ports it needs, register it to
 /// start at logon and make the shortcuts asked for. Returns false and fills
