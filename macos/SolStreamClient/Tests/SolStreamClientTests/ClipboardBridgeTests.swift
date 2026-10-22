@@ -293,6 +293,26 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(fake.writes, ["copied in Safari"])
     }
 
+    /// The same when the Mac's newer copy is the text that crossed last: the
+    /// PC holds something else now, so the copy still goes.
+    func testAMacCopyThatBeatsAnAnswerGoesEvenWhenItCrossedBefore() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("x")
+        bridge.syncNow()
+        fake.answerWrite(sequence: 10)
+        settle()
+
+        bridge.syncNow()
+        copyOnTheMac("x")
+        fake.answerRead(text: "y", sequence: 11)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "x")
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["x", "x"])
+    }
+
     // MARK: - The same text again
 
     /// What both clipboards held is forgotten once the PC holds a password:

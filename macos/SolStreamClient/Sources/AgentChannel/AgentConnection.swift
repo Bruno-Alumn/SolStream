@@ -1096,10 +1096,17 @@ public final class AgentConnection {
         return (String(text[text.startIndex..<cut]), true)
     }
 
+    /// Trim a set to its budget. A `clipboardPayload` in Windows' line endings
+    /// passes whole: measured against the Mac's budget instead, a copy that
+    /// fit as LF lost its tail once every line had gained a CR.
+    static func clipboardSetPayload(_ text: String) -> (text: String, truncated: Bool) {
+        clipboardPayload(text, limit: maxClipboardSetBytes)
+    }
+
     /// Put text on the host's clipboard, already in Windows' line endings: a
     /// `clipboardPayload` once every LF has gained its CR.
     public func setClipboard(_ text: String, completion: ((Int?) -> Void)? = nil) {
-        let (text, truncated) = Self.clipboardPayload(text, limit: Self.maxClipboardSetBytes)
+        let (text, truncated) = Self.clipboardSetPayload(text)
         if truncated {
             Log.info("[clipboard] trimmed to \(text.utf8.count) bytes for the host")
         }

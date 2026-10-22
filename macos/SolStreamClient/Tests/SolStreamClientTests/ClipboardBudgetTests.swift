@@ -79,10 +79,24 @@ final class ClipboardBudgetTests: XCTestCase {
             String(repeating: "\n", count: AgentConnection.maxClipboardBytes + 100))
         let windows = ClipboardBridge.windowsLineEndings(payload)
         XCTAssertEqual(windows.utf8.count, AgentConnection.maxClipboardSetBytes)
-        let (sent, truncated) = AgentConnection.clipboardPayload(
-            windows, limit: AgentConnection.maxClipboardSetBytes)
+        let (sent, truncated) = AgentConnection.clipboardSetPayload(windows)
         XCTAssertFalse(truncated)
         XCTAssertEqual(sent, windows)
+    }
+
+    /// The copy that used to lose its tail: 256,000 bytes in the Mac's lines
+    /// is 262,400 in Windows', and a set measured against the Mac's budget
+    /// cut the last 256 of them.
+    func testAMacCopyThatFitsReachesTheHostWhole() {
+        let text = String(repeating: String(repeating: "x", count: 39) + "\n", count: 6_400)
+        let (payload, cut) = AgentConnection.clipboardPayload(text)
+        XCTAssertFalse(cut)
+        let windows = ClipboardBridge.windowsLineEndings(payload)
+        XCTAssertEqual(windows.utf8.count, 262_400)
+        let (sent, truncated) = AgentConnection.clipboardSetPayload(windows)
+        XCTAssertFalse(truncated)
+        XCTAssertEqual(sent.utf8.count, windows.utf8.count)
+        XCTAssertTrue(sent.utf8.elementsEqual(windows.utf8))
     }
 
     func testEmptyTextIsNotTruncated() {
