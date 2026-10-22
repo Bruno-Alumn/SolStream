@@ -32,6 +32,9 @@ public final class VideoReassembler {
     /// A picture that will never be complete. The caller decides whether that is
     /// worth a keyframe request.
     public var onDamaged: ((UInt32) -> Void)?
+    /// A fragment of an IDR has arrived, for a picture not yet finished: the
+    /// keyframe the caller may be waiting for is on its way.
+    public var onIdrFragment: ((UInt32) -> Void)?
 
     public private(set) var complete: UInt64 = 0
     public private(set) var damaged: UInt64 = 0
@@ -168,6 +171,7 @@ public final class VideoReassembler {
             }
         }
         if frameId > highestSeen { highestSeen = frameId }
+        if flags & SMT.flagIdr != 0 { onIdrFragment?(frameId) }
 
         let stamp = Self.now()
         // Taken OUT of the dictionary, not read from it. A read leaves the

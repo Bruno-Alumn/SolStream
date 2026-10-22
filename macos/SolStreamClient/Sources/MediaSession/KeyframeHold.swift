@@ -19,7 +19,8 @@ struct KeyframeHold {
         case hold
         /// Keep it from the decoder, and ask the host for a keyframe now.
         case holdAndAsk
-        /// Nothing to do: damage the stream has already been repaired past.
+        /// Nothing to do: a picture older than one already decoded, or damage
+        /// that an IDR already decoded, or one on its way, makes good.
         case ignore
     }
 
@@ -30,6 +31,10 @@ struct KeyframeHold {
     /// Just past the host's 200 ms limit, so the repeat is never the one it
     /// ignores.
     static let reaskMs: Double = 250
+    /// On a path whose round trip is longer than that, the IDR cannot have
+    /// begun to arrive by then. A round trip, then a frame period or so to
+    /// capture and encode it, and room for jitter.
+    static let reaskMarginMs: Double = 100
 
     /// P-frames are being kept from the decoder until an IDR arrives.
     ///
@@ -50,6 +55,9 @@ struct KeyframeHold {
     /// When the host was last asked for a keyframe, in uptime nanoseconds, or
     /// nil before the first request.
     private var askedAt: UInt64?
+    /// The IDR whose fragments are arriving while the hold is on, and when the
+    /// latest of them came.
+    private var arrivingIdr: (frameId: UInt32, at: UInt64)?
 
     /// A complete picture.
     mutating func picture(frameId: UInt32, isIdr: Bool, now: UInt64) -> Verdict {
@@ -57,6 +65,7 @@ struct KeyframeHold {
             holding = false
             lastIdr = frameId
             lastDecoded = frameId
+            arrivingIdr = nil
             return .decode
         }
         // Older than a picture already decoded: nothing can use it.
@@ -87,17 +96,44 @@ struct KeyframeHold {
         // IDR. The reassembler now gives that picture up silently when the IDR
         // completes; this is for a late fragment that starts one again.
         if let lastIdr, frameId < lastIdr { return .ignore }
+        if let idr = arrivingIdr {
+            // The same for one older than an IDR that is on its way: asking
+            // again could only bring a second one.
+            if frameId < idr.frameId { return .ignore }
+            // And the one on its way is what broke, so it is no longer coming.
+            if frameId == idr.frameId { arrivingIdr = nil }
+        }
         holding = true
         return ask(now) ? .holdAndAsk : .hold
     }
 
+    /// A fragment of an IDR. While the hold is on, that is the answer to the
+    /// request arriving, and it counts as progress.
+    mutating func idrArriving(frameId: UInt32, now: UInt64) {
+        guard holding else { return }
+        if let lastDecoded, frameId <= lastDecoded { return }
+        arrivingIdr = (frameId, now)
+    }
+
     /// Whether to ask (again) now: at once when nothing has been asked yet,
     /// which is the session opening, and otherwise once the last request has
-    /// gone unanswered for a quarter-second.
-    mutating func reaskDue(now: UInt64) -> Bool {
+    /// gone unanswered for a quarter-second -- or a round trip and a little
+    /// more, where that is longer.
+    ///
+    /// Unanswered means no fragment of the IDR either. The repeat used to fire
+    /// on the clock alone, and over a relayed path -- a 150-200 ms round trip,
+    /// and 60-120 ms more for a 200-300 KB IDR to arrive at the paced rate --
+    /// it went out while the IDR it was repeating was landing, the host's limit
+    /// had expired, and a second full IDR followed the first into the narrowest
+    /// path there is. Counting from the latest fragment instead, the repeat
+    /// comes only once the IDR has stopped arriving; and an IDR that broke on
+    /// the way is reported damaged, which asks at once.
+    mutating func reaskDue(now: UInt64, rttMs: Double) -> Bool {
         guard holding else { return false }
-        if let askedAt, Self.millis(from: askedAt, to: now) <= Self.reaskMs {
-            return false
+        if var since = askedAt {
+            if let idr = arrivingIdr, idr.at > since { since = idr.at }
+            let interval = max(Self.reaskMs, rttMs + Self.reaskMarginMs)
+            if Self.millis(from: since, to: now) <= interval { return false }
         }
         askedAt = now
         return true
@@ -112,9 +148,9 @@ struct KeyframeHold {
         return true
     }
 
-    /// Never negative. The caller reads the clock before taking the lock this
-    /// is mutated under, so a stamp another thread wrote in between can be
-    /// newer than `now`, and UInt64 subtraction traps on underflow.
+    /// Never negative. A caller is free to read the clock before taking the
+    /// lock this is mutated under, and a stamp another thread wrote in between
+    /// is then newer than `now`; UInt64 subtraction traps on underflow.
     static func millis(from stamp: UInt64, to now: UInt64) -> Double {
         now > stamp ? Double(now - stamp) / 1e6 : 0
     }

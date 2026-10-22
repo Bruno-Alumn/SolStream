@@ -411,6 +411,26 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertEqual(events, ["picture 1", "picture 2", "picture 3"])
     }
 
+    /// Every fragment of an IDR still being built is announced, so a caller
+    /// waiting for one can tell it is arriving. A straggler of a finished one,
+    /// and a P-frame's fragments, are not.
+    func testIdrFragmentsAreAnnouncedWhileTheyArrive() {
+        let reassembler = VideoReassembler()
+        var announced: [UInt32] = []
+        reassembler.onIdrFragment = { announced.append($0) }
+        let payload = Data(repeating: 7, count: 1432)
+
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: false, idr: true))
+        reassembler.ingest(fragment(frameId: 1, offset: 1432, payload: payload,
+                                    start: false, end: true, idr: true))
+        reassembler.ingest(fragment(frameId: 1, offset: 1432, payload: payload,
+                                    start: false, end: true, idr: true))
+        reassembler.ingest(fragment(frameId: 2, offset: 0, payload: payload,
+                                    start: true, end: true))
+        XCTAssertEqual(announced, [1, 1])
+    }
+
     /// The buffer grows now, so "larger than the buffer" is no longer a
     /// condition — 512 KB was a starting size, not a limit, and a picture past
     /// it used to be dropped for ever. What is still a refusal is a picture

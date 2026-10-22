@@ -42,7 +42,7 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertEqual(hold.damaged(frameId: 9, now: ms(150)), .ignore)
         XCTAssertFalse(hold.holding)
         XCTAssertEqual(hold.picture(frameId: 11, isIdr: false, now: ms(160)), .decode)
-        XCTAssertFalse(hold.reaskDue(now: ms(600)), "nothing is owed, so nothing is asked")
+        XCTAssertFalse(hold.reaskDue(now: ms(600), rttMs: 0), "nothing is owed, so nothing is asked")
     }
 
     func testDamageAfterTheIdrStillHolds() {
@@ -55,16 +55,16 @@ final class KeyframeHoldTests: XCTestCase {
     func testTheRequestIsRepeatedEveryQuarterSecondUntilAnIdrArrives() {
         var hold = KeyframeHold()
         _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
-        XCTAssertFalse(hold.reaskDue(now: ms(10)), "not holding: nothing to repeat")
+        XCTAssertFalse(hold.reaskDue(now: ms(10), rttMs: 0), "not holding: nothing to repeat")
 
         XCTAssertEqual(hold.damaged(frameId: 2, now: ms(100)), .holdAndAsk)
-        XCTAssertFalse(hold.reaskDue(now: ms(300)))
-        XCTAssertTrue(hold.reaskDue(now: ms(351)))
-        XCTAssertFalse(hold.reaskDue(now: ms(400)))
-        XCTAssertTrue(hold.reaskDue(now: ms(602)))
+        XCTAssertFalse(hold.reaskDue(now: ms(300), rttMs: 0))
+        XCTAssertTrue(hold.reaskDue(now: ms(351), rttMs: 0))
+        XCTAssertFalse(hold.reaskDue(now: ms(400), rttMs: 0))
+        XCTAssertTrue(hold.reaskDue(now: ms(602), rttMs: 0))
 
         _ = hold.picture(frameId: 9, isIdr: true, now: ms(650))
-        XCTAssertFalse(hold.reaskDue(now: ms(2000)))
+        XCTAssertFalse(hold.reaskDue(now: ms(2000), rttMs: 0))
     }
 
     /// A session opens holding, and asks at once. Before the first IDR there is
@@ -72,12 +72,12 @@ final class KeyframeHoldTests: XCTestCase {
     func testNothingIsDecodedBeforeTheFirstIdrAndTheFirstRequestIsImmediate() {
         var hold = KeyframeHold()
         XCTAssertTrue(hold.holding)
-        XCTAssertTrue(hold.reaskDue(now: ms(0)), "the opening request")
-        XCTAssertFalse(hold.reaskDue(now: ms(10)))
+        XCTAssertTrue(hold.reaskDue(now: ms(0), rttMs: 0), "the opening request")
+        XCTAssertFalse(hold.reaskDue(now: ms(10), rttMs: 0))
 
         XCTAssertEqual(hold.picture(frameId: 3, isIdr: false, now: ms(20)), .hold)
         XCTAssertEqual(hold.picture(frameId: 4, isIdr: false, now: ms(36)), .hold)
-        XCTAssertTrue(hold.reaskDue(now: ms(251)))
+        XCTAssertTrue(hold.reaskDue(now: ms(251), rttMs: 0))
 
         XCTAssertEqual(hold.picture(frameId: 5, isIdr: true, now: ms(260)), .decode)
         XCTAssertEqual(hold.picture(frameId: 6, isIdr: false, now: ms(276)), .decode)
@@ -104,6 +104,76 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertEqual(hold.picture(frameId: 7, isIdr: false, now: ms(32)), .decode)
     }
 
+    /// Over a relayed path the IDR is still landing when a quarter-second is
+    /// up. Its fragments count as the answer, so the request is not repeated
+    /// into the middle of it.
+    func testARequestIsNotRepeatedWhileItsIdrIsArriving() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        hold.idrArriving(frameId: 5, now: ms(200))
+        hold.idrArriving(frameId: 5, now: ms(260))
+        XCTAssertFalse(hold.reaskDue(now: ms(300), rttMs: 180))
+        hold.idrArriving(frameId: 5, now: ms(320))
+        XCTAssertFalse(hold.reaskDue(now: ms(400), rttMs: 180))
+        XCTAssertEqual(hold.picture(frameId: 5, isIdr: true, now: ms(330)), .decode)
+        XCTAssertFalse(hold.reaskDue(now: ms(900), rttMs: 180))
+    }
+
+    /// An IDR whose fragments stop coming is asked for again, counted from the
+    /// last fragment rather than from the request.
+    func testAnIdrThatStopsArrivingIsAskedForAgain() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        hold.idrArriving(frameId: 5, now: ms(200))
+        XCTAssertFalse(hold.reaskDue(now: ms(449), rttMs: 0))
+        XCTAssertTrue(hold.reaskDue(now: ms(451), rttMs: 0))
+    }
+
+    /// The IDR itself broke on the way: that is asked for at once, not left to
+    /// the repeat.
+    func testAnIdrThatBrokeOnTheWayIsAskedForAtOnce() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        hold.idrArriving(frameId: 5, now: ms(200))
+        XCTAssertEqual(hold.damaged(frameId: 5, now: ms(230)), .holdAndAsk)
+        // And it no longer counts as on its way.
+        XCTAssertTrue(hold.reaskDue(now: ms(481), rttMs: 0))
+    }
+
+    /// Damage older than an IDR that is already arriving needs no request of
+    /// its own; the IDR repairs it.
+    func testDamageOlderThanAnArrivingIdrIsIgnored() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        hold.idrArriving(frameId: 6, now: ms(200))
+        XCTAssertEqual(hold.damaged(frameId: 4, now: ms(240)), .ignore)
+        XCTAssertTrue(hold.holding)
+    }
+
+    /// An IDR that nobody is waiting for -- the host's own -- is not progress on
+    /// anything, and damage after it is still asked about.
+    func testAnIdrArrivingWhileNotHoldingChangesNothing() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        hold.idrArriving(frameId: 4, now: ms(10))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(20)), .holdAndAsk)
+    }
+
+    /// Where a round trip is longer than the quarter-second, the repeat waits
+    /// for the answer to have had time to start.
+    func testALongRoundTripWaitsLongerBeforeAskingAgain() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.damaged(frameId: 2, now: ms(0)), .holdAndAsk)
+        XCTAssertFalse(hold.reaskDue(now: ms(300), rttMs: 300))
+        XCTAssertFalse(hold.reaskDue(now: ms(399), rttMs: 300))
+        XCTAssertTrue(hold.reaskDue(now: ms(401), rttMs: 300))
+    }
+
     /// The clock is read before the lock is taken, so `now` can be older than a
     /// stamp another thread has just written. That must read as no time at all
     /// rather than trap.
@@ -112,7 +182,7 @@ final class KeyframeHoldTests: XCTestCase {
         _ = hold.picture(frameId: 1, isIdr: true, now: ms(0))
         XCTAssertEqual(hold.damaged(frameId: 2, now: ms(100)), .holdAndAsk)
         XCTAssertEqual(hold.damaged(frameId: 3, now: ms(99)), .hold)
-        XCTAssertFalse(hold.reaskDue(now: ms(50)))
+        XCTAssertFalse(hold.reaskDue(now: ms(50), rttMs: 0))
     }
 }
 
@@ -139,6 +209,10 @@ final class VideoRecoveryPipelineTests: XCTestCase {
                 if self.hold.damaged(frameId: frameId, now: now) == .holdAndAsk {
                     self.asks += 1
                 }
+            }
+            reassembler.onIdrFragment = { [unowned self] frameId in
+                self.hold.idrArriving(frameId: frameId,
+                                      now: DispatchTime.now().uptimeNanoseconds)
             }
         }
 

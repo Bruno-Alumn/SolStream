@@ -139,8 +139,8 @@ public final class MediaClient {
             self.stateLock.unlock()
             switch verdict {
             case .ignore:
-                Log.debug("[media] frame \(frameId) never completed; a keyframe since "
-                          + "has already replaced it")
+                Log.debug("[media] frame \(frameId) never completed; a keyframe after "
+                          + "it, decoded or on its way, already repairs it")
             case .holdAndAsk:
                 // Now, from this thread, not on the next 50 ms feedback tick:
                 // the tick added up to half a frame-period of recovery on top
@@ -153,6 +153,12 @@ public final class MediaClient {
                 Log.debug("[media] frame \(frameId) never completed; a keyframe is "
                           + "already asked for")
             }
+        }
+        reassembler.onIdrFragment = { [weak self] frameId in
+            guard let self else { return }
+            self.stateLock.lock()
+            self.hold.idrArriving(frameId: frameId, now: DispatchTime.now().uptimeNanoseconds)
+            self.stateLock.unlock()
         }
     }
 
@@ -266,7 +272,7 @@ public final class MediaClient {
         // nothing to start from. See `KeyframeHold.holding`. Before the timer
         // starts, so it is this request and not the timer's.
         stateLock.lock()
-        let askNow = hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds)
+        let askNow = hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds, rttMs: 0)
         if askNow { needKeyframe = true }
         stateLock.unlock()
         if askNow { sendFeedback() }
@@ -533,11 +539,13 @@ public final class MediaClient {
                 self.stateLock.unlock()
             }
 
-            // Still holding for a keyframe a quarter-second after asking: the
-            // request or the IDR was lost. Ask again -- just past the host's
-            // 200 ms rate limit, so the repeat is never the one it ignores.
+            // Still holding for a keyframe a quarter-second after asking, with
+            // none of it arriving: the request or the IDR was lost. Ask again
+            // -- just past the host's 200 ms rate limit, so the repeat is never
+            // the one it ignores. See `KeyframeHold.reaskDue`.
             self.stateLock.lock()
-            if self.hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds) {
+            if self.hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds,
+                                  rttMs: self.stats.rttMs) {
                 self.needKeyframe = true
             }
             self.stateLock.unlock()
