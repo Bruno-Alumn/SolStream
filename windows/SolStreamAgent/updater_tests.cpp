@@ -471,6 +471,44 @@ void TestQualifyCommand() {
     CHECK(CommandProgram(tar) == L"tar.exe");
 }
 
+/// Everything the host writes into a JSON line reaches the Mac as UTF-8, or it
+/// costs the connection: the Mac refuses a whole line over one bad byte.
+void TestJsonEscape() {
+    const std::string fffd = "\xEF\xBF\xBD";
+    // Text from the wide APIs passes through untouched, whatever its script.
+    const std::string french = ToUtf8(L"Sécurité Windows — Paramètres");
+    CHECK(JsonEscape(french) == french);
+    const std::string japanese = ToUtf8(L"Windows セキュリティ");
+    CHECK(JsonEscape(japanese) == japanese);
+    const std::string emoji = ToUtf8(L"JÜRGEN-PC \U0001F600");
+    CHECK(JsonEscape(emoji) == emoji);
+    // What the escaping was always for.
+    CHECK(JsonEscape("say \"hi\"\\\n\r\t") == "say \\\"hi\\\"\\\\\\n\\r\\t");
+    CHECK(JsonEscape(std::string("a\x01" "b", 3)) == "a\\u0001b");
+    CHECK(JsonEscape("") == "");
+    // The same title read with the ANSI call on a Western PC: é is a lone 0xE9
+    // in code page 1252, and an em dash is 0x97.
+    CHECK(JsonEscape("S" "\xE9" "curit" "\xE9" " " "\x97" " x")
+          == "S" + fffd + "curit" + fffd + " " + fffd + " x");
+    // Code page 932: "セ" is 0x83 0x5A, which is no UTF-8 at all; the
+    // trailing byte is plain ASCII and survives.
+    CHECK(JsonEscape("\x83" "Z") == fffd + "Z");
+    // One replacement per broken sequence, not per byte: an unfinished
+    // three-byte sequence before ASCII, and one cut off at the end.
+    CHECK(JsonEscape("\xE2\x82" "A") == fffd + "A");
+    CHECK(JsonEscape("A" "\xE2\x82") == "A" + fffd);
+    CHECK(JsonEscape("\xE2(" "\xA1") == fffd + "(" + fffd);
+    // Forms a strict parser refuses: a stray continuation byte, an overlong
+    // '/', an encoded surrogate, and a code point past U+10FFFF.
+    CHECK(JsonEscape("\x80") == fffd);
+    CHECK(JsonEscape("\xC0\xAF") == fffd + fffd);
+    CHECK(JsonEscape("\xED\xA0\x80") == fffd + fffd + fffd);
+    CHECK(JsonEscape("\xF4\x90\x80\x80") == fffd + fffd + fffd + fffd);
+    // The edges of what is allowed stay allowed.
+    CHECK(JsonEscape("\xF4\x8F\xBF\xBF") == "\xF4\x8F\xBF\xBF");
+    CHECK(JsonEscape("\xEF\xBF\xBD") == fffd);
+}
+
 /// The display driver is the one install option named for what it turns ON:
 /// absent must mean "download nothing", for anybody typing --install by hand.
 void TestInstallOptions() {
@@ -1253,6 +1291,7 @@ int wmain(int argc, wchar_t** argv) {
     TestHostTaskStart();
     TestStopInstalled();
     TestQualifyCommand();
+    TestJsonEscape();
     TestNoDowngrade();
     TestDownload();
     TestInstallNote();

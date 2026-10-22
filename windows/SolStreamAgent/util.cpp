@@ -1,6 +1,7 @@
 #include "util.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cwctype>
 
 namespace solstream {
@@ -31,6 +32,91 @@ std::wstring ToWide(const std::string& text) {
     }
     std::wstring out(static_cast<size_t>(needed), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, text.data(), (int) text.size(), out.data(), needed);
+    return out;
+}
+
+namespace {
+
+/// How many bytes of the UTF-8 sequence starting at `at` are well formed:
+/// the whole sequence's length when it is complete and valid, otherwise the
+/// length of its longest valid start (at least 1), which is what one U+FFFD
+/// stands for. The ranges are RFC 3629's, so overlong forms, surrogates and
+/// anything past U+10FFFF are refused rather than passed on.
+size_t Utf8Sequence(const std::string& text, size_t at, bool& valid) {
+    const auto byte = [&](size_t i) { return static_cast<unsigned char>(text[i]); };
+    const unsigned char lead = byte(at);
+    size_t length = 0;
+    unsigned char low = 0x80;
+    unsigned char high = 0xBF;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        length = 2;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        length = 3;
+        if (lead == 0xE0) { low = 0xA0; }
+        if (lead == 0xED) { high = 0x9F; }
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        length = 4;
+        if (lead == 0xF0) { low = 0x90; }
+        if (lead == 0xF4) { high = 0x8F; }
+    } else {
+        valid = false;
+        return 1;
+    }
+    size_t taken = 1;
+    for (; taken < length && at + taken < text.size(); ++taken) {
+        const unsigned char next = byte(at + taken);
+        // Only the second byte has a narrowed range; the rest are any
+        // continuation byte.
+        const bool fits = taken == 1 ? (next >= low && next <= high)
+                                     : (next >= 0x80 && next <= 0xBF);
+        if (!fits) {
+            break;
+        }
+    }
+    valid = taken == length;
+    return taken;
+}
+
+}  // namespace
+
+std::string JsonEscape(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (ch >= 0x80) {
+            // Text from an ANSI ("A") Windows call is in the PC's code page, not
+            // UTF-8, and one such byte in a line makes the Mac refuse the whole
+            // line. A replacement character is the honest stand-in: the text
+            // still arrives, and the connection survives it.
+            bool valid = false;
+            const size_t length = Utf8Sequence(text, i, valid);
+            if (valid) {
+                out.append(text, i, length);
+            } else {
+                out += "\xEF\xBF\xBD";
+            }
+            i += length;
+            continue;
+        }
+        switch (ch) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    char buffer[8];
+                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
+                    out += buffer;
+                } else {
+                    out += static_cast<char>(ch);
+                }
+        }
+        ++i;
+    }
     return out;
 }
 

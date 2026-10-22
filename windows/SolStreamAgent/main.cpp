@@ -84,6 +84,7 @@ namespace {
 
 using solstream::FoldCase;
 using solstream::FromHex;
+using solstream::JsonEscape;
 using solstream::LocalDataPath;
 using solstream::ToHex;
 using solstream::ToUtf8;
@@ -303,6 +304,19 @@ std::string BestLocalAddress() {
     return best;
 }
 
+/// This PC's name in UTF-8, as the greeting, the busy refusal and the discovery
+/// answer all give it. Asked of the wide API: the ANSI one answers in the PC's
+/// code page, so a PC called JÜRGEN-PC greeted the Mac with a byte its parser
+/// would not take, and every connection to it ended on the first line.
+std::string ComputerName() {
+    wchar_t name[256] = {};
+    DWORD size = 256;
+    if (!GetComputerNameW(name, &size)) {
+        return {};
+    }
+    return ToUtf8(std::wstring(name, size));
+}
+
 /// One log line per sentence. Several of the setup steps report a paragraph of
 /// what they did, and a log line with newlines inside it is a log line nothing
 /// downstream can count.
@@ -323,31 +337,6 @@ std::vector<std::string> SplitLines(const std::string& text) {
         start = end + 1;
     }
     return lines;
-}
-
-/// Escape a string for embedding in JSON. Window titles are arbitrary user
-/// text — quotes and backslashes in them would otherwise corrupt the stream.
-std::string JsonEscape(const std::string& text) {
-    std::string out;
-    out.reserve(text.size() + 8);
-    for (const unsigned char ch : text) {
-        switch (ch) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (ch < 0x20) {
-                    char buffer[8];
-                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
-                    out += buffer;
-                } else {
-                    out += static_cast<char>(ch);
-                }
-        }
-    }
-    return out;
 }
 
 // ── Displays ─────────────────────────────────────────────────────────────────
@@ -2551,13 +2540,22 @@ void ReportOcclusion() {
         }
         g_occlusion[i].reported = found;
 
-        char title[128] = {0};
-        char cls[64] = {0};
+        // Read wide and converted, because the title goes to the Mac: the ANSI
+        // calls answer in the PC's code page, and a French "Sécurité Windows"
+        // or an em dash in a browser tab became a byte the Mac would not parse,
+        // which cost the whole session at the very moment this push exists to
+        // explain.
+        std::string title;
+        std::string cls;
         if (found) {
-            GetWindowTextA(found, title, sizeof(title) - 1);
-            GetClassNameA(found, cls, sizeof(cls) - 1);
+            wchar_t wide_title[128] = {};
+            wchar_t wide_class[64] = {};
+            GetWindowTextW(found, wide_title, 128);
+            GetClassNameW(found, wide_class, 64);
+            title = ToUtf8(wide_title);
+            cls = ToUtf8(wide_class);
             Log("[occlusion] [%s] \"%s\" is on top of the streamed window",
-                cls[0] ? cls : "?", title[0] ? title : "(untitled)");
+                cls.empty() ? "?" : cls.c_str(), title.empty() ? "(untitled)" : title.c_str());
         } else {
             Log("[occlusion] the streamed window is clear again");
         }
@@ -2581,8 +2579,7 @@ void ReportOcclusion() {
             if (found) {
                 by = title;
                 if (by.empty()) {
-                    const std::string klass = cls;
-                    by = (klass.rfind("Shell_System", 0) == 0 || klass == "#32770")
+                    by = (cls.rfind("Shell_System", 0) == 0 || cls == "#32770")
                          ? "a Windows dialog"
                          : "another window";
                 }
@@ -4450,9 +4447,7 @@ void ServeClient(SOCKET client) {
 
     // Greet with the protocol version and the display list, so the Mac can pick
     // its capture display without a round trip.
-    char hostname[256] = {};
-    DWORD hostname_size = sizeof(hostname);
-    GetComputerNameA(hostname, &hostname_size);
+    const std::string hostname = ComputerName();
 
     // The greeting says whether a token is needed, so the Mac can ask for one up
     // front rather than discovering it by having a command refused.
@@ -4695,12 +4690,10 @@ void StartDiscoveryResponder() {
             return;
         }
 
-        wchar_t name[256] = {};
-        DWORD size = 256;
-        GetComputerNameW(name, &size);
-        const std::string reply = "SOLSTREAM-HOST/1 " + ToUtf8(name);
+        const std::string name = ComputerName();
+        const std::string reply = "SOLSTREAM-HOST/1 " + name;
         Log("[discover] answering on UDP %u as %s", solstream::kDiscoveryPort,
-            ToUtf8(name).c_str());
+            name.c_str());
 
         char buffer[256];
         bool complained = false;
@@ -5665,11 +5658,8 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             if (g_clients_authenticated.load() > 0) {
-                char name[256] = {};
-                DWORD name_size = sizeof(name);
-                GetComputerNameA(name, &name_size);
                 std::string busy = "{\"type\":\"busy\",\"message\":\"";
-                busy += JsonEscape(std::string(name) + " is already streaming to "
+                busy += JsonEscape(ComputerName() + " is already streaming to "
                                    "another Mac. Disconnect there first.");
                 busy += "\"";
                 busy += ",\"virtualDisplay\":"

@@ -18,6 +18,12 @@ namespace solstream {
 std::string ToUtf8(const std::wstring& text);
 std::wstring ToWide(const std::string& text);
 
+/// Escape UTF-8 text for embedding in a JSON string. Window titles are
+/// arbitrary user text, so quotes, backslashes and control characters are
+/// escaped; and anything that is not well-formed UTF-8 comes out as U+FFFD,
+/// because the Mac's parser refuses a whole line over one bad byte.
+std::string JsonEscape(const std::string& text);
+
 /// Lower-cased copy, for case-insensitive comparison and searching.
 std::wstring FoldCase(std::wstring text);
 
