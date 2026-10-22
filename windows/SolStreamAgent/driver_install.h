@@ -116,15 +116,17 @@ enum class DeviceRemoval {
 /// (`opened`), and if not, why not (`open_error`); is what it found the
 /// driver's (`drivers`); the mark recorded beside the ID (`recorded_mark`,
 /// empty in a record from before marks) and the one the device carries
-/// (`device_mark`, empty when it has none); did DIF_REMOVE go through
-/// (`removed`); and the device's install flags after it (`install_flags`),
-/// which say when the removal waits for a restart.
+/// (`device_mark`, empty when it has none), or whether Windows wouldn't say
+/// (`device_mark_unknown`); did DIF_REMOVE go through (`removed`); and the
+/// device's install flags after it (`install_flags`), which say when the
+/// removal waits for a restart.
 struct RemovalAnswers {
     bool opened = false;
     DWORD open_error = 0;
     bool drivers = false;
     std::wstring recorded_mark = {};
     std::wstring device_mark = {};
+    bool device_mark_unknown = false;
     bool removed = false;
     DWORD install_flags = 0;
 };
@@ -165,9 +167,10 @@ struct DriverRemovalSteps {
 /// RemoveInstalledDriver on the records in `root`\`key`, with `steps`
 /// standing in for Windows. What became of the device decides the rest: one
 /// that is still there -- refused, or removed only at the restart -- keeps
-/// its package, its settings, and their records; a refused one keeps its own
-/// record too. One removed at the restart frees its instance ID for the next
-/// device, so its record keeps only that there was one. The settings go only
+/// its package, its settings, and their records, and its own record too. One
+/// removed at the restart frees its instance ID for the next device, so an
+/// unmarked record of it keeps only that there was one; a marked one keeps the
+/// ID, since the next device there has no mark. The settings go only
 /// when no other device of the driver's is there to read them. True when
 /// nothing recorded is left. Exposed for its tests.
 bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalSteps& steps,

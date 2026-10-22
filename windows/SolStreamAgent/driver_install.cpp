@@ -322,16 +322,22 @@ bool MarkDevice(HDEVINFO set, SP_DEVINFO_DATA& device, const std::wstring& mark)
         != FALSE;
 }
 
-/// The device's mark, or empty when it has none.
-std::wstring DeviceMark(HDEVINFO set, SP_DEVINFO_DATA& device) {
+/// The device's mark in `mark`, empty when it has none. False when Windows
+/// wouldn't say: only "not found" means no mark, and a failed read taken for
+/// one would make SolStream's own device somebody else's, its records let go.
+bool DeviceMark(HDEVINFO set, SP_DEVINFO_DATA& device, std::wstring& mark) {
+    mark.clear();
     DEVPROPTYPE type = 0;
-    wchar_t mark[64] = {0};
-    if (!SetupDiGetDevicePropertyW(set, &device, &kDeviceMarkKey, &type, (PBYTE) mark,
-                                   sizeof(mark) - sizeof(wchar_t), nullptr, 0)
-        || type != DEVPROP_TYPE_STRING) {
-        return {};
+    wchar_t text[64] = {0};
+    if (!SetupDiGetDevicePropertyW(set, &device, &kDeviceMarkKey, &type, (PBYTE) text,
+                                   sizeof(text) - sizeof(wchar_t), nullptr, 0)) {
+        return GetLastError() == ERROR_NOT_FOUND;
     }
-    return mark;
+    if (type != DEVPROP_TYPE_STRING) {
+        return false;
+    }
+    mark = text;
+    return true;
 }
 
 /// What Windows says of the device at a recorded instance ID before anything
@@ -346,7 +352,7 @@ RemovalAnswers AskAboutDevice(HDEVINFO set, SP_DEVINFO_DATA& device,
         answers.open_error = GetLastError();
     } else {
         answers.drivers = HasDriverHardwareId(set, device);
-        answers.device_mark = DeviceMark(set, device);
+        answers.device_mark_unknown = !DeviceMark(set, device, answers.device_mark);
     }
     return answers;
 }
@@ -833,12 +839,16 @@ RecordedDevice JudgeRecordedDevice(const RemovalAnswers& answers) {
     // The same driver at the same ID is not yet the same device: the mark
     // says so. A record from before marks has none and is taken at its word,
     // as it always was -- uninstall let such a record go with its device, and
-    // the one case that now keeps records past it, a removal at the restart,
-    // keeps no ID.
-    if (!answers.recorded_mark.empty() && answers.device_mark != answers.recorded_mark) {
-        return RecordedDevice::Somebodys;
+    // the one case that now keeps one past it, a removal at the restart,
+    // keeps no unmarked ID.
+    if (answers.recorded_mark.empty()) {
+        return RecordedDevice::Ours;
     }
-    return RecordedDevice::Ours;
+    if (answers.device_mark_unknown) {
+        return RecordedDevice::Unknown;
+    }
+    return answers.device_mark == answers.recorded_mark ? RecordedDevice::Ours
+                                                        : RecordedDevice::Somebodys;
 }
 
 DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
@@ -915,11 +925,14 @@ bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalStep
                 // not have gone anyway while the device uses it, and with its
                 // record let go nothing would say again that it was
                 // SolStream's: a later install finds it in the store, takes it
-                // for somebody else's, and no uninstall ever takes it. The ID
-                // is let go now, though: the restart frees it for the next
-                // device made, which may be somebody's own of the same driver.
-                WriteStateIn(root, key, kDeviceValue, L"");
-                DeleteStateIn(root, key, kDeviceMarkValue);
+                // for somebody else's, and no uninstall ever takes it. Its
+                // own record stays too, with its mark: removed again before
+                // the restart, it is still SolStream's, and the next device
+                // at its ID has no mark. An unmarked record's ID is let go,
+                // though, as nothing could tell that next device from it.
+                if (mark.empty()) {
+                    WriteStateIn(root, key, kDeviceValue, L"");
+                }
                 note += "Windows finishes removing the virtual display SolStream added when "
                         "this PC restarts. Until then the display still uses its driver and "
                         "its settings, so SolStream left them in place, still recorded as "

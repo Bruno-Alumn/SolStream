@@ -17,8 +17,6 @@
 // hardware: how commands are started, the install options, what uninstall
 // takes of the virtual display and its settings, when its device is waiting
 // for a restart or switched off, which adapter is Tailscale's, the
-// takes of the virtual display and its settings, when its device is waiting
-// for a restart or switched off, which adapter is Tailscale's, the
 // clipboard's privacy markers and line endings, when the sound capture opens
 // its device again, when the encoder spends a frame id, when a Mac may take
 // back the session it left behind, and how a key the Mac sends by position
@@ -1272,6 +1270,17 @@ void TestRecordedDevice() {
           == RecordedDevice::Gone);
     CHECK(JudgeRecordedDevice({.open_error = ERROR_ACCESS_DENIED, .recorded_mark = L"m1"})
           == RecordedDevice::Unknown);
+    // A mark Windows wouldn't read is not a missing one: taken for missing,
+    // SolStream's own device was somebody else's and its records were let go.
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                               .device_mark_unknown = true})
+          == RecordedDevice::Unknown);
+    CHECK(ClassifyRemoval({.opened = true, .drivers = true, .recorded_mark = L"m1",
+                           .device_mark_unknown = true})
+          == DeviceRemoval::Failed);
+    // With no mark recorded, there is nothing to read.
+    CHECK(JudgeRecordedDevice({.opened = true, .drivers = true, .device_mark_unknown = true})
+          == RecordedDevice::Ours);
 
     // And what uninstall makes of it: only its own device is removed.
     CHECK(ClassifyRemoval({.opened = true, .drivers = true, .recorded_mark = L"m1",
@@ -1330,6 +1339,7 @@ void TestDriverRecords(const std::wstring& scratch) {
     std::vector<std::wstring> removed;
     std::vector<std::wstring> uninstalled;
     int looked_up = 0;
+    DeviceRemoval outcome = DeviceRemoval::Failed;
     DriverRemovalSteps steps;
     steps.remove = [&](const std::wstring& device, const std::wstring& mark, DWORD& code) {
         RemovalAnswers answers;
@@ -1354,7 +1364,8 @@ void TestDriverRecords(const std::wstring& scratch) {
         } else if (refuse) {
             code = ERROR_ACCESS_DENIED;
         }
-        return ClassifyRemoval(answers);
+        outcome = ClassifyRemoval(answers);
+        return outcome;
     };
     // Unforced: refused while a device uses it.
     steps.uninstall = [&](const std::wstring& package) {
@@ -1442,14 +1453,15 @@ void TestDriverRecords(const std::wstring& scratch) {
     CHECK(note.find("still recorded as SolStream's") != std::string::npos);
     CHECK(!all_gone);
 
-    // Removed at the restart: the package and the settings stay, recorded,
-    // with a way to finish -- but the ID is let go.
+    // Removed at the restart: everything stays, recorded, with a way to
+    // finish. The ID too, with its mark: the next device there has none.
     install(L"m1");
     postpone = true;
     uninstall();
     CHECK(removed.size() == 1);
-    CHECK(recorded(L"DisplayDriverDevice") && value(L"DisplayDriverDevice").empty());
-    CHECK(!recorded(L"DisplayDriverDeviceMark"));
+    CHECK(outcome == DeviceRemoval::RemovedAtRestart);
+    CHECK(value(L"DisplayDriverDevice") == instance);
+    CHECK(value(L"DisplayDriverDeviceMark") == L"m1");
     CHECK(recorded(L"DisplayDriverInf") && recorded(L"DisplayDriverSettingsFolder"));
     CHECK(uninstalled.empty());
     CHECK(Exists(settings));
@@ -1457,9 +1469,46 @@ void TestDriverRecords(const std::wstring& scratch) {
     CHECK(note.find("pnputil /delete-driver oem42.inf") != std::string::npos);
     CHECK(!all_gone);
 
+    // Set up and removed again before the restart: still SolStream's, still
+    // going at the restart, and nothing of it is let go -- its own display,
+    // there until then, is no other display's reason to keep the settings.
+    uninstall();
+    CHECK(removed.size() == 1 && removed.front() == instance);
+    CHECK(outcome == DeviceRemoval::RemovedAtRestart);
+    CHECK(value(L"DisplayDriverDevice") == instance);
+    CHECK(value(L"DisplayDriverDeviceMark") == L"m1");
+    CHECK(recorded(L"DisplayDriverInf") && recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(uninstalled.empty());
+    CHECK(Exists(settings));
+    CHECK(!all_gone);
+
     // The restart, and then somebody installs the driver for themselves: the
     // same ID, the same package, their own settings in the same folder. They
     // set SolStream up again, which records nothing, and remove it again.
+    // The ID is theirs now, which stays, and so do its package and settings.
+    present.clear();
+    present[instance] = {L"", L"oem42.inf"};
+    postpone = false;
+    uninstall();
+    CHECK(removed.empty());
+    CHECK(outcome == DeviceRemoval::NotDrivers);
+    CHECK(looked_up == 0);
+    CHECK(present.count(instance) == 1);
+    CHECK(uninstalled.empty());
+    CHECK(Exists(settings));
+    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverDeviceMark"));
+    CHECK(!recorded(L"DisplayDriverInf") && !recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(!all_gone);
+
+    // The same with a record from before marks: nothing could tell their
+    // device from SolStream's at that ID, so the restart's removal lets the
+    // ID go, and the package can't lead uninstall to theirs either.
+    install(L"");
+    postpone = true;
+    uninstall();
+    CHECK(outcome == DeviceRemoval::RemovedAtRestart);
+    CHECK(recorded(L"DisplayDriverDevice") && value(L"DisplayDriverDevice").empty());
+    CHECK(recorded(L"DisplayDriverInf") && recorded(L"DisplayDriverSettingsFolder"));
     present.clear();
     present[instance] = {L"", L"oem42.inf"};
     postpone = false;
@@ -1467,22 +1516,9 @@ void TestDriverRecords(const std::wstring& scratch) {
     CHECK(removed.empty());
     CHECK(looked_up == 0);
     CHECK(present.count(instance) == 1);
-    CHECK(uninstalled.empty());
     CHECK(Exists(settings));
     CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverInf")
           && !recorded(L"DisplayDriverSettingsFolder"));
-    CHECK(!all_gone);
-
-    // The same, with the mark still recorded -- a record a set-up kept: the ID
-    // is another device's now, which stays, and so do its package and settings.
-    install(L"m1");
-    present[instance] = {L"", L"oem42.inf"};
-    uninstall();
-    CHECK(removed.empty());
-    CHECK(present.count(instance) == 1);
-    CHECK(Exists(settings));
-    CHECK(!recorded(L"DisplayDriverDevice") && !recorded(L"DisplayDriverDeviceMark"));
-    CHECK(!recorded(L"DisplayDriverSettingsFolder"));
 
     // Absent, with nothing else of the driver's here: the rest goes.
     install(L"m1");
