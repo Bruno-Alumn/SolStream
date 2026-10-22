@@ -643,12 +643,31 @@ public final class InputCapture {
         send(SMTInput.key(code: Self.windowsCapsLock, pressed: false, modifiers: []))
     }
 
+    /// The modifiers held on this Mac right now. Replaceable so the tests
+    /// decide rather than the keyboard of the Mac running them.
+    var modifierFlagsNow: () -> NSEvent.ModifierFlags = { NSEvent.modifierFlags }
+
     /// A session has just started, or restarted, under this capture: events
-    /// sent before it were dropped. Brings the host's Caps Lock into line if
-    /// this window has the keyboard.
+    /// sent before it were dropped. Brings the host's Caps Lock and modifiers
+    /// into line if this window has the keyboard.
+    ///
+    /// The host holds nothing at the start of a session -- one that ended
+    /// let go of everything it held -- so what this side remembers it being
+    /// told is forgotten first. Remembered, a Shift held across a restart was
+    /// never pressed on the new session: every event said Shift, nothing
+    /// changed, and the PC typed lower case until Shift was pressed again.
+    /// Forgotten, what is still held is pressed, and nothing else is sent: no
+    /// release, and on a first start with nothing held, nothing at all.
     public func inputBecameLive() {
         guard isCapturing else { return }
-        syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
+        heldKeys.removeAll()
+        chordKeys.removeAll()
+        heldButtons.removeAll()
+        lastModifierFlags = []
+        lastDeviceFlags = 0
+        let flags = modifierFlagsNow()
+        syncCapsLock(to: flags.contains(.capsLock))
+        syncModifiers(to: flags)
     }
 
     /// Bring the host's modifier keys to what `flags` says is held, sending

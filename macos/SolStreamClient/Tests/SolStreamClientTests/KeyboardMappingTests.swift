@@ -382,6 +382,49 @@ final class KeyboardMappingTests: XCTestCase {
         XCTAssertEqual(wire.packets.map(\.code), [0xA0, 0x41, 0x41])
     }
 
+    // MARK: - A session that starts or restarts
+
+    /// ⇧ held across a restart: the new session holds nothing, so ⇧ is
+    /// pressed on it again, and its release still follows.
+    func testAModifierHeldAcrossARestartIsPressedAgain() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let wire = Wire()
+        let shift = NSEvent.ModifierFlags(rawValue: shiftFlag | leftShiftBit)
+        wire.capture.modifierFlagsNow = { shift }
+        wire.send(.flagsChanged, keyCode: 0x38, deviceFlags: shift.rawValue)
+        wire.capture.inputBecameLive()
+        XCTAssertEqual(wire.packets.map(\.code), [0xA0, 0xA0])
+        XCTAssertEqual(wire.packets.map(\.pressed), [true, true], "⇧ was not pressed on the new session")
+        wire.send(.keyDown, keyCode: 0x00, deviceFlags: shift.rawValue)
+        wire.send(.flagsChanged, keyCode: 0x38, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.map(\.code), [0xA0, 0xA0, 0x41, 0xA0])
+        XCTAssertEqual(wire.packets.last?.pressed, false)
+    }
+
+    /// What the old session held is forgotten without a word: nothing still
+    /// held means nothing sent, release or press -- and so a first start with
+    /// nothing held sends nothing at all.
+    func testAStartSendsNoStrayReleases() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let first = Wire()
+        first.capture.modifierFlagsNow = { [] }
+        first.capture.inputBecameLive()
+        XCTAssertTrue(first.packets.isEmpty)
+
+        let restarted = Wire()
+        restarted.capture.modifierFlagsNow = { [] }
+        restarted.send(.flagsChanged, keyCode: leftCommand, deviceFlags: commandFlag | leftCommandBit)
+        restarted.send(.keyDown, keyCode: wKey, deviceFlags: commandFlag | leftCommandBit)
+        let before = restarted.packets.count
+        restarted.capture.inputBecameLive()
+        XCTAssertEqual(restarted.packets.count, before, "the restart sent what the host no longer holds")
+        // ⌘ coming up now has nothing of the old session's to let go of.
+        restarted.send(.flagsChanged, keyCode: leftCommand, deviceFlags: 0)
+        XCTAssertEqual(restarted.packets.count, before)
+    }
+
     // MARK: - Caps Lock, to a host that predates scan codes
 
     /// Caps Lock is a toggle on Windows, so each change on the Mac is one
