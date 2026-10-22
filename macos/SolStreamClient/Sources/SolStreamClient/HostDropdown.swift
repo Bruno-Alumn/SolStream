@@ -44,9 +44,14 @@ final class HostDropdown: DS.Box {
         var kind: Kind
     }
 
-    var items: [Item] = [] { didSet { if isOpen { rebuildList() } } }
+    /// The open list is rebuilt when these change, and only then: the
+    /// connect window sets both on every refresh, a network change makes
+    /// one, and a rebuild is a new list.
+    var items: [Item] = [] { didSet { if isOpen, items != oldValue { rebuildList() } } }
     /// Shown as the running footer while mDNS is still looking.
-    var isDiscovering: Bool = true { didSet { if isOpen { rebuildList() } } }
+    var isDiscovering: Bool = true {
+        didSet { if isOpen, isDiscovering != oldValue { rebuildList() } }
+    }
 
     /// Fired when a row is committed, or when an address is typed into the last
     /// row and entered.
@@ -354,10 +359,22 @@ final class HostDropdown: DS.Box {
         }
     }
 
+    /// The list again, for what it holds now. An address half typed into
+    /// the last row goes over to the new one, with the focus and the caret
+    /// where they were: the field went with the old list, and somebody
+    /// typing the PC's Tailscale address lost it when Tailscale came up.
     private func rebuildList() {
         guard isOpen else { return }
+        let typed = manualField?.stringValue ?? ""
+        let caret = manualField?.currentEditor()?.selectedRange
         closeList(commit: false)
         openList()
+        guard let field = manualField else { return }
+        field.stringValue = typed
+        if let caret {
+            panel?.makeFirstResponder(field)
+            field.currentEditor()?.selectedRange = caret
+        }
     }
 
     private func applyHighlight() {

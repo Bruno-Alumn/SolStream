@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import DesignSystem
 @testable import AgentChannel
 @testable import SolStreamClient
 
@@ -253,6 +254,23 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertFalse(shown(in: window).contains("Reachable"), "the old tailnet's answer is not kept")
         waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
         XCTAssertGreaterThan(world.probes, before)
+    }
+
+    /// The host list open, with an address half typed into it, when
+    /// Tailscale comes up: the address stays where it was.
+    func testANetworkChangeLeavesAnAddressBeingTyped() throws {
+        let world = World(tailscale: .installedButOff, answering: [])
+        let (connect, _) = try makeWindow(world)
+        let list = try XCTUnwrap(connect.openDropdownForTesting())
+        let field = try XCTUnwrap(find(DS.Field.self, in: list.contentView))
+        list.makeFirstResponder(field)
+        field.currentEditor()?.insertText("100.101.")
+
+        world.tailscale = .connected(address: "100.88.1.4")
+        connect.networkChanged()
+        let now = try XCTUnwrap(find(DS.Field.self, in: connect.openDropdownForTesting()?.contentView))
+        XCTAssertEqual(now.stringValue, "100.101.")
+        XCTAssertNotNil(now.currentEditor(), "still being typed into")
     }
 
     /// A probe already under way when Tailscale came up answers for the
