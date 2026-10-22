@@ -167,6 +167,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         connectButton.keyEquivalent = "\r"
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
+        // Escape here is the way out of SolStream, as Escape in the app picker
+        // is the way back to here. This window is only up when nothing is
+        // streaming, so it never ends a stream. An open PC list takes Escape
+        // first and only closes itself.
+        quitButton.keyEquivalent = "\u{1b}"
 
         updateNotice.target = self
         updateNotice.action = #selector(updateNoticeTapped)
