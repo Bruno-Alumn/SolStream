@@ -615,6 +615,104 @@ void TestFirewallSweep() {
     CHECK(std::count(sweep.begin(), sweep.end(), L'"') == 2);
 }
 
+/// Each spelling of the task's account in turn until Task Scheduler takes one:
+/// a domain account whose controller is out of reach cannot be named, and the
+/// task still has to register, under the SID.
+void TestRegisterUnderAccounts() {
+    const std::vector<std::wstring> accounts = {L"PC\\me", L"S-1-5-21-1-2-3-1001"};
+    std::vector<std::wstring> tried;
+    std::string error;
+
+    // The name refused: the SID is tried next, and taken.
+    auto name_refused = [&tried](const std::wstring& account, std::string& failure) {
+        tried.push_back(account);
+        if (account == L"PC\\me") {
+            failure = "Could not register the task (0x80070534).";
+            return false;
+        }
+        return true;
+    };
+    CHECK(RegisterUnderAccounts(accounts, name_refused, error) == 1);
+    CHECK(tried == accounts);
+
+    // Both refused: what is reported is the name's failure, the form that has
+    // always worked, not the SID's.
+    tried.clear();
+    auto both_refused = [&tried](const std::wstring& account, std::string& failure) {
+        tried.push_back(account);
+        failure = account == L"PC\\me" ? "the name was refused" : "the SID was refused";
+        return false;
+    };
+    CHECK(RegisterUnderAccounts(accounts, both_refused, error) == -1);
+    CHECK(tried == accounts);
+    CHECK(error == "the name was refused");
+
+    // The name taken: nothing else is tried.
+    tried.clear();
+    error.clear();
+    auto name_taken = [&tried](const std::wstring& account, std::string&) {
+        tried.push_back(account);
+        return true;
+    };
+    CHECK(RegisterUnderAccounts(accounts, name_taken, error) == 0);
+    CHECK(tried.size() == 1);
+    CHECK(error.empty());
+}
+
+/// The end of an install starts the host through its task even when the task
+/// would not register: on an update the one an earlier install registered
+/// names the same path, and skipping it left the PC with no SolStream until
+/// the next logon.
+void TestHostTaskStart() {
+    const std::vector<std::string> both = {"register", "run"};
+    std::vector<std::string> steps;
+    auto refused = [&steps](std::string& failure) {
+        steps.push_back("register");
+        failure = "Could not register the task (0x80070005).";
+        return false;
+    };
+    auto started = [&steps] {
+        steps.push_back("run");
+        return 0ul;
+    };
+    const HostTaskResult unregistered = RegisterAndRunHostTask(refused, started);
+    CHECK(steps == both);
+    CHECK(!unregistered.registered);
+    CHECK(unregistered.register_error == "Could not register the task (0x80070005).");
+    CHECK(unregistered.started == 0);
+
+    // Registered, and the run's answer carried back as it came, so a failed
+    // start can be warned about.
+    steps.clear();
+    auto registered = [&steps](std::string&) {
+        steps.push_back("register");
+        return true;
+    };
+    auto not_started = [&steps] {
+        steps.push_back("run");
+        return 1ul;
+    };
+    const HostTaskResult result = RegisterAndRunHostTask(registered, not_started);
+    CHECK(steps == both);
+    CHECK(result.registered);
+    CHECK(result.register_error.empty());
+    CHECK(result.started == 1);
+}
+
+/// An update or an uninstall asks the running host to quit before anything is
+/// stopped by force: only quitting takes its tray icon away and gives back the
+/// windows it was streaming.
+void TestStopInstalled() {
+    std::vector<std::wstring> steps;
+    StopInstalled(
+        L"C:\\Program Files\\SolStream",
+        [&steps](const std::wstring& directory) { steps.push_back(L"ask " + directory); },
+        [&steps](const std::wstring& directory) { steps.push_back(L"force " + directory); });
+    const std::vector<std::wstring> expected = {L"ask C:\\Program Files\\SolStream",
+                                                L"force C:\\Program Files\\SolStream"};
+    CHECK(steps == expected);
+}
+
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -1151,6 +1249,9 @@ int wmain(int argc, wchar_t** argv) {
     TestLogonTaskAccounts();
     TestFirewallRule();
     TestFirewallSweep();
+    TestRegisterUnderAccounts();
+    TestHostTaskStart();
+    TestStopInstalled();
     TestQualifyCommand();
     TestNoDowngrade();
     TestDownload();

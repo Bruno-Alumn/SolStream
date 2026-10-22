@@ -495,13 +495,8 @@ void AskInstalledHostsToQuit(const std::wstring& destination) {
     }
 }
 
-/// Stop anything already running out of the install directory, or the copy
-/// fails on a locked executable and leaves a half-installed folder.
-void StopInstalled(const std::wstring& destination) {
-    // Asked to quit first, and only what is still here after that is stopped
-    // below: see AskInstalledHostsToQuit.
-    AskInstalledHostsToQuit(destination);
-
+/// Stop by force whatever is still running out of the install directory.
+void ForceStopInstalled(const std::wstring& destination) {
     // By WHERE a process is running from, never by what it is called.
     //
     // The point of this is to release locks on files about to be overwritten,
@@ -533,6 +528,26 @@ void StopInstalled(const std::wstring& destination) {
                    "(powershell " + RunOutcome(code) + ")");
     }
     Sleep(1500);
+}
+
+}  // namespace
+
+void StopInstalled(const std::wstring& destination,
+                   const std::function<void(const std::wstring&)>& ask,
+                   const std::function<void(const std::wstring&)>& force) {
+    // Asked to quit first, and only what is still here after that is stopped
+    // by force: see AskInstalledHostsToQuit.
+    ask(destination);
+    force(destination);
+}
+
+namespace {
+
+/// Stop anything already running out of the install directory, or the copy
+/// fails on a locked executable and leaves a half-installed folder.
+void StopInstalled(const std::wstring& destination) {
+    // Qualified, or the name would find only this one.
+    solstream::StopInstalled(destination, AskInstalledHostsToQuit, ForceStopInstalled);
 }
 
 void DeleteRule(const std::wstring& name) {
@@ -936,6 +951,29 @@ std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& desti
         L"</Task>\r\n";
 }
 
+/// One account, spelled the ways LogonTaskAccounts gives, so a refusal of the
+/// first spelling -- a domain account whose controller is out of reach -- is
+/// not the end of it. The first one's failure is the one reported when none is
+/// taken: it is the form that has always worked, so its failure is the one
+/// worth reading.
+int RegisterUnderAccounts(
+    const std::vector<std::wstring>& accounts,
+    const std::function<bool(const std::wstring& account, std::string& failure)>& attempt,
+    std::string& error) {
+    std::string first;
+    for (size_t i = 0; i < accounts.size(); ++i) {
+        std::string failure;
+        if (attempt(accounts[i], failure)) {
+            return static_cast<int>(i);
+        }
+        if (i == 0) {
+            first = failure;
+        }
+    }
+    error = first;
+    return -1;
+}
+
 namespace {
 
 /// The Task Scheduler's class and interface ids, spelled out here rather than
@@ -1033,24 +1071,23 @@ bool RegisterLogonTask(const std::wstring& destination, std::string& error,
         error = "Could not tell which account to start SolStream for.";
         return false;
     }
-    // Each spelling in turn, keeping the first one's answer: it is the form
-    // that has always worked, so its failure is the one worth reporting.
-    for (size_t i = 0; i < accounts.size(); ++i) {
-        std::string attempt;
-        if (RegisterTaskDefinition(LogonTaskXml(accounts[i], destination, at_logon),
-                                   attempt)) {
-            if (i > 0) {
-                InstallLog("registered the task for " + ToUtf8(accounts[i]));
+    // Each spelling in turn: see RegisterUnderAccounts.
+    const int taken = RegisterUnderAccounts(
+        accounts,
+        [&destination, at_logon](const std::wstring& account, std::string& failure) {
+            if (RegisterTaskDefinition(LogonTaskXml(account, destination, at_logon),
+                                       failure)) {
+                return true;
             }
-            return true;
-        }
-        InstallLog("could not register the task for " + ToUtf8(accounts[i]) + ": "
-                   + attempt);
-        if (i == 0) {
-            error = attempt;
-        }
+            InstallLog("could not register the task for " + ToUtf8(account) + ": "
+                       + failure);
+            return false;
+        },
+        error);
+    if (taken > 0) {
+        InstallLog("registered the task for " + ToUtf8(accounts[static_cast<size_t>(taken)]));
     }
-    return false;
+    return taken >= 0;
 }
 
 /// The name of this run's result file, chosen by the process that is going to
@@ -1419,6 +1456,20 @@ bool StartsAtLogon() {
     return FAILED(hr) || count != 0;
 }
 
+HostTaskResult RegisterAndRunHostTask(
+    const std::function<bool(std::string& error)>& register_task,
+    const std::function<unsigned long()>& run_task) {
+    HostTaskResult result;
+    result.registered = register_task(result.register_error);
+    // Run whether or not that registration went through. On an update the task
+    // an earlier install registered is still there and names this same path, so
+    // it starts the copy just put in place; skipping it, as a failed
+    // registration used to, left the PC with no SolStream at all -- the old one
+    // already stopped -- until the next logon.
+    result.started = run_task();
+    return result;
+}
+
 bool InstallSelf(const InstallOptions& options, std::string& error) {
     InstallLog("install requested");
     if (!IsElevated()) {
@@ -1553,35 +1604,34 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // for the same reason the firewall one is: what is left is a working
     // install, and saying otherwise invites somebody to "fix" it by installing
     // again over the top.
-    std::string task_error;
-    const bool registered = RegisterLogonTask(destination, task_error, options.start_at_logon);
-    if (registered) {
-        InstallLog(options.start_at_logon ? "logon task registered"
-                                          : "on-demand task registered (not at logon)");
-    } else {
-        // Task Scheduler's own words, with its code in them, go to the log. The
-        // window gets the consequence, which is the part the person reading it
-        // can do anything about.
-        InstallLog("task failed: " + task_error);
-        if (options.start_at_logon) {
-            also("Windows would not register its logon task, so it will not start by"
-                 " itself when you log in.");
-        }
+    const HostTaskResult task = RegisterAndRunHostTask(
+        [&destination, &options](std::string& task_error) {
+            const bool registered =
+                RegisterLogonTask(destination, task_error, options.start_at_logon);
+            if (registered) {
+                InstallLog(options.start_at_logon ? "logon task registered"
+                                                  : "on-demand task registered (not at logon)");
+            } else {
+                // Task Scheduler's own words, with its code in them, go to the
+                // log. The window gets the consequence, below, which is the
+                // part the person reading it can do anything about.
+                InstallLog("task failed: " + task_error);
+            }
+            return registered;
+        },
+        [] { return RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\""); });
+    if (!task.registered && options.start_at_logon) {
+        also("Windows would not register its logon task, so it will not start by"
+             " itself when you log in.");
     }
-    // Run whether or not that registration went through. On an update the task
-    // an earlier install registered is still there and names this same path, so
-    // it starts the copy just put in place; skipping it, as a failed
-    // registration used to, left the PC with no SolStream at all -- the old one
-    // already stopped -- until the next logon.
-    const DWORD started =
-        RunHidden(L"schtasks.exe /run /tn \"" + std::wstring(kTaskName) + L"\"");
-    if (started == 0) {
-        InstallLog(registered ? "started"
-                              : "started through the task an earlier install registered");
+    if (task.started == 0) {
+        InstallLog(task.registered
+                       ? "started"
+                       : "started through the task an earlier install registered");
     } else {
         // A warning, not just a line: without one, setup's summary says
         // "SolStream is running" over a PC where nothing is.
-        InstallLog("could not start it now: schtasks " + RunOutcome(started));
+        InstallLog("could not start it now: schtasks " + RunOutcome(task.started));
         // Named when it follows another clause, which has a subject of its own.
         also(warning.empty() ? "Windows would not start it just now."
                              : "Windows would not start SolStream just now either.");

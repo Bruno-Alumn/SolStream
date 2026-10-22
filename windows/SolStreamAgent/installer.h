@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -127,6 +128,39 @@ std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& p
 /// program is inside `directory`, whatever the rule is called. Exposed for its
 /// tests.
 std::wstring FirewallSweepCommand(const std::wstring& directory);
+
+/// Register that task under each of `accounts` in turn, best first, until Task
+/// Scheduler takes one: `attempt` registers it under one of them. The index of
+/// the one taken, or -1 with `error` holding the first one's failure. Exposed,
+/// with `attempt` standing in for Task Scheduler, for its tests.
+int RegisterUnderAccounts(
+    const std::vector<std::wstring>& accounts,
+    const std::function<bool(const std::wstring& account, std::string& failure)>& attempt,
+    std::string& error);
+
+/// What became of the task that starts the installed host, at the end of an
+/// install.
+struct HostTaskResult {
+    bool registered = false;
+    /// Why not, in Task Scheduler's words, when it was not.
+    std::string register_error;
+    /// schtasks /run's answer, as RunHidden gives it: 0 when the host started.
+    unsigned long started = 0;
+};
+
+/// Register the task with `register_task`, then start the host through it with
+/// `run_task` -- whether or not the registration went through. Exposed, with
+/// both steps as parameters, for its tests.
+HostTaskResult RegisterAndRunHostTask(
+    const std::function<bool(std::string& error)>& register_task,
+    const std::function<unsigned long()>& run_task);
+
+/// Stop what is running out of `destination` before it is replaced or removed:
+/// `ask` each host there to quit, then `force` whatever is left. Exposed, with
+/// both steps as parameters, for its tests.
+void StopInstalled(const std::wstring& destination,
+                   const std::function<void(const std::wstring&)>& ask,
+                   const std::function<void(const std::wstring&)>& force);
 
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
