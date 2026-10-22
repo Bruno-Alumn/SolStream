@@ -208,11 +208,13 @@ endif()
 # The updater's own tests: version, JSON, SHA256SUMS and base64 parsing, the
 # signature against tests/update-vector, the host allow-list, the anti-rollback
 # name check, the download's hold, and the note an install leaves; and beside
-# them what uninstall takes of the virtual display's settings, and which
-# adapter is Tailscale's. No network, and nothing outside a temporary folder: it
-# never sees the real %LOCALAPPDATA%. updater_tests.cpp includes updater.cpp to
-# reach its internals, so that is not listed again here. Not built by
-# package-windows.ps1, which configures with BUILD_TESTING off.
+# them what uninstall takes of the virtual display's settings and records, and
+# which adapter is Tailscale's. No network, and nothing outside a temporary
+# folder and a volatile registry key of its own under HKCU: it never sees the
+# real %LOCALAPPDATA%, nor SolStream's records in HKLM. updater_tests.cpp
+# includes updater.cpp to reach its internals, so that is not listed again
+# here. Not built by package-windows.ps1, which configures with BUILD_TESTING
+# off.
 if(BUILD_TESTING)
     add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp installer.cpp media/log.cpp
         driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp)

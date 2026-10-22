@@ -64,15 +64,20 @@ const std::string kManualInstall =
     " You can install the Virtual Display Driver yourself from "
     "github.com/VirtualDrivers/Virtual-Display-Driver, then open SolStream again.";
 
-std::wstring ReadState(const wchar_t* name) {
+/// A record from `root`\`key`: kStateKey in HKLM everywhere but the tests.
+std::wstring ReadStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
     wchar_t value[MAX_PATH] = {0};
     DWORD size = sizeof(value);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, kStateKey, name,
-                     RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value, &size)
+    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value,
+                     &size)
         != ERROR_SUCCESS) {
         return {};
     }
     return value;
+}
+
+std::wstring ReadState(const wchar_t* name) {
+    return ReadStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
 }
 
 void WriteState(const wchar_t* name, const std::wstring& value) {
@@ -87,13 +92,17 @@ void WriteState(const wchar_t* name, const std::wstring& value) {
     RegCloseKey(key);
 }
 
-void DeleteState(const wchar_t* name) {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kStateKey, 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
-                      &key) == ERROR_SUCCESS) {
-        RegDeleteValueW(key, name);
-        RegCloseKey(key);
+void DeleteStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
+    HKEY opened = nullptr;
+    if (RegOpenKeyExW(root, key, 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &opened)
+        == ERROR_SUCCESS) {
+        RegDeleteValueW(opened, name);
+        RegCloseKey(opened);
     }
+}
+
+void DeleteState(const wchar_t* name) {
+    DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
 }
 
 /// A directory only SYSTEM and administrators can write to, for the download
@@ -713,14 +722,18 @@ void RemoveInstalledDriver(std::string& note) {
         DeleteState(kInfValue);
     }
 
+    RemoveRecordedDriverSettings(HKEY_LOCAL_MACHINE, kStateKey, note);
+}
+
+void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note) {
     // The settings folder only when SolStream made it, only what it holds of
     // the driver's and SolStream's, and never through a link. Its record goes
     // only with the folder: let go while the folder stays, nothing would say
     // again that the folder was SolStream's.
-    const std::wstring folder = ReadState(kSettingsValue);
+    const std::wstring folder = ReadStateIn(root, key, kSettingsValue);
     if (!folder.empty()) {
         if (RemoveDriverSettingsFolder(folder)) {
-            DeleteState(kSettingsValue);
+            DeleteStateIn(root, key, kSettingsValue);
         } else {
             note += "Left the display driver's settings folder, " + ToUtf8(folder)
                   + ", because it is a link or holds files SolStream didn't put there.\n";
@@ -729,12 +742,12 @@ void RemoveInstalledDriver(std::string& note) {
     // The settings file written into somebody else's folder, and the copy of
     // it, on the same terms.
     for (const wchar_t* value : {kSettingsFileValue, kSettingsBackupValue}) {
-        const std::wstring path = ReadState(value);
+        const std::wstring path = ReadStateIn(root, key, value);
         if (path.empty()) {
             continue;
         }
         if (RemoveDriverSettingsFile(path)) {
-            DeleteState(value);
+            DeleteStateIn(root, key, value);
         } else {
             note += "Left " + ToUtf8(path) + ": it is a link, isn't the display driver's "
                     "settings, or couldn't be deleted.\n";

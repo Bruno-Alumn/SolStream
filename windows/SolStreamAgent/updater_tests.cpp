@@ -8,8 +8,10 @@
 //
 // No network, and nothing outside a temporary folder: %LOCALAPPDATA% is pointed
 // at one before anything runs, so the real Updates folder is never touched. The
-// fetching itself (Get, the redirects, the token's scoping) needs a server and
-// is not covered here.
+// one exception is a volatile registry key of its own under HKCU, for the
+// virtual display's settings records, deleted again at the end. The fetching
+// itself (Get, the redirects, the token's scoping) needs a server and is not
+// covered here.
 //
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
@@ -790,6 +792,86 @@ void TestDriverSettingsJunction(const std::wstring& scratch) {
     RemoveTree(elsewhere);
 }
 
+/// Uninstall lets a settings record go only with what it names. A folder that
+/// still holds somebody's file is left, and so is its record, or nothing would
+/// say again that the folder was SolStream's; the same for a settings file
+/// that couldn't be deleted, and for a record naming anything but the
+/// settings. The records are in a key of this test's own under HKCU, named at
+/// the call, so SolStream's real ones in HKLM are never read.
+void TestDriverSettingsRecords(const std::wstring& scratch) {
+    const std::wstring key =
+        L"Software\\SolStreamUpdaterTests-" + std::to_wstring(GetCurrentProcessId());
+    HKEY records = nullptr;
+    // Volatile, so it goes at logoff even if this stops before deleting it.
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
+                        KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &records, nullptr)
+        != ERROR_SUCCESS) {
+        std::printf("FAIL: could not make a registry key for the settings records\n");
+        ++g_failures;
+        return;
+    }
+    auto record = [records](const wchar_t* name, const std::wstring& value) {
+        CHECK(RegSetValueExW(records, name, 0, REG_SZ, (const BYTE*) value.c_str(),
+                             (DWORD) ((value.size() + 1) * sizeof(wchar_t)))
+              == ERROR_SUCCESS);
+    };
+    auto recorded = [records](const wchar_t* name) {
+        return RegQueryValueExW(records, name, nullptr, nullptr, nullptr, nullptr)
+            == ERROR_SUCCESS;
+    };
+    std::string note;
+    auto take_back = [&key, &note] {
+        note.clear();
+        RemoveRecordedDriverSettings(HKEY_CURRENT_USER, key.c_str(), note);
+    };
+
+    // A folder SolStream made, where somebody has since put a file the
+    // driver reads.
+    const std::wstring folder = scratch + L"\\RecordedSettings";
+    CHECK(CreateDirectoryW(folder.c_str(), nullptr));
+    CHECK(WriteAll(folder + L"\\vdd_settings.xml", "x"));
+    CHECK(WriteAll(folder + L"\\user_edid.bin", "x"));
+    record(L"DisplayDriverSettingsFolder", folder);
+    take_back();
+    CHECK(Exists(folder + L"\\user_edid.bin"));
+    CHECK(recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(note.find("Left the display driver's settings folder") != std::string::npos);
+    // With theirs gone, the folder goes, and its record with it.
+    CHECK(DeleteFileW((folder + L"\\user_edid.bin").c_str()));
+    take_back();
+    CHECK(!Exists(folder));
+    CHECK(!recorded(L"DisplayDriverSettingsFolder"));
+    CHECK(note.empty());
+
+    // The settings file written into somebody else's folder, held open so it
+    // can't be deleted, beside a record that names their own file.
+    const std::wstring theirs = scratch + L"\\TheirRecordedSettings";
+    CHECK(CreateDirectoryW(theirs.c_str(), nullptr));
+    const std::wstring settings = theirs + L"\\vdd_settings.xml";
+    CHECK(WriteAll(settings, "x"));
+    CHECK(WriteAll(theirs + L"\\theirs.xml", "x"));
+    record(L"DisplayDriverSettingsFile", settings);
+    record(L"DisplayDriverSettingsBackup", theirs + L"\\theirs.xml");
+    HANDLE held = CreateFileW(settings.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(held != INVALID_HANDLE_VALUE);
+    take_back();
+    CHECK(Exists(settings));
+    CHECK(recorded(L"DisplayDriverSettingsFile"));
+    CloseHandle(held);
+    take_back();
+    CHECK(!Exists(settings));
+    CHECK(!recorded(L"DisplayDriverSettingsFile"));
+    // Not the settings: kept, and its record with it, however often asked.
+    CHECK(Exists(theirs + L"\\theirs.xml"));
+    CHECK(recorded(L"DisplayDriverSettingsBackup"));
+    CHECK(note.find("theirs.xml") != std::string::npos);
+
+    RegCloseKey(records);
+    RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());
+    RemoveTree(theirs);
+}
+
 /// A device Windows starts at the next restart is an install it has not
 /// finished, not a driver somebody switched off -- which is what the window
 /// once called SolStream's own new device, sending somebody to Device Manager
@@ -953,6 +1035,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsFolder(scratch);
     TestDriverSettingsFile(scratch);
     TestDriverSettingsJunction(scratch);
+    TestDriverSettingsRecords(scratch);
     TestWaitsForRestart();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();

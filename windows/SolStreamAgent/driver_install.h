@@ -95,6 +95,13 @@ bool InstalledDriverHere();
 /// administrator rights. What could not be done goes to `note`.
 void RemoveInstalledDriver(std::string& note);
 
+/// The settings part of that: the folder SolStream made, or the settings file
+/// it wrote into somebody else's and its backup, each record let go only once
+/// what it names is gone. The records are read from and let go in
+/// `root`\`key`: HKLM\SOFTWARE\SolStream for RemoveInstalledDriver, and a key
+/// of their own for the tests, which are why it is exposed.
+void RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& note);
+
 /// The settings folder's part of that, for a folder SolStream made: the files
 /// the driver and SolStream keep in it, then the folder itself -- never
 /// through a link. True when the folder is gone, false when it is a link or
