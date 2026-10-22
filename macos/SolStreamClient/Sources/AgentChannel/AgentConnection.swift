@@ -1056,13 +1056,18 @@ public final class AgentConnection {
         }
     }
 
-    /// Largest clipboard text the host will take, and the largest line either
-    /// end will read. Both mirror the constants in main.cpp and have to move
-    /// with them — whichever side hits its line cap first drops the control
-    /// channel, and the picture stays live while every window command quietly
-    /// stops working.
-    static let maxClipboardBytes = 256 * 1024
+    /// Largest clipboard text either side sends, measured in the Mac's line
+    /// endings, and the largest line either end will read. Both mirror the
+    /// constants in main.cpp and have to move with them — whichever side hits
+    /// its line cap first drops the control channel, and the picture stays
+    /// live while every window command quietly stops working.
+    public static let maxClipboardBytes = 256 * 1024
     static let maxLineBytes = 4 * 1024 * 1024
+    /// Largest text a set carries. The Mac cuts its copy to `maxClipboardBytes`
+    /// while its lines end in LF, then gives every line Windows' CR, which can
+    /// at most double it. No host cuts a set, and six times this still clears
+    /// `maxLineBytes`.
+    public static let maxClipboardSetBytes = 2 * maxClipboardBytes
 
     /// Trim to fit the host's clipboard budget, measured in UTF-8 bytes.
     ///
@@ -1070,9 +1075,10 @@ public final class AgentConnection {
     /// the two differ by up to 4×: 100k of CJK text is well inside any character
     /// limit and three times over the byte one. Trimmed by `Character` so a
     /// grapheme cluster — or worse, a UTF-8 sequence — is never cut in half.
-    static func clipboardPayload(_ text: String) -> (text: String, truncated: Bool) {
+    public static func clipboardPayload(_ text: String, limit: Int = maxClipboardBytes)
+        -> (text: String, truncated: Bool) {
         let utf8 = text.utf8
-        guard utf8.count > maxClipboardBytes else { return (text, false) }
+        guard utf8.count > limit else { return (text, false) }
 
         // Seek straight to the byte cap, then walk back to the nearest Character
         // boundary. Repeatedly dropping Characters and re-measuring would be
@@ -1080,7 +1086,7 @@ public final class AgentConnection {
         // much when the text is multi-byte — 2 MB of flag emoji is 1.75 MB over,
         // which is more Characters than the string has, so it would trim the
         // whole clipboard away.
-        guard let capped = utf8.index(utf8.startIndex, offsetBy: maxClipboardBytes,
+        guard let capped = utf8.index(utf8.startIndex, offsetBy: limit,
                                       limitedBy: utf8.endIndex) else { return (text, false) }
         var boundary = capped
         while boundary > utf8.startIndex, String.Index(boundary, within: text) == nil {
@@ -1090,8 +1096,10 @@ public final class AgentConnection {
         return (String(text[text.startIndex..<cut]), true)
     }
 
+    /// Put text on the host's clipboard, already in Windows' line endings: a
+    /// `clipboardPayload` once every LF has gained its CR.
     public func setClipboard(_ text: String, completion: ((Int?) -> Void)? = nil) {
-        let (text, truncated) = Self.clipboardPayload(text)
+        let (text, truncated) = Self.clipboardPayload(text, limit: Self.maxClipboardSetBytes)
         if truncated {
             Log.info("[clipboard] trimmed to \(text.utf8.count) bytes for the host")
         }

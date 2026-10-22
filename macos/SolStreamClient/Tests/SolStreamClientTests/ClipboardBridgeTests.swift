@@ -112,6 +112,34 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(fake.writes, ["one\r\ntwo"])
     }
 
+    /// Measured against the host's budget as the Mac's lines, not Windows':
+    /// those are a byte longer each, and a copy that fits would lose its tail.
+    func testAMacCopyThatFitsTheBudgetIsSentWhole() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        // 256,000 bytes in the Mac's lines, 262,400 in Windows'.
+        let text = String(repeating: String(repeating: "x", count: 39) + "\n", count: 6_400)
+        XCTAssertLessThanOrEqual(text.utf8.count, AgentConnection.maxClipboardBytes)
+        copyOnTheMac(text)
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes.count, 1)
+        XCTAssertGreaterThan(fake.writes.first?.utf8.count ?? 0, AgentConnection.maxClipboardBytes)
+        XCTAssertEqual(fake.writes.first.map(ClipboardBridge.macLineEndings), text)
+    }
+
+    /// And one that does not fit is cut to the budget in the Mac's lines,
+    /// then given Windows'.
+    func testAMacCopyOverTheBudgetIsCutBeforeItGainsItsReturns() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let text = String(repeating: String(repeating: "x", count: 39) + "\n", count: 8_000)
+        copyOnTheMac(text)
+        bridge.syncNow()
+        let sent = fake.writes.first.map(ClipboardBridge.macLineEndings) ?? ""
+        XCTAssertEqual(sent.utf8.count, AgentConnection.maxClipboardBytes)
+        XCTAssertTrue(text.hasPrefix(sent))
+    }
+
     /// A copy marked as a password's is never sent, keyboard or not.
     func testAPrivateMacCopyIsNeverSent() {
         bridge.start(resuming: false)

@@ -1279,7 +1279,19 @@ void TestClipboardLineEndings() {
     CHECK(ToMacLineEndings("one\ntwo") == "one\ntwo");
     CHECK(ToMacLineEndings("a\rb") == "a\rb");
     CHECK(ToMacLineEndings("ends in a CR\r") == "ends in a CR\r");
-    CHECK(ToMacLineEndings("\r\r\n") == "\r\n");
+    CHECK(ToMacLineEndings("a\r\rb") == "a\r\rb");
+    // A run of CRs before an LF -- an edit control's soft line break, or a
+    // CRLF converted twice -- is one line ending, and folds to one LF. So
+    // nothing folded holds a CRLF, and folding it again changes nothing: an
+    // old Mac, which does not fold, and a new one get the same text.
+    CHECK(ToMacLineEndings("\r\r\n") == "\n");
+    CHECK(ToMacLineEndings("a\r\r\nb\r\r\r\nc") == "a\nb\nc");
+    for (const std::string text : {"a\r\r\nb", "\r\r\r\n", "a\r\n\r\nb\r", "\r\ra\r\r",
+                                   "one\r\ntwo\n\rthree"}) {
+        const std::string once = ToMacLineEndings(text);
+        CHECK(ToMacLineEndings(once) == once);
+        CHECK(once.find("\r\n") == std::string::npos);
+    }
 
     // There and back again is the Mac's text as it was.
     const std::string mac = "first line\nsecond, with a tab\there\n\nafter a blank line";

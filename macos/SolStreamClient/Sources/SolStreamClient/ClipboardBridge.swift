@@ -139,19 +139,21 @@ final class ClipboardBridge {
         return String(out)
     }
 
-    /// Text as the Mac keeps it: CRLF folded to LF. A CR on its own is left
-    /// alone.
+    /// Text as the Mac keeps it: CRLF folded to LF, and with it any run of CRs
+    /// before an LF — what an edit control's soft line break, or a CRLF
+    /// converted twice, leaves. So what comes out holds no CRLF, and folding
+    /// it again changes nothing. A CR not followed by an LF is left alone.
     static func macLineEndings(_ text: String) -> String {
         guard text.unicodeScalars.contains("\r") else { return text }
         var out = String.UnicodeScalarView()
-        var heldReturn = false
         for scalar in text.unicodeScalars {
-            // A CR is held until the next scalar says whether it began a CRLF.
-            if heldReturn && scalar != "\n" { out.append("\r") }
-            heldReturn = scalar == "\r"
-            if !heldReturn { out.append(scalar) }
+            // The CRs at the end of what is out so far are the ones right
+            // before this LF.
+            if scalar == "\n" {
+                while out.last == "\r" { out.removeLast() }
+            }
+            out.append(scalar)
         }
-        if heldReturn { out.append("\r") }
         return String(out)
     }
 
@@ -264,17 +266,24 @@ final class ClipboardBridge {
                 Log.info("[clipboard] a private item was copied; not sending it to the host")
                 return
             }
-            let local = pasteboard.string(forType: .string).map(Self.macLineEndings)
+            // Cut to the host's budget while the lines are still the Mac's.
+            // Windows' are a byte longer each, and cut after converting, a copy
+            // that fits would lose its tail.
+            let local = pasteboard.string(forType: .string)
+                .map { AgentConnection.clipboardPayload(Self.macLineEndings($0)) }
             // Nothing to send is not the same as nothing to say, and neither is
             // sent: a Mac clipboard holding an image has no string on it at all
             // and `local` is nil, while one the user has emptied has a string of
             // no length. Sending the second would clear the host's clipboard, and
             // the host cannot tell that apart from the first — see the note on
             // the class, and the matching guard on the remote side below.
-            if let local, !local.isEmpty, local != lastSyncedText {
-                lastSyncedText = local
+            if let local, !local.text.isEmpty, local.text != lastSyncedText {
+                if local.truncated {
+                    Log.info("[clipboard] trimmed to \(local.text.utf8.count) bytes for the host")
+                }
+                lastSyncedText = local.text
                 inFlight = true
-                host.write(Self.windowsLineEndings(local)) { [weak self] sequence in
+                host.write(Self.windowsLineEndings(local.text)) { [weak self] sequence in
                     DispatchQueue.main.async {
                         guard let self else { return }
                         // Adopt the sequence our own write produced, so it is not

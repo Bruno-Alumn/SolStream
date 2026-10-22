@@ -23,11 +23,15 @@ std::string ToWindowsLineEndings(const std::string& text) {
 std::string ToMacLineEndings(const std::string& text) {
     std::string out;
     out.reserve(text.size());
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') {
-            continue;
+    for (const char c : text) {
+        // The CRs at the end of what is out so far are the ones right before
+        // this LF.
+        if (c == '\n') {
+            while (!out.empty() && out.back() == '\r') {
+                out.pop_back();
+            }
         }
-        out.push_back(text[i]);
+        out.push_back(c);
     }
     return out;
 }

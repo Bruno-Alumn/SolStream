@@ -110,6 +110,11 @@ constexpr int kProtocolVersion = 2;
 // tears down the control channel mid-session.
 constexpr size_t kMaxClipboardBytes = 256 * 1024;
 constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
+// A set from the Mac is cut to the cap while its lines still end in LF, then
+// given Windows' CRs, which can double it -- and is taken at whatever size it
+// arrives. So the line limit has to clear six times that as well.
+static_assert(6 * 2 * kMaxClipboardBytes < kMaxLineBytes,
+              "a clipboard set, escaped at worst, must fit in a line");
 
 /// The display SolStream captures. Chosen at startup to the virtual one when
 /// there is one, because a crop taken from a real monitor is a crop out of
@@ -1163,7 +1168,9 @@ std::string ClipboardSetJson(const std::string& text) {
     // Windows' line endings whatever the Mac sent: one from before it learned
     // to convert sends bare LF. No echo follows from changing the text: the
     // Mac adopts the sequence number this write produces, so it never reads
-    // the converted copy back as a change of its own.
+    // the converted copy back as a change of its own. Not cut to
+    // kMaxClipboardBytes: a Mac cuts its text to that before adding the CRs,
+    // so a full one arrives up to twice as long.
     const std::wstring wide = ToWide(solstream::ToWindowsLineEndings(text));
     const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);

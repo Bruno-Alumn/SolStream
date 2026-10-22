@@ -80,7 +80,24 @@ final class ClipboardSyncTests: XCTestCase {
         XCTAssertEqual(ClipboardBridge.windowsLineEndings("a\rb"), "a\rb")
         XCTAssertEqual(ClipboardBridge.macLineEndings("a\rb"), "a\rb")
         XCTAssertEqual(ClipboardBridge.macLineEndings("ends in a CR\r"), "ends in a CR\r")
-        XCTAssertEqual(ClipboardBridge.macLineEndings("\r\r\n"), "\r\n")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("a\r\rb"), "a\r\rb")
+    }
+
+    /// A run of CRs before an LF — an edit control's soft line break, or a
+    /// CRLF converted twice — is one line ending, and folds to one LF. So
+    /// nothing folded holds a CRLF, and folding it again changes nothing: the
+    /// host folds before it sends, and this Mac and one that does not fold
+    /// get the same text.
+    func testARunOfReturnsBeforeALineFeedIsOneLineEnding() {
+        XCTAssertEqual(ClipboardBridge.macLineEndings("\r\r\n"), "\n")
+        XCTAssertEqual(ClipboardBridge.macLineEndings("a\r\r\nb\r\r\r\nc"), "a\nb\nc")
+        for text in ["a\r\r\nb", "\r\r\r\n", "a\r\n\r\nb\r", "\r\ra\r\r", "one\r\ntwo\n\rthree"] {
+            let once = ClipboardBridge.macLineEndings(text)
+            XCTAssertEqual(ClipboardBridge.macLineEndings(once), once, text.debugDescription)
+            let scalars = Array(once.unicodeScalars)
+            XCTAssertFalse(zip(scalars, scalars.dropFirst()).contains { $0 == "\r" && $1 == "\n" },
+                           text.debugDescription)
+        }
     }
 
     /// Swift counts CRLF as one Character, so a conversion that searched by

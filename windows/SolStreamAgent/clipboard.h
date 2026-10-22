@@ -26,10 +26,14 @@ namespace solstream {
 /// follows a CR is left alone, so converting twice changes nothing.
 std::string ToWindowsLineEndings(const std::string& text);
 
-/// Text as the Mac keeps it: CRLF folded to LF.
+/// Text as the Mac keeps it: CRLF folded to LF, and with it any run of CRs
+/// before an LF -- what an edit control's soft line break, or a CRLF converted
+/// twice, leaves. So what comes out holds no CRLF, and folding it again changes
+/// nothing.
 ///
 /// Left as CRLF, every line pasted into a terminal or a code editor carries a
-/// stray CR. A CR on its own is not a Windows line ending and is left alone.
+/// stray CR. A CR not followed by an LF is not a Windows line ending and is
+/// left alone.
 std::string ToMacLineEndings(const std::string& text);
 
 /// The formats Windows defines for an application to say "clipboard tools,

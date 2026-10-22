@@ -1,5 +1,6 @@
 import XCTest
 @testable import AgentChannel
+@testable import SolStreamClient
 
 /// Checks the clipboard size budget.
 ///
@@ -65,6 +66,23 @@ final class ClipboardBudgetTests: XCTestCase {
         XCTAssertGreaterThan(AgentConnection.maxLineBytes,
                              AgentConnection.maxClipboardBytes * 6,
                              "line cap must clear worst-case JSON escaping of a full clipboard")
+        XCTAssertGreaterThan(AgentConnection.maxLineBytes,
+                             AgentConnection.maxClipboardSetBytes * 6,
+                             "line cap must clear worst-case JSON escaping of a full set")
+    }
+
+    /// A set is a full payload of the Mac's lines given Windows' CRs, and the
+    /// most that can grow is a payload of nothing but line breaks. That still
+    /// fits a set whole.
+    func testAFullPayloadInWindowsLinesFitsASet() {
+        let (payload, _) = AgentConnection.clipboardPayload(
+            String(repeating: "\n", count: AgentConnection.maxClipboardBytes + 100))
+        let windows = ClipboardBridge.windowsLineEndings(payload)
+        XCTAssertEqual(windows.utf8.count, AgentConnection.maxClipboardSetBytes)
+        let (sent, truncated) = AgentConnection.clipboardPayload(
+            windows, limit: AgentConnection.maxClipboardSetBytes)
+        XCTAssertFalse(truncated)
+        XCTAssertEqual(sent, windows)
     }
 
     func testEmptyTextIsNotTruncated() {
