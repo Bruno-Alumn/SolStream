@@ -106,14 +106,22 @@ void Add(std::string& note, const std::string& line) {
 
 // ── The driver's settings file ───────────────────────────────────────────────
 
-/// Where MikeTheTech's driver keeps its mode list. It is not installed by a
-/// package manager and has no registry entry pointing at itself, so the answer
-/// is a short list of the places it actually gets put.
+/// Where MikeTheTech's driver keeps its mode list. The driver itself reads
+/// VDDPATH under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when somebody
+/// has set it, and C:\VirtualDisplayDriver otherwise -- both read out of
+/// MttVDD.dll -- so those come first, then the places older builds used.
 std::wstring FindVddSettings() {
-    std::vector<std::wstring> candidates = {
-        L"C:\\VirtualDisplayDriver\\vdd_settings.xml",
-        L"C:\\IddSampleDriver\\vdd_settings.xml",
-    };
+    std::vector<std::wstring> candidates;
+    wchar_t configured[MAX_PATH] = {0};
+    DWORD size = sizeof(configured);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver",
+                     L"VDDPATH", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, configured,
+                     &size) == ERROR_SUCCESS
+        && configured[0] != L'\0') {
+        candidates.push_back(std::wstring(configured) + L"\\vdd_settings.xml");
+    }
+    candidates.push_back(L"C:\\VirtualDisplayDriver\\vdd_settings.xml");
+    candidates.push_back(L"C:\\IddSampleDriver\\vdd_settings.xml");
     wchar_t root[MAX_PATH] = {0};
     if (GetEnvironmentVariableW(L"ProgramW6432", root, MAX_PATH) != 0
         || GetEnvironmentVariableW(L"ProgramFiles", root, MAX_PATH) != 0) {

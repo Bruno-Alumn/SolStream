@@ -2081,6 +2081,52 @@ int CheckCommand(bool download) {
     return 0;
 }
 
+// ── Pinned downloads ─────────────────────────────────────────────────────────
+
+bool FetchPinned(const std::string& url, const std::string& sha256_hex,
+                 unsigned long long cap, std::vector<char>& body, std::string& error) {
+    body.clear();
+    Internet session = OpenSession(error);
+    if (!session) {
+        return false;
+    }
+    // Get only ever sends a token to api.github.com, and these URLs are never
+    // that host, so the person's token cannot travel with this request.
+    const Token no_token;
+    DWORD status = 0;
+    if (!Get(session.get(), url, Accept::Any, no_token, cap,
+             [&body](const char* data, size_t size) {
+                 body.insert(body.end(), data, data + size);
+                 return true;
+             },
+             status, error)) {
+        return false;
+    }
+    if (status != 200) {
+        error = "GitHub answered HTTP " + std::to_string(status);
+        return false;
+    }
+    unsigned char digest[32] = {0};
+    if (!Sha256(reinterpret_cast<const unsigned char*>(body.data()), body.size(), digest)) {
+        error = "could not hash what was downloaded";
+        return false;
+    }
+    static const char* hex = "0123456789abcdef";
+    std::string got;
+    for (unsigned char byte : digest) {
+        got.push_back(hex[byte >> 4]);
+        got.push_back(hex[byte & 0x0F]);
+    }
+    if (got != sha256_hex) {
+        // Not trusted, so not kept: nothing downstream may see these bytes.
+        body.clear();
+        error = "what was downloaded is not the file SolStream expects (SHA-256 "
+              + got + ")";
+        return false;
+    }
+    return true;
+}
+
 // ── Schedule ─────────────────────────────────────────────────────────────────
 
 void StartScheduler(const SchedulerHooks& hooks) {

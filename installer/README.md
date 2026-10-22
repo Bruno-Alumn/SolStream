@@ -55,30 +55,56 @@ by installing again over the top. `%ProgramData%\SolStream\solstream-install.log
 is the file to ask for when an install goes wrong on a machine nobody was
 watching.
 
-## The virtual display is not installed by setup
+## The virtual display, if you want one
 
-Nothing in the packaged build ships a display driver, and nothing downloads one.
-`vdd.cpp` looks for root-enumerated (`ROOT\DISPLAY\...`) display devices and
-reports whether one is present and started; the host window shows an advisory
-with an "Install driver" button when there is none. That button runs `pnputil`
-elevated on `driver\SolStreamDisplay.inf` beside the executable — a file
-`package-windows.ps1` does not produce — so on a downloaded build it always takes
-the other path, which tells the user that no driver is bundled and which indirect
-display driver SolStream is tested against. `windows/VirtualDisplay/README.md`
-names it and explains why a virtual display beats an HDMI dummy plug.
+SolStream streams a virtual display (`vdd.h` says why it still depends on one),
+so setup offers to put one on a PC that has none: a ticked box, "Set up a
+virtual display (recommended)", shown only when the Virtual Display Driver is
+missing. With it ticked, the elevated half of setup does this before it copies
+SolStream anywhere (`driver_install.cpp`):
 
-Once a driver exists, `display_setup.cpp` does the rest from inside the
-application: seed the mode ladder, turn the driver's HDR off, cycle the device so
-it re-reads its settings, attach it and set its scaling. That was a PowerShell
-script (`windows/VirtualDisplay/setup-virtual-display.ps1`, still here and still
-the reference for what the steps are) which the application never ran, so
-pressing "Install driver" used to give you a driver and none of the setup.
+1. **Download** one pinned release of the
+   [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+   (MIT, signed by SignPath Foundation, user-mode): the 132 KB driver-only zip
+   of `kDriverVersion`, over the updater's HTTPS path, GitHub hosts only. Its
+   SHA-256 is compiled in, and anything else is thrown away unread.
+2. **Unpack** it with System32's `tar` into a fresh folder in ProgramData that
+   only SYSTEM and administrators can write to, so nothing can swap a file in
+   between the check and the install.
+3. **Install** it into the driver store with `SetupCopyOEMInf`. This is where
+   Windows checks the signature and, the first time, asks the person whether
+   to trust SignPath Foundation — the setup screen says that prompt is coming.
+4. **Create the device.** `pnputil /add-driver /install` stages a package but
+   never creates a device node for a root-enumerated device, which is why a
+   driver installed that way did nothing. SolStream does what devcon's
+   `install` does: a `Root\MttVDD` device node, registered, then
+   `UpdateDriverForPlugAndPlayDevices` to bind the driver.
+5. **Set it up** with `display_setup.cpp`: seed the mode ladder in
+   `vdd_settings.xml` (the driver's VDDPATH, or `C:\VirtualDisplayDriver`),
+   turn its HDR off, cycle it, attach it, scale it to 200%.
 
-One thing learned the hard way and worth keeping: `pnputil /add-driver ...
-/install` stages a package but does not create a device node for a
-root-enumerated device. Something has to create the node — `nefconw`, or a
-SetupAPI sequence of our own — and nothing in SolStream does, which is part of
-why a driver the user installs themselves is currently the path that works.
+The driver goes in first because the host chooses what to capture as it
+starts. A driver that cannot be installed is not a failed install: SolStream
+streams the main display meanwhile, and setup's summary says why and that the
+host window's **Set up** button tries again. That button, and the tray's "Set
+up virtual display…", run the same steps elevated
+(`SolStream.exe --install-display-driver`), and the running host then switches
+its capture to the new display without restarting.
+
+What SolStream installed it remembers (`HKLM\SOFTWARE\SolStream`), and
+uninstalling takes back exactly that: the device, the driver package, and the
+settings folder if SolStream made it. A driver somebody installed themselves is
+theirs, and stays. ARM PCs are told where to get the driver instead: the
+project's ARM64 build needs test signing, which is not something to switch on
+for somebody.
+
+## After setup
+
+Setup ends on a summary rather than a sentence: whether SolStream is running,
+whether the virtual display is ready, whether this PC is on Tailscale (with a
+**Get Tailscale** button when it is not), and the three steps on the Mac — get
+the app, pick this PC, type the pairing token. The host window lists the
+Tailscale address beside the local one when there is one.
 
 ## Known gaps
 

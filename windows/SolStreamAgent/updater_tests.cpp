@@ -13,6 +13,7 @@
 
 #include "updater.cpp"
 
+#include <shellapi.h>
 #include <winioctl.h>
 
 #include <cstdio>
@@ -427,6 +428,31 @@ void TestNoDowngrade() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", nullptr);
 }
 
+/// The display driver is the one install option named for what it turns ON:
+/// absent must mean "download nothing", for anybody typing --install by hand.
+void TestInstallOptions() {
+    auto round_trip = [](const InstallOptions& options) {
+        const std::wstring line = L"SolStream.exe --install" + OptionArguments(options);
+        int argc = 0;
+        wchar_t** argv = CommandLineToArgvW(line.c_str(), &argc);
+        InstallOptions parsed = OptionsFromArguments(argc, argv);
+        LocalFree(argv);
+        return parsed;
+    };
+    InstallOptions plain;
+    CHECK(!plain.display_driver);
+    CHECK(OptionArguments(plain).find(L"--with-display-driver") == std::wstring::npos);
+    CHECK(!round_trip(plain).display_driver);
+
+    InstallOptions chosen;
+    chosen.display_driver = true;
+    chosen.start_at_logon = false;
+    const InstallOptions parsed = round_trip(chosen);
+    CHECK(parsed.display_driver);
+    CHECK(!parsed.start_at_logon);
+    CHECK(parsed.desktop_shortcut);
+}
+
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -695,6 +721,7 @@ int wmain(int argc, wchar_t** argv) {
     TestResolve();
     TestCommandLine(vector, scratch);
     TestEnvironment();
+    TestInstallOptions();
     TestNoDowngrade();
     TestDownload();
     TestInstallNote();

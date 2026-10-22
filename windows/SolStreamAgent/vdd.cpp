@@ -20,19 +20,6 @@
 #include "util.h"
 
 namespace solstream {
-namespace {
-
-std::wstring ExecutableDir() {
-    wchar_t path[MAX_PATH] = {};
-    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
-        return {};
-    }
-    std::wstring full(path);
-    const size_t slash = full.find_last_of(L'\\');
-    return slash == std::wstring::npos ? std::wstring{} : full.substr(0, slash);
-}
-
-}  // namespace
 
 std::vector<VirtualDisplay> FindVirtualDisplays() {
     std::vector<VirtualDisplay> found;
@@ -148,85 +135,6 @@ bool HasVirtualDisplayCached() {
         known = true;
     }
     return answer;
-}
-
-std::wstring BundledDriverPackage() {
-    const std::wstring here = ExecutableDir();
-    if (here.empty()) {
-        return {};
-    }
-    const std::wstring inf = here + L"\\driver\\SolStreamDisplay.inf";
-    const DWORD attributes = GetFileAttributesW(inf.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-        return {};
-    }
-    return inf;
-}
-
-bool InstallBundledDriver(std::string& error) {
-    const std::wstring inf = BundledDriverPackage();
-    if (inf.empty()) {
-        // Say what is missing, where it goes, and what happens without it.
-        // "No driver bundled" on its own tells the user nothing they can act
-        // on, and this is the one message they will see at exactly the moment
-        // they cannot stream properly.
-        error = "This build of SolStream has no display driver bundled with it.\r\n\r\n"
-                "SolStream streams a virtual display so the window can be any size, "
-                "can be matched to your Mac's resolution exactly, and can never show "
-                "what is on your real monitor. Without one it captures a real screen "
-                "instead, and all three of those stop being true.\r\n\r\n"
-                "Install any indirect display driver - the Virtual Display Driver "
-                "from github.com/itsmikethetech/Virtual-Display-Driver is the one "
-                "SolStream is tested against - then start SolStream again.\r\n\r\n"
-                "To have SolStream install it for you, put the driver package in a "
-                "'driver' folder beside SolStream.exe, named SolStreamDisplay.inf.";
-        return false;
-    }
-
-    // Elevated, and visibly so. pnputil installs a kernel-mode driver package;
-    // doing that behind a UAC prompt the user never sees is not something this
-    // program should be able to do.
-    std::wstring arguments = L"/add-driver \"" + inf + L"\" /install";
-    SHELLEXECUTEINFOW execute{};
-    execute.cbSize = sizeof(execute);
-    execute.fMask = SEE_MASK_NOCLOSEPROCESS;
-    execute.lpVerb = L"runas";
-    // System32, not a bare name. ShellExecuteEx searches the same way
-    // CreateProcess does, starting with the directory this process was started
-    // from -- and this call is the one that asks for administrator rights and
-    // then installs a kernel-mode driver package. A `pnputil.exe` dropped
-    // beside the setup program would be run instead, elevated, at the prompt
-    // the user has just approved.
-    wchar_t system_dir[MAX_PATH] = {0};
-    std::wstring pnputil = L"pnputil.exe";
-    if (GetSystemDirectoryW(system_dir, MAX_PATH) != 0) {
-        pnputil = std::wstring(system_dir) + L"\\pnputil.exe";
-    }
-    execute.lpFile = pnputil.c_str();
-    execute.lpParameters = arguments.c_str();
-    execute.nShow = SW_HIDE;
-    if (!ShellExecuteExW(&execute)) {
-        const DWORD code = GetLastError();
-        error = code == ERROR_CANCELLED
-            ? "Installing the display driver needs administrator approval."
-            : "Could not start the driver installer.";
-        return false;
-    }
-
-    DWORD exit_code = 1;
-    if (execute.hProcess) {
-        WaitForSingleObject(execute.hProcess, 120000);
-        GetExitCodeProcess(execute.hProcess, &exit_code);
-        CloseHandle(execute.hProcess);
-    }
-    if (exit_code != 0) {
-        char buffer[128];
-        std::snprintf(buffer, sizeof(buffer),
-                      "The display driver installer failed (code %lu).", exit_code);
-        error = buffer;
-        return false;
-    }
-    return true;
 }
 
 }  // namespace solstream

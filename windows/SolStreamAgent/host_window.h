@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace solstream::update {
@@ -30,6 +31,8 @@ struct HostStatus {
     std::wstring streaming_detail;
     std::wstring display_detail;
     int connected_clients = 0;
+    /// This PC's Tailscale address, or empty when it is not on Tailscale.
+    std::wstring tailscale_address;
 };
 
 /// Which face the window shows.
@@ -67,6 +70,11 @@ void UpdateCheckFinished(const update::CheckResult& result, bool asked);
 /// when this copy is `version`, otherwise it did not finish. Said in the
 /// window's notice. Call before ShowHostWindow, on the thread that will run it.
 void SayInstallOutcome(bool installed, const std::string& version);
+
+/// What to run once the window's "Set up" has installed a virtual display into
+/// this running host: choosing it as the display to capture. Called on a
+/// worker thread. Set before ShowHostWindow.
+void SetDisplayReadyHandler(std::function<void()> handler);
 
 /// Pump the window's messages until it is closed. Returns the exit code.
 int RunHostWindowLoop();

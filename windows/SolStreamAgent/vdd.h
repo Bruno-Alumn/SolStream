@@ -54,18 +54,6 @@ bool HasVirtualDisplayCached();
 /// size SolStream can stream", and fall back to the real monitor.
 bool IsSolStreamDisplayDriver(const std::wstring& name);
 
-/// The driver package SolStream would install, if it ships one.
-///
-/// Empty when nothing is bundled — in which case the honest thing to tell the
-/// user is where to get one, not to pretend a button will fix it.
-std::wstring BundledDriverPackage();
-
-/// Install the bundled driver package.
-///
-/// Needs administrator rights, so this re-launches `pnputil` elevated and the
-/// user sees the UAC prompt: a program that installs a kernel driver without the
-/// user knowing is the wrong kind of convenient. Returns false if there is
-/// nothing bundled or the user declined the prompt.
-bool InstallBundledDriver(std::string& error);
+// Installing one is driver_install.h's job.
 
 }  // namespace solstream

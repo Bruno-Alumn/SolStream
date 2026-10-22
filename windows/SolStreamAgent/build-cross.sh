@@ -17,10 +17,12 @@ fi
 "$CXX" -std=c++20 -municode -O2 -Wall -Wextra -static \
     "-DSOLSTREAM_VERSION_STRING=\"$VERSION\"" \
     -o SolStreamAgent.exe \
-    main.cpp util.cpp vdd.cpp display_setup.cpp host_window.cpp installer.cpp \
-    updater.cpp media/log.cpp \
+    main.cpp util.cpp vdd.cpp display_setup.cpp driver_install.cpp tailscale.cpp \
+    host_window.cpp \
+    installer.cpp updater.cpp media/log.cpp \
     -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32 \
-    -lsetupapi -lcfgmgr32 -lcomctl32 -lole32 -loleaut32 -luuid -ld2d1 -ldwrite
+    -lsetupapi -lcfgmgr32 -lcomctl32 -lnewdev -liphlpapi -lole32 -loleaut32 -luuid \
+    -ld2d1 -ldwrite
 echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
 # The updater's tests, compiled so this check covers them too. Run them on
 # Windows (or under Wine) with the test vector:

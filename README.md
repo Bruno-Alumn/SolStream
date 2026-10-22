@@ -15,7 +15,11 @@ Grab both files from the [Releases page](https://github.com/Bruno-Alumn/SolStrea
   SolStream into Applications.
 - **Windows PC**: `SolStreamSetup-X.Y.Z.exe`. Run it. It installs itself, asks
   for administrator rights once, and from then on starts quietly in the tray
-  when you log in.
+  when you log in. If the PC has no virtual display, setup offers to download
+  and install one (ticked by default), so your Mac gets a screen of its own
+  rather than a copy of your monitor; Windows asks once whether to trust its
+  publisher, SignPath Foundation. Setup ends with a checklist of what it did
+  and what to do on the Mac.
 
 Neither file is signed with a paid certificate yet, so both systems complain
 the first time:
@@ -27,8 +31,10 @@ the first time:
 
 ## Using it
 
-1. Open SolStream on the Mac. It finds the PC on your network, or over
-   Tailscale if you're away from home.
+1. Open SolStream on the Mac. The first time, it walks you through setting
+   up the PC. It finds the PC on your network by itself. To reach it away from
+   home, install [Tailscale](https://tailscale.com/download) on both machines,
+   signed in to the same account; both apps suggest it, and say when it is off.
 2. The first time, type in the pairing token. You'll find it in SolStream's
    window on the PC (click the tray icon).
 3. Pick an app, either one that's already open or one from the Start menu.
@@ -196,8 +202,10 @@ Two earlier dependencies are gone. [Sunshine](https://github.com/LizardByte/Suns
 [ENet](https://github.com/lsalzman/enet) (MIT) carried its control stream.
 SolStream does both itself now, so nothing it ships is under the GPL.
 
-The [Virtual Display Driver](https://github.com/VirtualDisplay/Virtual-Display-Driver)
-is optional, installed separately, and never bundled.
+The [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+(MIT) is not bundled. Setup offers to download one pinned, hash-checked release
+of it and install it, and uninstalling SolStream removes it again; see
+[`installer/README.md`](installer/README.md).
 
 Everything else comes with the operating systems: BCrypt, Media Foundation and
 Windows.Graphics.Capture on Windows; CryptoKit, VideoToolbox, AudioUnit and

@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,9 +37,11 @@
 #include <vector>
 
 #include "display_setup.h"
+#include "driver_install.h"
 #include "host_theme.h"
 #include "installer.h"
 #include "ports.h"
+#include "tailscale.h"
 #include "updater.h"
 #include "util.h"
 #include "vdd.h"
@@ -100,6 +103,9 @@ constexpr UINT WM_SOLSTREAM_UPDATE = WM_APP + 4;
 /// and this copy is still running -- so it was not replaced. wparam is its exit
 /// code.
 constexpr UINT WM_SOLSTREAM_UPDATE_EXITED = WM_APP + 5;
+/// The virtual display's answer from a job, ahead of its WM_SOLSTREAM_JOB_DONE;
+/// lParam is a std::string* the UI thread takes ownership of.
+constexpr UINT WM_SOLSTREAM_JOB_DISPLAY = WM_APP + 6;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpen = 1;
 constexpr UINT kTrayCopyToken = 2;
@@ -152,6 +158,24 @@ bool g_job_running = false;
 /// gives away that the rest of it was drawn at all.
 std::wstring g_notice;
 std::wstring g_notice_detail;
+
+/// The virtual display, as setup found it and as the install left it.
+///
+/// `g_had_driver` is read once as the setup window opens: whether to offer the
+/// tick box at all. `g_driver_ours` is the same question for the uninstall
+/// window, which only promises to remove a driver SolStream put there.
+/// `g_display_result` is the elevated half's answer, "ready <note>" or
+/// "failed <why>", empty when it was not asked to do anything.
+bool g_had_driver = false;
+bool g_driver_ours = false;
+std::string g_display_result;
+/// What was ticked when Install was pressed, for the summary afterwards.
+InstallOptions g_chosen;
+/// Registered: the elevated half's progress, a DriverStep in wParam.
+UINT g_progress_message = 0;
+/// main.cpp's, run once a virtual display has been installed into a running
+/// host, so it starts capturing it. On the worker thread.
+std::function<void()> g_display_ready;
 
 /// Which job g_job_running is about, so its answer is worded for that job.
 enum class HostJob { None, Display, Update };
@@ -504,11 +528,19 @@ enum ButtonId {
     kIdClose,
     kIdRetry,
     kIdRemove,
+    // In the summary setup ends on: where to get the Mac app, and Tailscale.
+    kIdGetMacApp,
+    kIdGetTailscale,
     // The tick boxes on the setup screen, in the order they are drawn.
     kIdCheckDesktop = 100,
     kIdCheckStartMenu,
     kIdCheckLogon,
+    kIdCheckDisplay,
 };
+
+/// Where the Mac app comes from: the same releases the updaters read.
+constexpr wchar_t kMacAppUrl[] = L"https://github.com/Bruno-Alumn/SolStream/releases/latest";
+constexpr wchar_t kMacAppShown[] = L"github.com/Bruno-Alumn/SolStream/releases";
 
 /// A tick box. Drawn rather than a real BUTTON control for the same reason the
 /// buttons are: the design gives its resting, hover, checked and focused looks
@@ -826,8 +858,9 @@ Screen Describe(const HostStatus& status) {
         screen.why = L"That works, but everything on that display goes to your Mac — "
                      L"including anything you drag over the application — and the "
                      L"picture is your monitor's size rather than your Mac's. A "
-                     L"virtual display fixes both.";
-        screen.fix = L"Install driver";
+                     L"virtual display fixes both: SolStream downloads the free "
+                     L"Virtual Display Driver, checks it, and sets it up.";
+        screen.fix = L"Set up";
         screen.mark = Mark::NeedsYou;
         screen.shield = true;
         screen.action = BannerAction::InstallDriver;
@@ -927,9 +960,14 @@ SetupCopy CopyForPhase() {
                 copy.bullets = {
                     L"Removes the program and its shortcuts",
                     L"Deletes the firewall rules it added",
-                    L"Keeps your pairing token, so a reinstall won't make your "
-                    L"Mac pair again",
                 };
+                // Only a driver SolStream installed: one somebody put here for
+                // themselves is theirs, and stays.
+                if (g_driver_ours) {
+                    copy.bullets.push_back(L"Removes the virtual display it installed");
+                }
+                copy.bullets.push_back(L"Keeps your pairing token, so a reinstall won't "
+                                       L"make your Mac pair again");
                 copy.go = L"Remove";
             } else {
                 copy.headline = L"Install SolStream on this PC.";
@@ -946,8 +984,14 @@ SetupCopy CopyForPhase() {
                         + std::to_wstring(kDefaultPort) + L", UDP\u00A0"
                         + std::to_wstring(kDefaultMediaPort) + L" and "
                         + std::to_wstring(kDiscoveryPort),
-                    L"Includes everything it streams with — nothing to download",
+                    // Said because it is the promise the tray behaviour keeps,
+                    // and the thing a person installing a host most worries about.
+                    L"Waits beside the clock, so nothing on this PC is interrupted",
                 };
+                if (g_had_driver) {
+                    copy.bullets.push_back(L"Streams from the virtual display already on "
+                                           L"this PC");
+                }
                 copy.go = L"Install";
             }
             copy.shield = true;
@@ -959,7 +1003,9 @@ SetupCopy CopyForPhase() {
         case Phase::Done:
             copy.headline = removing ? L"SolStream has been removed."
                                      : L"SolStream is installed.";
-            copy.lead = g_outcome;
+            // Setup says what it did in a summary of its own, below, rather
+            // than in a sentence here.
+            copy.lead = removing ? g_outcome : L"";
             break;
         case Phase::Failed:
             copy.headline = removing ? L"Removing SolStream didn't finish."
@@ -998,6 +1044,213 @@ void DrawWorkingBar(float left, float top, float right) {
 void DrawCard(const D2D1_RECT_F& rect) {
     Fill(rect, metric::kRadiusCard, g_palette.surface);
     Stroke(rect, metric::kRadiusCard, g_palette.hairline);
+}
+
+/// Tailscale's state, asked at most every few seconds: the setup screen
+/// repaints thirty times a second for its animation, and the adapter list is
+/// not something to walk that often.
+struct TailscaleState {
+    std::wstring address;
+    bool installed = false;
+};
+
+TailscaleState CurrentTailscale() {
+    static TailscaleState state;
+    static ULONGLONG checked = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (checked == 0 || now - checked > 5000) {
+        state.address = TailscaleAddress();
+        state.installed = !state.address.empty() || TailscaleInstalled();
+        checked = now;
+    }
+    return state;
+}
+
+/// One line of the summary setup ends on: a dot or a step number, what is
+/// true now, a sentence under it, and perhaps a button that does the next
+/// thing about it.
+struct SummaryLine {
+    Mark mark = Mark::None;
+    std::wstring number;   ///< "1", "2"... in place of a dot, for steps to take
+    std::wstring title;
+    std::wstring detail;
+    bool mono_detail = false;  ///< an address or a link: Cascadia Mono
+    int button = 0;
+    std::wstring button_caption;
+};
+
+/// A card of summary lines, hairlines between them, from `top`. Returns where
+/// the card ends.
+float DrawSummaryCard(const std::vector<SummaryLine>& lines, float pad, float top,
+                      float right) {
+    const float inset = metric::kCardInset;
+    const float lead_w = 20.0f;
+    const float text_left = pad + inset + lead_w + space::kSm;
+    const float title_h = LineHeight(g_fmt_body);
+
+    // Measured first, so the card can be drawn behind them at its real height.
+    std::vector<float> text_w, detail_h, button_w;
+    float height = inset;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const SummaryLine& line = lines[i];
+        button_w.push_back(line.button ? ButtonWidth(line.button_caption, false, 72.0f)
+                                       : 0.0f);
+        text_w.push_back(right - inset - text_left
+                         - (line.button ? button_w.back() + space::kMd : 0.0f));
+        detail_h.push_back(MeasureHeight(line.detail,
+                                         line.mono_detail ? g_fmt_mono : g_fmt_caption,
+                                         text_w.back()));
+        height += std::max(title_h + (line.detail.empty() ? 0.0f : 2.0f + detail_h.back()),
+                           line.button ? metric::kButtonH : 0.0f);
+        if (i + 1 < lines.size()) {
+            height += space::kMd * 2.0f + 1.0f;
+        }
+    }
+    height += inset;
+    DrawCard(D2D1::RectF(pad, top, right, top + height));
+
+    float y = top + inset;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const SummaryLine& line = lines[i];
+        const float block = std::max(
+            title_h + (line.detail.empty() ? 0.0f : 2.0f + detail_h[i]),
+            line.button ? metric::kButtonH : 0.0f);
+        const float lead_cx = pad + inset + lead_w / 2.0f;
+        if (!line.number.empty()) {
+            Text(line.number, g_fmt_headline,
+                 D2D1::RectF(pad + inset, y, pad + inset + lead_w, y + title_h),
+                 g_palette.accent, DWRITE_TEXT_ALIGNMENT_CENTER);
+        } else {
+            DrawMark(lead_cx, y + title_h / 2.0f, line.mark);
+        }
+        Text(line.title, g_fmt_body,
+             D2D1::RectF(text_left, y, text_left + text_w[i], y + title_h), g_palette.text);
+        if (!line.detail.empty()) {
+            Text(line.detail, line.mono_detail ? g_fmt_mono : g_fmt_caption,
+                 D2D1::RectF(text_left, y + title_h + 2.0f, text_left + text_w[i],
+                             y + title_h + 2.0f + detail_h[i]),
+                 g_palette.textSecondary);
+        }
+        if (line.button) {
+            if (Button* button = FindButton(line.button)) {
+                const float button_top = y + (block - metric::kButtonH) / 2.0f;
+                button->rect = D2D1::RectF(right - inset - button_w[i], button_top,
+                                           right - inset, button_top + metric::kButtonH);
+                button->caption = line.button_caption;
+                button->kind = ButtonKind::Secondary;
+                button->shield = false;
+                button->visible = true;
+                DrawButton(*button);
+            }
+        }
+        y += block;
+        if (i + 1 < lines.size()) {
+            y += space::kMd;
+            Fill(D2D1::RectF(text_left, y, right - inset, y + 1.0f), 0.0f, g_palette.hairline);
+            y += 1.0f + space::kMd;
+        }
+    }
+    return top + height;
+}
+
+/// What setup did, and what is left to do on the Mac -- the end of setup, in
+/// place of the one sentence it used to end on, which said nothing about the
+/// display and left the Mac half to be guessed.
+float DrawSetupSummary(float pad, float top, float right) {
+    std::vector<SummaryLine> done;
+
+    SummaryLine host;
+    if (g_outcome.empty()) {
+        host.mark = Mark::Live;
+        host.title = L"SolStream is running";
+        host.detail = g_chosen.start_at_logon
+            ? L"It starts when you log in and waits beside the clock."
+            : L"Open it from the Start menu whenever you want to stream.";
+    } else {
+        // InstallSelf's warning: installed, but something is missing.
+        host.mark = Mark::NeedsYou;
+        host.title = L"SolStream is installed";
+        host.detail = g_outcome;
+    }
+    done.push_back(host);
+
+    SummaryLine display;
+    const std::string& result = g_display_result;
+    if (result.rfind("ready", 0) == 0) {
+        const bool restart = result.find("restart") != std::string::npos;
+        display.mark = restart ? Mark::NeedsYou : Mark::Live;
+        display.title = L"Virtual display ready";
+        display.detail = restart
+            ? L"Restart this PC to finish installing it. Until then SolStream streams "
+              L"your main display."
+            : L"Your Mac gets a screen of its own on this PC, so nothing on your monitor "
+              L"is streamed.";
+    } else if (result.rfind("failed", 0) == 0) {
+        display.mark = Mark::NeedsYou;
+        display.title = L"Virtual display not set up";
+        display.detail = ToWide(result.size() > 7 ? result.substr(7) : std::string())
+                       + L" Until then SolStream streams your main display, and its "
+                         L"window offers Set up again.";
+    } else if (g_had_driver) {
+        display.mark = Mark::Live;
+        display.title = L"Virtual display ready";
+        display.detail = L"Using the one already on this PC.";
+    } else {
+        display.mark = Mark::NeedsYou;
+        display.title = L"Streaming your main display";
+        display.detail = L"You can set up a virtual display any time from SolStream's "
+                         L"window.";
+    }
+    done.push_back(display);
+
+    // Away from home. Read now rather than when setup opened: somebody may
+    // have installed Tailscale while this was running.
+    SummaryLine away;
+    const TailscaleState tailscale_state = CurrentTailscale();
+    const std::wstring& tailscale = tailscale_state.address;
+    if (!tailscale.empty()) {
+        away.mark = Mark::Live;
+        away.title = L"Tailscale is on";
+        away.detail = L"Your Mac can reach this PC away from home at " + tailscale + L".";
+    } else {
+        away.mark = Mark::Idle;
+        away.title = L"Away from home?";
+        away.detail = tailscale_state.installed
+            ? L"Turn Tailscale on here and on your Mac, signed in to the same account."
+            : L"Install Tailscale here and on your Mac, signed in to the same account. "
+              L"It's free, and SolStream finds this PC over it.";
+        if (!tailscale_state.installed) {
+            away.button = kIdGetTailscale;
+            away.button_caption = L"Get Tailscale";
+        }
+    }
+    done.push_back(away);
+
+    float y = DrawSummaryCard(done, pad, top, right);
+
+    y += space::kXl;
+    const float label_h = LineHeight(g_fmt_body);
+    Text(L"Next, on your Mac", g_fmt_body, D2D1::RectF(pad, y, right, y + label_h),
+         g_palette.textMuted);
+    y += label_h + space::kSm;
+
+    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD name_size = MAX_COMPUTERNAME_LENGTH + 1;
+    GetComputerNameW(name, &name_size);
+    std::vector<SummaryLine> steps(3);
+    steps[0].number = L"1";
+    steps[0].title = L"Get SolStream for Mac";
+    steps[0].detail = kMacAppShown;
+    steps[0].mono_detail = true;
+    steps[0].button = kIdGetMacApp;
+    steps[0].button_caption = L"Get it";
+    steps[1].number = L"2";
+    steps[1].title = std::wstring(L"Open it and pick ") + (name[0] ? name : L"this PC");
+    steps[1].detail = L"It finds this PC on your network by itself.";
+    steps[2].number = L"3";
+    steps[2].title = L"Type the pairing token, once";
+    steps[2].detail = L"Open SolStream here to see it.";
+    return DrawSummaryCard(steps, pad, y, right);
 }
 
 void LayoutAndPaintSetup(HWND window) {
@@ -1048,6 +1301,11 @@ void LayoutAndPaintSetup(HWND window) {
         Text(log, g_fmt_caption, D2D1::RectF(pad, y, right, y + log_h),
              g_palette.textMuted);
         y += log_h;
+    }
+
+    if (g_phase == Phase::Done && g_mode == WindowMode::Setup) {
+        y += space::kLgr;
+        y = DrawSetupSummary(pad, y, right);
     }
 
     // The card, in the choosing phase only. It says what is about to happen,
@@ -1114,6 +1372,23 @@ void LayoutAndPaintSetup(HWND window) {
         Text(where, g_fmt_caption, D2D1::RectF(pad, y, right, y + where_h),
              g_palette.textMuted);
         y += where_h;
+        // What ticking the display box agrees to, said before the prompts
+        // that follow it: a download, from whom, checked how, and the second
+        // Windows prompt that will appear -- so neither comes as a surprise.
+        if (FindCheck(kIdCheckDisplay) != nullptr) {
+            y += space::kSm;
+            const std::wstring about =
+                std::wstring(L"The virtual display is the free Virtual Display Driver ")
+                + ToWide(kDriverVersion) + L" from " + kDriverProject
+                + L". SolStream checks the download before installing it, and Windows "
+                  L"asks you to trust its publisher, SignPath Foundation. It gives "
+                  L"your Mac a screen of its own, so nothing on your monitor is "
+                  L"streamed.";
+            const float about_h = MeasureHeight(about, g_fmt_caption, width);
+            Text(about, g_fmt_caption, D2D1::RectF(pad, y, right, y + about_h),
+                 g_palette.textMuted);
+            y += about_h;
+        }
     }
 
     // The buttons sit on the bottom edge, right-aligned, where a Windows setup
@@ -1330,6 +1605,12 @@ void LayoutAndPaint(HWND window) {
     rows.push_back({L"Address",
                     status.address.empty() ? L"not reachable" : status.address,
                     Mark::None, !status.address.empty(), status.address.empty()});
+    // The address that works away from home, when there is one and it is not
+    // already the one above. Only then: a row saying "not set up" would be
+    // a fifth line nagging about something optional.
+    if (!status.tailscale_address.empty() && status.tailscale_address != status.address) {
+        rows.push_back({L"Tailscale", status.tailscale_address, Mark::None, true, false});
+    }
     if (screen.connected) {
         rows.push_back({L"Serving",
                         std::to_wstring(status.connected_clients) + L" of 1 · Mac only",
@@ -1661,6 +1942,12 @@ void StartInstallJob(HWND window) {
     options.desktop_shortcut = CheckedById(kIdCheckDesktop);
     options.start_menu_shortcut = CheckedById(kIdCheckStartMenu);
     options.start_at_logon = CheckedById(kIdCheckLogon);
+    // Only offered when the PC has no virtual display; CheckedById answers
+    // false for a box that was never put on the screen.
+    options.display_driver = FindCheck(kIdCheckDisplay) != nullptr
+                          && CheckedById(kIdCheckDisplay);
+    g_chosen = options;
+    g_display_result.clear();
 
     g_job_running = true;
     g_phase = Phase::Working;
@@ -1669,21 +1956,40 @@ void StartInstallJob(HWND window) {
 
     std::thread([window, options] {
         std::string error;
+        std::string display;
         bool ok = false;
         if (IsElevated()) {
+            // Already elevated -- setup run as administrator -- so the work
+            // happens here, in the order the elevated half does it.
+            if (options.display_driver) {
+                bool already = false;
+                std::string note, driver_error;
+                const bool ready = InstallDisplayDriver(
+                    [window](DriverStep step) {
+                        PostMessageW(window, g_progress_message, (WPARAM) step, 0);
+                    },
+                    already, note, driver_error);
+                display = ready ? "ready " + note : "failed " + driver_error;
+                PostMessageW(window, g_progress_message, (WPARAM) DriverStep::Done, 0);
+            }
             ok = InstallSelf(options, error);
         } else {
             // The elevated half is this same executable running its install
             // path. It cannot report back through a return value, so it leaves
-            // its reason in a file.
-            if (RelaunchElevated(L"--install" + OptionArguments(options), error)) {
-                ok = ReadInstallResult(error);
+            // its reason in a file, and posts its progress to this window.
+            const std::wstring progress = L" --progress-window "
+                + std::to_wstring((unsigned long long) (uintptr_t) window);
+            if (RelaunchElevated(L"--install" + OptionArguments(options) + progress, error)) {
+                ok = ReadInstallResult(error, &display);
             }
         }
-        PostDone(window, ok,
-                 ok ? L"Open SolStream on your Mac and pick this PC. It asks for a "
-                      L"pairing token once, and SolStream's window on this PC shows it."
-                    : ToWide(error));
+        if (!display.empty()) {
+            PostMessageW(window, WM_SOLSTREAM_JOB_DISPLAY, 0,
+                         (LPARAM) new std::string(display));
+        }
+        // On success `error` is InstallSelf's warning, or empty; the summary
+        // says the rest.
+        PostDone(window, ok, ToWide(error));
     }).detach();
 }
 
@@ -1723,24 +2029,49 @@ void StartDisplayJob(HWND window) {
     }
     g_job_running = true;
     g_host_job = HostJob::Display;
-    SetNotice(L"Setting the virtual display up…", L"Installing the driver.", Mark::NeedsYou,
+    SetNotice(L"Setting the virtual display up…",
+              L"Waiting for you to allow this in the Windows prompt.", Mark::NeedsYou,
               false);
     InvalidateRect(window, nullptr, FALSE);
 
     std::thread([window] {
+        // The same elevated steps as setup's tick box: download, check,
+        // install, create the device, set it up.
         std::string error;
-        if (!InstallBundledDriver(error)) {
-            PostDone(window, false, ToWide(error));
-            return;
+        std::string display;
+        if (IsElevated()) {
+            bool already = false;
+            std::string note;
+            const bool ready = InstallDisplayDriver(
+                [window](DriverStep step) {
+                    PostMessageW(window, g_progress_message, (WPARAM) step, 0);
+                },
+                already, note, error);
+            display = ready ? "ready " + note : "failed " + error;
+        } else {
+            const std::wstring progress = L"--install-display-driver --progress-window "
+                + std::to_wstring((unsigned long long) (uintptr_t) window);
+            if (RelaunchElevated(progress, error)) {
+                ReadInstallResult(error, &display);
+            } else {
+                display = "failed " + error;
+            }
         }
-        PostStep(window, L"Setting its size and colour up. The screen may blink.");
-        std::string note;
-        std::string configure_error;
-        const bool ok = ConfigureVirtualDisplay(kDefaultCanvasWidth,
-                                                kDefaultCanvasHeight,
-                                                kDefaultScalePercent, note,
-                                                configure_error);
-        PostDone(window, ok, ToWide(ok ? note : configure_error));
+        const bool ok = display.rfind("ready", 0) == 0;
+        if (ok && g_display_ready) {
+            // This host chose what to capture as it started, when there was
+            // no virtual display to choose.
+            g_display_ready();
+        }
+        if (display.empty()) {
+            display = "failed " + (error.empty() ? std::string("The setup did not run.") : error);
+        }
+        const bool restart = display.find("restart") != std::string::npos;
+        PostDone(window, ok,
+                 ok ? (restart ? L"Restart this PC to finish installing it."
+                               : L"Your Mac gets a screen of its own from the next time it "
+                                 L"connects.")
+                    : ToWide(display.substr(7)));
     }).detach();
 }
 
@@ -1989,6 +2320,15 @@ void Activate(HWND window, int id) {
             break;
         }
 
+        case kIdGetMacApp:
+            ShellExecuteW(nullptr, L"open", kMacAppUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+
+        case kIdGetTailscale:
+            ShellExecuteW(nullptr, L"open", kTailscaleDownloadUrl, nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            break;
+
         case kIdCancel:
         case kIdClose:
             PostMessageW(window, WM_CLOSE, 0, 0);
@@ -2229,6 +2569,36 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         ShowFromTray(window);
         return 0;
     }
+    if (g_progress_message != 0 && message == g_progress_message) {
+        // The virtual display's progress, from the elevated half. Each step is
+        // a wait the person would otherwise sit through wondering, and the
+        // second one is a Windows prompt they need to know is coming.
+        std::wstring text;
+        switch ((DriverStep) wparam) {
+            case DriverStep::Downloading:
+                text = L"Downloading the Virtual Display Driver…";
+                break;
+            case DriverStep::Installing:
+                text = L"Installing the virtual display. If Windows asks whether to "
+                       L"install software from SignPath Foundation, choose Install.";
+                break;
+            case DriverStep::Configuring:
+                text = L"Setting the virtual display up for your Mac. The screen may "
+                       L"blink.";
+                break;
+            case DriverStep::Done:
+                text = L"Installing SolStream…";
+                break;
+            default:
+                return 0;
+        }
+        g_step = text;
+        if (g_mode == WindowMode::Host) {
+            g_notice_detail = text;
+        }
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    }
     switch (message) {
         case WM_CREATE: {
             g_dpi = (float) GetDpiForWindow(window);
@@ -2236,12 +2606,22 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             g_buttons.push_back({kIdBannerFix, L"", ButtonKind::Primary, false, {}, false});
             g_buttons.push_back({kIdCopyToken, L"Copy", ButtonKind::Secondary, false, {}, false});
             for (int id : {kIdInstall, kIdCancel, kIdOpenApp, kIdClose, kIdRetry,
-                           kIdRemove}) {
+                           kIdRemove, kIdGetTailscale, kIdGetMacApp}) {
                 g_buttons.push_back({id, L"", ButtonKind::Secondary, false, {}, false});
             }
 
             g_checks.clear();
             if (g_mode == WindowMode::Setup) {
+                // First, and ticked, when the PC has no virtual display: it is
+                // what makes the picture fit the Mac, and the one thing setup
+                // can do that a person would otherwise have to go and find.
+                // Not offered at all when one is here already.
+                g_had_driver = HasSolStreamDriver();
+                if (!g_had_driver) {
+                    g_checks.push_back({kIdCheckDisplay,
+                                        L"Set up a virtual display (recommended)",
+                                        L"", true, false, {}});
+                }
                 // All on. Every one of them is what somebody installing a program
                 // expects to get and every one is a tick away from being undone —
                 // but they are shown, because a program that puts things on your
@@ -2252,6 +2632,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                                     L"", true, false, {}});
                 g_checks.push_back({kIdCheckLogon, L"Start SolStream when I log in",
                                     L"", true, false, {}});
+            }
+            if (g_mode == WindowMode::Uninstall) {
+                g_driver_ours = InstalledDriverHere();
             }
 
             if (g_mode == WindowMode::Host) {
@@ -2320,8 +2703,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                         ApplyInstallerExited(window, g_update_exit_code);
                     }
                 } else {
-                    SetNotice(ok ? L"The display is set up."
-                                 : L"SolStream couldn't set the display up.",
+                    SetNotice(ok ? L"The virtual display is ready."
+                                 : L"SolStream couldn't set the virtual display up.",
                               *text, ok ? Mark::Live : Mark::Failed, false);
                 }
                 g_host_job = HostJob::None;
@@ -2331,6 +2714,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             }
             delete text;
             InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+
+        case WM_SOLSTREAM_JOB_DISPLAY: {
+            std::string* text = (std::string*) lparam;
+            g_display_result = *text;
+            delete text;
             return 0;
         }
 
@@ -2590,6 +2980,11 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     g_mode = mode;
     g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     g_show_request = RegisterWindowMessageW(L"SolStream.ShowHostWindow");
+    g_progress_message = RegisterWindowMessageW(kSetupProgressMessage);
+    // A message from a more privileged process than this one is let through
+    // UIPI's filter as long as it goes downwards, which this one does -- but
+    // say so, so that a setup run from an elevated prompt still hears it.
+    ChangeWindowMessageFilter(g_progress_message, MSGFLT_ADD);
     if (!CreateDeviceIndependentResources()) {
         return false;
     }
@@ -2690,7 +3085,8 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.pairing_token == b.pairing_token && a.agent_listening == b.agent_listening
         && a.streaming_ready == b.streaming_ready && a.virtual_display == b.virtual_display
         && a.streaming_detail == b.streaming_detail && a.display_detail == b.display_detail
-        && a.connected_clients == b.connected_clients;
+        && a.connected_clients == b.connected_clients
+        && a.tailscale_address == b.tailscale_address;
 }
 
 void UpdateHostStatus(const HostStatus& status) {
@@ -2742,6 +3138,10 @@ void UpdateCheckFinished(const update::CheckResult& result, bool asked) {
     if (!PostMessageW(g_window, WM_SOLSTREAM_UPDATE, asked ? 1 : 0, (LPARAM) copy)) {
         delete copy;
     }
+}
+
+void SetDisplayReadyHandler(std::function<void()> handler) {
+    g_display_ready = std::move(handler);
 }
 
 void SayInstallOutcome(bool installed, const std::string& version) {

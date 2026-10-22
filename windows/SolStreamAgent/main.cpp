@@ -60,6 +60,8 @@
 #include <vector>
 
 #include "display_setup.h"
+#include "driver_install.h"
+#include "tailscale.h"
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
@@ -107,10 +109,18 @@ constexpr int kProtocolVersion = 2;
 constexpr size_t kMaxClipboardBytes = 256 * 1024;
 constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 
-/// The display SolStream captures. Resolved at startup to the virtual one when
+/// The display SolStream captures. Chosen at startup to the virtual one when
 /// there is one, because a crop taken from a real monitor is a crop out of
-/// somebody's actual screen.
+/// somebody's actual screen -- and chosen again when the window's "Set up"
+/// installs one, which is why it is behind a lock: the status, watcher and
+/// command threads all read it, and it can now change under them.
+std::mutex g_capture_mutex;
 std::wstring g_capture_display;
+
+std::wstring CaptureDisplay() {
+    std::lock_guard<std::mutex> lock(g_capture_mutex);
+    return g_capture_display;
+}
 /// How many Macs are connected right now, for the window.
 std::atomic<int> g_clients_connected{0};
 /// How many of those have presented the token, which is a different number and
@@ -2263,14 +2273,15 @@ std::vector<HWND> g_rescued;
 /// visible to the person sitting at the PC, and rearranging their windows
 /// because a dialog opened would be interference, not help.
 bool WorkOutCaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
-    if (g_capture_display.empty()) {
+    const std::wstring capture_display = CaptureDisplay();
+    if (capture_display.empty()) {
         return false;
     }
     const std::vector<Display> displays = EnumerateDisplays();
     const Display* captured = nullptr;
     const Display* primary = nullptr;
     for (const Display& display : displays) {
-        if (ToWide(display.device_name) == g_capture_display) {
+        if (ToWide(display.device_name) == capture_display) {
             captured = &display;
         }
         if (display.primary) {
@@ -3158,7 +3169,7 @@ std::string DisplaysJson(const std::vector<Display>& displays) {
         // dropped, and a black strip beside an olive rectangle on screen.
         // Sending it with the list means the client has it at the moment it
         // chooses, with no second round trip to race.
-        const bool captured = ToWide(display.device_name) == g_capture_display;
+        const bool captured = ToWide(display.device_name) == CaptureDisplay();
         std::snprintf(buffer, sizeof(buffer),
                       "%s{\"name\":\"%s\",\"adapter\":\"%s\",\"x\":%ld,\"y\":%ld,"
                       "\"w\":%ld,\"h\":%ld,\"primary\":%s,\"captured\":%s}",
@@ -3184,7 +3195,8 @@ UINT MonitorDpi(HMONITOR monitor) {
 
 /// The effective DPI of the capture display, or 0 when there is none.
 UINT CaptureDisplayDpi() {
-    struct Search { const std::wstring* name; HMONITOR found; } search{&g_capture_display, nullptr};
+    const std::wstring capture_display = CaptureDisplay();
+    struct Search { const std::wstring* name; HMONITOR found; } search{&capture_display, nullptr};
     EnumDisplayMonitors(nullptr, nullptr,
         [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
             auto* search = reinterpret_cast<Search*>(param);
@@ -3509,7 +3521,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 #else
         out += ",\"streaming\":false";
 #endif
-        out += ",\"captureDisplay\":\"" + JsonEscape(ToUtf8(g_capture_display)) + "\"";
+        out += ",\"captureDisplay\":\"" + JsonEscape(ToUtf8(CaptureDisplay())) + "\"";
         out += ",\"virtualDisplay\":"
              + std::string(solstream::HasVirtualDisplayCached() ? "true" : "false");
         out += "}";
@@ -3872,8 +3884,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // size", and it carries on at that size.
         const std::wstring wanted = ToWide(device);
         const std::wstring virtual_device = solstream::VirtualDisplayDevice();
-        const bool is_capture = !g_capture_display.empty()
-            && _wcsicmp(wanted.c_str(), g_capture_display.c_str()) == 0;
+        const std::wstring capture_display = CaptureDisplay();
+        const bool is_capture = !capture_display.empty()
+            && _wcsicmp(wanted.c_str(), capture_display.c_str()) == 0;
         const bool is_virtual =
             (!virtual_device.empty()
              && _wcsicmp(wanted.c_str(), virtual_device.c_str()) == 0)
@@ -4786,6 +4799,80 @@ int PrintLicenses() {
     return 0;
 }
 
+/// Pick what is captured: the virtual display when there is one, so a crop
+/// can never be a crop out of somebody's real screen. At startup, and again
+/// once the window has installed one. A session already streaming keeps the
+/// display it opened on; the next one uses this.
+void ChooseCaptureDisplay() {
+    std::wstring chosen;
+    const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
+    for (const Display& display : EnumerateDisplays()) {
+        if (!configured.empty() && display.device_name == configured) {
+            chosen = ToWide(display.device_name);
+            Log("[agent] capturing %s [%s]", display.device_name.c_str(),
+                display.adapter.c_str());
+            break;
+        }
+    }
+    for (const Display& display : EnumerateDisplays()) {
+        if (!chosen.empty()) {
+            break;
+        }
+        // Ours only. This used to match "virtual" or "idd" anywhere in the
+        // adapter name, which is every phone-as-monitor and remote-desktop
+        // product's display too — and capturing one of those streams a screen
+        // SolStream did not size, from a display it does not control. Better
+        // the primary below, which at least says plainly what it is.
+        const std::string& adapter = display.adapter;
+        if (solstream::IsSolStreamDisplayDriver(ToWide(adapter))) {
+            chosen = ToWide(display.device_name);
+            Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
+            break;
+        }
+    }
+    if (chosen.empty()) {
+        for (const Display& display : EnumerateDisplays()) {
+            if (display.primary) {
+                chosen = ToWide(display.device_name);
+                Log("[agent] no virtual display; falling back to %s",
+                    display.device_name.c_str());
+                break;
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_capture_mutex);
+    g_capture_display = chosen;
+}
+
+/// The setup or host window waiting on this elevated process, to be told how
+/// the virtual display is getting on. Null when nobody is waiting.
+HWND g_progress_window = nullptr;
+
+void ReportDriverStep(solstream::DriverStep step) {
+    if (!g_progress_window) {
+        return;
+    }
+    static const UINT message = RegisterWindowMessageW(solstream::kSetupProgressMessage);
+    // Downwards across integrity levels, which UIPI allows: this process is
+    // elevated and the window is not.
+    PostMessageW(g_progress_window, message, (WPARAM) step, 0);
+}
+
+/// The virtual display's line in the result the waiting window reads; see
+/// WriteInstallResult.
+std::string DisplayResult(bool ok, bool already, const std::string& note,
+                          const std::string& error) {
+    if (!ok) {
+        return "failed " + error;
+    }
+    return std::string("ready ")
+         + (already ? "This PC already had the Virtual Display Driver, so SolStream set "
+                      "it up for streaming.\n"
+                    : "")
+         + note;
+}
+
 int wmain(int argc, wchar_t** argv) {
     ReleaseUnwantedConsole();
     // Everything outside main.cpp logs through the agent's file rather than
@@ -4861,6 +4948,17 @@ int wmain(int argc, wchar_t** argv) {
             uninstall_now = true;
         } else if (arg == L"--configure-display") {
             configure_display = true;
+        } else if (arg == L"--progress-window" && i + 1 < argc) {
+            // Only a live window in this session: anything else on the switch is
+            // ignored, and the worst a wrong one could do is receive a number.
+            const HWND window = (HWND) (uintptr_t) std::wcstoull(argv[++i], nullptr, 10);
+            DWORD session = 0, own = 0;
+            DWORD pid = 0;
+            if (window && IsWindow(window) && GetWindowThreadProcessId(window, &pid)
+                && ProcessIdToSessionId(pid, &session)
+                && ProcessIdToSessionId(GetCurrentProcessId(), &own) && session == own) {
+                g_progress_window = window;
+            }
         }
     }
 
@@ -4879,7 +4977,7 @@ int wmain(int argc, wchar_t** argv) {
     // the unelevated setup window: a DLL planted beside it runs as the user who
     // planted it, which gains nothing, and its Direct2D, DirectWrite, comctl32
     // and driver-install paths have not been tried under this restriction.
-    if (install || uninstall) {
+    if (install || uninstall || install_driver) {
         SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
 
@@ -4947,6 +5045,13 @@ int wmain(int argc, wchar_t** argv) {
             }
             return 0;
         }
+        // The virtual display first, and only if SolStream put it here: one
+        // somebody installed for themselves is theirs.
+        std::string driver_note;
+        solstream::RemoveInstalledDriver(driver_note);
+        for (const std::string& line : SplitLines(driver_note)) {
+            Log("[uninstall] %s", line.c_str());
+        }
         std::string error;
         const bool ok = solstream::UninstallSelf(error);
         solstream::WriteInstallResult(ok, error);
@@ -5003,12 +5108,30 @@ int wmain(int argc, wchar_t** argv) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
         }
+        // The virtual display before SolStream itself: InstallSelf ends by
+        // starting the host, and the host chooses what to capture as it
+        // starts. Done the other way round, it would pick the main display and
+        // keep it until the next logon. A display that cannot be set up is not
+        // a failed install -- SolStream streams the main display meanwhile --
+        // so it is reported beside the install's answer, not instead of it.
+        std::string display;
+        if (options.display_driver) {
+            bool already = false;
+            std::string note, driver_error;
+            const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, already,
+                                                               note, driver_error);
+            ReportDriverStep(solstream::DriverStep::Done);
+            display = DisplayResult(ready, already, note, driver_error);
+            for (const std::string& line : SplitLines(ready ? note : driver_error)) {
+                Log("[display] %s", line.c_str());
+            }
+        }
         std::string error;
         const bool ok = solstream::InstallSelf(options, error);
         CloseHandle(self);
         // The window that asked for this is in another process and cannot see a
         // return code, so the reason goes in a file it knows to read.
-        solstream::WriteInstallResult(ok, error);
+        solstream::WriteInstallResult(ok, error, display);
         if (!ok) {
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
@@ -5018,16 +5141,36 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
 
-    if (install_driver || configure_display) {
-        std::string error;
-        if (install_driver && !solstream::InstallBundledDriver(error)) {
-            std::fprintf(stderr, "%s\n", error.c_str());
-            return 1;
+    if (install_driver) {
+        // What the host window's "Set up" runs, elevated: the same steps as
+        // setup's tick box, for a PC that was installed without them.
+        if (!solstream::IsElevated()) {
+            std::string error;
+            if (!solstream::RelaunchElevated(L"--install-display-driver", error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
+            std::string display;
+            solstream::ReadInstallResult(error, &display);
+            std::fprintf(stdout, "%s\n", display.c_str());
+            return display.rfind("ready", 0) == 0 ? 0 : 1;
         }
-        // Installing the driver is not the same as having a display worth
-        // capturing: out of the box it offers a mode list that matches no Mac,
-        // scales wrong, and advertises HDR — which is what made streamed content
-        // arrive as a black rectangle with its chrome drawn correctly around it.
+        bool already = false;
+        std::string note, error;
+        const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, already, note,
+                                                           error);
+        solstream::WriteInstallResult(ready, ready ? std::string() : error,
+                                      DisplayResult(ready, already, note, error));
+        std::fprintf(ready ? stdout : stderr, "%s\n", (ready ? note : error).c_str());
+        return ready ? 0 : 1;
+    }
+
+    if (configure_display) {
+        std::string error;
+        // A driver already here, set up for streaming: out of the box it offers
+        // a mode list that matches no Mac, scales wrong, and advertises HDR —
+        // which is what made streamed content arrive as a black rectangle with
+        // its chrome drawn correctly around it.
         std::string note;
         if (!solstream::ConfigureVirtualDisplay(solstream::kDefaultCanvasWidth,
                                                 solstream::kDefaultCanvasHeight,
@@ -5246,13 +5389,8 @@ int wmain(int argc, wchar_t** argv) {
             Log("[agent] SolStream will capture a real monitor, which means the");
             Log("[agent] streamed window cannot be larger than it and anything");
             Log("[agent] dragged over the window appears inside the stream.");
-            if (solstream::BundledDriverPackage().empty()) {
-                Log("[agent] no driver is bundled with this build; install the");
-                Log("[agent] Virtual Display Driver and restart SolStream.");
-            } else {
-                Log("[agent] a driver is bundled: use the window's Install button,");
-                Log("[agent] or run with --install-display-driver.");
-            }
+            Log("[agent] the window's Set up button installs one, as does");
+            Log("[agent] SolStream.exe --install-display-driver.");
         } else {
             for (const auto& display : virtual_displays) {
                 Log("[agent] virtual display: %s (%s)",
@@ -5286,45 +5424,10 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Pick what is captured: the virtual display when there is one, so a
-    // crop can never be a crop out of somebody's real screen. The one that was
-    // just set up first — matching "virtual" alone also matches other products'
-    // virtual displays, which are not sized for the Mac.
-    const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
-    for (const Display& display : EnumerateDisplays()) {
-        if (!configured.empty() && display.device_name == configured) {
-            g_capture_display = ToWide(display.device_name);
-            Log("[agent] capturing %s [%s]", display.device_name.c_str(),
-                display.adapter.c_str());
-            break;
-        }
-    }
-    for (const Display& display : EnumerateDisplays()) {
-        if (!g_capture_display.empty()) {
-            break;
-        }
-        // Ours only. This used to match "virtual" or "idd" anywhere in the
-        // adapter name, which is every phone-as-monitor and remote-desktop
-        // product's display too — and capturing one of those streams a screen
-        // SolStream did not size, from a display it does not control. Better
-        // the primary below, which at least says plainly what it is.
-        const std::string& adapter = display.adapter;
-        if (solstream::IsSolStreamDisplayDriver(ToWide(adapter))) {
-            g_capture_display = ToWide(display.device_name);
-            Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
-            break;
-        }
-    }
-    if (g_capture_display.empty()) {
-        for (const Display& display : EnumerateDisplays()) {
-            if (display.primary) {
-                g_capture_display = ToWide(display.device_name);
-                Log("[agent] no virtual display; falling back to %s",
-                    display.device_name.c_str());
-                break;
-            }
-        }
-    }
+    ChooseCaptureDisplay();
+    // The window's "Set up" installs a virtual display into a host that is
+    // already running, which then has to start capturing it.
+    solstream::SetDisplayReadyHandler(ChooseCaptureDisplay);
 
     for (const Display& display : EnumerateDisplays()) {
         Log("[agent]   display %s %ldx%ld at (%ld,%ld)%s",
@@ -5548,6 +5651,7 @@ int wmain(int argc, wchar_t** argv) {
                                  ? ToWide(BestLocalAddress())
                                  : ToWide(bind_address);
             status.pairing_token = ToWide(g_token);
+            status.tailscale_address = solstream::TailscaleAddress();
             status.agent_listening = true;
             status.connected_clients = g_clients_authenticated.load();
 
@@ -5571,7 +5675,7 @@ int wmain(int argc, wchar_t** argv) {
 
             status.virtual_display = solstream::HasVirtualDisplayCached();
             status.display_detail = status.virtual_display
-                ? (g_capture_display.empty() ? L"ready" : g_capture_display)
+                ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
                 : L"not installed";
 
             solstream::UpdateHostStatus(status);

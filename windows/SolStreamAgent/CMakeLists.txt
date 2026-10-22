@@ -79,6 +79,10 @@ add_executable(SolStreamAgent
     media/log.cpp
     vdd.cpp
     display_setup.cpp
+    # Fetches and installs the virtual display for a PC that has none.
+    driver_install.cpp
+    # Whether this PC is on Tailscale, for the window's away-from-home advice.
+    tailscale.cpp
     host_window.cpp
     installer.cpp
     # Finds, verifies and installs updates from GitHub releases.
@@ -98,6 +102,10 @@ set_target_properties(SolStreamAgent PROPERTIES
 target_link_libraries(SolStreamAgent PRIVATE
     user32 ws2_32 dwmapi shell32 winhttp crypt32 bcrypt gdi32
     setupapi cfgmgr32 comctl32
+    # UpdateDriverForPlugAndPlayDevices, which binds the virtual display's
+    # driver to the device driver_install.cpp creates; and the adapter list,
+    # for whether this PC is on Tailscale.
+    newdev iphlpapi
     # GetDpiForMonitor, for the size a window will be on the capture display.
     shcore
     # The host window draws with Direct2D and lays out text with DirectWrite.

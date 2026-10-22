@@ -167,6 +167,16 @@ int VerifySignatureCommand(int argc, wchar_t** argv);
 /// Exits 0 when the check completed, whatever it found, and 1 when it failed.
 int CheckCommand(bool download);
 
+// ── Pinned downloads ─────────────────────────────────────────────────────────
+
+/// GET `url` into `body`, through the same HTTPS path the updater uses -- TLS
+/// 1.2+, redirects followed by hand and only within GitHub's hosts, at most
+/// `cap` bytes -- and keep it only if its SHA-256 is `sha256_hex` (lower case).
+/// For files SolStream fetches but does not publish, so has no signature for:
+/// the hash compiled in is what says these are the bytes that were reviewed.
+bool FetchPinned(const std::string& url, const std::string& sha256_hex,
+                 unsigned long long cap, std::vector<char>& body, std::string& error);
+
 // ── Schedule ─────────────────────────────────────────────────────────────────
 
 struct SchedulerHooks {

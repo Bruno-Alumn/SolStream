@@ -43,6 +43,11 @@ struct InstallOptions {
     bool desktop_shortcut = true;
     bool start_menu_shortcut = true;
     bool start_at_logon = true;
+    /// Also fetch and install the virtual display (driver_install.h). Off unless
+    /// asked for: unlike the three above, it downloads something and installs a
+    /// driver, so `SolStream.exe --install` typed at a prompt never does it by
+    /// surprise. The setup screen ticks it when the PC has no virtual display.
+    bool display_driver = false;
 };
 
 /// Encode/decode options as command-line switches, because the install runs in a
@@ -98,7 +103,12 @@ std::wstring InstallLogPath();
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
 /// than showing the user an exit code.
-void WriteInstallResult(bool ok, const std::string& error);
-bool ReadInstallResult(std::string& error);
+///
+/// `display`, when not empty, is the virtual display's own answer, carried
+/// beside the install's because the setup screen reports the two separately:
+/// "ready <what was done>" or "failed <why>".
+void WriteInstallResult(bool ok, const std::string& error,
+                        const std::string& display = std::string());
+bool ReadInstallResult(std::string& error, std::string* display = nullptr);
 
 }  // namespace solstream

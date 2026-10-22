@@ -944,6 +944,9 @@ std::wstring OptionArguments(const InstallOptions& options) {
     if (!options.desktop_shortcut) { out += L" --no-desktop-shortcut"; }
     if (!options.start_menu_shortcut) { out += L" --no-start-menu"; }
     if (!options.start_at_logon) { out += L" --no-logon"; }
+    // The exception: this one is named for what it turns ON, because absent has
+    // to mean "download nothing" for anybody typing --install by hand.
+    if (options.display_driver) { out += L" --with-display-driver"; }
     // Who is asking. This is only ever built on the way to the UAC prompt, by
     // the half that has not been elevated, so the account this process runs as
     // is the person at the keyboard — which is exactly what the elevated half
@@ -963,11 +966,16 @@ InstallOptions OptionsFromArguments(int argc, wchar_t** argv) {
         if (arg == L"--no-desktop-shortcut") { options.desktop_shortcut = false; }
         else if (arg == L"--no-start-menu") { options.start_menu_shortcut = false; }
         else if (arg == L"--no-logon") { options.start_at_logon = false; }
+        else if (arg == L"--with-display-driver") { options.display_driver = true; }
     }
     return options;
 }
 
-void WriteInstallResult(bool ok, const std::string& error) {
+/// Between the install's answer and the display's, on a line of its own. Not
+/// a character either answer can contain: both are sentences.
+constexpr char kDisplaySeparator[] = "\n--display--\n";
+
+void WriteInstallResult(bool ok, const std::string& error, const std::string& display) {
     const std::wstring path = ResultPath();
     // Delete first, then CREATE_NEW rather than CREATE_ALWAYS: what is written
     // here has to land in a file this process made, not in whatever happens to
@@ -992,14 +1000,17 @@ void WriteInstallResult(bool ok, const std::string& error) {
     // "OK" alone is a clean install. "OK " with something after it is an install
     // that stands, with a warning attached -- a firewall rule netsh refused, or a
     // logon task that would not register. Failures keep the ERR form.
-    const std::string text = ok ? (error.empty() ? "OK" : "OK " + error)
-                                : ("ERR " + error);
+    std::string text = ok ? (error.empty() ? "OK" : "OK " + error)
+                          : ("ERR " + error);
+    if (!display.empty()) {
+        text += kDisplaySeparator + display;
+    }
     DWORD written = 0;
     WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr);
     CloseHandle(file);
 }
 
-bool ReadInstallResult(std::string& error) {
+bool ReadInstallResult(std::string& error, std::string* display) {
     const std::wstring path = ResultPath();
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1009,12 +1020,19 @@ bool ReadInstallResult(std::string& error) {
         error = "The install did not run.";
         return false;
     }
-    char buffer[2048] = {0};
+    char buffer[8192] = {0};
     DWORD read = 0;
     ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr);
     CloseHandle(file);
     DeleteFileW(path.c_str());
-    const std::string text(buffer, read);
+    std::string text(buffer, read);
+    const size_t split = text.find(kDisplaySeparator);
+    if (split != std::string::npos) {
+        if (display) {
+            *display = text.substr(split + sizeof(kDisplaySeparator) - 1);
+        }
+        text.resize(split);
+    }
     if (text.rfind("OK", 0) == 0) {
         // Anything after the OK is a warning from an install that otherwise
         // worked, so it comes back in `error` with a true return. Callers that
