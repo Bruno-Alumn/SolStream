@@ -10,8 +10,8 @@ import MediaSession
 /// `didChange` with `restartsStream` saying whether it can be applied to a
 /// running stream as it is (volume, buffering, mouse, clipboard) or needs the
 /// media session opened again (quality, frame rate, sound on or off, sound
-/// quality), because the host's encoders and audio capture are fixed when the
-/// session opens.
+/// quality and source), because the host's encoders and audio capture are fixed
+/// when the session opens.
 ///
 /// The mouse settings live in InputCapture, which owns the behaviour; they are
 /// mirrored here so every setting has one address.
@@ -157,6 +157,39 @@ final class StreamSettings {
         set { set(newValue.rawValue, Key.soundQuality, restarts: true) }
     }
 
+    /// Whose sound the PC sends: the streamed apps' alone, so a notification
+    /// or a song elsewhere on the PC stays there, or everything it plays.
+    enum SoundSource: String, CaseIterable {
+        case streamedApps, wholePC
+
+        /// On the segmented control, so short.
+        var title: String {
+            switch self {
+            case .streamedApps: return "Streamed apps"
+            case .wholePC: return "Whole PC"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .streamedApps: return "Only the streamed apps, not the rest of the PC."
+            case .wholePC: return "Everything the PC plays, notifications included."
+            }
+        }
+
+        var audioSource: AudioSource {
+            switch self {
+            case .streamedApps: return .apps
+            case .wholePC: return .system
+            }
+        }
+    }
+
+    var soundSource: SoundSource {
+        get { defaults.string(forKey: Key.soundSource).flatMap(SoundSource.init(rawValue:)) ?? .streamedApps }
+        set { set(newValue.rawValue, Key.soundSource, restarts: true) }
+    }
+
     /// 0...1.
     var volume: Float {
         get { min(max(defaults.object(forKey: Key.volume) as? Float ?? 1, 0), 1) }
@@ -242,8 +275,9 @@ final class StreamSettings {
     /// `base` with the chosen frame rate, bitrate and sound applied.
     ///
     /// `overrides` names fields a command-line flag already set (`--bitrate`,
-    /// `--fps`, `--no-audio`, `--sound-quality`), which win: the test harness
-    /// and anyone debugging from a terminal must get exactly what they typed.
+    /// `--fps`, `--no-audio`, `--sound-quality`, `--sound-from`), which win: the
+    /// test harness and anyone debugging from a terminal must get exactly what
+    /// they typed.
     func apply(to base: StreamConfig, host: String,
                overrides: Set<Override> = []) -> StreamConfig {
         var config = base
@@ -253,10 +287,11 @@ final class StreamSettings {
         }
         if !overrides.contains(.audio) { config.audio = streamsAudio }
         if !overrides.contains(.soundQuality) { config.audioEncoding = soundQuality.encoding }
+        if !overrides.contains(.soundSource) { config.audioSource = soundSource.audioSource }
         return config
     }
 
-    enum Override: Hashable { case frameRate, bitrate, audio, soundQuality }
+    enum Override: Hashable { case frameRate, bitrate, audio, soundQuality, soundSource }
 
     // MARK: - Storage
 
@@ -268,6 +303,7 @@ final class StreamSettings {
         static let muted = "SolStream.muted"
         static let buffering = "SolStream.audioBuffering"
         static let soundQuality = "SolStream.soundQuality"
+        static let soundSource = "SolStream.soundSource"
         static let clipboard = "SolStream.syncsClipboard"
     }
 

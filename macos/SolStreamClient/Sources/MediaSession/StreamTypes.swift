@@ -20,17 +20,27 @@ public struct StreamConfig: Sendable {
     public var audio: Bool
     /// How the host is asked to send it, when it is asked for at all.
     public var audioEncoding: AudioEncoding
+    /// And whose sound it is.
+    public var audioSource: AudioSource
 
     public init(width: Int = 1920, height: Int = 1080, frameRate: Int = 60,
                 bitrateKbps: Int = 20000, audio: Bool = true,
-                audioEncoding: AudioEncoding = .pcm) {
+                audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
         self.bitrateKbps = bitrateKbps
         self.audio = audio
         self.audioEncoding = audioEncoding
+        self.audioSource = audioSource
     }
+}
+
+/// Whose sound the host sends: everything the PC plays, or only what the
+/// streamed apps play -- Windows' process loopback, from build 20348. Like the
+/// encoding, a request: a host that predates it sends the whole PC's.
+public enum AudioSource: String, Sendable {
+    case system, apps
 }
 
 /// How the host sends its sound: raw, or as Opus at a bitrate.

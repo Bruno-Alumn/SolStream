@@ -1870,6 +1870,62 @@ bool SlotWindowGone(const WindowLock& lock) {
     return owner != lock.pid;
 }
 
+#ifdef SOLSTREAM_MEDIA
+/// The process whose sound belongs to a window.
+///
+/// Its owner, almost always. A Store app's window is a frame drawn by
+/// ApplicationFrameHost, and the app itself -- the process that plays its
+/// sound -- owns a child window inside that frame, so that child's owner is
+/// the one wanted. Only for that frame: plenty of programs host another
+/// process's window inside their own, and the host is the one being streamed.
+DWORD SoundOwner(HWND window) {
+    DWORD owner = 0;
+    GetWindowThreadProcessId(window, &owner);
+    wchar_t className[64] = {0};
+    GetClassNameW(window, className, 63);
+    if (wcscmp(className, L"ApplicationFrameWindow") != 0) {
+        return owner;
+    }
+    struct Search {
+        DWORD frame;
+        DWORD app;
+    } search{owner, 0};
+    EnumChildWindows(window, [](HWND child, LPARAM param) -> BOOL {
+        auto* found = reinterpret_cast<Search*>(param);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(child, &pid);
+        if (pid != 0 && pid != found->frame) {
+            found->app = pid;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    return search.app ? search.app : owner;
+}
+
+/// The processes of every window the Mac is managing: whose sound is the
+/// stream's, when it asked for the streamed apps' alone. Read on the audio
+/// thread; the windows are copied out under the lock and asked about outside it.
+std::vector<unsigned long> StreamedProcesses() {
+    HWND windows[kMaxLocks] = {};
+    int count = 0;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window) {
+            windows[count++] = g_locks[i].window;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    std::vector<unsigned long> pids;
+    for (int i = 0; i < count; ++i) {
+        if (IsWindow(windows[i])) {
+            pids.push_back(SoundOwner(windows[i]));
+        }
+    }
+    return pids;
+}
+#endif
+
 /// Tell the Mac a window it was streaming has been closed.
 ///
 /// Pushed the moment the watcher notices, rather than left for the Mac's
@@ -3444,7 +3500,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         std::string startError;
         // What the sound will be sent as, said in the reply so the Mac knows
         // without waiting for a packet. Empty -- and so not said -- without sound.
-        std::string audioCodecReply;
+        std::string audioCodecReply, audioSourceReply;
 #ifdef SOLSTREAM_MEDIA
         long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
         // Zero means "host decides", which is what an absent field leaves behind.
@@ -3457,9 +3513,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         FieldNumber(line, "audio", audio);
         FieldNumber(line, "width", width);
         FieldNumber(line, "height", height);
-        // Sound quality. Absent from every Mac that predates it, which therefore
-        // gets the PCM it has always had.
-        std::string audioCodec;
+        // Sound quality and source. Absent from every Mac that predates them,
+        // which therefore gets the whole PC's sound as PCM, as it always has.
+        std::string audioCodec, audioSource;
+        FieldString(line, "audioSource", audioSource);
         long long audioBitrate = 0, audioFrameMs = 0;
         FieldString(line, "audioCodec", audioCodec);
         FieldNumber(line, "audioBitrate", audioBitrate);
@@ -3508,6 +3565,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             if (config.audio) {
                 audioCodecReply = audioCodec == "opus" ? "opus" : "pcm";
             }
+            // The streamed apps' sound only: the processes of every window the
+            // Mac is managing, read afresh by the audio thread as they change.
+            if (config.audio && audioSource == "apps") {
+                config.audioProcesses = [] { return StreamedProcesses(); };
+                audioSourceReply = "apps";
+            } else if (config.audio) {
+                audioSourceReply = "system";
+            }
             config.port = solstream::kDefaultMediaPort;
             // Start does not return until the capture and the encoder have both
             // opened or one of them has failed, so `streaming` below is what
@@ -3525,9 +3590,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 #else
         startError = "this build has no media path";
 #endif
-        Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s",
+        Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s%s%s",
             hcount, started.c_str(), startError.empty() ? "" : " -- ",
-            startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str());
+            startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str(),
+            audioSourceReply.empty() ? "" : " from ", audioSourceReply.c_str());
         return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
                ",\"hpub\":\"" + hpubHex + "\""
                ",\"hnonce\":\"" + hnonceHex + "\""
@@ -3538,6 +3604,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                                      : ",\"message\":\"" + JsonEscape(startError) + "\"")
                + (audioCodecReply.empty() ? std::string()
                                           : ",\"audioCodec\":\"" + audioCodecReply + "\"")
+               + (audioSourceReply.empty() ? std::string()
+                                           : ",\"audioSource\":\"" + audioSourceReply + "\"")
                + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
     }
 

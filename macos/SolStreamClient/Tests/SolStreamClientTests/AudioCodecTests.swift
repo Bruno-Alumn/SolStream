@@ -222,6 +222,35 @@ final class AudioCodecTests: XCTestCase {
         XCTAssertEqual(AgentConnection.audioCodec(inReply: new), .pcm)
     }
 
+    /// The streamed apps' sound alone is one more field, sent only when it is
+    /// wanted and there is sound to want it of, and like the codec's it cannot
+    /// be read as a field an old host knows.
+    func testTheAppsSoundIsAskedForInOneFieldAnOldHostCannotMisread() throws {
+        var request = AgentConnection.MediaRequest(display: "\\\\.\\DISPLAY1", fps: 60,
+                                                   bitrate: 20_000_000, audio: true,
+                                                   audioEncoding: .pcm, audioSource: .apps)
+        var fields = AgentConnection.mediaOpenFields(request)
+        XCTAssertEqual(Set(fields.keys), ["display", "fps", "bitrate", "audio", "audioSource"])
+        XCTAssertEqual(fields["audioSource"] as? String, "apps")
+        for old in ["audio", "display", "fps", "bitrate"] {
+            XCTAssertFalse("\"audioSource\"".contains("\"\(old)\""))
+        }
+        let line = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: fields),
+                                        encoding: .utf8))
+        XCTAssertEqual(Self.hostFieldNumber(line, "audio"), 1)
+
+        request.audio = false
+        fields = AgentConnection.mediaOpenFields(request)
+        XCTAssertNil(fields["audioSource"], "asked whose sound while asking for none")
+    }
+
+    func testAHostThatSaysNothingSendsTheWholePCsSound() {
+        XCTAssertEqual(AgentConnection.audioSource(inReply: ["type": "media", "ok": true]), .system)
+        XCTAssertEqual(AgentConnection.audioSource(inReply: ["audioSource": "apps"]), .apps)
+        XCTAssertEqual(AgentConnection.audioSource(inReply: ["audioSource": "system"]), .system)
+        XCTAssertEqual(AgentConnection.audioSource(inReply: ["audioSource": "everything"]), .system)
+    }
+
     /// The popover's "predates this" is said only when Opus was asked for and
     /// PCM promised -- not with the sound off, and not for Lossless.
     func testTheMacNoticesAHostThatIgnoredTheQuality() {

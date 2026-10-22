@@ -57,6 +57,12 @@ double MillisBetween(long long from, long long to) {
     return (double) (to - from) * 1000.0 / (double) g_frequency.QuadPart;
 }
 
+/// "the whole pc", or "1 app" and so on, for the five-second line.
+std::string AudioFromLabel(int apps) {
+    if (apps < 0) { return "from the whole pc"; }
+    return "from " + std::to_string(apps) + (apps == 1 ? " app" : " apps");
+}
+
 struct Picture {
     std::vector<unsigned char> bytes;
     uint32_t frameId = 0;
@@ -565,7 +571,7 @@ void MediaSession::Impl::SenderLoop() {
             Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
-                " | audio %s %llu sent, %llu silent, %.0f kbit/s | input %llu applied, %llu dup,"
+                " | audio %s %s, %llu sent, %llu silent, %.0f kbit/s | input %llu applied, %llu dup,"
                 " %llu failed, ack %u | rx %llu, rejected %llu | idr %llu, mean %llu KB",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
@@ -582,6 +588,8 @@ void MediaSession::Impl::SenderLoop() {
                 clientLastFrame.load(), clientDamaged.load(),
                 (unsigned long long) idrRequests.load(),
                 audioLabel,
+                // Where it came from: the whole PC, or how many streamed apps.
+                AudioFromLabel(audio.AppSources()).c_str(),
                 (unsigned long long) audio.Packets(),
                 (unsigned long long) audio.Silent(),
                 // Sealed datagrams, so headers and tag included: what the
@@ -884,7 +892,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.captureThread = std::thread([&s] { s.CaptureLoop(); });
     if (config.audio) {
         s.audioThread = std::thread([&s] {
-            s.audio.Run(s.config.audioEncoding,
+            s.audio.Run(s.config.audioEncoding, s.config.audioProcesses,
                         [&s](const unsigned char* data, size_t length, uint32_t seq,
                              uint32_t timestampUs, uint32_t rate, uint16_t channels,
                              unsigned char format) {
@@ -1038,7 +1046,8 @@ std::string MediaSession::StatsJson() const {
                 ",\"encoderSubmitted\":%llu,\"encoderPictures\":%llu"
                 ",\"encoderDropped\":%llu,\"encoderExtraSamples\":%llu"
                 ",\"captureDelivered\":%llu,\"glassToWireMs\":%.2f"
-                ",\"audioPackets\":%llu,\"audioBytes\":%llu,\"audioCodec\":\"%s\"}",
+                ",\"audioPackets\":%llu,\"audioBytes\":%llu,\"audioCodec\":\"%s\""
+                ",\"audioApps\":%d}",
                 s.running.load() ? "true" : "false",
                 (unsigned long long) s.picturesSent.load(),
                 (unsigned long long) s.picturesDropped.load(),
@@ -1056,7 +1065,8 @@ std::string MediaSession::StatsJson() const {
                 s.lastGlassToWireMs.load(),
                 (unsigned long long) s.audio.Packets(),
                 (unsigned long long) s.audioBytesSent.load(),
-                s.config.audioEncoding.codec == AudioEncoding::Codec::Opus ? "opus" : "pcm");
+                s.config.audioEncoding.codec == AudioEncoding::Codec::Opus ? "opus" : "pcm",
+                s.audio.AppSources());
     return buffer;
 }
 

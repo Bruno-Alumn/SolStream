@@ -36,6 +36,9 @@ struct MediaConfig {
     bool audio = true;
     /// PCM unless the Mac asked for Opus by name; see audio.h.
     AudioEncoding audioEncoding;
+    /// The streamed apps' processes, when the Mac asked to hear only them.
+    /// Null -- the default, and all an older Mac gets -- is the whole PC.
+    AudioCapture::Processes audioProcesses;
 };
 
 class MediaSession {

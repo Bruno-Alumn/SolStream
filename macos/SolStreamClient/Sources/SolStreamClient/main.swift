@@ -113,6 +113,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           + all.map(\.rawValue).joined(separator: ", ") + "; using Settings")
             }
         }
+        if let from = value(after: "--sound-from") {
+            // "apps" for the streamed apps' sound alone, "pc" for everything.
+            switch from.lowercased() {
+            case "apps", "app":
+                config.audioSource = .apps
+                overrides.insert(.soundSource)
+                Log.info("[stream] sound from the streamed apps only")
+            case "pc", "system":
+                config.audioSource = .system
+                overrides.insert(.soundSource)
+                Log.info("[stream] sound from the whole PC")
+            default:
+                Log.error("[stream] --sound-from \(from) is not apps or pc; using Settings")
+            }
+        }
         settingsOverrides = overrides
         QualityPill.commandLineOverrides = overrides
 
@@ -678,7 +693,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 fps: config.frameRate,
                 bitrate: config.bitrateKbps * 1000,
                 audio: config.audio,
-                audioEncoding: config.audioEncoding)
+                audioEncoding: config.audioEncoding,
+                audioSource: config.audioSource)
             // The canvas, said out loud: it is the size every crop is expressed
             // in, so the host must encode exactly this and not the raw source.
             request.width = config.width
@@ -1142,11 +1158,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      status: ("Applying settings…", "Restarting the picture from \(host)"))
     }
 
-    /// `request` and `config` with the settings' frame rate, bitrate, sound and
-    /// sound quality, or nil when the stream already has them all -- in which
-    /// case there is nothing to restart for.
+    /// `request` and `config` with the settings' frame rate, bitrate, sound,
+    /// sound quality and sound source, or nil when the stream already has them
+    /// all -- in which case there is nothing to restart for.
     ///
-    /// The sound's quality counts only while there is sound: with it off, the
+    /// The sound's quality and source count only while there is sound: with it off, the
     /// host captures none to encode, and the restart that turns it back on
     /// picks the new quality up with it.
     static func applying(_ settings: StreamSettings, to request: AgentConnection.MediaRequest,
@@ -1155,7 +1171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         -> (request: AgentConnection.MediaRequest, config: StreamConfig)? {
         let fresh = settings.apply(to: config, host: host, overrides: overrides)
         let soundChanged = fresh.audio != config.audio
-            || (fresh.audio && fresh.audioEncoding != config.audioEncoding)
+            || (fresh.audio && (fresh.audioEncoding != config.audioEncoding
+                                || fresh.audioSource != config.audioSource))
         guard fresh.frameRate != config.frameRate || fresh.bitrateKbps != config.bitrateKbps
                 || soundChanged else { return nil }
         var updated = request
@@ -1163,12 +1180,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updated.bitrate = fresh.bitrateKbps * 1000
         updated.audio = fresh.audio
         updated.audioEncoding = fresh.audioEncoding
+        updated.audioSource = fresh.audioSource
         return (updated, fresh)
     }
 
     static func describe(_ config: StreamConfig) -> String {
         "\(config.frameRate) fps, \(config.bitrateKbps) kbit/s, "
-            + (config.audio ? "sound \(config.audioEncoding.summary)" : "sound off")
+            + (config.audio ? "sound \(config.audioEncoding.summary)"
+                + (config.audioSource == .apps ? " from the streamed apps" : " from the whole PC")
+                : "sound off")
     }
 
     /// Choose which host display to stream.

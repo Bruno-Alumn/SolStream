@@ -828,11 +828,14 @@ public final class AgentConnection {
         /// every host sends unasked; anything else is a request a host that
         /// predates it ignores. See `AudioEncoding`.
         public var audioEncoding: AudioEncoding
+        /// Whose sound: the whole PC's, which every host sends unasked, or
+        /// the streamed apps' alone.
+        public var audioSource: AudioSource
 
         public init(display: String? = nil,
                     fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true,
                     width: Int? = nil, height: Int? = nil,
-                    audioEncoding: AudioEncoding = .pcm) {
+                    audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system) {
             self.display = display
             self.fps = fps
             self.bitrate = bitrate
@@ -840,6 +843,7 @@ public final class AgentConnection {
             self.width = width
             self.height = height
             self.audioEncoding = audioEncoding
+            self.audioSource = audioSource
         }
     }
 
@@ -853,14 +857,18 @@ public final class AgentConnection {
         /// said nothing, because that is what one that predates the choice
         /// sends.
         public var audioCodec: AudioEncoding.Codec = .pcm
+        /// Whose sound the host said it will send; the whole PC's from a host
+        /// that said nothing.
+        public var audioSource: AudioSource = .system
     }
 
     /// The `media open` command's fields beyond the key material.
     ///
     /// Everything a host might not know is sent only when it means something,
     /// so a host that predates a field sees the same command it always saw:
-    /// the canvas only when one is set, and the sound's encoding only when it
-    /// is something other than the PCM every host sends unasked.
+    /// the canvas only when one is set, and the sound's encoding and source
+    /// only when they are something other than the whole PC's PCM that every
+    /// host sends unasked.
     static func mediaOpenFields(_ request: MediaRequest) -> [String: Any] {
         var fields: [String: Any] = ["fps": request.fps, "bitrate": request.bitrate,
                                      "audio": request.audio ? 1 : 0]
@@ -874,7 +882,16 @@ public final class AgentConnection {
             fields["audioBitrate"] = request.audioEncoding.bitrate
             fields["audioFrameMs"] = request.audioEncoding.frameMilliseconds
         }
+        if request.audio, request.audioSource != .system {
+            fields["audioSource"] = request.audioSource.rawValue
+        }
         return fields
+    }
+
+    /// Whose sound a `media open` reply says it will be: the whole PC's, from a
+    /// host that says nothing or names something this build does not know.
+    static func audioSource(inReply reply: [String: Any]) -> AudioSource {
+        (reply["audioSource"] as? String).flatMap(AudioSource.init(rawValue:)) ?? .system
     }
 
     /// What a `media open` reply says the sound will be. A host that predates
@@ -974,6 +991,7 @@ public final class AgentConnection {
                       + "port number; trying \(port) instead")
         }
         let audioCodec = Self.audioCodec(inReply: reply)
+        let audioSource = Self.audioSource(inReply: reply)
         Log.info("[media] session \(hcount) open, keys agree (sid \(keys.sessionTag)), "
                  + "host \(streaming ? "is streaming" : "is NOT streaming: \(message2 ?? "?")")")
         if request.audio, request.audioEncoding.codec != audioCodec {
@@ -983,8 +1001,12 @@ public final class AgentConnection {
                      + (reply["audioCodec"] == nil ? "predates the choice and sends PCM"
                                                    : "sends \(audioCodec.rawValue)"))
         }
+        if request.audio, request.audioSource != audioSource {
+            Log.info("[media] asked for the streamed apps' sound alone; the host sends "
+                     + "the whole PC's" + (reply["audioSource"] == nil ? " (it predates the choice)" : ""))
+        }
         return MediaSession(keys: keys, port: port, streaming: streaming, message: message2,
-                            audioCodec: audioCodec)
+                            audioCodec: audioCodec, audioSource: audioSource)
     }
 
     /// Ask for the host's displays.

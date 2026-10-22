@@ -117,6 +117,8 @@ if(MSVC)
         # timeBeginPeriod. Windows' default timer is 15.6 ms, so a pacer that
         # sleeps without this runs at a third of the rate it thinks it does.
         winmm
+        # ActivateAudioInterfaceAsync, which opens a capture of one app's sound.
+        mmdevapi
     )
 
     # The sound's encoder. Static, and nothing of libopus's own build beyond the

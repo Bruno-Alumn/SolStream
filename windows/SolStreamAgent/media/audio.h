@@ -14,6 +14,11 @@
 // what that costs is fixed: 10 ms packets play 7.5 ms later than PCM's 5 ms
 // ones. The Mac decodes it with AudioToolbox and needs nothing.
 //
+// FROM THE WHOLE PC, or from the streamed apps alone when the Mac asks: the
+// sound of the processes whose windows it is streaming, through Windows'
+// process loopback, so a notification or a song playing elsewhere on the PC
+// stays there. A Mac that predates the choice gets the whole PC, as before.
+//
 //   off  w  field
 //    0   1  type = 0x20
 //    1   1  flags
@@ -36,6 +41,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 namespace solstream::media {
 
@@ -60,18 +66,27 @@ public:
                                     uint32_t sampleRate, uint16_t channels,
                                     unsigned char format)>;
 
+    /// The processes whose sound is wanted, asked again four times a second
+    /// because the streamed windows change during a session. Null means the
+    /// whole PC's sound.
+    using Processes = std::function<std::vector<unsigned long>()>;
+
     /// Runs until `keepGoing` returns false or Stop is called. Blocking: this
     /// is the body of the audio thread.
-    void Run(const AudioEncoding& encoding, Sink sink, std::function<bool()> keepGoing);
+    void Run(const AudioEncoding& encoding, const Processes& processes, Sink sink,
+             std::function<bool()> keepGoing);
     void Stop();
 
     uint64_t Packets() const { return packets_.load(); }
     uint64_t Silent() const { return silent_.load(); }
     bool Started() const { return started_.load(); }
+    /// How many apps' sound is being captured, or -1 for the whole PC's.
+    int AppSources() const { return appSources_.load(); }
 
 private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> started_{false};
+    std::atomic<int> appSources_{-1};
     std::atomic<uint64_t> packets_{0};
     /// Atomic for the same reason as `packets_`, which it sits next to in the
     /// same log line: the audio thread counts silent buffers while the sender

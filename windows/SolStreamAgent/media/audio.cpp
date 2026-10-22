@@ -4,11 +4,14 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
+#include <audioclientactivationparams.h>
 #include <opus.h>
 #include "log.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 
@@ -23,6 +26,9 @@ constexpr int kPacketMs = 5;
 /// The most libopus will put in one packet whatever it is asked for, and well
 /// inside one datagram.
 constexpr int kMaxOpusPacket = 1275;
+
+/// What goes on the wire is always 48 kHz stereo, whatever the endpoint runs at.
+constexpr uint32_t kWireRate = 48000;
 
 template <typename T>
 void Release(T*& p) {
@@ -176,16 +182,400 @@ OpusEncoder* OpenOpus(const AudioEncoding& encoding) {
     return encoder;
 }
 
-}  // namespace
+// ── Encoding and sending ────────────────────────────────────────────────────
 
-void AudioCapture::Stop() { stop_.store(true); }
+/// 48 kHz stereo float in, packets out: PCM or Opus, as the Mac asked.
+///
+/// Shared by both sources below, which differ only in where the samples come
+/// from. A packet that is nothing but digital zero is not sent at all, whatever
+/// the source: an app capture delivers its silences as zeros rather than with
+/// AUDCLNT_BUFFERFLAGS_SILENT, and sending them would cost Lossless 1.6 Mbit/s
+/// to transmit nothing. The Mac plays silence when its queue runs dry, which is
+/// the same result for no bytes.
+class Packetizer {
+public:
+    Packetizer(const AudioEncoding& encoding, const AudioCapture::Sink& sink,
+               std::atomic<uint64_t>& packets, std::atomic<uint64_t>& silent)
+        : sink_(sink), packets_(packets), silent_(silent) {
+        opus_ = encoding.codec == AudioEncoding::Codec::Opus ? OpenOpus(encoding) : nullptr;
+        format_ = opus_ ? 2 : 1;
+        // PCM stays at 5 ms whatever was asked: 10 ms of it is 1920 bytes, which
+        // no longer fits in a datagram.
+        frames_ = (size_t) kWireRate * (opus_ ? encoding.frameMs : kPacketMs) / 1000;
+        QueryPerformanceFrequency(&frequency_);
+        QueryPerformanceCounter(&started_);
+    }
+    ~Packetizer() {
+        if (opus_) { opus_encoder_destroy(opus_); }
+    }
+    Packetizer(const Packetizer&) = delete;
+    Packetizer& operator=(const Packetizer&) = delete;
 
-void AudioCapture::Run(const AudioEncoding& encoding, Sink sink,
-                       std::function<bool()> keepGoing) {
-    stop_.store(false);
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool ownsCom = SUCCEEDED(com);
+    /// Send every whole packet `pending` holds, and keep the remainder.
+    void Drain(std::vector<float>& pending) {
+        const size_t samples = frames_ * 2;
+        size_t at = 0;
+        for (; pending.size() - at >= samples; at += samples) {
+            const float* chunk = pending.data() + at;
+            if (std::all_of(chunk, chunk + samples, [](float v) { return v == 0.0f; })) {
+                silent_.fetch_add(1);
+                continue;
+            }
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            const uint32_t timestampUs = (uint32_t)
+                ((now.QuadPart - started_.QuadPart) * 1000000 / frequency_.QuadPart);
+            if (opus_) {
+                // Float straight in: Opus would only turn S16 back into float.
+                const opus_int32 length = opus_encode_float(
+                    opus_, chunk, (int) frames_, encoded_, (opus_int32) sizeof(encoded_));
+                if (length > 0) {
+                    sink_(encoded_, (size_t) length, seq_++, timestampUs, kWireRate, 2, format_);
+                    packets_.fetch_add(1);
+                } else if (++encodeFailures_ == 1 || encodeFailures_ % 1000 == 0) {
+                    // Losing a packet loses its 10 ms and nothing else, so this
+                    // is said, not acted on -- once, then every thousandth.
+                    Log("[media] Opus could not encode a packet (%s); %llu so far",
+                        opus_strerror((int) length), (unsigned long long) encodeFailures_);
+                }
+            } else {
+                packet_.resize(samples);
+                for (size_t i = 0; i < samples; ++i) {
+                    packet_[i] = Clamp16(chunk[i]);
+                }
+                sink_((const unsigned char*) packet_.data(), samples * sizeof(int16_t),
+                      seq_++, timestampUs, kWireRate, 2, format_);
+                packets_.fetch_add(1);
+            }
+        }
+        pending.erase(pending.begin(), pending.begin() + at);
+    }
 
+private:
+    const AudioCapture::Sink& sink_;
+    std::atomic<uint64_t>& packets_;
+    std::atomic<uint64_t>& silent_;
+    OpusEncoder* opus_ = nullptr;
+    unsigned char format_ = 1;
+    size_t frames_ = 0;
+    unsigned char encoded_[kMaxOpusPacket];
+    std::vector<int16_t> packet_;
+    uint64_t encodeFailures_ = 0;
+    uint32_t seq_ = 1;
+    LARGE_INTEGER frequency_{}, started_{};
+};
+
+// ── One app's sound ──────────────────────────────────────────────────────────
+//
+// PROCESS LOOPBACK, which Windows has had since build 20348 -- every Windows 11:
+// the sound of one process and everything it started, and nothing else. A
+// browser's audio comes from a child process of the browser, so the tree is
+// what is wanted rather than the one process.
+//
+// Measured on the dev box before this was written, because the design hangs on
+// it: a tap delivers continuously, 100 buffers a second, whether its app is
+// playing or not, and a silent app's buffers are zeros WITHOUT the silent flag.
+// So the taps of several apps run in step and can simply be added together,
+// and the packetizer's zero check is what keeps a quiet app off the wire. The
+// endpoint's mix format does not apply -- GetMixFormat answers E_NOTIMPL -- so
+// the tap is asked for the wire format itself and needs no resampling.
+
+/// The completion handler ActivateAudioInterfaceAsync calls back on a thread of
+/// its own. It has to be agile, which answering for IAgileObject declares.
+class Activation final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
+public:
+    Activation() : done(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+
+    HANDLE done;
+    HRESULT result = E_FAIL;
+
+    /// The activated client, once `done` is set, for the caller to own.
+    IAudioClient* Take() {
+        IAudioClient* taken = client_;
+        client_ = nullptr;
+        return taken;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG) InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG left = InterlockedDecrement(&refs_);
+        if (left == 0) { delete this; }
+        return (ULONG) left;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IActivateAudioInterfaceCompletionHandler)) {
+            *out = static_cast<IActivateAudioInterfaceCompletionHandler*>(this);
+        } else if (iid == __uuidof(IAgileObject)) {
+            *out = static_cast<IAgileObject*>(this);
+        } else {
+            *out = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE ActivateCompleted(IActivateAudioInterfaceAsyncOperation* op) override {
+        HRESULT activated = E_FAIL;
+        IUnknown* unknown = nullptr;
+        HRESULT hr = op->GetActivateResult(&activated, &unknown);
+        if (SUCCEEDED(hr)) { hr = activated; }
+        if (SUCCEEDED(hr) && unknown) {
+            hr = unknown->QueryInterface(__uuidof(IAudioClient), (void**) &client_);
+        }
+        if (unknown) { unknown->Release(); }
+        result = hr;
+        SetEvent(done);
+        return S_OK;
+    }
+
+private:
+    // A handler whose caller gave up waiting is released by the operation
+    // when it finally completes, and takes the client with it.
+    ~Activation() {
+        if (client_) { client_->Release(); }
+        if (done) { CloseHandle(done); }
+    }
+    LONG refs_ = 1;
+    IAudioClient* client_ = nullptr;
+};
+
+struct ProcessTap {
+    DWORD pid = 0;
+    IAudioClient* client = nullptr;
+    IAudioCaptureClient* capture = nullptr;
+    HANDLE ready = nullptr;
+    /// Stereo frames read and not yet mixed.
+    std::vector<float> queued;
+};
+
+void CloseTap(ProcessTap& tap) {
+    if (tap.client) { tap.client->Stop(); }
+    Release(tap.capture);
+    Release(tap.client);
+    if (tap.ready) { CloseHandle(tap.ready); tap.ready = nullptr; }
+    tap.queued.clear();
+}
+
+HRESULT OpenTap(DWORD pid, ProcessTap& tap) {
+    AUDIOCLIENT_ACTIVATION_PARAMS params{};
+    params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+    params.ProcessLoopbackParams.TargetProcessId = pid;
+    params.ProcessLoopbackParams.ProcessLoopbackMode =
+        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+    PROPVARIANT variant{};
+    variant.vt = VT_BLOB;
+    variant.blob.cbSize = sizeof(params);
+    variant.blob.pBlobData = (BYTE*) &params;
+
+    Activation* handler = new Activation();
+    IActivateAudioInterfaceAsyncOperation* operation = nullptr;
+    HRESULT hr = ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+                                             __uuidof(IAudioClient), &variant, handler,
+                                             &operation);
+    if (SUCCEEDED(hr)) {
+        // Measured at well under a millisecond. The bound is for a wedged
+        // audio service, which must not take the audio thread down with it.
+        hr = WaitForSingleObject(handler->done, 2000) == WAIT_OBJECT_0
+                 ? handler->result : HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    }
+    tap.pid = pid;
+    tap.client = SUCCEEDED(hr) ? handler->Take() : nullptr;
+    if (operation) { operation->Release(); }
+    handler->Release();
+    if (SUCCEEDED(hr) && !tap.client) { hr = E_NOINTERFACE; }
+
+    if (SUCCEEDED(hr)) {
+        WAVEFORMATEX format{};
+        format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+        format.nChannels = 2;
+        format.nSamplesPerSec = kWireRate;
+        format.wBitsPerSample = 32;
+        format.nBlockAlign = 8;
+        format.nAvgBytesPerSec = kWireRate * 8;
+        // Event-driven, as a process tap has to be, with 20 ms of buffer:
+        // twice the engine's period, drained every period.
+        hr = tap.client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                    AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+                                        | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                                        | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                                    200000, 0, &format, nullptr);
+    }
+    if (SUCCEEDED(hr)) {
+        tap.ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        hr = tap.ready ? tap.client->SetEventHandle(tap.ready) : HRESULT_FROM_WIN32(GetLastError());
+    }
+    if (SUCCEEDED(hr)) {
+        hr = tap.client->GetService(__uuidof(IAudioCaptureClient), (void**) &tap.capture);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = tap.client->Start();
+    }
+    if (FAILED(hr)) { CloseTap(tap); }
+    return hr;
+}
+
+/// Everything a tap has delivered, onto the end of its queue. A buffer
+/// flagged silent still holds its place in time, as zeros, so the apps
+/// being mixed stay in step.
+void ReadTap(ProcessTap& tap) {
+    UINT32 available = 0;
+    while (SUCCEEDED(tap.capture->GetNextPacketSize(&available)) && available > 0) {
+        BYTE* data = nullptr;
+        UINT32 frames = 0;
+        DWORD flags = 0;
+        if (FAILED(tap.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
+            return;
+        }
+        const size_t at = tap.queued.size();
+        tap.queued.resize(at + (size_t) frames * 2, 0.0f);
+        if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && frames > 0) {
+            memcpy(tap.queued.data() + at, data, (size_t) frames * 2 * sizeof(float));
+        }
+        tap.capture->ReleaseBuffer(frames);
+    }
+}
+
+/// How far one tap may run ahead of another before the one behind is counted
+/// as silent for the difference: three engine periods. Taps deliver in step,
+/// so this is reached only by an app that has stalled or is going away, and it
+/// must not hold up the others' sound while it does.
+constexpr size_t kMixSlackFrames = kWireRate * 30 / 1000;
+
+/// Every tap's sound added together, as far as all of them have reached.
+void Mix(std::vector<ProcessTap>& taps, std::vector<float>& out) {
+    size_t least = SIZE_MAX, most = 0;
+    for (const ProcessTap& tap : taps) {
+        const size_t frames = tap.queued.size() / 2;
+        least = frames < least ? frames : least;
+        most = frames > most ? frames : most;
+    }
+    if (taps.empty()) { return; }
+    size_t frames = least;
+    if (most > least + kMixSlackFrames) { frames = most - kMixSlackFrames; }
+    if (frames == 0) { return; }
+    const size_t base = out.size();
+    out.resize(base + frames * 2, 0.0f);
+    for (ProcessTap& tap : taps) {
+        const size_t take = frames * 2 < tap.queued.size() ? frames * 2 : tap.queued.size();
+        for (size_t i = 0; i < take; ++i) {
+            out[base + i] += tap.queued[i];
+        }
+        tap.queued.erase(tap.queued.begin(), tap.queued.begin() + take);
+    }
+}
+
+/// The name of a process's executable, for the log.
+std::string ProcessName(DWORD pid) {
+    std::string name = "pid " + std::to_string(pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) { return name; }
+    wchar_t path[MAX_PATH];
+    DWORD length = MAX_PATH;
+    if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+        const wchar_t* base = wcsrchr(path, L'\\');
+        char narrow[MAX_PATH];
+        if (WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : path, -1, narrow, sizeof(narrow),
+                                nullptr, nullptr) > 0) {
+            name = std::string(narrow) + " (" + std::to_string(pid) + ")";
+        }
+    }
+    CloseHandle(process);
+    return name;
+}
+
+/// Whether this Windows can capture one process's sound: build 20348 or
+/// later. Asked of ntdll, because GetVersionEx lies to an executable whose
+/// manifest does not name the version it is running on.
+bool HasProcessLoopback() {
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    auto rtlGetVersion = ntdll
+        ? reinterpret_cast<RtlGetVersionFn>(
+              reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion")))
+        : nullptr;
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    return rtlGetVersion && rtlGetVersion(&version) == 0
+        && (version.dwMajorVersion > 10
+            || (version.dwMajorVersion == 10 && version.dwBuildNumber >= 20348));
+}
+
+/// The streamed apps' sound, and nothing else, until `running` says stop.
+void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
+             const std::function<bool()>& running, std::atomic<bool>& started,
+             std::atomic<int>& appSources) {
+    std::vector<ProcessTap> taps;
+    std::vector<DWORD> current;
+    std::vector<HANDLE> events;
+    std::vector<float> pending;
+    ULONGLONG nextCheck = 0;
+    started.store(true);
+    Log("[media] audio from the streamed apps only");
+
+    while (running()) {
+        // The streamed windows come and go during a session -- the Mac places
+        // them after the session opens, and closes and adds them as it likes --
+        // so which apps to hear is asked again four times a second.
+        const ULONGLONG now = GetTickCount64();
+        if (now >= nextCheck) {
+            nextCheck = now + 250;
+            std::vector<DWORD> wanted;
+            for (unsigned long pid : processes()) {
+                if (pid != 0 && pid != GetCurrentProcessId()) { wanted.push_back((DWORD) pid); }
+            }
+            std::sort(wanted.begin(), wanted.end());
+            wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
+            if (wanted != current) {
+                // Kept where still wanted, so an app that stays does not lose a
+                // beat when another joins it.
+                for (ProcessTap& tap : taps) {
+                    if (!std::binary_search(wanted.begin(), wanted.end(), tap.pid)) {
+                        Log("[media] no longer hearing %s", ProcessName(tap.pid).c_str());
+                        CloseTap(tap);
+                    }
+                }
+                taps.erase(std::remove_if(taps.begin(), taps.end(),
+                                          [](const ProcessTap& tap) { return !tap.client; }),
+                           taps.end());
+                for (DWORD pid : wanted) {
+                    const bool have = std::any_of(taps.begin(), taps.end(),
+                                                  [pid](const ProcessTap& tap) { return tap.pid == pid; });
+                    if (have) { continue; }
+                    ProcessTap tap;
+                    const HRESULT hr = OpenTap(pid, tap);
+                    if (SUCCEEDED(hr)) {
+                        Log("[media] hearing %s", ProcessName(pid).c_str());
+                        taps.push_back(std::move(tap));
+                    } else {
+                        Log("[media] could not hear %s (0x%08lX)", ProcessName(pid).c_str(), hr);
+                    }
+                }
+                // A failed open is not retried until the set changes; asking a
+                // process that refused once, four times a second, would only
+                // fill the log.
+                current = wanted;
+                appSources.store((int) taps.size());
+            }
+        }
+        if (taps.empty()) {
+            Sleep(kPacketMs);
+            continue;
+        }
+        events.clear();
+        for (const ProcessTap& tap : taps) { events.push_back(tap.ready); }
+        WaitForMultipleObjects((DWORD) events.size(), events.data(), FALSE, 20);
+        for (ProcessTap& tap : taps) { ReadTap(tap); }
+        Mix(taps, pending);
+        packetizer.Drain(pending);
+    }
+
+    for (ProcessTap& tap : taps) { CloseTap(tap); }
+    started.store(false);
+}
+
+/// Everything the PC plays, as the default output device is sent it.
+void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
+                std::atomic<bool>& started, std::atomic<uint64_t>& silent) {
     IMMDeviceEnumerator* enumerator = nullptr;
     IMMDevice* device = nullptr;
     IAudioClient* client = nullptr;
@@ -224,41 +614,21 @@ void AudioCapture::Run(const AudioEncoding& encoding, Sink sink,
         Release(device);
         Release(enumerator);
         if (format) { CoTaskMemFree(format); }
-        if (ownsCom) { CoUninitialize(); }
         return;
     }
 
-    started_.store(true);
+    started.store(true);
     Log("[media] audio loopback at %lu Hz, %u channels, %u bits",
         format->nSamplesPerSec, format->nChannels, format->wBitsPerSample);
 
-    // What goes on the wire is always 48 kHz stereo, whatever the endpoint is
-    // running at. The Mac's renderer is fixed at 48 kHz, and a rate field it
-    // ignores would be a silent half-speed bug rather than a loud one. It is
-    // also the rate Opus works at internally, so it resamples nothing.
-    constexpr uint32_t kWireRate = 48000;
+    // To 48 kHz, whatever the endpoint is running at. The Mac's renderer is
+    // fixed at 48 kHz, and a rate field it ignores would be a silent half-speed
+    // bug rather than a loud one. It is also the rate Opus works at internally.
     const double ratio = (double) format->nSamplesPerSec / (double) kWireRate;
     Resampler resampler;
-
-    OpusEncoder* opus =
-        encoding.codec == AudioEncoding::Codec::Opus ? OpenOpus(encoding) : nullptr;
-    const unsigned char wireFormat = opus ? 2 : 1;
-    // PCM stays at 5 ms whatever was asked: 10 ms of it is 1920 bytes, which no
-    // longer fits in a datagram.
-    const size_t framesPerPacket =
-        (size_t) kWireRate * (opus ? encoding.frameMs : kPacketMs) / 1000;
-    unsigned char encoded[kMaxOpusPacket];
-    uint64_t encodeFailures = 0;
-
-    LARGE_INTEGER frequency{}, started{};
-    QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&started);
-
     std::vector<float> converted, pending;
-    std::vector<int16_t> packet;
-    uint32_t seq = 1;
 
-    while (!stop_.load() && keepGoing()) {
+    while (running()) {
         UINT32 available = 0;
         if (FAILED(capture->GetNextPacketSize(&available)) || available == 0) {
             Sleep(kPacketMs);
@@ -272,10 +642,8 @@ void AudioCapture::Run(const AudioEncoding& encoding, Sink sink,
                 break;
             }
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Nothing is playing. Sending digital silence would cost 1.5
-                // Mbit/s to transmit nothing; the Mac plays silence when its
-                // queue runs dry, which is the same result for no bytes.
-                silent_.fetch_add(1);
+                // Nothing is playing; see Packetizer on why nothing is sent.
+                silent.fetch_add(1);
             } else if (frames > 0) {
                 Convert(format, data, frames, converted);
                 resampler.Run(converted, ratio, pending);
@@ -285,47 +653,41 @@ void AudioCapture::Run(const AudioEncoding& encoding, Sink sink,
                 break;
             }
         }
-
-        while (pending.size() >= framesPerPacket * 2) {
-            LARGE_INTEGER now{};
-            QueryPerformanceCounter(&now);
-            const uint32_t timestampUs = (uint32_t)
-                ((now.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart);
-            if (opus) {
-                // Float straight in: Opus would only turn S16 back into float.
-                const opus_int32 length = opus_encode_float(
-                    opus, pending.data(), (int) framesPerPacket, encoded,
-                    (opus_int32) sizeof(encoded));
-                if (length > 0) {
-                    sink(encoded, (size_t) length, seq++, timestampUs, kWireRate, 2, wireFormat);
-                    packets_.fetch_add(1);
-                } else if (++encodeFailures == 1 || encodeFailures % 1000 == 0) {
-                    // Losing a packet loses its 10 ms and nothing else, so this
-                    // is said, not acted on -- once, then every thousandth.
-                    Log("[media] Opus could not encode a packet (%s); %llu so far",
-                        opus_strerror((int) length), (unsigned long long) encodeFailures);
-                }
-            } else {
-                packet.resize(framesPerPacket * 2);
-                for (size_t i = 0; i < packet.size(); ++i) {
-                    packet[i] = Clamp16(pending[i]);
-                }
-                sink((const unsigned char*) packet.data(), packet.size() * sizeof(int16_t),
-                     seq++, timestampUs, kWireRate, 2, wireFormat);
-                packets_.fetch_add(1);
-            }
-            pending.erase(pending.begin(), pending.begin() + framesPerPacket * 2);
-        }
+        packetizer.Drain(pending);
     }
 
     client->Stop();
-    started_.store(false);
-    if (opus) { opus_encoder_destroy(opus); }
+    started.store(false);
     Release(capture);
     Release(client);
     Release(device);
     Release(enumerator);
     if (format) { CoTaskMemFree(format); }
+}
+
+}  // namespace
+
+void AudioCapture::Stop() { stop_.store(true); }
+
+void AudioCapture::Run(const AudioEncoding& encoding, const Processes& processes, Sink sink,
+                       std::function<bool()> keepGoing) {
+    stop_.store(false);
+    appSources_.store(-1);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool ownsCom = SUCCEEDED(com);
+    Packetizer packetizer(encoding, sink, packets_, silent_);
+    const auto running = [&] { return !stop_.load() && keepGoing(); };
+
+    if (processes && HasProcessLoopback()) {
+        RunApps(processes, packetizer, running, started_, appSources_);
+    } else {
+        if (processes) {
+            Log("[media] only the streamed apps' sound needs Windows 10 build 20348 or "
+                "later; sending the whole PC's");
+        }
+        RunWholePc(packetizer, running, started_, silent_);
+    }
+    appSources_.store(-1);
     if (ownsCom) { CoUninitialize(); }
 }
 
