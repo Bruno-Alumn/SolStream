@@ -59,21 +59,12 @@ struct ReleaseVersion: Comparable, CustomStringConvertible {
 
     var description: String { text }
 
-    /// 1.0 and 1.0.0 are the same version.
-    private static func padded(_ a: ReleaseVersion, _ b: ReleaseVersion) -> ([Int], [Int]) {
-        let count = max(a.parts.count, b.parts.count)
-        return (a.parts + Array(repeating: 0, count: count - a.parts.count),
-                b.parts + Array(repeating: 0, count: count - b.parts.count))
-    }
-
     static func == (a: ReleaseVersion, b: ReleaseVersion) -> Bool {
-        let (x, y) = padded(a, b)
-        return x == y
+        a.parts == b.parts
     }
 
     static func < (a: ReleaseVersion, b: ReleaseVersion) -> Bool {
-        let (x, y) = padded(a, b)
-        return x.lexicographicallyPrecedes(y)
+        a.parts.lexicographicallyPrecedes(b.parts)
     }
 }
 

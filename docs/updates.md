@@ -85,13 +85,19 @@ the public repository will.
 ### For testing
 
 `SOLSTREAM_PRETEND_VERSION=X.Y.Z` makes an updater believe it is that version
-when it checks. It never lets an install go sideways or down: both updaters
-compare against the version they were built as before installing.
+when it checks. It never offers or installs anything not strictly newer than
+the version the program was really built as.
 
 On Windows, `SolStream.exe --check-updates` runs one check and prints the
 result; with `--download` it also fetches and verifies the installer, and never
 runs it. Both obey the two variables above and exit 0 when the check completed,
 1 when it failed.
+
+`SolStream.exe --verify-update-signature <SHA256SUMS> <SHA256SUMS.sig>
+[<public key base64, or a file holding it>]` checks a signature with no UI and
+touches nothing else: exit 0 when it verifies, 1 when it does not, 2 on wrong
+usage. Without the third argument it uses the compiled-in production key. CI
+and the release workflow run it on `tests/update-vector`.
 
 ## When
 

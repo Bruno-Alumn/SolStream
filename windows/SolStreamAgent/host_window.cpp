@@ -1763,12 +1763,9 @@ NOTIFYICONDATAW TrayData(HWND window);
 /// is "keep it": guessing wrong that way costs a shortcut, and the other way it
 /// costs the installer deleting one.
 ///
-/// The logon task is always asked for, because it is also how the installer
-/// starts the new copy. An update told --no-logon would leave SolStream not
-/// running afterwards, with a Mac on the other side waiting for it. That does
-/// turn starting at logon back on for somebody who had turned it off, so the
-/// banner's Install says so; keeping their choice needs the installer to start
-/// the new copy some other way first.
+/// Start at logon is read back from the installed task (StartsAtLogon), so an
+/// update keeps the person's choice: with it off, the installer registers a task
+/// with no trigger and still uses it to start the new copy.
 InstallOptions InstalledOptions() {
     auto present = [](int csidl) {
         wchar_t folder[MAX_PATH] = {0};
