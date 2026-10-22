@@ -114,8 +114,19 @@ std::wstring QualifySystemCommand(const std::wstring& command) {
     if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) {
         return command;
     }
+    // Named outright, CreateProcess adds no ".exe" and searches nowhere, so
+    // the name has to be the file's: the extension spelled out, and Windows
+    // PowerShell found where it lives, under System32 rather than in it.
+    std::wstring name = program;
+    if (name.find(L'.') == std::wstring::npos) {
+        name += L".exe";
+    }
+    std::wstring folder = system_dir;
+    if (lstrcmpiW(name.c_str(), L"powershell.exe") == 0) {
+        folder += L"\\WindowsPowerShell\\v1.0";
+    }
     const size_t rest = command[0] == L'"' ? program.size() + 2 : program.size();
-    return L"\"" + std::wstring(system_dir) + L"\\" + program + L"\""
+    return L"\"" + folder + L"\\" + name + L"\""
          + command.substr((std::min)(rest, command.size()));
 }
 

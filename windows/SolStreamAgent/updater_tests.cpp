@@ -442,7 +442,13 @@ void TestQualifyCommand() {
     CHECK(QualifySystemCommand(netsh).rfind(sys + L"netsh.exe\" advfirewall", 0) == 0);
     CHECK(QualifySystemCommand(L"schtasks.exe /run") == sys + L"schtasks.exe\" /run");
     CHECK(QualifySystemCommand(L"\"pnputil.exe\" /enum-drivers") == sys + L"pnputil.exe\" /enum-drivers");
-    CHECK(QualifySystemCommand(L"whoami") == sys + L"whoami\"");
+    CHECK(QualifySystemCommand(L"whoami") == sys + L"whoami.exe\"");
+    // Windows PowerShell is under System32, not in it; named as plain
+    // System32\powershell.exe it never started, and the installer's stop and
+    // firewall sweep silently did nothing.
+    CHECK(QualifySystemCommand(L"powershell.exe -NoProfile -Command \"Stop-Process C:\\x\"")
+          == sys + L"WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -Command \"Stop-Process C:\\x\"");
+    CHECK(QualifySystemCommand(L"PowerShell.EXE -c x").rfind(sys + L"WindowsPowerShell\\v1.0\\PowerShell.EXE\"", 0) == 0);
     // Given by path, it is left alone.
     const std::wstring quoted = L"\"C:\\Program Files\\SolStream\\SolStream.exe\" --x";
     CHECK(QualifySystemCommand(quoted) == quoted);
