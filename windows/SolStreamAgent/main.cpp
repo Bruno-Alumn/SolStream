@@ -4475,7 +4475,8 @@ std::string g_holder_id;
 /// Set by a takeover, read by the serving thread on its next wakeup.
 bool g_holder_retiring = false;
 /// When the holder last sent anything, by GetTickCount64. Written on every
-/// receive, so it is atomic rather than under the mutex.
+/// receive, so it is atomic rather than under the mutex. Bytes still unread
+/// on the socket count as heard as well: see ListenForTakeover.
 std::atomic<unsigned long long> g_holder_heard_at{0};
 
 /// Record `client` as the session's holder, the moment it is authenticated.
@@ -4973,6 +4974,18 @@ bool ListenForTakeover(SOCKET client) {
         const unsigned long long heard = g_holder_heard_at.load();
         const unsigned long long now = GetTickCount64();
         silent_ms = now > heard ? now - heard : 0;
+        // The stamp is written when the serving thread reads, and a thread
+        // inside a long command -- a launch waits up to a minute for its
+        // window -- reads nothing until it returns, while the Mac's pings
+        // pile up unread behind it. Bytes waiting on the socket are the Mac
+        // being heard from all the same. A Mac whose network has gone sends
+        // nothing new, so its takeover waits at most for the command.
+        if (present) {
+            u_long waiting = 0;
+            if (ioctlsocket(g_holder_socket, FIONREAD, &waiting) == 0 && waiting > 0) {
+                silent_ms = 0;
+            }
+        }
         verdict = solstream::DecideTakeover(proof_ok, id, present, g_holder_id, silent_ms);
         if (verdict == solstream::TakeoverVerdict::Take && present) {
             // Under the lock, so this is still the holder's socket and not a
