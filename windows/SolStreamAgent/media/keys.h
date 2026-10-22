@@ -35,9 +35,14 @@ namespace solstream::media {
 /// 0xE0, a zero, or a break code.
 ///
 /// Almost every key goes in as KEYEVENTF_SCANCODE, so this PC's layout decides
-/// what it means. Four kinds do not, because there it is the Mac's meaning
-/// that is wanted and no position on a PC keyboard carries it:
+/// what it means. A few do not, because there it is the Mac's meaning that is
+/// wanted and no position on a PC keyboard is sure to carry it:
 ///
+///   - Control (0x1D, and 0xE01D on the right) goes in as VK_LCONTROL and
+///     VK_RCONTROL. The Mac's Command arrives as Control for what Control
+///     does, and some layouts put another key at its place: Korean's 101-key
+///     Type 1 has Hanja on the right one, so right-Command-C opened the Hanja
+///     window instead of copying.
 ///   - The keypad's digits and point go in by virtual key. A Mac keypad has no
 ///     Num Lock and always types digits, while the same scan codes on a PC
 ///     with Num Lock off are Home, End and the arrows.

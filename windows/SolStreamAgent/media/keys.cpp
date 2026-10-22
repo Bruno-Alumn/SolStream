@@ -12,6 +12,9 @@ constexpr unsigned char kScanKeypadEquals = 0x59;
 constexpr unsigned char kScanLang1 = 0xF2;  // Kana
 constexpr unsigned char kScanLang2 = 0xF1;  // Eisu
 
+/// Control's place, left and, behind 0xE0, right.
+constexpr unsigned char kScanControl = 0x1D;
+
 /// The keypad's digits and point, as the virtual keys they always mean on a
 /// Mac. Zero for any other code.
 WORD KeypadVirtualKey(unsigned char scan) {
@@ -42,6 +45,16 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
     INPUT input{};
     input.type = INPUT_KEYBOARD;
     const DWORD up = down ? 0 : KEYEVENTF_KEYUP;
+    // Control by virtual key, so that it is Control whatever the layout here
+    // makes of its place; the scan code is still given, as for the keypad.
+    if (scan == kScanControl) {
+        const bool right = prefix == 0xE0;
+        input.ki.wVk = right ? VK_RCONTROL : VK_LCONTROL;
+        input.ki.wScan = scan;
+        input.ki.dwFlags = up | (right ? KEYEVENTF_EXTENDEDKEY : 0);
+        *out = input;
+        return true;
+    }
     if (prefix == 0) {
         // By virtual key, with the scan code still given: what the PC's own
         // keyboard driver would report for the key, so a game reading raw

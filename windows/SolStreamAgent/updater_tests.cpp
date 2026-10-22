@@ -1851,10 +1851,24 @@ void TestScanKeys() {
     CHECK(BuildScanKeyInput(0xE04B, true, &in));
     CHECK(in.ki.wScan == 0x4B && in.ki.wVk == 0);
     CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY));
-    CHECK(BuildScanKeyInput(0xE01D, false, &in));
+    CHECK(BuildScanKeyInput(0xE038, false, &in));
     CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
     CHECK(BuildScanKeyInput(0xE01C, true, &in) && in.ki.wScan == 0x1C
           && (in.ki.dwFlags & KEYEVENTF_EXTENDEDKEY));
+
+    // Control goes in by virtual key, so it is Control on every layout: on
+    // Korean's 101-key Type 1 the right one's place is Hanja. The scan code
+    // is still given, and the right one is still extended.
+    CHECK(BuildScanKeyInput(0x001D, true, &in));
+    CHECK(in.ki.wVk == VK_LCONTROL && in.ki.wScan == 0x1D && in.ki.dwFlags == 0);
+    CHECK(BuildScanKeyInput(0xE01D, true, &in));
+    CHECK(in.ki.wVk == VK_RCONTROL && in.ki.wScan == 0x1D
+          && in.ki.dwFlags == KEYEVENTF_EXTENDEDKEY);
+    CHECK(BuildScanKeyInput(0xE01D, false, &in));
+    CHECK(in.ki.wVk == VK_RCONTROL
+          && in.ki.dwFlags == (KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+    CHECK(BuildScanKeyInput(0x001D, false, &in) && in.ki.wVk == VK_LCONTROL
+          && in.ki.dwFlags == KEYEVENTF_KEYUP);
 
     // The keypad's digits and point go in by virtual key, so this PC's Num
     // Lock cannot turn them into Home, End and the arrows. The scan code is
