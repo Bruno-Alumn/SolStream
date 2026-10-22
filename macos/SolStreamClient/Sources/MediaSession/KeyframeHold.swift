@@ -24,6 +24,15 @@ struct KeyframeHold {
         case ignore
     }
 
+    /// The round trip to the host, or that none has been measured yet. Not a
+    /// bare number, because MediaClient's reads 0 until the first pong and a
+    /// 0 passed on as it stands is the shortest path there is; see
+    /// `unmeasuredRttMs`.
+    enum RoundTrip: Equatable {
+        case unmeasured
+        case measured(Double)
+    }
+
     /// A lost run reports every picture in it at once, and one request covers
     /// the lot.
     static let burstMs: Double = 20
@@ -147,8 +156,7 @@ struct KeyframeHold {
     /// Whether to ask (again) now: at once when nothing has been asked yet,
     /// which is the session opening, and otherwise once the last request the
     /// host can have acted on has gone unanswered for a quarter-second -- or a
-    /// round trip and a little more, where that is longer. `rttMs` is nil
-    /// until a round trip has been measured.
+    /// round trip and a little more, where that is longer.
     ///
     /// Unanswered means no fragment of the IDR either. The repeat used to fire
     /// on the clock alone, and over a relayed path -- a 150-200 ms round trip,
@@ -158,11 +166,15 @@ struct KeyframeHold {
     /// path there is. Counting from the latest fragment instead, the repeat
     /// comes only once the IDR has stopped arriving; and an IDR that broke on
     /// the way is reported damaged, which asks at once.
-    mutating func reaskDue(now: UInt64, rttMs: Double?) -> Bool {
+    mutating func reaskDue(now: UInt64, roundTrip: RoundTrip) -> Bool {
         guard holding else { return false }
         if var since = askedAt {
             if let idr = arrivingIdr, idr.at > since { since = idr.at }
-            let rtt = rttMs ?? Self.unmeasuredRttMs
+            let rtt: Double
+            switch roundTrip {
+            case .unmeasured: rtt = Self.unmeasuredRttMs
+            case .measured(let ms): rtt = ms
+            }
             let interval = max(Self.reaskMs, rtt + Self.reaskMarginMs)
             if Self.millis(from: since, to: now) <= interval { return false }
         }
