@@ -20,6 +20,7 @@ import SolStreamLogging
 public final class MediaClient {
 
     public struct Stats: Sendable {
+        /// 0 until the first pong.
         public var rttMs: Double = 0
         public var framesComplete: UInt64 = 0
         public var framesDamaged: UInt64 = 0
@@ -33,6 +34,10 @@ public final class MediaClient {
         // offset that was never estimated. The host measures the same interval
         // end to end -- "glass->wire last/min/mean" in its five-second line -- so
         // a field that could only ever say nothing is worse than no field.
+
+        /// The round trip, or nil while no pong has measured one: before then
+        /// `rttMs` reads 0, and the path is unknown rather than short.
+        var measuredRttMs: Double? { rttMs > 0 ? rttMs : nil }
     }
 
     /// A complete coded picture, in Annex B, and whether it is a keyframe.
@@ -272,7 +277,7 @@ public final class MediaClient {
         // nothing to start from. See `KeyframeHold.holding`. Before the timer
         // starts, so it is this request and not the timer's.
         stateLock.lock()
-        let askNow = hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds, rttMs: 0)
+        let askNow = hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds, rttMs: nil)
         if askNow { needKeyframe = true }
         stateLock.unlock()
         if askNow { sendFeedback() }
@@ -560,7 +565,7 @@ public final class MediaClient {
             // the one it ignores. See `KeyframeHold.reaskDue`.
             self.stateLock.lock()
             if self.hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds,
-                                  rttMs: self.stats.rttMs) {
+                                  rttMs: self.stats.measuredRttMs) {
                 self.needKeyframe = true
             }
             self.stateLock.unlock()

@@ -38,6 +38,17 @@ struct KeyframeHold {
     /// begun to arrive by then. A round trip, then a frame period or so to
     /// capture and encode it, and room for jitter.
     static let reaskMarginMs: Double = 100
+    /// The round trip to go on before one has been measured. MediaClient's
+    /// reads 0 until the first pong, and taken at its word that is the
+    /// shortest path there is: over a relayed path with a round trip longer
+    /// than a quarter-second, the opening request was repeated before the
+    /// IDR it asked for could have begun to arrive, after the host's limit
+    /// had run out, and a second full IDR followed the first at the start of
+    /// every session. On a LAN the first pong is back within milliseconds, so
+    /// this only ever holds back a slow path's repeat -- or one where the
+    /// first ping or its pong was lost, and that is still repeated, a little
+    /// later.
+    static let unmeasuredRttMs: Double = 500
 
     /// P-frames are being kept from the decoder until an IDR arrives.
     ///
@@ -132,7 +143,8 @@ struct KeyframeHold {
     /// Whether to ask (again) now: at once when nothing has been asked yet,
     /// which is the session opening, and otherwise once the last request the
     /// host can have acted on has gone unanswered for a quarter-second -- or a
-    /// round trip and a little more, where that is longer.
+    /// round trip and a little more, where that is longer. `rttMs` is nil
+    /// until a round trip has been measured.
     ///
     /// Unanswered means no fragment of the IDR either. The repeat used to fire
     /// on the clock alone, and over a relayed path -- a 150-200 ms round trip,
@@ -142,11 +154,12 @@ struct KeyframeHold {
     /// path there is. Counting from the latest fragment instead, the repeat
     /// comes only once the IDR has stopped arriving; and an IDR that broke on
     /// the way is reported damaged, which asks at once.
-    mutating func reaskDue(now: UInt64, rttMs: Double) -> Bool {
+    mutating func reaskDue(now: UInt64, rttMs: Double?) -> Bool {
         guard holding else { return false }
         if var since = askedAt {
             if let idr = arrivingIdr, idr.at > since { since = idr.at }
-            let interval = max(Self.reaskMs, rttMs + Self.reaskMarginMs)
+            let rtt = rttMs ?? Self.unmeasuredRttMs
+            let interval = max(Self.reaskMs, rtt + Self.reaskMarginMs)
             if Self.millis(from: since, to: now) <= interval { return false }
         }
         sent(now)

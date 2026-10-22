@@ -15,7 +15,7 @@ final class KeyframeHoldTests: XCTestCase {
     /// When the request goes out again, read the way MediaClient reads it: on
     /// a 10 ms timer, from `start` to `end`.
     private func repeats(_ hold: inout KeyframeHold, from start: Double, to end: Double,
-                         rttMs: Double) -> [Double] {
+                         rttMs: Double?) -> [Double] {
         var asked: [Double] = []
         var at = start
         while at <= end {
@@ -217,6 +217,35 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertFalse(hold.reaskDue(now: ms(300), rttMs: 300))
         XCTAssertFalse(hold.reaskDue(now: ms(399), rttMs: 300))
         XCTAssertTrue(hold.reaskDue(now: ms(401), rttMs: 300))
+    }
+
+    /// A session opening over a path whose round trip is longer than a
+    /// quarter-second. Until the first pong there is no round trip to go on,
+    /// and none is not the same as a short one: the opening request is not
+    /// repeated while the IDR it asked for cannot yet have begun to arrive.
+    func testTheOpeningRequestIsNotRepeatedBeforeTheRoundTripIsKnown() {
+        var hold = KeyframeHold()
+        var stats = MediaClient.Stats()
+        XCTAssertNil(stats.measuredRttMs, "no pong yet")
+        XCTAssertTrue(hold.reaskDue(now: ms(0), rttMs: stats.measuredRttMs),
+                      "the opening request")
+        // It used to be repeated at 260, a round trip before any IDR could land.
+        XCTAssertEqual(repeats(&hold, from: 10, to: 300, rttMs: stats.measuredRttMs), [])
+
+        // The pong, and then the first fragment of the IDR.
+        stats.rttMs = 310
+        XCTAssertEqual(stats.measuredRttMs, 310)
+        hold.idrArriving(frameId: 4, now: ms(330))
+        XCTAssertEqual(repeats(&hold, from: 310, to: 400, rttMs: stats.measuredRttMs), [])
+        XCTAssertEqual(hold.picture(frameId: 4, isIdr: true, now: ms(410)), .decode)
+    }
+
+    /// The first ping or its pong was lost, so the round trip stays unknown.
+    /// The opening request is still repeated, at the longer interval.
+    func testAnOpeningRequestIsRepeatedWithNoRoundTripMeasured() {
+        var hold = KeyframeHold()
+        XCTAssertTrue(hold.reaskDue(now: ms(0), rttMs: nil))
+        XCTAssertEqual(repeats(&hold, from: 10, to: 1300, rttMs: nil), [610, 1220])
     }
 
     /// The clock is read before the lock is taken, so `now` can be older than a
