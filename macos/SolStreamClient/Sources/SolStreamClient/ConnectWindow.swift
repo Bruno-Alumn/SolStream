@@ -52,14 +52,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private let tailscaleWords = NSTextField(wrappingLabelWithString: "")
     private let tailscaleLink = LinkButton(title: "Get Tailscale", font: DS.caption,
                                            target: nil, action: nil)
-    private var tailscale = TailscaleStatus.missing
+    private var tailscale: TailscaleStatus
+    /// When `tailscale` was read. Nil has the next refresh read it again.
     private var tailscaleCheckedAt: Date?
-    /// Whether the Tailscale line is up. Remembered rather than worked out
-    /// afresh each time, because "Checking…" says nothing either way and the
-    /// line should neither appear nor go while a probe is out.
+    /// Whether the Tailscale line's words are up. Remembered rather than
+    /// worked out afresh each time, because "Checking…" says nothing either
+    /// way and the words should neither appear nor go while a probe is out.
     private var showsTailscaleAdvice = false
     /// What the window was last sized for: which of the two optional parts
-    /// were showing, and what the Tailscale line said, since its two wordings
+    /// had room, and what the Tailscale line says, since its two wordings
     /// can wrap differently. The window is re-fitted when this changes and at
     /// no other time.
     private var fittedFor: (guide: Bool, advice: String?)?
@@ -69,6 +70,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var discovered: [DiscoveredHost] = []
     private var state: HostState
     private var probe: DispatchWorkItem?
+    /// Which probe is the latest. Cancelling one that is already connecting
+    /// does not stop it, and its answer -- given before Tailscale came up,
+    /// say -- would otherwise land after the fresh probe was asked for.
+    private var probeGeneration = 0
     /// Set once a host is picked or typed in this window. Until then the host on
     /// show is only what was remembered from last time, and discovery is allowed
     /// to replace it with a better one; after it, nothing replaces a choice.
@@ -78,11 +83,23 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var searchingRoutes = false
 
     private let onConnect: (String) -> Void
+    /// Whether this Mac is on Tailscale, and whether a host answers on the
+    /// agent's port: the real readings, except in tests.
+    private let readTailscale: () -> TailscaleStatus
+    private let reach: (String) -> Bool
 
-    init(onConnect: @escaping (String) -> Void) {
+    init(onConnect: @escaping (String) -> Void,
+         readTailscale: @escaping () -> TailscaleStatus = TailscaleStatus.current,
+         reach: ((String) -> Bool)? = nil) {
         self.onConnect = onConnect
+        self.readTailscale = readTailscale
+        self.reach = reach ?? { Self.canReach(host: $0, port: StreamPorts.agent) }
         self.state = HostState(address: Self.lastHost ?? Self.recentHosts.first ?? "",
                                name: nil, isReachable: nil, isPaired: false, latency: nil)
+        // Read now rather than at the first refresh, so that every later
+        // reading has a real one to be compared with.
+        self.tailscale = readTailscale()
+        self.tailscaleCheckedAt = Date()
 
         connectButton = DS.Button(title: "Connect", style: .primary, target: nil, action: nil)
         quitButton = DS.Button(title: "Quit", target: nil, action: nil)
@@ -166,6 +183,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         tailscaleRow.alignment = .firstBaseline
         tailscaleRow.spacing = DS.Space.x3
         tailscaleRow.isHidden = true
+        // Hidden words keep their room; see `refreshTailscaleAdvice`.
+        tailscaleRow.detachesHiddenViews = false
 
         connectButton.target = self
         connectButton.action = #selector(connectTapped)
@@ -295,7 +314,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // First, before anything below reads it: the hint and the Tailscale
         // line used to be decided from the last reading and then refreshed,
         // so coming back from turning Tailscale on still said it was off.
-        readTailscaleIfDue()
+        let tailscaleChanged = readTailscaleIfDue()
+        // A Tailscale address answered, or did not, through the Tailscale
+        // there was before. Kept, that went on saying "Not answering" -- now
+        // with "Check the PC is awake" -- after Tailscale came up, until the
+        // next probe; or "Reachable" after it went down, with no probe to
+        // come. Until the PC is asked again, it is "Checking…".
+        if tailscaleChanged, StreamSettings.isRemote(host: state.address) {
+            state.isReachable = nil
+            state.latency = nil
+        }
         // "Paired" means one thing: this Mac holds the host's agent token.
         state.isPaired = AgentConnection.hasStoredToken(for: state.address)
 
@@ -373,30 +401,47 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         guide.isHidden = steps == nil
         if let steps { guide.show(steps) }
         refreshTailscaleAdvice(firstRun: steps != nil, tailscaleOff: tailscaleOff)
+
+        // Tailscale just came up or went down: ask the PC again now, rather
+        // than at the next recheck, which a PC that answered never gets.
+        if tailscaleChanged, state.isReachable != true {
+            scheduleProbe()
+        }
     }
 
     /// Whether this Mac is on Tailscale, asked at most every few seconds.
     /// Turning Tailscale on is noticed sooner than that when it matters:
     /// coming back from its app makes this window key, which asks again
     /// (`windowDidBecomeKey`).
-    private func readTailscaleIfDue() {
-        if tailscaleCheckedAt.map({ Date().timeIntervalSince($0) > 3 }) ?? true {
-            tailscale = .current()
-            tailscaleCheckedAt = Date()
-        }
+    ///
+    /// - Returns: whether this Mac went on or off Tailscale since the last
+    ///   reading.
+    private func readTailscaleIfDue() -> Bool {
+        guard tailscaleCheckedAt.map({ Date().timeIntervalSince($0) > 3 }) ?? true else { return false }
+        let wasConnected = tailscale.isConnected
+        tailscale = readTailscale()
+        tailscaleCheckedAt = Date()
+        return tailscale.isConnected != wasConnected
     }
 
-    /// The Tailscale line: shown on a first run, and when the PC on show is
-    /// not answering -- exactly when somebody might be away from home, or
-    /// about to be -- unless this Mac is on Tailscale already.
+    /// The Tailscale line: its words shown on a first run, and when the PC on
+    /// show is not answering -- exactly when somebody might be away from
+    /// home, or about to be -- unless this Mac is on Tailscale already.
+    ///
+    /// Its room is kept whenever this Mac is not on Tailscale, words or no
+    /// words. The line used to come and go with the words, and so with each
+    /// probe, which moved Quit and Connect a line and more under the pointer
+    /// a few seconds after the window opened, and back when the PC answered.
     private func refreshTailscaleAdvice(firstRun: Bool, tailscaleOff: Bool) {
         if firstRun || tailscaleOff {
             showsTailscaleAdvice = true
         } else if let reachable = state.isReachable {
             showsTailscaleAdvice = !reachable
         }
-        let advice = showsTailscaleAdvice ? tailscale.advice : nil
+        let advice = tailscale.advice
         tailscaleRow.isHidden = advice == nil
+        tailscaleWords.isHidden = !showsTailscaleAdvice
+        tailscaleLink.isHidden = !showsTailscaleAdvice
         if let advice {
             tailscaleWords.stringValue = advice.words
             tailscaleLink.words = advice.action
@@ -416,18 +461,22 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// One probe per debounced keystroke: each is a connection the agent sees.
     private func scheduleProbe() {
         probe?.cancel()
+        probeGeneration += 1
+        let generation = probeGeneration
         let address = state.address
         guard !address.isEmpty else {
             state.isReachable = nil
             refresh()
             return
         }
+        let reach = self.reach
         let work = DispatchWorkItem { [weak self] in
             let started = Date()
-            let reachable = Self.canReach(host: address, port: StreamPorts.agent)
+            let reachable = reach(address)
             let elapsed = Date().timeIntervalSince(started)
             DispatchQueue.main.async {
-                guard let self, self.state.address == address else { return }
+                guard let self, self.probeGeneration == generation,
+                      self.state.address == address else { return }
                 self.state.isReachable = reachable
                 self.state.latency = reachable ? elapsed : nil
                 if !reachable, self.preferDiscoveredHost() { return }
@@ -560,6 +609,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         guard !candidates.isEmpty else { return false }
         searchingRoutes = true
+        let reach = self.reach
         // All at once, not one after another: a dead address costs its whole
         // timeout, and a `.local` name that will not resolve costs five
         // seconds before the next one is even tried. The most recently used
@@ -572,7 +622,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 group.enter()
                 DispatchQueue.global(qos: .userInitiated).async {
                     let started = Date()
-                    if Self.canReach(host: candidate, port: StreamPorts.agent) {
+                    if reach(candidate) {
                         resultsLock.lock()
                         answered[candidate] = Date().timeIntervalSince(started)
                         resultsLock.unlock()
@@ -715,14 +765,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// say so now rather than in a few seconds.
     func windowDidBecomeKey(_ notification: Notification) {
         becameKeyAt = Date()
-        let wasConnected = tailscale.isConnected
         tailscaleCheckedAt = nil
         refresh()
-        // Tailscale just came up or went down under a PC that was not
-        // answering: ask the PC again now, rather than at the next recheck.
-        if tailscale.isConnected != wasConnected, state.isReachable != true {
-            scheduleProbe()
-        }
     }
 
     func windowWillClose(_ notification: Notification) {
