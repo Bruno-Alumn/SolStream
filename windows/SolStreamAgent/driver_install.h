@@ -45,9 +45,10 @@ enum class DriverStep {
 
 /// Where SolStream's driver stands on this PC.
 enum class DriverState {
-    Missing,  ///< no device of it at all: setup may install one
-    Ready,    ///< present and running
-    Off,      ///< present but disabled or failing -- somebody's, and left alone
+    Missing,         ///< no device of it at all: setup may install one
+    Ready,           ///< present and running
+    RestartPending,  ///< installed, and Windows starts it once the PC restarts
+    Off,             ///< present but disabled or failing -- somebody's, and left alone
 };
 DriverState CurrentDriverState();
 
@@ -66,10 +67,11 @@ std::string ManualInstallAdvice();
 ///
 /// Only on a PC with no device of the driver's at all: a device that is there
 /// but switched off is somebody's own, and this says so rather than install
-/// over it. What it does install it records -- the store package only if this
-/// call added it, the device it created, the settings folder if it made it, or
-/// else the settings file if it wrote one into a folder that was already there
-/// -- and on failure it takes those back.
+/// over it. One that waits for a restart is installed already, and this says
+/// to restart (`restart`) and changes nothing. What it does install it records
+/// -- the store package only if this call added it, the device it created, the
+/// settings folder if it made it, or else the settings file if it wrote one
+/// into a folder that was already there -- and on failure it takes those back.
 ///
 /// `owner` is the window waiting on this, for Windows' own prompts to come up
 /// over. True when a virtual display is ready at the end, including when one

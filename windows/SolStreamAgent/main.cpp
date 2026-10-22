@@ -5397,7 +5397,9 @@ int wmain(int argc, wchar_t** argv) {
             for (const auto& display : virtual_displays) {
                 Log("[agent] virtual display: %s (%s)",
                     ToUtf8(display.friendly_name).c_str(),
-                    display.running ? "running" : "present but not started");
+                    display.running           ? "running"
+                    : display.restart_pending ? "starts when this PC restarts"
+                                              : "present but not started");
             }
         }
     }
@@ -5681,13 +5683,18 @@ int wmain(int argc, wchar_t** argv) {
             // answer is worth.
             static ULONGLONG off_checked = 0;
             static bool off = false;
+            static bool restart_pending = false;
             if (status.virtual_display) {
                 off = false;
+                restart_pending = false;
             } else if (off_checked == 0 || GetTickCount64() - off_checked > 10000) {
-                off = solstream::CurrentDriverState() == solstream::DriverState::Off;
+                const solstream::DriverState state = solstream::CurrentDriverState();
+                off = state == solstream::DriverState::Off;
+                restart_pending = state == solstream::DriverState::RestartPending;
                 off_checked = GetTickCount64();
             }
             status.driver_off = off;
+            status.driver_restart_pending = restart_pending;
             status.display_detail = status.virtual_display
                 ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
                 : L"not installed";

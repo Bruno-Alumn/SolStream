@@ -61,11 +61,24 @@ std::vector<VirtualDisplay> FindVirtualDisplays() {
         ULONG status = 0, problem = 0;
         if (CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS) {
             display.running = (status & DN_STARTED) != 0 && problem == 0;
+            display.restart_pending = WaitsForRestart(status, problem);
         }
         found.push_back(display);
     }
     SetupDiDestroyDeviceInfoList(set);
     return found;
+}
+
+bool WaitsForRestart(unsigned long status, unsigned long problem) {
+    if ((status & DN_STARTED) != 0 && problem == 0) {
+        return false;
+    }
+    // Disabled is disabled before a restart and after it, whatever else
+    // Windows has pending for the device.
+    if (problem == CM_PROB_DISABLED) {
+        return false;
+    }
+    return problem == CM_PROB_NEED_RESTART || (status & DN_NEED_RESTART) != 0;
 }
 
 bool IsSolStreamDisplayDriver(const std::wstring& name) {

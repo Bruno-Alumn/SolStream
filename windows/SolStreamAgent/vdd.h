@@ -25,7 +25,17 @@ struct VirtualDisplay {
     std::wstring friendly_name;  ///< e.g. "Virtual Display Driver"
     std::wstring instance_id;    ///< e.g. ROOT\DISPLAY\0001
     bool running = false;        ///< Present *and* started.
+    /// Not started, and Windows starts it once the PC restarts: an install it
+    /// finishes then, not a driver somebody switched off.
+    bool restart_pending = false;
 };
+
+/// Is a device with this devnode status and problem code (CM_Get_DevNode_Status)
+/// waiting for the PC to restart before it can start? Windows says so with
+/// problem 14, CM_PROB_NEED_RESTART, or with DN_NEED_RESTART. A device that is
+/// running is not waiting for anything, and one that is switched off stays off
+/// after a restart. Exposed for its tests.
+bool WaitsForRestart(unsigned long status, unsigned long problem);
 
 /// Every indirect display driver this machine has.
 ///

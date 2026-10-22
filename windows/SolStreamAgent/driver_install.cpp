@@ -351,16 +351,31 @@ std::string InstallProblem(const char* what, DWORD code) {
 
 DriverState CurrentDriverState() {
     bool found = false;
+    // A device Windows starts at the next restart is not off: it is an install
+    // that is not finished yet. Called off, it was sent to Device Manager for
+    // an Enable that isn't there.
+    bool restart = false;
     for (const VirtualDisplay& display : FindVirtualDisplays()) {
         if (IsSolStreamDisplayDriver(display.friendly_name)) {
             if (display.running) {
                 return DriverState::Ready;
             }
             found = true;
+            restart = restart || display.restart_pending;
         }
     }
-    ForEachDriverDevice([&found](HDEVINFO, SP_DEVINFO_DATA&) { found = true; });
-    return found ? DriverState::Off : DriverState::Missing;
+    ForEachDriverDevice([&found, &restart](HDEVINFO, SP_DEVINFO_DATA& device) {
+        found = true;
+        ULONG status = 0, problem = 0;
+        if (CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0) == CR_SUCCESS
+            && WaitsForRestart(status, problem)) {
+            restart = true;
+        }
+    });
+    if (!found) {
+        return DriverState::Missing;
+    }
+    return restart ? DriverState::RestartPending : DriverState::Off;
 }
 
 bool HasSolStreamDriver() {
@@ -405,6 +420,15 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                 "(Display adapters, Virtual Display Driver, Enable device) to stream to "
                 "it.";
         return false;
+    }
+    if (state == DriverState::RestartPending) {
+        // Installed already, by an earlier Set up or by hand, and Windows
+        // starts it at the restart. Nothing here can hurry that, and the host
+        // sets the display up when it starts after the restart.
+        restart = true;
+        note += "Windows hasn't finished installing the Virtual Display Driver yet. Restart "
+                "this PC to finish setting up the virtual display.";
+        return true;
     }
     if (state == DriverState::Missing) {
         if (!CanInstallDisplayDriver()) {

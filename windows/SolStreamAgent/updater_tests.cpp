@@ -13,17 +13,20 @@
 //
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
-// takes of the virtual display's settings, and which adapter is Tailscale's.
+// takes of the virtual display's settings, when its device is waiting for a
+// restart, and which adapter is Tailscale's.
 
 #include "updater.cpp"
 
 #include <shellapi.h>
 #include <winioctl.h>
+#include <cfgmgr32.h>
 
 #include <cstdio>
 
 #include "driver_install.h"
 #include "tailscale.h"
+#include "vdd.h"
 
 namespace {
 
@@ -787,6 +790,25 @@ void TestDriverSettingsJunction(const std::wstring& scratch) {
     RemoveTree(elsewhere);
 }
 
+/// A device Windows starts at the next restart is an install it has not
+/// finished, not a driver somebody switched off -- which is what the window
+/// once called SolStream's own new device, sending somebody to Device Manager
+/// for an Enable that isn't there.
+void TestWaitsForRestart() {
+    CHECK(WaitsForRestart(DN_HAS_PROBLEM, CM_PROB_NEED_RESTART));
+    CHECK(WaitsForRestart(0, CM_PROB_NEED_RESTART));
+    // Failed to start, and Windows says a restart is what it needs.
+    CHECK(WaitsForRestart(DN_HAS_PROBLEM | DN_NEED_RESTART, CM_PROB_FAILED_START));
+    // Running: there is a display now, whatever the restart would change.
+    CHECK(!WaitsForRestart(DN_STARTED, 0));
+    CHECK(!WaitsForRestart(DN_STARTED | DN_NEED_RESTART, 0));
+    // Switched off, before a restart and after it.
+    CHECK(!WaitsForRestart(DN_HAS_PROBLEM, CM_PROB_DISABLED));
+    CHECK(!WaitsForRestart(DN_HAS_PROBLEM | DN_NEED_RESTART, CM_PROB_DISABLED));
+    // Failing, with nothing said about a restart.
+    CHECK(!WaitsForRestart(DN_HAS_PROBLEM, CM_PROB_FAILED_START));
+}
+
 // ── Tailscale ────────────────────────────────────────────────────────────────
 
 /// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
@@ -862,6 +884,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverSettingsFolder(scratch);
     TestDriverSettingsFile(scratch);
     TestDriverSettingsJunction(scratch);
+    TestWaitsForRestart();
     TestTailscaleAdapter();
 
     RemoveTree(scratch);

@@ -92,7 +92,9 @@ up virtual display…", run the same steps elevated
 its capture to the new display without restarting. When Windows says the
 install needs a restart, the device may not start before it, so that is not
 called a failure: setup and the window say to restart the PC to finish, and the
-host sets the display up when it starts after the restart.
+host sets the display up when it starts after the restart. Until then the
+device is not called switched off (Windows marks it as waiting for a restart):
+setup, the window and the tray keep saying to restart, and offer no **Set up**.
 
 Setup installs only on a PC with no device of the driver's at all. One that is
 there but switched off or failing is somebody's own: setup says it is off and

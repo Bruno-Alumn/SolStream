@@ -34,6 +34,9 @@ struct HostStatus {
     /// The Virtual Display Driver is here but switched off or failing: the
     /// user's own, which the window points at rather than offering to install.
     bool driver_off = false;
+    /// The Virtual Display Driver is installed and Windows starts it once this
+    /// PC restarts: the window says to restart, and offers nothing else.
+    bool driver_restart_pending = false;
     /// This PC's Tailscale address, or empty when it is not on Tailscale.
     std::wstring tailscale_address;
 };
