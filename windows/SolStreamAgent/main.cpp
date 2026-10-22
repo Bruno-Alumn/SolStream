@@ -4874,6 +4874,91 @@ std::string DisplayResult(bool ok, bool already, bool restart, const std::string
          + note;
 }
 
+/// Normal priority, however this copy was started: for the CPU, for the disk
+/// and for memory.
+///
+/// A logon task registered before it said <Priority> runs its program at Task
+/// Scheduler's default of 7, and that is three settings, not one: the below
+/// normal priority class, low I/O priority and low memory priority. The class
+/// decides who gets the CPU when a game on the PC wants it too, and every
+/// application the Mac opens from here inherits it. The other two are what
+/// SetPriorityClass leaves alone outside background mode, and they matter in
+/// the same contention: the disk serves this process after everybody else,
+/// and under a game's memory pressure the pages of capture, the encoder and
+/// the audio are the first Windows takes away.
+///
+/// Each one only ever raised to normal: a host somebody started high on
+/// purpose keeps what they gave it. Best effort throughout, and the log says
+/// what was found and what became of it.
+void RaiseToNormalPriority() {
+    HANDLE self = GetCurrentProcess();
+
+    const DWORD priority = GetPriorityClass(self);
+    if (priority == BELOW_NORMAL_PRIORITY_CLASS || priority == IDLE_PRIORITY_CLASS) {
+        if (SetPriorityClass(self, NORMAL_PRIORITY_CLASS)) {
+            Log("[agent] started below normal CPU priority; raised to normal");
+        } else {
+            Log("[agent] started below normal CPU priority and could not raise it: %lu",
+                (unsigned long) GetLastError());
+        }
+    }
+
+    // The process's, which every thread started from here on takes, and this
+    // thread's own, which it took from the process before this ran.
+    MEMORY_PRIORITY_INFORMATION memory{};
+    if (GetProcessInformation(self, ProcessMemoryPriority, &memory, sizeof(memory))
+        && memory.MemoryPriority < MEMORY_PRIORITY_NORMAL) {
+        const unsigned long found = memory.MemoryPriority;
+        memory.MemoryPriority = MEMORY_PRIORITY_NORMAL;
+        if (SetProcessInformation(self, ProcessMemoryPriority, &memory, sizeof(memory))) {
+            SetThreadInformation(GetCurrentThread(), ThreadMemoryPriority, &memory,
+                                 sizeof(memory));
+            Log("[agent] started at memory priority %lu; raised to normal (%d)", found,
+                MEMORY_PRIORITY_NORMAL);
+        } else {
+            Log("[agent] started at memory priority %lu and could not raise it: %lu",
+                found, (unsigned long) GetLastError());
+        }
+    }
+
+    // No Win32 call sets I/O priority outside background mode, so this is
+    // ntdll's, asked for by name as audio.cpp asks for RtlGetVersion. Normal
+    // and below need no privilege; only High would. The numbers are ntdll's
+    // own: ProcessIoPriority, ThreadIoPriority, and IoPriorityNormal.
+    using QueryProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    using SetInformationFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+    constexpr ULONG kProcessIoPriority = 33;
+    constexpr ULONG kThreadIoPriority = 22;
+    constexpr ULONG kIoPriorityNormal = 2;
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    auto query = ntdll ? reinterpret_cast<QueryProcessFn>(reinterpret_cast<void*>(
+                             GetProcAddress(ntdll, "NtQueryInformationProcess")))
+                       : nullptr;
+    auto set_process = ntdll ? reinterpret_cast<SetInformationFn>(reinterpret_cast<void*>(
+                                   GetProcAddress(ntdll, "NtSetInformationProcess")))
+                             : nullptr;
+    auto set_thread = ntdll ? reinterpret_cast<SetInformationFn>(reinterpret_cast<void*>(
+                                  GetProcAddress(ntdll, "NtSetInformationThread")))
+                            : nullptr;
+    ULONG io = kIoPriorityNormal;
+    if (query && set_process && query(self, kProcessIoPriority, &io, sizeof(io), nullptr) >= 0
+        && io < kIoPriorityNormal) {
+        const unsigned long found = io;
+        io = kIoPriorityNormal;
+        const LONG status = set_process(self, kProcessIoPriority, &io, sizeof(io));
+        if (status >= 0) {
+            if (set_thread) {
+                set_thread(GetCurrentThread(), kThreadIoPriority, &io, sizeof(io));
+            }
+            Log("[agent] started at I/O priority %lu; raised to normal (%lu)", found,
+                (unsigned long) kIoPriorityNormal);
+        } else {
+            Log("[agent] started at I/O priority %lu and could not raise it: 0x%08lX", found,
+                (unsigned long) status);
+        }
+    }
+}
+
 int wmain(int argc, wchar_t** argv) {
     ReleaseUnwantedConsole();
     // Everything outside main.cpp logs through the agent's file rather than
@@ -5282,22 +5367,9 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Normal priority, however this copy was started. A logon task registered
-    // before it said <Priority> runs its program below normal, and so would
-    // every application the Mac opens from here, because a process started by
-    // one below normal inherits that class. Only ever raised to normal: a host
-    // somebody started high on purpose keeps what they gave it.
-    {
-        const DWORD priority = GetPriorityClass(GetCurrentProcess());
-        if (priority == BELOW_NORMAL_PRIORITY_CLASS || priority == IDLE_PRIORITY_CLASS) {
-            if (SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS)) {
-                Log("[agent] started below normal priority; raised to normal");
-            } else {
-                Log("[agent] started below normal priority and could not raise it: %lu",
-                    (unsigned long) GetLastError());
-            }
-        }
-    }
+    // Normal priority, however this copy was started, and before anything that
+    // captures, encodes or starts an application: see RaiseToNormalPriority.
+    RaiseToNormalPriority();
 
     // An installed SolStream exists to serve a Mac, so it listens like one
     // unless told otherwise. Off loopback the token is still required; the
