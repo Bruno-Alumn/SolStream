@@ -373,6 +373,7 @@ public final class AgentConnection {
         self.token = token ?? Self.storedToken(for: host)
         self.clientID = Self.clientIDDefaultsOverride.map { Self.clientID(in: $0) }
             ?? Self.installClientID
+        self.busyTiming = Self.busyTimingOverride ?? .standard
     }
 
     // MARK: - Coming back to a host that is still holding the last connection
@@ -455,6 +456,25 @@ public final class AgentConnection {
     /// somebody else, or stuck, and the person is better told.
     static let busyPatience: TimeInterval = 45
 
+    /// How long to go on knocking on a busy host, and how far apart.
+    struct BusyTiming: Equatable {
+        /// Since the session was lost, or since the first `busy` when there
+        /// was none.
+        var patience: TimeInterval
+        /// The wait before knocking again the first time. Each wait after it
+        /// is half as long again, up to `longestRetry`.
+        var firstRetry: TimeInterval
+        var longestRetry: TimeInterval
+
+        /// The app's own.
+        static let standard = BusyTiming(patience: AgentConnection.busyPatience,
+                                         firstRetry: 2, longestRetry: 6)
+    }
+
+    /// For tests, so a connection they make can give up in seconds rather than
+    /// in the app's 45. Read when the connection is made.
+    static var busyTimingOverride: BusyTiming?
+
     /// What to do about a `busy`.
     ///
     /// Final for a Mac connecting afresh to a host that cannot say whose the
@@ -468,8 +488,9 @@ public final class AgentConnection {
     ///   this connection had, rather than a first connection.
     /// - Parameter waited: since that session was lost, or since the first
     ///   `busy` when there was none.
+    /// - Parameter timing: the app's own, unless a test has a shorter one.
     static func busyAction(holder: BusyHolder, reconnecting: Bool, waited: TimeInterval,
-                           retries: Int) -> BusyAction {
+                           retries: Int, timing: BusyTiming = .standard) -> BusyAction {
         switch holder {
         case .anotherMac:
             return .giveUp
@@ -478,10 +499,11 @@ public final class AgentConnection {
         case .unknown:
             guard reconnecting else { return .giveUp }
         }
-        guard waited < busyPatience else { return .giveUp }
+        guard waited < timing.patience else { return .giveUp }
         // Soon at first, because the host may let go at any moment; then every
         // few seconds, so the wait ends close to when the host frees the slot.
-        return .retry(after: min(2 * pow(1.5, Double(max(retries, 0))), 6))
+        return .retry(after: min(timing.firstRetry * pow(1.5, Double(max(retries, 0))),
+                                 timing.longestRetry))
     }
 
     /// What is left on screen once a host has said for `busyPatience` that it
@@ -536,6 +558,8 @@ public final class AgentConnection {
     /// lost session to count from.
     private var busySince: Date?
     private var busyRetries = 0
+    /// `BusyTiming.standard`, or a test's shorter one.
+    private let busyTiming: BusyTiming
     /// Whether this connection has been offered a takeover and has asked for
     /// one, and whether the answer is still to come. Everything sent meanwhile
     /// is held, as it is while the auth proof is out: the host reads exactly
@@ -568,7 +592,7 @@ public final class AgentConnection {
         let waited = now.timeIntervalSince(sessionLostAt ?? busySince ?? now)
         let holder = BusyHolder(field: message["holder"])
         switch Self.busyAction(holder: holder, reconnecting: sessionLostAt != nil,
-                               waited: waited, retries: busyRetries) {
+                               waited: waited, retries: busyRetries, timing: busyTiming) {
         case .retry(let delay):
             busyRetries += 1
             Log.info("[agent] \(host) is still holding a session (\(holder)); "

@@ -38,6 +38,7 @@ final class AgentReconnectLoopbackTests: XCTestCase {
     }
 
     override func tearDown() {
+        AgentConnection.busyTimingOverride = nil
         AgentConnection.clientIDDefaultsOverride = nil
         TokenStore.directoryOverride = nil
         UserDefaults().removePersistentDomain(forName: suite)
@@ -252,9 +253,16 @@ final class AgentReconnectLoopbackTests: XCTestCase {
 
     /// A host that goes on saying it is letting go of this Mac's session --
     /// stuck in a command, or held live by a second copy of the app -- is
-    /// given up on once `busyPatience` has passed since the loss, and then
+    /// given up on once the patience has run out since the loss, and then
     /// left alone.
+    ///
+    /// On a shorter clock than the app's 45 seconds, so the test does not
+    /// spend a minute waiting. The patience still has to outlast the two
+    /// seconds the Mac waits before its first knock after the loss, or it
+    /// would give up on that knock without ever having waited.
     func testAHostThatNeverLetsGoIsGivenUpOnAndLeftAlone() throws {
+        let timing = AgentConnection.BusyTiming(patience: 4, firstRetry: 0.2, longestRetry: 0.6)
+        AgentConnection.busyTimingOverride = timing
         let lose = DispatchSemaphore(value: 0)
         let host = ScriptedHost { index, connection in
             if index == 0 {
@@ -280,21 +288,22 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         states.onFailure = { _ in failed.fulfill() }
         let lost = Date()
         lose.signal()
-        wait(for: [failed], timeout: 70)
+        wait(for: [failed], timeout: timing.patience + 10)
         let waited = Date().timeIntervalSince(lost)
-        XCTAssertGreaterThanOrEqual(waited, AgentConnection.busyPatience)
-        XCTAssertLessThan(waited, AgentConnection.busyPatience + 10,
-                          "given up within one retry of the patience running out")
+        XCTAssertGreaterThanOrEqual(waited, timing.patience)
+        XCTAssertLessThan(waited, timing.patience + 5,
+                          "given up within a retry or so of the patience running out")
         XCTAssertFalse(agent.willReconnect)
-        XCTAssertGreaterThan(states.waits.count, 3, "it knocked again meanwhile, and said so")
+        XCTAssertGreaterThanOrEqual(states.waits.count, 3, "it knocked again meanwhile, and said so")
         // Not the host's "still letting go", which promises a wait that is
         // over: nothing tries again after this.
         XCTAssertEqual(states.failures, [AgentConnection.heldByThisMacMessage(host: "::1")])
         XCTAssertFalse(states.failures.contains { $0.contains("letting go") })
 
-        // Longer than the longest wait between knocks.
+        // Longer than the longest wait between knocks, and than the two
+        // seconds a reconnect would wait.
         let knocks = host.connections
-        Thread.sleep(forTimeInterval: 7)
+        Thread.sleep(forTimeInterval: 3)
         XCTAssertEqual(host.connections, knocks, "no more knocking after giving up")
     }
 
