@@ -12,21 +12,20 @@ import DesignSystem
 /// nothing here touches the network. Hosts are picked through the host row,
 /// the way a person picks one.
 final class ConnectWindowTests: XCTestCase {
-    private static let keys = ["SolStream.lastHost", "SolStream.recentHosts"]
-    private var saved: [String: Any] = [:]
     private var directory: URL!
+    /// The recent hosts, kept in this test's own folder: the standard
+    /// defaults of a test run are shared by every test run on the Mac at
+    /// the time, and a domain by name leaves a file behind in Preferences.
+    private var defaults: UserDefaults!
 
     override func setUp() {
         super.setUp()
         _ = NSApplication.shared
-        saved = [:]
-        for key in Self.keys {
-            if let value = UserDefaults.standard.object(forKey: key) { saved[key] = value }
-            UserDefaults.standard.removeObject(forKey: key)
-        }
-        // Paired, so no setup steps: a Mac that knows how this works.
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-connect-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defaults = UserDefaults(suiteName: directory.appendingPathComponent("defaults").path)
+        // Paired, so no setup steps: a Mac that knows how this works.
         TokenStore.directoryOverride = directory
         for host in ["192.168.1.20", "192.168.1.21", "100.101.102.103"] {
             TokenStore.set("00112233445566778899aabbccddeeff", for: host)
@@ -34,13 +33,7 @@ final class ConnectWindowTests: XCTestCase {
     }
 
     override func tearDown() {
-        for key in Self.keys {
-            if let value = saved[key] {
-                UserDefaults.standard.set(value, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
-        }
+        defaults = nil
         TokenStore.directoryOverride = nil
         try? FileManager.default.removeItem(at: directory)
         super.tearDown()
@@ -97,7 +90,8 @@ final class ConnectWindowTests: XCTestCase {
     private func makeWindow(_ world: World) throws -> (ConnectWindow, NSWindow) {
         let connect = ConnectWindow(onConnect: { _ in XCTFail("nothing here connects") },
                                     readTailscale: { world.tailscale },
-                                    reach: { world.reach($0) })
+                                    reach: { world.reach($0) },
+                                    defaults: defaults)
         let window = try XCTUnwrap(NSApp.windows.first { $0.delegate === connect })
         addTeardownBlock { connect.close() }
         return (connect, window)
@@ -326,7 +320,7 @@ final class ConnectWindowTests: XCTestCase {
         connect.close()
         RunLoop.main.run(until: Date().addingTimeInterval(0.8))
         XCTAssertFalse(shown(in: window).contains("Reachable"))
-        XCTAssertNil(UserDefaults.standard.object(forKey: "SolStream.recentHosts"))
+        XCTAssertNil(defaults.object(forKey: "SolStream.recentHosts"))
     }
 
     /// Tailscale changing under an address on the home network says nothing

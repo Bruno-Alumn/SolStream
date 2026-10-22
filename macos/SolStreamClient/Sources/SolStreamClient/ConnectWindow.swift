@@ -97,15 +97,22 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// agent's port: the real readings, except in tests.
     private let readTailscale: () -> TailscaleStatus
     private let reach: (String) -> Bool
+    /// Where the hosts used before are kept: the app's own defaults, except
+    /// in tests, which each keep theirs apart -- the standard defaults of a
+    /// test run are shared by every test run on the Mac at the time.
+    private let defaults: UserDefaults
 
     init(onConnect: @escaping (String) -> Void,
          readTailscale: @escaping () -> TailscaleStatus = TailscaleStatus.current,
-         reach: ((String) -> Bool)? = nil) {
+         reach: ((String) -> Bool)? = nil,
+         defaults: UserDefaults = .standard) {
         self.onConnect = onConnect
         self.readTailscale = readTailscale
         self.reach = reach ?? { Self.canReach(host: $0, port: StreamPorts.agent) }
-        self.state = HostState(address: Self.lastHost ?? Self.recentHosts.first ?? "",
-                               name: nil, isReachable: nil, isPaired: false, latency: nil)
+        self.defaults = defaults
+        let shown = Self.lastHost(in: defaults) ?? Self.recentHosts(in: defaults).first ?? ""
+        self.state = HostState(address: shown, name: nil, isReachable: nil, isPaired: false,
+                               latency: nil)
         // Read now: there must be a reading before the window is built, and
         // the first refresh can take this one as it is.
         self.tailscale = readTailscale()
@@ -539,7 +546,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 // the list free of half-typed addresses: every keystroke schedules
                 // one of these, and "192.168.1.5" on the way to "192.168.1.50" is
                 // not a host anyone wants offered back to them.
-                if reachable { Self.remember(host: address) }
+                if reachable { self.remember(host: address) }
                 self.refresh()
                 if !reachable { self.recheckLater(address, generation: generation) }
             }
@@ -652,7 +659,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func preferAnotherRoute() -> Bool {
         guard !hostChosenHere, !searchingRoutes else { return false }
         let failed = state.address
-        let candidates = Self.recentHosts.filter {
+        let candidates = recentHosts.filter {
             $0 != failed && AgentConnection.hasStoredToken(for: $0)
         }
         guard !candidates.isEmpty else { return false }
@@ -708,7 +715,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 self.state.isReachable = true
                 self.state.latency = found.latency
                 self.state.askedUnderTailscale = askedUnderTailscale
-                Self.remember(host: found.address)
+                self.remember(host: found.address)
                 self.refresh()
             }
         }
@@ -760,7 +767,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.textColor = DS.danger
             return
         }
-        Self.remember(host: host)
+        remember(host: host)
         close()
         onConnect(host)
     }
@@ -888,7 +895,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                               ? "Paired" : "Not paired")],
                               dotState: .live, kind: .discovered)
         }
-        items += HostBrowser.recentsWorthShowing(Self.recentHosts,
+        items += HostBrowser.recentsWorthShowing(recentHosts,
                                                  discovered: discovered).map { address in
             HostDropdown.Item(address: address, name: nil,
                               detail: [.words("Used before"),
@@ -901,21 +908,23 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     // MARK: - Recents
 
-    private static var lastHost: String? {
-        UserDefaults.standard.string(forKey: lastHostKey)
+    private static func lastHost(in defaults: UserDefaults) -> String? {
+        defaults.string(forKey: lastHostKey)
     }
 
-    private static var recentHosts: [String] {
+    private static func recentHosts(in defaults: UserDefaults) -> [String] {
         // No default. This used to seed one developer's Tailscale address into
         // every install's recents list, where it showed up as a host the user
         // had supposedly connected to before.
-        UserDefaults.standard.stringArray(forKey: recentHostsKey) ?? []
+        defaults.stringArray(forKey: recentHostsKey) ?? []
     }
 
-    private static func remember(host: String) {
+    private var recentHosts: [String] { Self.recentHosts(in: defaults) }
+
+    private func remember(host: String) {
         var hosts = recentHosts.filter { $0 != host }
         hosts.insert(host, at: 0)
-        UserDefaults.standard.set(Array(hosts.prefix(5)), forKey: recentHostsKey)
-        UserDefaults.standard.set(host, forKey: lastHostKey)
+        defaults.set(Array(hosts.prefix(5)), forKey: Self.recentHostsKey)
+        defaults.set(host, forKey: Self.lastHostKey)
     }
 }
