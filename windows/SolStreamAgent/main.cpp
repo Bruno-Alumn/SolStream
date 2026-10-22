@@ -5719,10 +5719,18 @@ int wmain(int argc, wchar_t** argv) {
             if (!status.streaming_ready) {
                 status.streaming_detail =
                     L"This PC's Windows is too old for the capture SolStream uses.";
+                // The version that added capturing one window or one display
+                // by its handle, which is how media/capture.cpp starts every
+                // capture. The calls that came later are tried and survived.
+                status.streaming_why =
+                    L"SolStream streams with Windows' own window capture, which "
+                    L"needs Windows 10 version 1903 or later.";
             }
 #else
             status.streaming_ready = false;
             status.streaming_detail = L"This build has no media path.";
+            status.streaming_why =
+                L"It was built without the capture and encoding SolStream streams with.";
 #endif
 
             status.virtual_display = solstream::HasVirtualDisplayCached();

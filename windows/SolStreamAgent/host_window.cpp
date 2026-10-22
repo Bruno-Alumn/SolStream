@@ -815,8 +815,11 @@ Screen Describe(const HostStatus& status) {
         screen.what = status.streaming_detail.empty()
                           ? L"The streaming host stopped."
                           : status.streaming_detail;
-        screen.why = L"SolStream restarts it on a crash, so a failure that reaches "
-                     L"you is a real conflict rather than a hiccup.";
+        // Said by the agent, which knows which of its reasons this is. This
+        // line used to say SolStream restarted a crashed host, which was true
+        // of Sunshine and of nothing here since: nothing restarts the host,
+        // and the only way to this banner is a PC that cannot capture at all.
+        screen.why = status.streaming_why;
         screen.code = L"SS-311";
         screen.mark = Mark::Failed;
     } else {
@@ -1731,8 +1734,10 @@ void LayoutAndPaint(HWND window) {
                         std::to_wstring(status.connected_clients) + L" of 1 · Mac only",
                         Mark::Live});
     } else {
+        // "ready", not "running": with no Mac connected nothing is being
+        // streamed, and a green "running" read as though something were.
         rows.push_back({L"Streaming",
-                        status.streaming_ready ? L"running" : L"not running",
+                        status.streaming_ready ? L"ready" : L"not available",
                         status.streaming_ready ? Mark::Live : Mark::Failed});
     }
     // Named for what it is doing rather than for what is missing. "Virtual
@@ -3246,7 +3251,8 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
     return a.computer_name == b.computer_name && a.address == b.address
         && a.pairing_token == b.pairing_token && a.agent_listening == b.agent_listening
         && a.streaming_ready == b.streaming_ready && a.virtual_display == b.virtual_display
-        && a.streaming_detail == b.streaming_detail && a.display_detail == b.display_detail
+        && a.streaming_detail == b.streaming_detail && a.streaming_why == b.streaming_why
+        && a.display_detail == b.display_detail
         && a.connected_clients == b.connected_clients
         && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off
         && a.driver_restart_pending == b.driver_restart_pending;

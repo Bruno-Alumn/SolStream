@@ -29,6 +29,9 @@ struct HostStatus {
     bool streaming_ready = false;
     bool virtual_display = false;
     std::wstring streaming_detail;
+    /// Why streaming cannot work here, when streaming_ready is false: the
+    /// banner's second line, under streaming_detail.
+    std::wstring streaming_why;
     std::wstring display_detail;
     int connected_clients = 0;
     /// The Virtual Display Driver is here but switched off or failing: the
