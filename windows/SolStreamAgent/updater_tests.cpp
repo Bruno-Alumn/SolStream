@@ -992,6 +992,26 @@ void TestInstallNote() {
 
 // ── The virtual display's settings, at uninstall ─────────────────────────────
 
+/// HKCU\`key`, made new and empty for one test, or null. Volatile, so it goes
+/// at logoff even if this stops before deleting it -- and deleted first, so a
+/// key that a stopped run left is never read back. The name carries this
+/// process's ID, which Wine hands out the same on every run.
+HKEY FreshRecordsKey(const std::wstring& key) {
+    RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());
+    HKEY records = nullptr;
+    DWORD disposition = 0;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
+                        KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &records, &disposition)
+        != ERROR_SUCCESS) {
+        return nullptr;
+    }
+    if (disposition != REG_CREATED_NEW_KEY) {
+        RegCloseKey(records);
+        return nullptr;
+    }
+    return records;
+}
+
 /// A settings folder SolStream made goes with the files it and the driver keep
 /// there -- the backup of the settings among them, which once kept the folder
 /// on the PC for good while its record was let go. One that holds anything
@@ -1068,11 +1088,8 @@ void TestDriverSettingsJunction(const std::wstring& scratch) {
 void TestDriverSettingsRecords(const std::wstring& scratch) {
     const std::wstring key =
         L"Software\\SolStreamUpdaterTests-" + std::to_wstring(GetCurrentProcessId());
-    HKEY records = nullptr;
-    // Volatile, so it goes at logoff even if this stops before deleting it.
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, REG_OPTION_VOLATILE,
-                        KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, &records, nullptr)
-        != ERROR_SUCCESS) {
+    HKEY records = FreshRecordsKey(key);
+    if (records == nullptr) {
         std::printf("FAIL: could not make a registry key for the settings records\n");
         ++g_failures;
         return;
