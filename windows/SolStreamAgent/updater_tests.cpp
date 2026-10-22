@@ -50,6 +50,7 @@
 #include "media/keys.h"
 #include "tailscale.h"
 #include "vdd.h"
+#include "window_restore.h"
 
 namespace {
 
@@ -2684,6 +2685,147 @@ void TestCaptureDisplayIsStale() {
     CHECK(!CaptureDisplayIsStale(L"", {}, L""));
 }
 
+/// A window as File Explorer was measured behaving: per-monitor DPI aware, so
+/// carried onto a monitor of another scaling it takes the size it is given and
+/// THEN scales itself by the ratio of the two. Left of x=3440 is a 125% monitor,
+/// right of it the 200% capture display.
+struct FakeWindow {
+    RECT normal{};
+    int dpi = 192;
+    int sets = 0;
+    LONG min_width = 0;   // an application that will not be narrower
+    bool fail_set = false;
+    bool fail_get = false;
+
+    bool Set(const WINDOWPLACEMENT& placement) {
+        if (fail_set) { return false; }
+        ++sets;
+        RECT r = placement.rcNormalPosition;
+        if (r.right - r.left < min_width) { r.right = r.left + min_width; }
+        const int target = r.left >= 3440 ? 192 : 120;
+        if (target != dpi) {
+            r.right = r.left + MulDiv(r.right - r.left, target, dpi);
+            r.bottom = r.top + MulDiv(r.bottom - r.top, target, dpi);
+            dpi = target;
+        }
+        normal = r;
+        return true;
+    }
+    bool Get(WINDOWPLACEMENT& placement) const {
+        if (fail_get) { return false; }
+        placement.rcNormalPosition = normal;
+        return true;
+    }
+};
+
+WINDOWPLACEMENT PlacementAt(LONG x, LONG y, LONG w, LONG h) {
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    placement.showCmd = SW_SHOWNORMAL;
+    placement.rcNormalPosition = RECT{x, y, x + w, y + h};
+    return placement;
+}
+
+int Restore(FakeWindow& window, const WINDOWPLACEMENT& saved, bool* matched) {
+    return RestorePlacement(
+        saved,
+        [&window](const WINDOWPLACEMENT& p) { return window.Set(p); },
+        [&window](WINDOWPLACEMENT& p) { return window.Get(p); },
+        matched);
+}
+
+void TestRestorePlacement() {
+    const WINDOWPLACEMENT saved = PlacementAt(1000, 300, 1406, 792);
+    const RECT& want = saved.rcNormalPosition;
+
+    // The bug: one SetWindowPlacement off the 200% display left the window at
+    // 0.625 of its size (the measured 879x495). The second lands exactly.
+    {
+        FakeWindow window;
+        window.normal = RECT{3440, 0, 3440 + 2250, 1268};
+        WINDOWPLACEMENT once = saved;
+        window.Set(once);
+        CHECK(window.normal.right - window.normal.left == 879);
+        CHECK(window.normal.bottom - window.normal.top == 495);
+
+        FakeWindow fresh;
+        fresh.normal = RECT{3440, 0, 3440 + 2250, 1268};
+        bool matched = false;
+        CHECK(Restore(fresh, saved, &matched) == 2);
+        CHECK(matched);
+        CHECK(PlacementDistance(want, fresh.normal) == 0);
+        CHECK(fresh.dpi == 120);
+    }
+    // Four sessions in a row keep the size, rather than dividing it by 1.6
+    // each time.
+    {
+        FakeWindow window;
+        window.normal = want;
+        window.dpi = 120;
+        for (int session = 0; session < 4; ++session) {
+            window.Set(PlacementAt(3440, 0, 2250, 1268));
+            window.Set(PlacementAt(3440, 0, 2250, 1268));
+            bool matched = false;
+            Restore(window, saved, &matched);
+            CHECK(matched);
+        }
+        CHECK(PlacementDistance(want, window.normal) == 0);
+    }
+    // Already on the monitor it belongs to: one call, and done.
+    {
+        FakeWindow window;
+        window.normal = RECT{10, 10, 500, 400};
+        window.dpi = 120;
+        bool matched = false;
+        CHECK(Restore(window, saved, &matched) == 1);
+        CHECK(matched);
+    }
+    // An application holding a size of its own is asked once more and left:
+    // the second try comes no closer.
+    {
+        FakeWindow window;
+        window.normal = RECT{10, 10, 2000, 1500};
+        window.dpi = 120;
+        window.min_width = 1500;
+        bool matched = true;
+        CHECK(Restore(window, saved, &matched) == 2);
+        CHECK(!matched);
+        CHECK(window.normal.right - window.normal.left == 1500);
+    }
+    // Never more than the limit, even for a window that keeps getting closer.
+    {
+        int calls = 0;
+        bool matched = true;
+        RECT got = RECT{0, 0, 100, 100};
+        const int tries = RestorePlacement(
+            saved,
+            [&calls](const WINDOWPLACEMENT&) { ++calls; return true; },
+            [&got, &want, &calls](WINDOWPLACEMENT& p) {
+                got = want;
+                got.right += 10 - calls;   // 9, 8, 7 pixels out
+                p.rcNormalPosition = got;
+                return true;
+            },
+            &matched);
+        CHECK(tries == kRestorePlacementAttempts);
+        CHECK(calls == kRestorePlacementAttempts);
+        CHECK(!matched);
+    }
+    // A refused set is no tries; a placement that cannot be read back is one.
+    {
+        FakeWindow window;
+        window.fail_set = true;
+        bool matched = true;
+        CHECK(Restore(window, saved, &matched) == 0);
+        CHECK(!matched);
+        FakeWindow unread;
+        unread.fail_get = true;
+        CHECK(Restore(unread, saved, &matched) == 1);
+        CHECK(!matched);
+    }
+    CHECK(PlacementDistance(RECT{0, 0, 10, 10}, RECT{1, -1, 12, 7}) == 1 + 1 + 2 + 3);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2769,6 +2911,7 @@ int wmain(int argc, wchar_t** argv) {
     TestAudioSource();
     TestReceiveFailures();
     TestCaptureDisplayIsStale();
+    TestRestorePlacement();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

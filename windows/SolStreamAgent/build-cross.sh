@@ -18,7 +18,7 @@ fi
     "-DSOLSTREAM_VERSION_STRING=\"$VERSION\"" \
     -o SolStreamAgent.exe \
     main.cpp util.cpp clipboard.cpp vdd.cpp display_setup.cpp driver_install.cpp tailscale.cpp \
-    session_takeover.cpp host_window.cpp \
+    session_takeover.cpp window_restore.cpp host_window.cpp \
     installer.cpp updater.cpp media/log.cpp \
     -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32 \
     -lsetupapi -lcfgmgr32 -lcomctl32 -lnewdev -liphlpapi -lole32 -loleaut32 -luuid \
@@ -34,7 +34,7 @@ echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
     -o SolStreamUpdaterTests.exe \
     updater_tests.cpp util.cpp clipboard.cpp installer.cpp media/log.cpp \
     driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp session_takeover.cpp \
-    media/keys.cpp \
+    media/keys.cpp window_restore.cpp \
     -luser32 -ladvapi32 -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lole32 -loleaut32 -luuid \
     -lsetupapi -lcfgmgr32 -lnewdev -liphlpapi -lws2_32 -lwtsapi32
 echo "built: $(pwd)/SolStreamUpdaterTests.exe"

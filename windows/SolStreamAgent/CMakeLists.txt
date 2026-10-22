@@ -88,6 +88,8 @@ add_executable(SolStreamAgent
     tailscale.cpp
     # Whether a Mac knocking on a busy host may take back the session it left.
     session_takeover.cpp
+    # Putting a streamed window back as it was, and remembering what is owed.
+    window_restore.cpp
     host_window.cpp
     installer.cpp
     # Finds, verifies and installs updates from GitHub releases.
@@ -230,7 +232,7 @@ endif()
 if(BUILD_TESTING)
     add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp clipboard.cpp
         installer.cpp media/log.cpp driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp
-        session_takeover.cpp media/keys.cpp)
+        session_takeover.cpp media/keys.cpp window_restore.cpp)
     set_target_properties(SolStreamUpdaterTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON

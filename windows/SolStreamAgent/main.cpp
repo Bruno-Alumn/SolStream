@@ -70,6 +70,7 @@
 #include "ports.h"
 #include "session_takeover.h"
 #include "stranded.h"
+#include "window_restore.h"
 #include "updater.h"
 #include "util.h"
 
@@ -3050,8 +3051,43 @@ void RestoreWindow(const WindowLock& saved) {
     // display, whose origin sits off the side of the real desktop, so a window
     // left at those coordinates is not merely misplaced — it is invisible, on a
     // monitor that stops existing when the session ends.
+    //
+    // Asked again when it does not land there: see window_restore.h. The move
+    // off the 200% capture display makes a DPI-aware window rescale itself by
+    // the ratio of the two scalings AFTER taking the size it is given, so one
+    // SetWindowPlacement put File Explorer back at 0.625 of its size on a 125%
+    // monitor -- and the next session opened at that size, and shrank it again.
     if (saved.saved_placement.length == sizeof(WINDOWPLACEMENT)) {
-        SetWindowPlacement(window, &saved.saved_placement);
+        bool matched = false;
+        const int tries = solstream::RestorePlacement(
+            saved.saved_placement,
+            [window](const WINDOWPLACEMENT& placement) {
+                return SetWindowPlacement(window, &placement) != FALSE;
+            },
+            [window](WINDOWPLACEMENT& placement) {
+                return GetWindowPlacement(window, &placement) != FALSE;
+            },
+            &matched);
+        const RECT& wanted = saved.saved_placement.rcNormalPosition;
+        WINDOWPLACEMENT now{};
+        now.length = sizeof(now);
+        GetWindowPlacement(window, &now);
+        const RECT& got = now.rcNormalPosition;
+        const std::string title = WindowTitleForLog(window);
+        if (matched) {
+            Log("[restore] \"%s\" back at %ldx%ld at %ld,%ld (%d %s)",
+                title.empty() ? "(untitled)" : title.c_str(),
+                wanted.right - wanted.left, wanted.bottom - wanted.top,
+                wanted.left, wanted.top, tries, tries == 1 ? "try" : "tries");
+        } else {
+            Log("[restore] \"%s\" asked back to %ldx%ld at %ld,%ld and settled at "
+                "%ldx%ld at %ld,%ld after %d %s",
+                title.empty() ? "(untitled)" : title.c_str(),
+                wanted.right - wanted.left, wanted.bottom - wanted.top,
+                wanted.left, wanted.top,
+                got.right - got.left, got.bottom - got.top, got.left, got.top,
+                tries, tries == 1 ? "try" : "tries");
+        }
     }
 }
 
