@@ -515,7 +515,20 @@ void TestLogonTask() {
         CHECK(xml.find(L"<RunLevel>LeastPrivilege</RunLevel>") != std::wstring::npos);
         CHECK(xml.find(L"<LogonType>InteractiveToken</LogonType>") != std::wstring::npos);
     }
-    CHECK(at_logon.find(L"<LogonTrigger>") != std::wstring::npos);
+    // At this account's logon only: a trigger naming nobody fires for every
+    // account on the PC, and restarted the host in the installer's session
+    // whenever somebody else logged on.
+    CHECK(at_logon.find(L"<LogonTrigger><Enabled>true</Enabled><UserId>PC\\me</UserId>"
+                        L"</LogonTrigger>")
+          != std::wstring::npos);
+    CHECK(at_logon.find(L"<Principal id=\"Author\">\r\n    <UserId>PC\\me</UserId>")
+          != std::wstring::npos);
+    CHECK(LogonTaskXml(L"S-1-5-21-1-2-3-1001", L"C:\\x", true)
+              .find(L"<UserId>S-1-5-21-1-2-3-1001</UserId></LogonTrigger>")
+          != std::wstring::npos);
+    CHECK(LogonTaskXml(L"PC\\R&D", L"C:\\x", true)
+              .find(L"<UserId>PC\\R&amp;D</UserId></LogonTrigger>")
+          != std::wstring::npos);
     CHECK(on_demand.find(L"<LogonTrigger>") == std::wstring::npos);
     CHECK(on_demand.find(L"<Triggers />") != std::wstring::npos);
     // An & is legal in a Windows user name, and unescaped it made the whole

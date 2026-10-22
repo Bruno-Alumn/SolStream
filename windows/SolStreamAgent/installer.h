@@ -107,8 +107,9 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error);
 std::wstring InstallLogPath();
 
 /// The definition of the task that starts the installed host, as it is handed
-/// to Task Scheduler: run as `account`, from `destination`, at logon when
-/// `at_logon` and otherwise only when asked to. Exposed for its tests.
+/// to Task Scheduler: run as `account`, from `destination`, at that account's
+/// logon when `at_logon` and otherwise only when asked to. Exposed for its
+/// tests.
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
                           bool at_logon);
 

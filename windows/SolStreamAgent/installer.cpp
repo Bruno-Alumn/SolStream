@@ -754,9 +754,15 @@ std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& desti
         L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
         L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
         L"  <RegistrationInfo><Description>Starts SolStream so this PC can serve a Mac.</Description></RegistrationInfo>\r\n"
-        + std::wstring(at_logon
-              ? L"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
-              : L"  <Triggers />\r\n") +
+        // At THIS account's logon. A logon trigger naming nobody fires for
+        // every account on the PC, so on a shared one each logon started the
+        // host again in the background session of whoever installed it --
+        // undoing their Quit, holding the port, and serving a desktop nobody
+        // was at.
+        + (at_logon
+              ? L"  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + user
+                    + L"</UserId></LogonTrigger></Triggers>\r\n"
+              : std::wstring(L"  <Triggers />\r\n")) +
         L"  <Principals><Principal id=\"Author\">\r\n"
         // The account is declared here, beside InteractiveToken, so no password
         // is ever wanted for it.
