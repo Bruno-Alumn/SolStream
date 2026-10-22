@@ -140,7 +140,13 @@ public final class MediaClient {
             self.stats.framesDamaged = self.reassembler.damaged
             let verdict = self.hold.damaged(frameId: frameId,
                                             now: DispatchTime.now().uptimeNanoseconds)
-            if verdict != .ignore { self.needKeyframe = true }
+            // Only for a request going out now. This used to be set for every
+            // report but an ignored one, and a lost run reports each picture
+            // in it: the first asked at once, the rest set the flag again, and
+            // the next feedback tick asked a second time -- one the host could
+            // act on over a slow path, for a second full IDR. A request that
+            // is lost is repeated by `reaskDue`.
+            if verdict == .holdAndAsk { self.needKeyframe = true }
             self.stateLock.unlock()
             switch verdict {
             case .ignore:
