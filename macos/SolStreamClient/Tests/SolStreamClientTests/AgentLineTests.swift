@@ -126,11 +126,12 @@ final class AgentLineTests: XCTestCase {
 
     // MARK: - Over a socket
 
-    /// The whole path, against a stand-in for an older host on this Mac's own
-    /// loopback: a greeting naming JÜRGEN-PC in code page 1252, a push that will
-    /// not parse, and a covering window's title in the code page. The session
-    /// has to survive all three and still match the next reply to its request.
-    func testASessionSurvivesAnOlderHostsCodePageTextAndABrokenPush() throws {
+    /// Connects to a stand-in for an older host on this Mac's own loopback,
+    /// which greets with JÜRGEN-PC and a covering window's title in code page
+    /// 1252 and answers requests from `replies`, then hands over the session.
+    /// `dropped` is met whenever the connection is lost.
+    private func overLoopback(replies: [String: String], dropped: XCTestExpectation,
+                              _ body: (AgentConnection) -> Void) throws {
         let tokens = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-lines-\(UUID().uuidString)", isDirectory: true)
         TokenStore.directoryOverride = tokens
@@ -144,23 +145,20 @@ final class AgentLineTests: XCTestCase {
             #"{"type":"hello","version":2,"host":"JÜRGEN-PC","needsAuth":false,"challenge":"00"}"#,
             #"{"type":"displays","displays":[{"name":"\\\\.\\DISPLAY1","adapter":"x","x":0,"#
                 + #""y":0,"w":1920,"h":1080,"primary":true,"captured":true}]}"#,
-            #"{"type":"occluded","id":7,"by":}"#,
             #"{"type":"occluded","id":7,"by":"Sécurité Windows"}"#,
         ] {
             greeting.append(codePage(text))
             greeting.append(0x0A)
         }
-        let host = FakeHost(greeting: greeting, replies: [
-            "windows": #"{"type":"windows","windows":[{"id":1,"pid":2,"title":"Paramètres","#
-                + #""class":"C","x":0,"y":0,"w":10,"h":10}]}"#,
-            "ping": #"{"type":"pong"}"#,
-        ])
+        let host = FakeHost(greeting: greeting, replies: replies)
         let port = try host.start()
         defer { host.stop() }
 
         let agent = AgentConnection(host: "::1", port: port)
         defer { agent.disconnect() }
-        var dropped = false
+        // A dropped connection is made anew and greeted again, so each of these
+        // can be met more than once.
+        dropped.assertForOverFulfill = false
         let connected = expectation(description: "greeted")
         connected.assertForOverFulfill = false
         agent.onState = { state in
@@ -169,12 +167,13 @@ final class AgentLineTests: XCTestCase {
                 XCTAssertEqual(name, "J\u{FFFD}RGEN-PC")
                 connected.fulfill()
             case .disconnected:
-                dropped = true
+                dropped.fulfill()
             default:
                 break
             }
         }
         let occluded = expectation(description: "the readable push arrived")
+        occluded.assertForOverFulfill = false
         agent.onOccluded = { id, by in
             XCTAssertEqual(id, 7)
             XCTAssertEqual(by, "S\u{FFFD}curit\u{FFFD} Windows")
@@ -182,14 +181,62 @@ final class AgentLineTests: XCTestCase {
         }
         agent.connect()
         wait(for: [connected, occluded], timeout: 5)
+        body(agent)
+    }
 
-        let answered = expectation(description: "the next reply reached its request")
-        agent.windows { windows in
-            XCTAssertEqual(windows.map(\.title), ["Paramètres"])
-            answered.fulfill()
+    private static let windowsReply = #"{"type":"windows","windows":[{"id":1,"pid":2,"#
+        + #""title":"Paramètres","class":"C","x":0,"y":0,"w":10,"h":10}]}"#
+    private static let appsReply = #"{"type":"apps","apps":[{"name":"Bloc-notes","#
+        + #""path":"C:\\Windows\\notepad.exe"}]}"#
+
+    /// The whole path: an older host's code-page greeting and covering window,
+    /// then a push that will not parse arriving between a request and its
+    /// reply, with a second request asked right behind the first. The session
+    /// has to survive all of it, and each reply still has to reach its own
+    /// request.
+    func testASessionSurvivesAnOlderHostsCodePageTextAndABrokenPush() throws {
+        let dropped = XCTestExpectation(description: "the connection dropped")
+        dropped.isInverted = true
+        try overLoopback(replies: [
+            "windows": #"{"type":"occluded","id":7,"by":}"# + "\n" + Self.windowsReply,
+            "apps": Self.appsReply,
+        ], dropped: dropped) { agent in
+            let windowsAnswered = expectation(description: "windows reached its request")
+            agent.windows { windows in
+                XCTAssertEqual(windows.map(\.title), ["Paramètres"])
+                windowsAnswered.fulfill()
+            }
+            let appsAnswered = expectation(description: "apps reached its request")
+            agent.apps { apps in
+                XCTAssertEqual(apps.map(\.name), ["Bloc-notes"])
+                appsAnswered.fulfill()
+            }
+            wait(for: [windowsAnswered, appsAnswered], timeout: 5, enforceOrder: true)
+            wait(for: [dropped], timeout: 0.5)
         }
-        wait(for: [answered], timeout: 5)
-        XCTAssertFalse(dropped, "the connection should have survived every line")
+    }
+
+    /// A push the host cut short, with the reply it wrote next run on behind
+    /// it in the same line. Passing over that line would lose the reply and
+    /// hand the next one to the wrong request; the connection has to go.
+    func testAPushCutShortWithAReplyBehindItDropsTheSession() throws {
+        let dropped = XCTestExpectation(description: "the connection dropped")
+        try overLoopback(replies: [
+            "windows": #"{"type":"occluded","id":7,"by":"Param"# + Self.windowsReply,
+            "apps": Self.appsReply,
+        ], dropped: dropped) { agent in
+            let windowsAnswered = expectation(description: "windows was answered")
+            agent.windows { windows in
+                XCTAssertEqual(windows.map(\.title), [], "its reply was in the dropped line")
+                windowsAnswered.fulfill()
+            }
+            let appsAnswered = expectation(description: "apps was answered")
+            agent.apps { apps in
+                XCTAssertEqual(apps.map(\.name), [], "the session it was asked on is gone")
+                appsAnswered.fulfill()
+            }
+            wait(for: [dropped, windowsAnswered, appsAnswered], timeout: 5)
+        }
     }
 }
 
