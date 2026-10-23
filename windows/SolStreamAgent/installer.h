@@ -95,6 +95,18 @@ bool UninstallSelf(std::string& error, std::string& left);
 /// Where an install lives.
 std::wstring InstallDirectory();
 
+/// The program an install in `directory` runs: SolStream.exe inside it.
+std::wstring InstalledExe(const std::wstring& directory);
+
+/// What this install was set up with, so an update keeps it rather than
+/// quietly putting back a shortcut somebody removed: the installer applies
+/// exactly what it is told, and told nothing it writes every shortcut. The
+/// shortcuts are the ones InstallSelf writes, SolStream.lnk on the all-users
+/// desktop and in the all-users Start menu; start at logon is read back from
+/// the installed task (StartsAtLogon), so with it off the installer registers
+/// a task with no trigger and still uses it to start the new copy.
+InstallOptions InstalledOptions();
+
 /// True when this executable is already running from the install directory,
 /// which is what tells the running program it does not need to offer setup.
 bool RunningInstalled();

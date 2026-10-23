@@ -667,7 +667,7 @@ void RemoveShortcutFile(const std::wstring& path) {
 }
 
 void WriteShortcuts(const std::wstring& destination, const InstallOptions& options) {
-    const std::wstring exe = destination + L"\\SolStream.exe";
+    const std::wstring exe = InstalledExe(destination);
     const std::wstring description = L"Stream one Windows application to your Mac";
 
     // COM has to be up for IShellLink, and this process may not have initialised
@@ -746,7 +746,7 @@ void RegisterUninstallEntry(const std::wstring& destination) {
                    + std::to_string((int) opened) + ")");
         return;
     }
-    const std::wstring exe = destination + L"\\SolStream.exe";
+    const std::wstring exe = InstalledExe(destination);
     SetRegString(key, L"DisplayName", L"SolStream");
     SetRegString(key, L"DisplayVersion", kVersion);
     SetRegString(key, L"Publisher", L"SolStream");
@@ -943,7 +943,7 @@ std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& desti
         L"  </Settings>\r\n"
         L"  <Actions Context=\"Author\">\r\n"
         L"    <Exec>\r\n"
-        L"      <Command>" + directory + L"\\SolStream.exe</Command>\r\n"
+        L"      <Command>" + InstalledExe(directory) + L"</Command>\r\n"
         // --listen-all because an installed host that only answers on loopback is
         // one no Mac can reach. The socket still requires the pairing token off
         // loopback; the window shows that token. That is the lock, not the address.
@@ -1439,6 +1439,26 @@ std::wstring InstallDirectory() {
     return std::wstring(root) + L"\\SolStream";
 }
 
+std::wstring InstalledExe(const std::wstring& directory) {
+    return directory + L"\\SolStream.exe";
+}
+
+InstallOptions InstalledOptions() {
+    // Where Windows will not name a folder the answer is "keep it": guessing
+    // wrong that way costs a shortcut, and the other way it costs the
+    // installer deleting one.
+    auto present = [](const std::wstring& link) {
+        return link.empty() || GetFileAttributesW(link.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+    InstallOptions options;
+    options.desktop_shortcut = present(DesktopShortcutPath());
+    options.start_menu_shortcut = present(StartMenuShortcutPath());
+    // As the person left it: an update used to turn "start when I log in"
+    // back on every time.
+    options.start_at_logon = StartsAtLogon();
+    return options;
+}
+
 bool RunningInstalled() {
     std::wstring here = DirectoryOf(ExePath());
     std::wstring there = InstallDirectory();
@@ -1537,7 +1557,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // scan, a full disk -- and on a self-update the host had already been
     // stopped, so the PC had no SolStream until somebody logged in again.
     // Now a failure leaves the old copy whole and starts it again.
-    const std::wstring installed = destination + L"\\SolStream.exe";
+    const std::wstring installed = InstalledExe(destination);
     const std::wstring incoming = installed + L".new";
     bool replaced = false;
     DWORD failure = 0;
@@ -1584,7 +1604,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // TCP and three UDP Sunshine ports derived from a base -- and a directory
     // that had to be created by hand because Sunshine exited 0 before its
     // logging was up if it could not write there.
-    const std::wstring exe = destination + L"\\SolStream.exe";
+    const std::wstring exe = InstalledExe(destination);
     // Both answers, and both looked at. These two calls used to have their
     // results thrown away and "firewall rules written" logged either way, so a
     // netsh that refused produced an install nothing could connect to and not

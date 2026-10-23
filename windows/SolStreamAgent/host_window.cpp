@@ -2252,36 +2252,6 @@ NOTIFYICONDATAW TrayData(HWND window);
 // here, installed only from here: the banner's Install button or the tray's
 // "Install update". See docs/updates.md.
 
-/// What this install was set up with, so an update keeps it rather than
-/// quietly putting back a shortcut somebody removed: the installer applies
-/// exactly what it is told, and told nothing it writes every shortcut.
-///
-/// The paths are installer.cpp's -- SolStream.lnk on the all-users desktop and
-/// in the all-users Start menu. Where Windows will not name a folder the answer
-/// is "keep it": guessing wrong that way costs a shortcut, and the other way it
-/// costs the installer deleting one.
-///
-/// Start at logon is read back from the installed task (StartsAtLogon), so an
-/// update keeps the person's choice: with it off, the installer registers a task
-/// with no trigger and still uses it to start the new copy.
-InstallOptions InstalledOptions() {
-    auto present = [](int csidl) {
-        wchar_t folder[MAX_PATH] = {0};
-        if (FAILED(SHGetFolderPathW(nullptr, csidl, nullptr, SHGFP_TYPE_CURRENT, folder))) {
-            return true;
-        }
-        const std::wstring link = std::wstring(folder) + L"\\SolStream.lnk";
-        return GetFileAttributesW(link.c_str()) != INVALID_FILE_ATTRIBUTES;
-    };
-    InstallOptions options;
-    options.desktop_shortcut = present(CSIDL_COMMON_DESKTOPDIRECTORY);
-    options.start_menu_shortcut = present(CSIDL_COMMON_PROGRAMS);
-    // As the person left it: an update used to turn "start when I log in"
-    // back on every time.
-    options.start_at_logon = StartsAtLogon();
-    return options;
-}
-
 bool StreamingNow() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_status.connected_clients > 0;
@@ -2480,7 +2450,7 @@ void Activate(HWND window, int id) {
             // The install already started the agent through its logon task, so
             // this normally finds a running window and brings it forward; the
             // installed executable's single-instance check does that for us.
-            const std::wstring exe = InstallDirectory() + L"\\SolStream.exe";
+            const std::wstring exe = InstalledExe(InstallDirectory());
             ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, nullptr,
                           SW_SHOWNORMAL);
             PostMessageW(window, WM_CLOSE, 0, 0);
