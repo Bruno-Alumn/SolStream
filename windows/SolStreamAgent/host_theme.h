@@ -61,7 +61,7 @@ constexpr float kButtonH = 32.0f;
 constexpr float kButtonHit = 32.0f;     // hit rect, per the platform minimum
 constexpr float kButtonMinW = 96.0f;
 constexpr float kButtonPadX = 16.0f;    // caption to edge, each side
-constexpr float kShieldExtra = 18.0f;   // widened for the elevation glyph
+constexpr float kShieldExtra = 18.0f;   // widened for the elevation glyph: its 12 box, a 6 gap
 
 constexpr float kRowH = 36.0f;          // one-line row
 constexpr float kFieldH = 36.0f;

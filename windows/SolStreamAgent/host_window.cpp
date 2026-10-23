@@ -630,16 +630,16 @@ bool HitButton(const Button& button, float x, float y) {
            && y >= button.rect.top - grow && y <= button.rect.bottom + grow;
 }
 
-/// The elevation glyph's box, and the gap between it and the caption.
+/// The elevation glyph's box. metric::kShieldExtra is the box and the gap
+/// between it and the caption.
 constexpr float kShieldW = 12.0f;
-constexpr float kShieldGap = 6.0f;
 
 /// A button's width: its caption plus the design's padding, never narrower
 /// than `min_width`, and wider by the glyph when it carries the UAC shield.
 float ButtonWidth(const std::wstring& caption, bool shield, float min_width) {
     const float width = MeasureWidth(caption, g_fmt_button)
                       + metric::kButtonPadX * 2.0f
-                      + (shield ? kShieldW + kShieldGap : 0.0f);
+                      + (shield ? metric::kShieldExtra : 0.0f);
     return width > min_width ? width : min_width;
 }
 
@@ -673,7 +673,7 @@ void DrawButton(const Button& button) {
     // The caption — and the shield, when there is one — centred as a group,
     // so the glyph does not push the word off the button's middle.
     const float caption_w = MeasureWidth(button.caption, g_fmt_button);
-    const float group = caption_w + (button.shield ? kShieldW + kShieldGap : 0.0f);
+    const float group = caption_w + (button.shield ? metric::kShieldExtra : 0.0f);
     const float mid = (button.rect.left + button.rect.right) / 2.0f;
     float left = mid - group / 2.0f;
     if (button.shield) {
@@ -682,7 +682,7 @@ void DrawButton(const Button& button) {
              D2D1::RectF(left - 2.0f, button.rect.top, left + kShieldW + 2.0f,
                          button.rect.bottom),
              ink, DWRITE_TEXT_ALIGNMENT_CENTER);
-        left += kShieldW + kShieldGap;
+        left += metric::kShieldExtra;
     }
     Text(button.caption, g_fmt_button,
          D2D1::RectF(left, button.rect.top, left + caption_w + 1.0f,
