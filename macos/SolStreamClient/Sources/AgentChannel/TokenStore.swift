@@ -30,6 +30,11 @@ public enum TokenStore {
     private static let lock = NSLock()
     /// host -> token, as stored. Loaded once.
     private static var tokens: [String: String]?
+    /// Hosts the old stores were searched for and had nothing for, and whether
+    /// they had nothing at all. Nothing writes those stores any more, so a
+    /// "no" stays true and the keychain is not asked again on every keystroke.
+    private static var legacyChecked: Set<String> = []
+    private static var legacyAnyChecked = false
 
     public static func token(for host: String) -> String? {
         lock.lock()
@@ -45,13 +50,16 @@ public enum TokenStore {
         lock.lock()
         defer { lock.unlock() }
         if loaded()[host] != nil { return true }
+        if legacyChecked.contains(host) { return false }
         if UserDefaults.standard.string(forKey: legacyPrefix + host) != nil { return true }
         // Attributes only: whether an old keychain item exists is answerable
         // without its contents, so this never puts up a prompt.
         var query = keychainQuery(host)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess { return true }
+        legacyChecked.insert(host)
+        return false
     }
 
     /// Whether this Mac has paired with any PC at all: what decides whether the
@@ -67,13 +75,16 @@ public enum TokenStore {
         lock.lock()
         defer { lock.unlock() }
         if !loaded().isEmpty { return true }
+        if legacyAnyChecked { return false }
         if UserDefaults.standard.dictionaryRepresentation().keys
             .contains(where: { $0.hasPrefix(legacyPrefix) }) { return true }
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecReturnAttributes as String: true,
                                     kSecMatchLimit as String: kSecMatchLimitOne]
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess { return true }
+        legacyAnyChecked = true
+        return false
     }
 
     public static func set(_ token: String, for host: String) {
@@ -111,7 +122,13 @@ public enum TokenStore {
 
     /// For tests, so they never read or write the person's real tokens.
     static var directoryOverride: URL? {
-        didSet { lock.lock(); tokens = nil; lock.unlock() }
+        didSet {
+            lock.lock()
+            tokens = nil
+            legacyChecked = []
+            legacyAnyChecked = false
+            lock.unlock()
+        }
     }
 
     static var fileURL: URL {
