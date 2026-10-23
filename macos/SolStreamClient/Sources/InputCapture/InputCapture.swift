@@ -168,11 +168,7 @@ public final class InputCapture {
 
     /// The host key for a macOS key code, or nil for one with no PC key.
     static func hostKey(forMacKey code: UInt16, isISO: Bool) -> HostKey? {
-        guard let windowsKey = KeyboardMap.windowsKey(forMacKey: code, isISO: isISO),
-              let scanCode = KeyboardMap.scanCode(forMacKey: code, isISO: isISO) else {
-            return nil
-        }
-        return HostKey(windowsKey: windowsKey, scanCode: scanCode)
+        KeyboardMap.hostKey(forMacKey: code, isISO: isISO)
     }
 
     /// The kind of keyboard an event was typed on. The event says, for the
