@@ -36,6 +36,7 @@
 #include <map>
 #include <cstring>
 
+#include "capture_display.h"
 #include "clipboard.h"
 #include "driver_install.h"
 #include "foreground.h"
@@ -2616,6 +2617,27 @@ void TestReceiveFailures() {
     CHECK(!early.Allow(5, unsaid));
 }
 
+void TestCaptureDisplayIsStale() {
+    const std::wstring one = L"\\\\.\\DISPLAY1";
+    const std::wstring three = L"\\\\.\\DISPLAY3";
+    const std::wstring four = L"\\\\.\\DISPLAY4";
+    // Nothing has changed: no choosing again, with or without a virtual display.
+    CHECK(!CaptureDisplayIsStale(three, {one, three}, three));
+    CHECK(!CaptureDisplayIsStale(one, {one}, L""));
+    // The virtual display came back under another number.
+    CHECK(CaptureDisplayIsStale(three, {one, four}, four));
+    // It attached after the host had settled for the primary.
+    CHECK(CaptureDisplayIsStale(one, {one, three}, three));
+    // It went away: the primary is chosen instead.
+    CHECK(CaptureDisplayIsStale(three, {one}, L""));
+    // Attached but not yet among the monitors: wait for it, rather than choose
+    // something that would not include it.
+    CHECK(!CaptureDisplayIsStale(one, {one}, three));
+    // Nothing was chosen while there were displays to choose from.
+    CHECK(CaptureDisplayIsStale(L"", {one}, L""));
+    CHECK(!CaptureDisplayIsStale(L"", {}, L""));
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -2700,6 +2722,7 @@ int wmain(int argc, wchar_t** argv) {
     TestForegroundBound();
     TestAudioSource();
     TestReceiveFailures();
+    TestCaptureDisplayIsStale();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

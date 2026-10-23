@@ -59,6 +59,7 @@
 #include <thread>
 #include <vector>
 
+#include "capture_display.h"
 #include "clipboard.h"
 #include "display_setup.h"
 #include "driver_install.h"
@@ -124,8 +125,9 @@ static_assert(6 * 2 * kMaxClipboardBytes < kMaxLineBytes,
 /// The display SolStream captures. Chosen at startup to the virtual one when
 /// there is one, because a crop taken from a real monitor is a crop out of
 /// somebody's actual screen -- and chosen again when the window's "Set up"
-/// installs one, which is why it is behind a lock: the status, watcher and
-/// command threads all read it, and it can now change under them.
+/// installs one or the displays change, which is why it is behind a lock: the
+/// status, watcher and command threads all read it, and it can now change
+/// under them.
 std::mutex g_capture_mutex;
 std::wstring g_capture_display;
 
@@ -5297,9 +5299,10 @@ int PrintLicenses() {
 }
 
 /// Pick what is captured: the virtual display when there is one, so a crop
-/// can never be a crop out of somebody's real screen. At startup, and again
-/// once the window has installed one. A session already streaming keeps the
-/// display it opened on; the next one uses this.
+/// can never be a crop out of somebody's real screen. At startup, again once
+/// the window has installed one, and again whenever the displays change under
+/// the choice (RechooseCaptureDisplayIfStale). A session already streaming
+/// keeps the display it opened on; the next one uses this.
 void ChooseCaptureDisplay() {
     std::wstring chosen;
     const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
@@ -5340,6 +5343,27 @@ void ChooseCaptureDisplay() {
 
     std::lock_guard<std::mutex> lock(g_capture_mutex);
     g_capture_display = chosen;
+}
+
+/// Choose again when the displays have changed under the choice; see
+/// capture_display.h. Every few seconds at most: it asks for every display.
+void RechooseCaptureDisplayIfStale() {
+    static ULONGLONG checked_at = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (checked_at != 0 && now - checked_at < 3000) {
+        return;
+    }
+    checked_at = now;
+    std::vector<std::wstring> present;
+    for (const Display& display : EnumerateDisplays()) {
+        present.push_back(ToWide(display.device_name));
+    }
+    const std::wstring current = CaptureDisplay();
+    if (solstream::CaptureDisplayIsStale(current, present, solstream::VirtualDisplayDevice())) {
+        Log("[agent] the displays changed under %s; choosing what to capture again",
+            current.empty() ? "no capture display" : ToUtf8(current).c_str());
+        ChooseCaptureDisplay();
+    }
 }
 
 /// The setup or host window waiting on this elevated process, to be told how
@@ -6315,6 +6339,7 @@ int wmain(int argc, wchar_t** argv) {
             status.driver_off = off;
             status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
+            RechooseCaptureDisplayIfStale();
             status.display_detail = status.virtual_display
                 ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
                 : L"not installed";
