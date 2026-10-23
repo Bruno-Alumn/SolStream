@@ -3,6 +3,8 @@
 #include <cstring>
 #include <initializer_list>
 
+#include "util.h"
+
 namespace solstream {
 
 namespace {
@@ -20,6 +22,32 @@ const MarkerFormats& Formats() {
     static const MarkerFormats formats;
     return formats;
 }
+
+/// The clipboard is a shared, contended resource: another process can hold it
+/// open, and OpenClipboard fails rather than waiting.
+class ClipboardLock {
+public:
+    ClipboardLock() {
+        for (int attempt = 0; attempt < 10 && !held_; ++attempt) {
+            held_ = OpenClipboard(nullptr) != FALSE;
+            if (!held_) {
+                Sleep(20);
+            }
+        }
+    }
+    ~ClipboardLock() {
+        if (held_) {
+            CloseClipboard();
+        }
+    }
+    bool held() const { return held_; }
+
+    ClipboardLock(const ClipboardLock&) = delete;
+    ClipboardLock& operator=(const ClipboardLock&) = delete;
+
+private:
+    bool held_ = false;
+};
 
 }  // namespace
 
@@ -118,6 +146,100 @@ void MarkClipboardPrivate() {
             GlobalFree(data);
         }
     }
+}
+
+DWORD ClipboardSequence() {
+    return GetClipboardSequenceNumber();
+}
+
+std::string ClipboardGetJson() {
+    ClipboardLock lock;
+    if (!lock.held()) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
+    }
+    // A password manager marks what it copies as not for clipboard tools, and
+    // this sync is one. On the Mac a password would go on into clipboard
+    // history and across to the user's other Apple devices, and nothing would
+    // clear it when the password manager clears this clipboard. Said as no
+    // text, which every Mac already leaves alone, with "private" for one that
+    // wants to say why.
+    if (ClipboardIsPrivate(ReadClipboardMarkers())) {
+        return "{\"type\":\"clipboard\",\"ok\":true,\"private\":true,\"text\":\"\",\"seq\":"
+             + std::to_string(ClipboardSequence()) + "}";
+    }
+    HANDLE handle = GetClipboardData(CF_UNICODETEXT);
+    if (!handle) {
+        // Not an error: the clipboard may hold an image, or nothing.
+        return "{\"type\":\"clipboard\",\"ok\":true,\"text\":\"\",\"seq\":"
+             + std::to_string(ClipboardSequence()) + "}";
+    }
+    auto* wide = static_cast<const wchar_t*>(GlobalLock(handle));
+    if (!wide) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
+    }
+    // In the Mac's line endings, so every Mac gets them whatever its version.
+    // Before the size check, which then counts what is actually sent.
+    std::string text = ToMacLineEndings(ToUtf8(wide));
+    GlobalUnlock(handle);
+
+    // A clipboard can hold a whole document; this channel is for text people
+    // copy, not for bulk transfer.
+    bool truncated = false;
+    if (text.size() > kMaxClipboardBytes) {
+        // Cut between codepoints, not at a byte offset. resize() alone can slice
+        // a multi-byte character in half, and the Mac rejects the whole line as
+        // malformed JSON — losing the reply, not just the tail of the text.
+        size_t cut = kMaxClipboardBytes;
+        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
+            --cut;
+        }
+        text.resize(cut);
+        truncated = true;
+    }
+    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":" + std::to_string(ClipboardSequence())
+         + ",\"truncated\":" + (truncated ? "true" : "false")
+         + ",\"text\":\"" + JsonEscape(text) + "\"}";
+}
+
+std::string ClipboardSetJson(const std::string& text) {
+    // Windows' line endings whatever the Mac sent: one from before it learned
+    // to convert sends bare LF. No echo follows from changing the text: the
+    // Mac adopts the sequence number this write produces, so it never reads
+    // the converted copy back as a change of its own. Not cut to
+    // kMaxClipboardBytes: a Mac cuts its text to that before adding the CRs,
+    // so a full one arrives up to twice as long.
+    const std::wstring wide = ToWide(ToWindowsLineEndings(text));
+    const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) {
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"out of memory\"}";
+    }
+    if (void* target = GlobalLock(memory)) {
+        std::memcpy(target, wide.c_str(), bytes);
+        GlobalUnlock(memory);
+    } else {
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
+    }
+
+    ClipboardLock lock;
+    if (!lock.held()) {
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
+    }
+    EmptyClipboard();
+    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        // Ownership only transfers on success; on failure it is still ours.
+        GlobalFree(memory);
+        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard rejected it\"}";
+    }
+    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":"
+         + std::to_string(ClipboardSequence()) + "}";
+}
+
+std::string ClipboardUnchangedJson() {
+    return "{\"type\":\"clipboard\",\"ok\":true,\"unchanged\":true,\"seq\":"
+         + std::to_string(ClipboardSequence()) + "}";
 }
 
 }  // namespace solstream

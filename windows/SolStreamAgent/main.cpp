@@ -115,22 +115,6 @@ constexpr const char* kLoopback = "127.0.0.1";
 // Mac cannot interoperate, and deliberately so -- see the client's refusal.
 constexpr int kProtocolVersion = 2;
 
-// Transport and payload budgets. These have to be picked together, and together
-// with the matching pair in AgentConnection.swift, because the clipboard is the
-// one command whose payload is sized by the user rather than by the protocol.
-//
-// JSON escaping can expand text sixfold — a control byte becomes \u00xx — so the
-// line limit must clear six times the payload cap at both ends. Getting this
-// wrong is not a truncated clipboard: whichever side hits its line cap first
-// tears down the control channel mid-session.
-constexpr size_t kMaxClipboardBytes = 256 * 1024;
-constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
-// A set from the Mac is cut to the cap while its lines still end in LF, then
-// given Windows' CRs, which can double it -- and is taken at whatever size it
-// arrives. So the line limit has to clear six times that as well.
-static_assert(6 * 2 * kMaxClipboardBytes < kMaxLineBytes,
-              "a clipboard set, escaped at worst, must fit in a line");
-
 /// The display SolStream captures. Chosen at startup to the virtual one when
 /// there is one, because a crop taken from a real monitor is a crop out of
 /// somebody's actual screen -- and chosen again when the window's "Set up"
@@ -1137,122 +1121,7 @@ uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
 // channel to this machine; a second port for it would be a second thing to
 // secure.
 
-/// The clipboard is a shared, contended resource: another process can hold it
-/// open, and OpenClipboard fails rather than waiting.
-class ClipboardLock {
-public:
-    ClipboardLock() {
-        for (int attempt = 0; attempt < 10 && !held_; ++attempt) {
-            held_ = OpenClipboard(nullptr) != FALSE;
-            if (!held_) {
-                Sleep(20);
-            }
-        }
-    }
-    ~ClipboardLock() {
-        if (held_) {
-            CloseClipboard();
-        }
-    }
-    bool held() const { return held_; }
-
-    ClipboardLock(const ClipboardLock&) = delete;
-    ClipboardLock& operator=(const ClipboardLock&) = delete;
-
-private:
-    bool held_ = false;
-};
-
-/// Bumped by Windows whenever anything changes the clipboard, so the Mac can poll
-/// for "has it changed" without transferring the contents every time.
-DWORD ClipboardSequence() {
-    return GetClipboardSequenceNumber();
-}
-
-std::string ClipboardGetJson() {
-    ClipboardLock lock;
-    if (!lock.held()) {
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
-    }
-    // A password manager marks what it copies as not for clipboard tools, and
-    // this sync is one. On the Mac a password would go on into clipboard
-    // history and across to the user's other Apple devices, and nothing would
-    // clear it when the password manager clears this clipboard. Said as no
-    // text, which every Mac already leaves alone, with "private" for one that
-    // wants to say why.
-    if (solstream::ClipboardIsPrivate(solstream::ReadClipboardMarkers())) {
-        return "{\"type\":\"clipboard\",\"ok\":true,\"private\":true,\"text\":\"\",\"seq\":"
-             + std::to_string(ClipboardSequence()) + "}";
-    }
-    HANDLE handle = GetClipboardData(CF_UNICODETEXT);
-    if (!handle) {
-        // Not an error: the clipboard may hold an image, or nothing.
-        return "{\"type\":\"clipboard\",\"ok\":true,\"text\":\"\",\"seq\":"
-             + std::to_string(ClipboardSequence()) + "}";
-    }
-    auto* wide = static_cast<const wchar_t*>(GlobalLock(handle));
-    if (!wide) {
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
-    }
-    // In the Mac's line endings, so every Mac gets them whatever its version.
-    // Before the size check, which then counts what is actually sent.
-    std::string text = solstream::ToMacLineEndings(ToUtf8(wide));
-    GlobalUnlock(handle);
-
-    // A clipboard can hold a whole document; this channel is for text people
-    // copy, not for bulk transfer.
-    bool truncated = false;
-    if (text.size() > kMaxClipboardBytes) {
-        // Cut between codepoints, not at a byte offset. resize() alone can slice
-        // a multi-byte character in half, and the Mac rejects the whole line as
-        // malformed JSON — losing the reply, not just the tail of the text.
-        size_t cut = kMaxClipboardBytes;
-        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
-            --cut;
-        }
-        text.resize(cut);
-        truncated = true;
-    }
-    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":" + std::to_string(ClipboardSequence())
-         + ",\"truncated\":" + (truncated ? "true" : "false")
-         + ",\"text\":\"" + JsonEscape(text) + "\"}";
-}
-
-std::string ClipboardSetJson(const std::string& text) {
-    // Windows' line endings whatever the Mac sent: one from before it learned
-    // to convert sends bare LF. No echo follows from changing the text: the
-    // Mac adopts the sequence number this write produces, so it never reads
-    // the converted copy back as a change of its own. Not cut to
-    // kMaxClipboardBytes: a Mac cuts its text to that before adding the CRs,
-    // so a full one arrives up to twice as long.
-    const std::wstring wide = ToWide(solstream::ToWindowsLineEndings(text));
-    const size_t bytes = (wide.size() + 1) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (!memory) {
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"out of memory\"}";
-    }
-    if (void* target = GlobalLock(memory)) {
-        std::memcpy(target, wide.c_str(), bytes);
-        GlobalUnlock(memory);
-    } else {
-        GlobalFree(memory);
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
-    }
-
-    ClipboardLock lock;
-    if (!lock.held()) {
-        GlobalFree(memory);
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard busy\"}";
-    }
-    EmptyClipboard();
-    if (!SetClipboardData(CF_UNICODETEXT, memory)) {
-        // Ownership only transfers on success; on failure it is still ours.
-        GlobalFree(memory);
-        return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard rejected it\"}";
-    }
-    return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":"
-         + std::to_string(ClipboardSequence()) + "}";
-}
+// The transfer and its replies are in clipboard.cpp.
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 //
@@ -4049,17 +3918,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     if (command == "clipboard") {
         std::string text;
         if (FieldString(line, "text", text)) {
-            return ClipboardSetJson(text);
+            return solstream::ClipboardSetJson(text);
         }
         // No text field means "what have you got"; a seq that matches what the
         // Mac already has means it need not ask for the contents.
         long long since = -1;
         if (FieldNumber(line, "seq", since) && since >= 0
-            && static_cast<DWORD>(since) == ClipboardSequence()) {
-            return "{\"type\":\"clipboard\",\"ok\":true,\"unchanged\":true,\"seq\":"
-                 + std::to_string(ClipboardSequence()) + "}";
+            && static_cast<DWORD>(since) == solstream::ClipboardSequence()) {
+            return solstream::ClipboardUnchangedJson();
         }
-        return ClipboardGetJson();
+        return solstream::ClipboardGetJson();
     }
 
     if (command == "icon") {
@@ -4998,7 +4866,7 @@ void ServeClient(SOCKET client) {
         // watching. The Mac does reconnect and re-assert every window now, but
         // the media session does not come back with it -- so what this costs is
         // still a live picture of a window that has been moved out from under it.
-        if (buffer.size() > kMaxLineBytes) {
+        if (buffer.size() > solstream::kMaxLineBytes) {
 #ifdef SOLSTREAM_MEDIA
             // Newline framing only. Everything above -- clearing the buffer,
             // then resynchronising on the next '\n' -- describes a line, and on
@@ -5011,11 +4879,11 @@ void ServeClient(SOCKET client) {
             // recovered from, so drop the connection instead.
             if (g_channel.encrypted) {
                 Log("[agent] a record on the encrypted channel passed %zu bytes "
-                    "without framing; dropping the client", kMaxLineBytes);
+                    "without framing; dropping the client", solstream::kMaxLineBytes);
                 return;
             }
 #endif
-            Log("[agent] request over %zu bytes, skipping it", kMaxLineBytes);
+            Log("[agent] request over %zu bytes, skipping it", solstream::kMaxLineBytes);
             buffer.clear();
             discarding = true;
             // Exactly one line, because the Mac pops one waiting completion per
