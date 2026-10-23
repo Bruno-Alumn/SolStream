@@ -66,23 +66,54 @@ WINDOWPLACEMENT PlacementForRestore(const WINDOWPLACEMENT& saved, bool visible);
 struct OwedWindow {
     uint64_t window = 0;      // the HWND, as the Mac also knows it
     uint32_t pid = 0;         // who owned it, against handle reuse
+    /// When that process started (GetProcessTimes, 100 ns units). A pid is
+    /// reused as readily as a handle, so the pair alone could name an
+    /// unrelated window; with the start time it names one process only.
+    uint64_t process_created = 0;
     uint64_t removed_style = 0;
     bool topmost = false;     // whether it was always-on-top before
     WINDOWPLACEMENT placement{};
 };
 
-/// The record as text: a header line, then one line of numbers per window.
-std::string FormatOwedWindows(const std::vector<OwedWindow>& windows);
+/// The whole record: the windows, and which run of Windows wrote it.
+struct OwedRecord {
+    /// When this PC last started, in whole seconds of the system clock
+    /// (BootSecond), as the writer worked it out.
+    uint64_t boot = 0;
+    /// The writer's GetTickCount64 at the time.
+    uint64_t written = 0;
+    std::vector<OwedWindow> windows;
+};
 
-/// The record read back. Lines that are not whole are skipped, as is a record
-/// without the header; an empty list is the answer to anything unreadable.
-std::vector<OwedWindow> ParseOwedWindows(const std::string& text);
+/// When the PC started, in seconds of the system clock: the time now less how
+/// long it has been running. `filetime_now` is GetSystemTimeAsFileTime as one
+/// number, `tick_ms` GetTickCount64.
+uint64_t BootSecond(uint64_t filetime_now, uint64_t tick_ms);
 
-/// Write the record to `path`, replacing it whole, or remove it when there is
-/// nothing owed. False when the file could not be written.
-bool SaveOwedWindows(const std::wstring& path, const std::vector<OwedWindow>& windows);
+/// How far two workings-out of the same start may differ: rounding, and the
+/// clock being set while the PC runs.
+constexpr uint64_t kBootSlackSeconds = 60;
+
+/// Whether `record` was written since this PC last started. Window handles and
+/// pids start again with Windows, so a record from before a restart names
+/// windows that are not the ones it means, however well they match. A start
+/// further from this one than the slack is another; and a record written later
+/// into its run than this run has lasted cannot be from this one either.
+bool RecordIsFromThisBoot(const OwedRecord& record, uint64_t boot_second, uint64_t tick_ms);
+
+/// The record as text: a header line, the line saying when it was written, then
+/// one line of numbers per window.
+std::string FormatOwedWindows(const OwedRecord& record);
+
+/// The record read back. Window lines that are not whole are skipped; a record
+/// without the header or the time it was written reads as empty.
+OwedRecord ParseOwedWindows(const std::string& text);
+
+/// Write the record to `path`, replacing it whole, or remove it when no window
+/// is owed. False when the file could not be written.
+bool SaveOwedWindows(const std::wstring& path, const OwedRecord& record);
 
 /// Read the record at `path`; empty when there is none.
-std::vector<OwedWindow> LoadOwedWindows(const std::wstring& path);
+OwedRecord LoadOwedWindows(const std::wstring& path);
 
 }  // namespace solstream

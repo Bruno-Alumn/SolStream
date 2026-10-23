@@ -13,10 +13,35 @@ namespace {
 
 /// The first line of the record. A record without it -- anything else that
 /// happens to be at that path, or a future format -- is not read at all.
-constexpr char kOwedHeader[] = "SolStream owed windows 1";
+constexpr char kOwedHeader[] = "SolStream owed windows 2";
 
 /// The numbers on one window's line, in order.
-constexpr int kOwedFields = 14;
+constexpr int kOwedFields = 15;
+
+/// Up to `count` whole numbers separated by spaces, and nothing else on the
+/// line. Signed 64-bit, so a negative or oversized one is caught by the range
+/// checks of whoever asked rather than wrapping into a plausible value. Field
+/// 0 of a window line is the handle, which fits; anything past LLONG_MAX fails.
+bool ReadNumbers(const std::string& line, long long* field, int count) {
+    const char* cursor = line.c_str();
+    int got = 0;
+    while (got < count) {
+        while (*cursor == ' ') { ++cursor; }
+        if (*cursor == '\0' || *cursor == '\r') {
+            break;
+        }
+        char* end = nullptr;
+        errno = 0;
+        const long long value = std::strtoll(cursor, &end, 10);
+        if (end == cursor || errno != 0 || (*end != ' ' && *end != '\0' && *end != '\r')) {
+            return false;
+        }
+        field[got++] = value;
+        cursor = end;
+    }
+    while (*cursor == ' ' || *cursor == '\r') { ++cursor; }
+    return got == count && *cursor == '\0';
+}
 
 }  // namespace
 
@@ -68,13 +93,29 @@ WINDOWPLACEMENT PlacementForRestore(const WINDOWPLACEMENT& saved, bool visible) 
     return placement;
 }
 
-std::string FormatOwedWindows(const std::vector<OwedWindow>& windows) {
+uint64_t BootSecond(uint64_t filetime_now, uint64_t tick_ms) {
+    const uint64_t now = filetime_now / 10000000ull;
+    const uint64_t up = tick_ms / 1000ull;
+    return now > up ? now - up : 0;
+}
+
+bool RecordIsFromThisBoot(const OwedRecord& record, uint64_t boot_second, uint64_t tick_ms) {
+    if (record.boot == 0 || boot_second == 0) {
+        return false;
+    }
+    const uint64_t apart = record.boot > boot_second ? record.boot - boot_second
+                                                     : boot_second - record.boot;
+    return apart <= kBootSlackSeconds && record.written <= tick_ms;
+}
+
+std::string FormatOwedWindows(const OwedRecord& record) {
     std::ostringstream out;
     out << kOwedHeader << "\n";
-    for (const OwedWindow& owed : windows) {
+    out << record.boot << ' ' << record.written << "\n";
+    for (const OwedWindow& owed : record.windows) {
         const WINDOWPLACEMENT& p = owed.placement;
-        out << owed.window << ' ' << owed.pid << ' ' << owed.removed_style << ' '
-            << (owed.topmost ? 1 : 0) << ' '
+        out << owed.window << ' ' << owed.pid << ' ' << owed.process_created << ' '
+            << owed.removed_style << ' ' << (owed.topmost ? 1 : 0) << ' '
             << p.flags << ' ' << p.showCmd << ' '
             << p.ptMinPosition.x << ' ' << p.ptMinPosition.y << ' '
             << p.ptMaxPosition.x << ' ' << p.ptMaxPosition.y << ' '
@@ -84,42 +125,26 @@ std::string FormatOwedWindows(const std::vector<OwedWindow>& windows) {
     return out.str();
 }
 
-std::vector<OwedWindow> ParseOwedWindows(const std::string& text) {
-    std::vector<OwedWindow> windows;
+OwedRecord ParseOwedWindows(const std::string& text) {
+    OwedRecord record;
     std::istringstream in(text);
     std::string line;
     if (!std::getline(in, line)) {
-        return windows;
+        return record;
     }
     if (!line.empty() && line.back() == '\r') { line.pop_back(); }
     if (line != kOwedHeader) {
-        return windows;
+        return record;
     }
+    long long when[2] = {};
+    if (!std::getline(in, line) || !ReadNumbers(line, when, 2) || when[0] <= 0 || when[1] < 0) {
+        return record;
+    }
+    record.boot = (uint64_t) when[0];
+    record.written = (uint64_t) when[1];
     while (std::getline(in, line)) {
-        // Every field as a signed 64-bit number first, so a negative or
-        // oversized one is caught by the range checks below rather than
-        // wrapping silently into a plausible value.
         long long field[kOwedFields] = {};
-        const char* cursor = line.c_str();
-        int count = 0;
-        bool whole = true;
-        while (count < kOwedFields) {
-            while (*cursor == ' ') { ++cursor; }
-            if (*cursor == '\0' || *cursor == '\r') {
-                break;
-            }
-            char* end = nullptr;
-            errno = 0;
-            const long long value = std::strtoll(cursor, &end, 10);
-            if (end == cursor || errno != 0 || (*end != ' ' && *end != '\0' && *end != '\r')) {
-                whole = false;
-                break;
-            }
-            field[count++] = value;
-            cursor = end;
-        }
-        while (*cursor == ' ' || *cursor == '\r') { ++cursor; }
-        if (!whole || count != kOwedFields || *cursor != '\0') {
+        if (!ReadNumbers(line, field, kOwedFields)) {
             continue;
         }
         auto in_range = [](long long value, long long low, long long high) {
@@ -127,12 +152,13 @@ std::vector<OwedWindow> ParseOwedWindows(const std::string& text) {
         };
         // A window handle is 32 significant bits even in a 64-bit process.
         if (!in_range(field[0], 1, 0xFFFFFFFFLL) || !in_range(field[1], 1, 0xFFFFFFFFLL)
-            || !in_range(field[2], 0, 0xFFFFFFFFLL) || !in_range(field[3], 0, 1)
-            || !in_range(field[4], 0, 0xFFFF) || !in_range(field[5], 0, 11)) {
+            || field[2] <= 0
+            || !in_range(field[3], 0, 0xFFFFFFFFLL) || !in_range(field[4], 0, 1)
+            || !in_range(field[5], 0, 0xFFFF) || !in_range(field[6], 0, 11)) {
             continue;
         }
         bool coordinates = true;
-        for (int i = 6; i < kOwedFields; ++i) {
+        for (int i = 7; i < kOwedFields; ++i) {
             coordinates = coordinates && in_range(field[i], INT_MIN, INT_MAX);
         }
         if (!coordinates) {
@@ -141,30 +167,31 @@ std::vector<OwedWindow> ParseOwedWindows(const std::string& text) {
         OwedWindow owed;
         owed.window = (uint64_t) field[0];
         owed.pid = (uint32_t) field[1];
-        owed.removed_style = (uint64_t) field[2];
-        owed.topmost = field[3] != 0;
+        owed.process_created = (uint64_t) field[2];
+        owed.removed_style = (uint64_t) field[3];
+        owed.topmost = field[4] != 0;
         WINDOWPLACEMENT& p = owed.placement;
         p.length = sizeof(WINDOWPLACEMENT);
-        p.flags = (UINT) field[4];
-        p.showCmd = (UINT) field[5];
-        p.ptMinPosition = POINT{(LONG) field[6], (LONG) field[7]};
-        p.ptMaxPosition = POINT{(LONG) field[8], (LONG) field[9]};
-        p.rcNormalPosition = RECT{(LONG) field[10], (LONG) field[11],
-                                  (LONG) field[12], (LONG) field[13]};
+        p.flags = (UINT) field[5];
+        p.showCmd = (UINT) field[6];
+        p.ptMinPosition = POINT{(LONG) field[7], (LONG) field[8]};
+        p.ptMaxPosition = POINT{(LONG) field[9], (LONG) field[10]};
+        p.rcNormalPosition = RECT{(LONG) field[11], (LONG) field[12],
+                                  (LONG) field[13], (LONG) field[14]};
         if (p.rcNormalPosition.right <= p.rcNormalPosition.left
             || p.rcNormalPosition.bottom <= p.rcNormalPosition.top) {
             continue;
         }
-        windows.push_back(owed);
+        record.windows.push_back(owed);
     }
-    return windows;
+    return record;
 }
 
-bool SaveOwedWindows(const std::wstring& path, const std::vector<OwedWindow>& windows) {
+bool SaveOwedWindows(const std::wstring& path, const OwedRecord& record) {
     if (path.empty()) {
         return false;
     }
-    if (windows.empty()) {
+    if (record.windows.empty()) {
         return DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND;
     }
     // Written beside it and moved over it, so a host killed mid-write -- the
@@ -176,7 +203,7 @@ bool SaveOwedWindows(const std::wstring& path, const std::vector<OwedWindow>& wi
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
-    const std::string text = FormatOwedWindows(windows);
+    const std::string text = FormatOwedWindows(record);
     DWORD written = 0;
     const bool wrote = WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr)
                     && written == text.size();
@@ -188,7 +215,7 @@ bool SaveOwedWindows(const std::wstring& path, const std::vector<OwedWindow>& wi
     return true;
 }
 
-std::vector<OwedWindow> LoadOwedWindows(const std::wstring& path) {
+OwedRecord LoadOwedWindows(const std::wstring& path) {
     if (path.empty()) {
         return {};
     }

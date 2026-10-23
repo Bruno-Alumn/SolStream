@@ -2850,6 +2850,7 @@ void TestOwedWindows(const std::wstring& scratch) {
     OwedWindow first;
     first.window = 0xFFFFFFFFull;
     first.pid = 8940;
+    first.process_created = 134056224000000000ull;
     first.removed_style = WS_THICKFRAME | WS_MAXIMIZEBOX;
     first.topmost = false;
     first.placement = PlacementAt(-1720, -40, 1406, 792);
@@ -2859,14 +2860,20 @@ void TestOwedWindows(const std::wstring& scratch) {
     OwedWindow second;
     second.window = 1970158;
     second.pid = 4;
+    second.process_created = 1;
     second.topmost = true;
     second.placement = PlacementAt(3440, 0, 3600, 2338);
     second.placement.showCmd = SW_SHOWMAXIMIZED;
+    OwedRecord record;
+    record.boot = 13404567890ull;
+    record.written = 7200000;
+    record.windows = {first, second};
 
     auto same = [](const OwedWindow& a, const OwedWindow& b) {
         const WINDOWPLACEMENT& p = a.placement;
         const WINDOWPLACEMENT& q = b.placement;
         return a.window == b.window && a.pid == b.pid
+            && a.process_created == b.process_created
             && a.removed_style == b.removed_style && a.topmost == b.topmost
             && p.length == sizeof(WINDOWPLACEMENT) && p.flags == q.flags
             && p.showCmd == q.showCmd
@@ -2875,10 +2882,12 @@ void TestOwedWindows(const std::wstring& scratch) {
             && PlacementDistance(p.rcNormalPosition, q.rcNormalPosition) == 0;
     };
 
-    const std::string text = FormatOwedWindows({first, second});
-    std::vector<OwedWindow> back = ParseOwedWindows(text);
-    CHECK(back.size() == 2);
-    CHECK(back.size() == 2 && same(back[0], first) && same(back[1], second));
+    const std::string text = FormatOwedWindows(record);
+    OwedRecord back = ParseOwedWindows(text);
+    CHECK(back.boot == record.boot && back.written == record.written);
+    CHECK(back.windows.size() == 2);
+    CHECK(back.windows.size() == 2 && same(back.windows[0], first)
+          && same(back.windows[1], second));
 
     // Line endings a text editor might have given it.
     std::string crlf;
@@ -2886,50 +2895,89 @@ void TestOwedWindows(const std::wstring& scratch) {
         if (c == '\n') { crlf += '\r'; }
         crlf += c;
     }
-    CHECK(ParseOwedWindows(crlf).size() == 2);
+    CHECK(ParseOwedWindows(crlf).windows.size() == 2);
 
-    // Nothing without the header, and nothing from an empty file.
-    CHECK(ParseOwedWindows(text.substr(text.find('\n') + 1)).empty());
-    CHECK(ParseOwedWindows("").empty());
-    CHECK(FormatOwedWindows({}) == "SolStream owed windows 1\n");
+    // Nothing without the header, nor without the line saying when; nothing
+    // from an empty file, nor from the first format, which named no process.
+    const std::string header = "SolStream owed windows 2\n";
+    const std::string when = "13404567890 7200000\n";
+    const std::string good = "100 7 55 0 0 0 1 0 0 0 0 10 20 110 220\n";
+    CHECK(ParseOwedWindows(header + when + good).windows.size() == 1);
+    CHECK(ParseOwedWindows(when + good).windows.empty());
+    CHECK(ParseOwedWindows(header + good).windows.empty());
+    CHECK(ParseOwedWindows(header + "0 7200000\n" + good).windows.empty());
+    CHECK(ParseOwedWindows(header + "13404567890\n" + good).windows.empty());
+    CHECK(ParseOwedWindows(header + "13404567890 -1\n" + good).windows.empty());
+    CHECK(ParseOwedWindows("").windows.empty());
+    CHECK(ParseOwedWindows("SolStream owed windows 1\n100 7 0 0 0 1 0 0 0 0 10 20 110 220\n")
+              .windows.empty());
+    CHECK(FormatOwedWindows(OwedRecord{}) == header + "0 0\n");
 
     // Each damaged line is skipped on its own; the whole one beside it stays.
-    const std::string header = "SolStream owed windows 1\n";
-    const std::string good = "100 7 0 0 0 1 0 0 0 0 10 20 110 220\n";
-    CHECK(ParseOwedWindows(header + good).size() == 1);
     for (const char* bad : {
-             "100 7 0 0 0 1 0 0 0 0 10 20 110\n",            // too few
-             "100 7 0 0 0 1 0 0 0 0 10 20 110 220 5\n",      // too many
-             "100 7 0 0 0 1 0 0 0 0 10 20 110 2x0\n",        // not a number
-             "0 7 0 0 0 1 0 0 0 0 10 20 110 220\n",          // no window
-             "100 0 0 0 0 1 0 0 0 0 10 20 110 220\n",        // no owner
-             "4294967296 7 0 0 0 1 0 0 0 0 10 20 110 220\n", // past 32 bits
-             "100 7 0 2 0 1 0 0 0 0 10 20 110 220\n",        // topmost is 0 or 1
-             "100 7 0 0 0 12 0 0 0 0 10 20 110 220\n",       // no such showCmd
-             "100 7 -1 0 0 1 0 0 0 0 10 20 110 220\n",       // negative style
-             "100 7 0 0 0 1 0 0 0 0 110 20 10 220\n",        // empty rectangle
-             "100 7 0 0 0 1 0 0 0 0 10 20 110 99999999999\n", // past a LONG
+             "100 7 55 0 0 0 1 0 0 0 0 10 20 110\n",            // too few
+             "100 7 55 0 0 0 1 0 0 0 0 10 20 110 220 5\n",      // too many
+             "100 7 55 0 0 0 1 0 0 0 0 10 20 110 2x0\n",        // not a number
+             "0 7 55 0 0 0 1 0 0 0 0 10 20 110 220\n",          // no window
+             "100 0 55 0 0 0 1 0 0 0 0 10 20 110 220\n",        // no owner
+             "100 7 0 0 0 0 1 0 0 0 0 10 20 110 220\n",         // no start time
+             "100 7 -5 0 0 0 1 0 0 0 0 10 20 110 220\n",        // nor a negative one
+             "4294967296 7 55 0 0 0 1 0 0 0 0 10 20 110 220\n", // past 32 bits
+             "100 7 55 0 2 0 1 0 0 0 0 10 20 110 220\n",        // topmost is 0 or 1
+             "100 7 55 0 0 0 12 0 0 0 0 10 20 110 220\n",       // no such showCmd
+             "100 7 55 -1 0 0 1 0 0 0 0 10 20 110 220\n",       // negative style
+             "100 7 55 0 0 0 1 0 0 0 0 110 20 10 220\n",        // empty rectangle
+             "100 7 55 0 0 0 1 0 0 0 0 10 20 110 99999999999\n", // past a LONG
          }) {
-        const std::vector<OwedWindow> parsed = ParseOwedWindows(header + bad + good);
-        CHECK(parsed.size() == 1);
-        CHECK(parsed.size() == 1 && parsed[0].window == 100);
+        const OwedRecord parsed = ParseOwedWindows(header + when + bad + good);
+        CHECK(parsed.windows.size() == 1);
+        CHECK(parsed.windows.size() == 1 && parsed.windows[0].window == 100
+              && parsed.windows[0].process_created == 55);
     }
+
+    // When the PC started: the clock less the time it has been running.
+    CHECK(BootSecond(134056224000000000ull, 3600000) == 13405622400ull - 3600);
+    CHECK(BootSecond(134056224000000000ull, 3600999) == 13405622400ull - 3600);
+    CHECK(BootSecond(10000000ull, 5000) == 0);   // a clock that cannot be right
+
+    // From this run of Windows: the same start, give or take the slack, and
+    // written no later into the run than it has lasted.
+    OwedRecord dated;
+    dated.boot = 13405618800ull;
+    dated.written = 7200000;
+    CHECK(RecordIsFromThisBoot(dated, 13405618800ull, 7200000));
+    CHECK(RecordIsFromThisBoot(dated, 13405618800ull, 90000000));
+    CHECK(RecordIsFromThisBoot(dated, 13405618800ull + kBootSlackSeconds, 90000000));
+    CHECK(RecordIsFromThisBoot(dated, 13405618800ull - kBootSlackSeconds, 90000000));
+    // Restarted since: started later by at least as long as the last run.
+    CHECK(!RecordIsFromThisBoot(dated, 13405618800ull + 7200 + 40, 600000));
+    CHECK(!RecordIsFromThisBoot(dated, 13405618800ull + kBootSlackSeconds + 1, 90000000));
+    // Within the slack, yet written later into its run than this run has
+    // lasted: another run.
+    CHECK(!RecordIsFromThisBoot(dated, 13405618800ull + 30, 7199999));
+    // A record or a clock that cannot say.
+    CHECK(!RecordIsFromThisBoot(OwedRecord{}, 13405618800ull, 7200000));
+    CHECK(!RecordIsFromThisBoot(dated, 0, 7200000));
 
     // On disk: written whole, read back, and gone once nothing is owed.
     const std::wstring path = scratch + L"\\owed-windows.txt";
-    CHECK(LoadOwedWindows(path).empty());
-    CHECK(SaveOwedWindows(path, {first, second}));
+    CHECK(LoadOwedWindows(path).windows.empty());
+    CHECK(SaveOwedWindows(path, record));
     back = LoadOwedWindows(path);
-    CHECK(back.size() == 2 && same(back[0], first) && same(back[1], second));
+    CHECK(back.boot == record.boot && back.written == record.written);
+    CHECK(back.windows.size() == 2 && same(back.windows[0], first)
+          && same(back.windows[1], second));
     CHECK(GetFileAttributesW((path + L".new").c_str()) == INVALID_FILE_ATTRIBUTES);
-    CHECK(SaveOwedWindows(path, {second}));
+    OwedRecord one = record;
+    one.windows = {second};
+    CHECK(SaveOwedWindows(path, one));
     back = LoadOwedWindows(path);
-    CHECK(back.size() == 1 && same(back[0], second));
-    CHECK(SaveOwedWindows(path, {}));
+    CHECK(back.windows.size() == 1 && same(back.windows[0], second));
+    CHECK(SaveOwedWindows(path, OwedRecord{}));
     CHECK(GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
-    CHECK(SaveOwedWindows(path, {}));   // nothing there is fine too
-    CHECK(!SaveOwedWindows(L"", {first}));
-    CHECK(!SaveOwedWindows(scratch + L"\\no such folder\\owed.txt", {first}));
+    CHECK(SaveOwedWindows(path, OwedRecord{}));   // nothing there is fine too
+    CHECK(!SaveOwedWindows(L"", record));
+    CHECK(!SaveOwedWindows(scratch + L"\\no such folder\\owed.txt", record));
 }
 
 }  // namespace

@@ -1777,6 +1777,9 @@ struct WindowLock {
     /// Mac would go on showing whatever now occupies those pixels rather than
     /// noticing that the thing it was streaming is gone.
     DWORD pid = 0;
+    /// When that process started, so a record of this slot written to disk
+    /// names it and no later process given the same pid. 0 when unknown.
+    uint64_t process_created = 0;
     // How the window looked before the agent touched it. Everything the agent
     // changes has to be recorded, because the client that changed it may never
     // come back to change it again: a Mac that loses its network leaves the
@@ -1815,6 +1818,20 @@ uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 /// nothing measures afterwards are made asynchronous as well.
 bool Unresponsive(HWND window) {
     return IsHungAppWindow(window) != FALSE;
+}
+
+/// When a process started (GetProcessTimes, in 100 ns units), or 0 when it
+/// cannot be opened -- it has gone, or it is protected.
+uint64_t ProcessCreationTime(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return 0;
+    }
+    FILETIME created{}, exited{}, kernel{}, user{};
+    const bool ok = GetProcessTimes(process, &created, &exited, &kernel, &user) != FALSE;
+    CloseHandle(process);
+    return ok ? (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime
+              : 0;
 }
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
@@ -2954,6 +2971,7 @@ int ClaimSlot(HWND window) {
         g_locks[i].active = true;
         g_locks[i].generation = ++g_lock_generation;
         GetWindowThreadProcessId(window, &g_locks[i].pid);
+        g_locks[i].process_created = ProcessCreationTime(g_locks[i].pid);
         g_locks[i].saved_topmost =
             (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
         // WINDOWPLACEMENT rather than GetWindowRect: it carries the restored
@@ -2964,6 +2982,15 @@ int ClaimSlot(HWND window) {
         return i;
     }
     return -1;
+}
+
+/// When this PC last started, in seconds of the system clock; see BootSecond.
+uint64_t ThisBootSecond() {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    return solstream::BootSecond(
+        (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime,
+        GetTickCount64());
 }
 
 /// Where a host writes down the windows it owes a restore.
@@ -2982,19 +3009,24 @@ std::wstring OwedWindowsPath() {
 /// only ever leave the later state on disk.
 void RecordOwedWindows() {
     EnterCriticalSection(&g_owed_cs);
-    std::vector<solstream::OwedWindow> owed;
+    solstream::OwedRecord owed;
+    owed.boot = ThisBootSecond();
+    owed.written = GetTickCount64();
     EnterCriticalSection(&g_lock_cs);
     for (int i = 0; i < kMaxLocks; ++i) {
-        if (!g_locks[i].active) {
+        // A window whose process could not be identified is not written down:
+        // the next host could not tell it from another one with its handle.
+        if (!g_locks[i].active || g_locks[i].process_created == 0) {
             continue;
         }
         solstream::OwedWindow entry;
         entry.window = IdFromWindow(g_locks[i].window);
         entry.pid = g_locks[i].pid;
+        entry.process_created = g_locks[i].process_created;
         entry.removed_style = (uint64_t) g_locks[i].removed_style;
         entry.topmost = g_locks[i].saved_topmost;
         entry.placement = g_locks[i].saved_placement;
-        owed.push_back(entry);
+        owed.windows.push_back(entry);
     }
     LeaveCriticalSection(&g_lock_cs);
     static bool complained = false;
@@ -3192,15 +3224,24 @@ void UnlockAll() {
 /// monitor shows, without the resize border and maximise box the session took.
 /// Left to the next session, the window is claimed as it is -- so the Mac is
 /// told it cannot be resized, and the end of that session "restores" it to the
-/// capture display. RestoreWindow's own checks keep this from touching a
-/// window that has since closed, or a handle Windows has given to another
-/// program.
+/// capture display.
+///
+/// Only a record from this run of Windows, and only for the process that
+/// owned the window then: handles and pids both start again with Windows, and
+/// either can be given to something else since. RestoreWindow's own checks
+/// keep this from touching a window that has since closed.
 void RestoreWindowsLeftBehind() {
-    const std::vector<solstream::OwedWindow> owed =
-        solstream::LoadOwedWindows(OwedWindowsPath());
-    if (owed.empty()) {
+    const solstream::OwedRecord record = solstream::LoadOwedWindows(OwedWindowsPath());
+    if (record.windows.empty()) {
         return;
     }
+    if (!solstream::RecordIsFromThisBoot(record, ThisBootSecond(), GetTickCount64())) {
+        Log("[restore] the windows a host owed were written down before this PC "
+            "last started; none of them is still there to give back");
+        solstream::SaveOwedWindows(OwedWindowsPath(), solstream::OwedRecord{});
+        return;
+    }
+    const std::vector<solstream::OwedWindow>& owed = record.windows;
     Log("[restore] the last host stopped owing %zu window%s a restore; giving "
         "%s back now", owed.size(), owed.size() == 1 ? "" : "s",
         owed.size() == 1 ? "it" : "them");
@@ -3208,6 +3249,7 @@ void RestoreWindowsLeftBehind() {
         WindowLock saved;
         saved.window = reinterpret_cast<HWND>(static_cast<uintptr_t>(entry.window));
         saved.pid = entry.pid;
+        saved.process_created = entry.process_created;
         // Only ever the two bits a lock takes, whatever the file says.
         saved.removed_style = (LONG_PTR) entry.removed_style & kLockedStyleBits;
         saved.saved_topmost = entry.topmost;
@@ -3215,7 +3257,8 @@ void RestoreWindowsLeftBehind() {
         // Not this process's own window, which a handle reused since could be.
         DWORD owner = 0;
         if (!IsWindow(saved.window)
-            || (GetWindowThreadProcessId(saved.window, &owner), owner == GetCurrentProcessId())) {
+            || (GetWindowThreadProcessId(saved.window, &owner), owner == GetCurrentProcessId())
+            || owner != entry.pid || ProcessCreationTime(owner) != entry.process_created) {
             continue;
         }
         RestoreWindow(saved);
