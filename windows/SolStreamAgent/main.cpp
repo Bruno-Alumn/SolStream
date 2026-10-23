@@ -653,6 +653,19 @@ RECT VisibleFrame(HWND window) {
     return frame;
 }
 
+/// Whether a rectangle covers anything at all.
+bool HasArea(const RECT& rect) {
+    return (rect.right - rect.left) > 0 && (rect.bottom - rect.top) > 0;
+}
+
+/// Whether DWM has cloaked this window: it counts as visible, and nothing of
+/// it is on screen.
+bool IsCloaked(HWND window) {
+    int cloaked = 0;
+    return SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+           && cloaked != 0;
+}
+
 /// Client area, in screen coordinates.
 RECT ClientAreaInScreen(HWND window) {
     RECT client{};
@@ -664,8 +677,10 @@ RECT ClientAreaInScreen(HWND window) {
     return RECT{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
 }
 
-/// Is this a window a user would think of as an application window?
-bool IsUserWindow(HWND window) {
+/// IsUserWindow, all but its last test: that the window's visible frame covers
+/// anything. Split out so a caller that has measured the frame already need
+/// not measure it again.
+bool IsUserWindowAsideFromFrame(HWND window) {
     if (!IsWindowVisible(window) || IsIconic(window)) {
         return false;
     }
@@ -692,18 +707,16 @@ bool IsUserWindow(HWND window) {
 
     // UWP keeps invisible "ghost" windows around that pass every check above;
     // DWM marks them cloaked. Without this the window list is full of junk.
-    int cloaked = 0;
-    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
-        && cloaked != 0) {
+    if (IsCloaked(window)) {
         return false;
     }
 
-    if (GetWindowTextLengthW(window) == 0) {
-        return false;
-    }
+    return GetWindowTextLengthW(window) != 0;
+}
 
-    const RECT frame = VisibleFrame(window);
-    return (frame.right - frame.left) > 0 && (frame.bottom - frame.top) > 0;
+/// Is this a window a user would think of as an application window?
+bool IsUserWindow(HWND window) {
+    return IsUserWindowAsideFromFrame(window) && HasArea(VisibleFrame(window));
 }
 
 /// Accumulates the enumeration, plus every visible window above the current
@@ -725,12 +738,14 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     // Whether THIS window ended up in `above`, which the occlusion pass below
     // needs to know and cannot assume — see the note there.
     bool self_in_above = false;
-    int cloaked = 0;
-    if (visible
-        && !(SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
-             && cloaked != 0)) {
-        const RECT frame = VisibleFrame(window);
-        if ((frame.right - frame.left) > 0 && (frame.bottom - frame.top) > 0) {
+    // Measured at most once: by this block for a window that can occlude, and
+    // otherwise below, only for one that passes every other test.
+    bool measured = false;
+    RECT frame{};
+    if (visible && !IsCloaked(window)) {
+        frame = VisibleFrame(window);
+        measured = true;
+        if (HasArea(frame)) {
             wchar_t occluder_title[128] = {};
             GetWindowTextW(window, occluder_title, 128);
             state->above.emplace_back(frame, ToUtf8(occluder_title));
@@ -738,14 +753,20 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
         }
     }
 
-    if (!IsUserWindow(window)) {
+    if (!IsUserWindowAsideFromFrame(window)) {
+        return TRUE;
+    }
+    if (!measured) {
+        frame = VisibleFrame(window);
+    }
+    if (!HasArea(frame)) {
         return TRUE;
     }
     auto* windows = &state->windows;
 
     WindowInfo info;
     info.handle = window;
-    info.frame = VisibleFrame(window);
+    info.frame = frame;
     info.client = ClientAreaInScreen(window);
     info.caption_inset = (int) std::max(0L, info.client.top - info.frame.top);
     GetWindowThreadProcessId(window, &info.pid);
@@ -2194,9 +2215,7 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
     if (ex_style & WS_EX_TRANSPARENT) {
         return TRUE;  // click-through overlay; moving it would break it
     }
-    int cloaked = 0;
-    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
-        && cloaked != 0) {
+    if (IsCloaked(window)) {
         return TRUE;
     }
     // The shell's own furniture exists on every display and belongs to none.
