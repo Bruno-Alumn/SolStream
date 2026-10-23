@@ -2505,35 +2505,51 @@ void TestStrandedWindows() {
     const std::vector<OwnerLink> none;
 
     // Nothing streamed: nothing belongs.
-    CHECK(!PartOfTheStream(dialog, 300, none, inside, {}));
+    CHECK(!PartOfTheStream(dialog, 300, none, inside, false, {}));
     // The streamed window itself, and its own process's dialogs, wherever they are.
-    CHECK(PartOfTheStream(app, 100, none, elsewhere, streamed));
-    CHECK(PartOfTheStream(dialog, 100, none, elsewhere, streamed));
+    CHECK(PartOfTheStream(app, 100, none, elsewhere, false, streamed));
+    CHECK(PartOfTheStream(dialog, 100, none, elsewhere, false, streamed));
     // A credential prompt from another process, owned by the streamed window.
-    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{app, 100}}, elsewhere, streamed));
+    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{app, 100}}, elsewhere, false, streamed));
     // Owned through a window of its own process first: the chain still reaches it.
     CHECK(PartOfTheStream(dialog, 300, {OwnerLink{broker_frame, 300}, OwnerLink{app, 100}},
-                          elsewhere, streamed));
+                          elsewhere, false, streamed));
     // Owned by another window of the streamed process.
-    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{other_app, 100}}, elsewhere, streamed));
+    CHECK(PartOfTheStream(dialog, 300, {OwnerLink{other_app, 100}}, elsewhere, false, streamed));
     // Owned by something that is not streamed, and out of the picture: carried off.
-    CHECK(!PartOfTheStream(dialog, 300, {OwnerLink{other_app, 200}}, elsewhere, streamed));
-    // Unowned, but over the streamed window: it is in the picture.
-    CHECK(PartOfTheStream(dialog, 300, none, inside, streamed));
-    // Touching the edge is not overlapping it.
-    CHECK(!PartOfTheStream(dialog, 300, none, RECT{1280, 0, 1600, 300}, streamed));
-    CHECK(PartOfTheStream(dialog, 300, none, RECT{1279, 0, 1600, 300}, streamed));
+    CHECK(!PartOfTheStream(dialog, 300, {OwnerLink{other_app, 200}}, elsewhere, false,
+                           streamed));
+
+    // Unowned, in front of the streamed window and over it: in the picture.
+    CHECK(PartOfTheStream(dialog, 300, none, inside, false, streamed));
+    // The same window BEHIND it, which the Mac's pinning puts every ordinary
+    // window: hidden from everybody, so carried off.
+    std::vector<StreamedWindow> passed{slot};
+    NoteMet(app, passed);
+    CHECK(passed[0].met);
+    CHECK(!PartOfTheStream(dialog, 300, none, inside, false, passed));
+    // Unless it is always on top, and so over the streamed window anyway.
+    CHECK(PartOfTheStream(dialog, 300, none, inside, true, passed));
+    // Meeting some other window says nothing about this one.
+    std::vector<StreamedWindow> unmet{slot};
+    NoteMet(other_app, unmet);
+    CHECK(!unmet[0].met);
+    // Judged by its middle: a corner over the streamed window is not enough.
+    CHECK(!PartOfTheStream(dialog, 300, none, RECT{1279, 0, 1600, 300}, true, streamed));
+    CHECK(!PartOfTheStream(dialog, 300, none, RECT{1000, 0, 1600, 300}, true, streamed));
+    CHECK(PartOfTheStream(dialog, 300, none, RECT{1000, 0, 1500, 300}, true, streamed));
     // A slot that is not held has no area to be in.
     StreamedWindow loose = slot;
     loose.held = false;
-    CHECK(!PartOfTheStream(dialog, 300, none, inside, {loose}));
+    CHECK(!PartOfTheStream(dialog, 300, none, inside, true, {loose}));
     // No pid known never matches another unknown pid.
     StreamedWindow nameless;
     nameless.window = app;
-    CHECK(!PartOfTheStream(dialog, 0, {OwnerLink{other_app, 0}}, elsewhere, {nameless}));
-    // An empty rectangle overlaps nothing.
-    CHECK(!RectsOverlap(RECT{10, 10, 10, 20}, RECT{0, 0, 100, 100}));
-    CHECK(RectsOverlap(RECT{10, 10, 11, 11}, RECT{0, 0, 100, 100}));
+    CHECK(!PartOfTheStream(dialog, 0, {OwnerLink{other_app, 0}}, elsewhere, false, {nameless}));
+
+    CHECK(MiddleInside(RECT{0, 0, 10, 10}, RECT{0, 0, 6, 6}));
+    CHECK(!MiddleInside(RECT{0, 0, 10, 10}, RECT{0, 0, 5, 5}));
+    CHECK(MiddleInside(RECT{0, 0, 10, 10}, RECT{5, 5, 6, 6}));
 }
 
 void TestForegroundBound() {

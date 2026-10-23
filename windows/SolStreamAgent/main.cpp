@@ -2382,6 +2382,9 @@ struct StrandedSearch {
 
 BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
     auto* search = reinterpret_cast<StrandedSearch*>(param);
+    // Before anything is skipped: EnumWindows goes from the top of the
+    // z-order down, and what comes after a streamed window is behind it.
+    solstream::NoteMet(window, search->streamed);
 
     if (!IsWindowVisible(window) || IsIconic(window)) {
         return TRUE;
@@ -2433,7 +2436,8 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
         GetWindowThreadProcessId(owner, &link.pid);
         owners.push_back(link);
     }
-    if (solstream::PartOfTheStream(window, pid, owners, rect, search->streamed)) {
+    if (solstream::PartOfTheStream(window, pid, owners, rect, (ex_style & WS_EX_TOPMOST) != 0,
+                                   search->streamed)) {
         return TRUE;
     }
     // By its middle, so a dialog straddling the edge of two displays is judged

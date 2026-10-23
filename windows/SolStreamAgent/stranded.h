@@ -14,9 +14,12 @@
 //
 // Two things now keep a window where it is, either being enough. Its owner
 // chain reaches a streamed window, or a window of a streamed process: that is
-// how Windows itself says a dialog belongs to an application. Or it overlaps
-// the part of the display a streamed window is held to, which means it is in
-// the picture the Mac is showing.
+// how Windows itself says a dialog belongs to an application. Or it is in the
+// picture the Mac is showing: its middle inside the part of the display a
+// streamed window is held to, and IN FRONT of that window -- always on top, or
+// met before it going down the z-order. The Mac pins every streamed window on
+// top, so a window that is merely under one is hidden from everybody, and that
+// one is still carried off.
 //
 // Header-only and with nothing to call, so the test program can check it.
 
@@ -40,6 +43,9 @@ struct StreamedWindow {
     RECT desired{};
     /// Whether `desired` is in force. A slot that is not held has no area.
     bool held = false;
+    /// Whether the search, going from the top of the z-order down, has met
+    /// this window yet. Every window met after it is behind it.
+    bool met = false;
 };
 
 /// One window in a candidate's owner chain, nearest owner first.
@@ -48,16 +54,28 @@ struct OwnerLink {
     DWORD pid = 0;
 };
 
-/// Whether two rectangles share at least one pixel. An empty one shares none.
-inline bool RectsOverlap(const RECT& a, const RECT& b) {
-    return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
-        && a.left < a.right && a.top < a.bottom && b.left < b.right && b.top < b.bottom;
+/// Whether the middle of `rect` lies inside `area`.
+inline bool MiddleInside(const RECT& rect, const RECT& area) {
+    const LONG x = rect.left + (rect.right - rect.left) / 2;
+    const LONG y = rect.top + (rect.bottom - rect.top) / 2;
+    return x >= area.left && x < area.right && y >= area.top && y < area.bottom;
+}
+
+/// Note that the search going down the z-order has reached `window`.
+inline void NoteMet(HWND window, std::vector<StreamedWindow>& streamed) {
+    for (StreamedWindow& slot : streamed) {
+        if (slot.window == window) {
+            slot.met = true;
+        }
+    }
 }
 
 /// Whether the window `window`, of process `pid`, with these owners and this
-/// rectangle, is part of what is being streamed and so stays put.
+/// rectangle, is part of what is being streamed and so stays put. `topmost`
+/// is whether it is always on top.
 inline bool PartOfTheStream(HWND window, DWORD pid, const std::vector<OwnerLink>& owners,
-                            const RECT& rect, const std::vector<StreamedWindow>& streamed) {
+                            const RECT& rect, bool topmost,
+                            const std::vector<StreamedWindow>& streamed) {
     for (const StreamedWindow& slot : streamed) {
         if (slot.window == window || (slot.pid != 0 && slot.pid == pid)) {
             return true;
@@ -68,7 +86,7 @@ inline bool PartOfTheStream(HWND window, DWORD pid, const std::vector<OwnerLink>
                 return true;
             }
         }
-        if (slot.held && RectsOverlap(rect, slot.desired)) {
+        if (slot.held && (topmost || !slot.met) && MiddleInside(rect, slot.desired)) {
             return true;
         }
     }
