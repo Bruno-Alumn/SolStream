@@ -37,7 +37,6 @@ struct CodedPicture {
     uint32_t frameId = 0;
     bool isIdr = false;
     long long capturedAt = 0;   ///< QPC ticks, carried from the capture
-    long long encodedAt = 0;    ///< QPC ticks, when the last byte came out
 };
 
 class Encoder {
@@ -51,7 +50,6 @@ public:
     /// `device` must be the same D3D11 device the capture textures live on.
     bool Open(ID3D11Device* device, UINT width, UINT height, UINT fps, UINT bitrateBps);
     void Close();
-    bool Running() const;
 
     UINT Width() const;
     UINT Height() const;
@@ -73,7 +71,6 @@ public:
     void RequestIdr();
     /// A keyframe has been asked for and not yet produced.
     bool IdrPending() const;
-    void SetBitrate(UINT bitrateBps);
 
     /// Diagnostics. `extraSamples` counts output samples that arrived for a
     /// picture already emitted -- if it is not zero, one encoder output is not

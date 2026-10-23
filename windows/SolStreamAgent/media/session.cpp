@@ -80,7 +80,6 @@ struct Picture {
     uint32_t frameId = 0;
     bool isIdr = false;
     long long capturedAt = 0;
-    long long encodedAt = 0;
 };
 
 }  // namespace
@@ -171,7 +170,6 @@ struct MediaSession::Impl {
     std::atomic<uint64_t> idrRequests{0};
     std::atomic<uint32_t> clientLastFrame{0};
     std::atomic<uint32_t> clientDamaged{0};
-    std::atomic<double> lastRttMs{0.0};
     // Capture -> last byte on the wire, which is the figure the whole design is
     // budgeted against and the one nothing has measured until now. Kept as a
     // minimum and a running mean rather than a sample list, because the sender
@@ -449,7 +447,6 @@ void MediaSession::Impl::RunCapture() {
         picture.frameId = coded.frameId;
         picture.isIdr = coded.isIdr;
         picture.capturedAt = coded.capturedAt;
-        picture.encodedAt = coded.encodedAt;
         // A full queue means the sender cannot keep up: the backlog is thrown
         // away, and so is every P-frame until the keyframe asked for comes
         // out. See overflow_gate.h.
@@ -950,7 +947,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     // is this session's sum over this session's pictures, and the last
     // session's best and its client's frame count are not this one's.
     s.lastGlassToWireMs = 0.0; s.minGlassToWireMs = 1e9; s.sumGlassToWireMs = 0.0;
-    s.clientLastFrame = 0; s.clientDamaged = 0; s.lastRttMs = 0.0;
+    s.clientLastFrame = 0; s.clientDamaged = 0;
 
     {
         std::lock_guard<std::mutex> guard(s.openLock);
