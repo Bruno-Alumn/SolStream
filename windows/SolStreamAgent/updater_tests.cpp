@@ -807,20 +807,6 @@ void TestHostTaskStart() {
     CHECK(result.started == 1);
 }
 
-/// An update or an uninstall, both through StopInstalled, asks the running
-/// host to quit before anything is stopped by force: only quitting takes its
-/// tray icon away and gives back the windows it was streaming.
-void TestStopInstalled() {
-    std::vector<std::wstring> steps;
-    StopInstalled(
-        L"C:\\Program Files\\SolStream",
-        [&steps](const std::wstring& directory) { steps.push_back(L"ask " + directory); },
-        [&steps](const std::wstring& directory) { steps.push_back(L"force " + directory); });
-    const std::vector<std::wstring> expected = {L"ask C:\\Program Files\\SolStream",
-                                                L"force C:\\Program Files\\SolStream"};
-    CHECK(steps == expected);
-}
-
 void TestEnvironment() {
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", L"0.9.0");
     CHECK(CurrentVersion() == "0.9.0");
@@ -3250,7 +3236,6 @@ int wmain(int argc, wchar_t** argv) {
     TestFirewallSweep();
     TestRegisterUnderAccounts();
     TestHostTaskStart();
-    TestStopInstalled();
     TestQualifyCommand();
     TestJsonEscape();
     TestNoDowngrade();

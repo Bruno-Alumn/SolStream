@@ -544,24 +544,13 @@ void ForceStopInstalled(const std::wstring& destination) {
     Sleep(1500);
 }
 
-}  // namespace
-
-void StopInstalled(const std::wstring& destination,
-                   const std::function<void(const std::wstring&)>& ask,
-                   const std::function<void(const std::wstring&)>& force) {
-    // Asked to quit first, and only what is still here after that is stopped
-    // by force: see AskInstalledHostsToQuit.
-    ask(destination);
-    force(destination);
-}
-
-namespace {
-
 /// Stop anything already running out of the install directory, or the copy
 /// fails on a locked executable and leaves a half-installed folder.
 void StopInstalled(const std::wstring& destination) {
-    // Qualified, or the name would find only this one.
-    solstream::StopInstalled(destination, AskInstalledHostsToQuit, ForceStopInstalled);
+    // Asked to quit first, and only what is still here after that is stopped
+    // by force: see AskInstalledHostsToQuit.
+    AskInstalledHostsToQuit(destination);
+    ForceStopInstalled(destination);
 }
 
 void DeleteRule(const std::wstring& name) {

@@ -181,13 +181,6 @@ HostTaskResult RegisterAndRunHostTask(
     const std::function<bool(std::string& error)>& register_task,
     const std::function<unsigned long()>& run_task);
 
-/// Stop what is running out of `destination` before it is replaced or removed:
-/// `ask` each host there to quit, then `force` whatever is left. Exposed, with
-/// both steps as parameters, for its tests.
-void StopInstalled(const std::wstring& destination,
-                   const std::function<void(const std::wstring&)>& ask,
-                   const std::function<void(const std::wstring&)>& force);
-
 /// The elevated install runs in a second process, so its failure has to travel
 /// back somehow. It writes the reason here and the setup screen reads it, rather
 /// than showing the user an exit code.
