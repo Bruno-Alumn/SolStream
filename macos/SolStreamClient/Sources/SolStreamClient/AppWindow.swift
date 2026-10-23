@@ -458,6 +458,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
             self?.pointerCaptureChanged(captured)
         }
         inputCapture = capture
+        // An emoji from the Character Viewer, or dictation, goes to the PC
+        // as the text it is. The view must have the keyboard focus for the
+        // system to offer either.
+        view.onInsertText = { [weak capture] text in capture?.sendText(text) }
+        window.initialFirstResponder = view
+        window.makeFirstResponder(view)
 
         // The quality pill lives in the title bar accessory so it sits in the
         // chrome rather than over the application, and never moves as the window

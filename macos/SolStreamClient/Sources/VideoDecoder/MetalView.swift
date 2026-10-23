@@ -108,6 +108,25 @@ public final class MetalView: NSView {
         addCursorRect(bounds, cursor: remoteCursor)
     }
 
+    // MARK: - Text from outside the keyboard
+
+    /// Told of text inserted into the view by the system rather than typed:
+    /// an emoji or symbol picked in the Character Viewer, or dictation. Set,
+    /// the view takes the keyboard focus, which is what makes the system
+    /// offer it those at all.
+    ///
+    /// Keys never come this way. InputCapture takes every key it sends to
+    /// the PC before the view would see it, and this view never hands a key
+    /// to the input system, so nothing typed on the keyboard can arrive here
+    /// as well and be sent twice.
+    public var onInsertText: ((String) -> Void)?
+
+    public override var acceptsFirstResponder: Bool { onInsertText != nil }
+
+    /// Commands a key would have sent through the input system. None should
+    /// arrive, see `onInsertText`; one that did is not this Mac's to act on.
+    public override func doCommand(by selector: Selector) {}
+
     // MARK: - Status overlay
 
     /// Update the overlay. Passing `pin` shows the pairing code prominently.
@@ -346,4 +365,50 @@ private final class StatusOverlay: NSView {
     @objc private func retryTapped() {
         onRetry?()
     }
+}
+
+/// Just enough of a text input client for the system to insert text: an
+/// insertion point with nothing around it, no marked text, and every
+/// insertion handed to `onInsertText`. Marked text -- dictation's words before
+/// it settles on them -- is not shown, and what it settles on arrives as an
+/// insertion. A replacement range cannot be honoured, since the text is
+/// already in a Windows application, and is ignored.
+extension MetalView: NSTextInputClient {
+    public func insertText(_ string: Any, replacementRange: NSRange) {
+        let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        guard !text.isEmpty else { return }
+        onInsertText?(text)
+    }
+
+    public func setMarkedText(_ string: Any, selectedRange: NSRange,
+                              replacementRange: NSRange) {}
+
+    public func unmarkText() {}
+
+    public func selectedRange() -> NSRange { NSRange(location: 0, length: 0) }
+
+    public func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+
+    public func hasMarkedText() -> Bool { false }
+
+    public func attributedSubstring(forProposedRange range: NSRange,
+                                    actualRange: NSRangePointer?) -> NSAttributedString? {
+        nil
+    }
+
+    public func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
+
+    /// Where the system draws what goes beside the insertion point -- the
+    /// Character Viewer's popover, dictation's microphone. The caret is in a
+    /// Windows application this side cannot see, so the middle of the
+    /// picture, a line high: the popover then opens over the picture rather
+    /// than off the bottom of the window.
+    public func firstRect(forCharacterRange range: NSRange,
+                          actualRange: NSRangePointer?) -> NSRect {
+        guard let window else { return .zero }
+        let line = NSRect(x: bounds.midX, y: bounds.midY - 10, width: 1, height: 20)
+        return window.convertToScreen(convert(line, to: nil))
+    }
+
+    public func characterIndex(for point: NSPoint) -> Int { 0 }
 }

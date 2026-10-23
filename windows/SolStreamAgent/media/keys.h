@@ -58,6 +58,29 @@ namespace solstream::media {
 ///     Japanese PC keyboard does that with are not on an Apple one.
 bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out);
 
+// ── Text ─────────────────────────────────────────────────────────────────────
+//
+// What the Mac cannot send as a key: an emoji or symbol picked from its
+// Character Viewer, dictation, and keystrokes another program typed into the
+// stream window, which carry their text rather than a real key. A
+// `kInputText` body is UTF-16 code units, big-endian, and each character goes
+// in as KEYEVENTF_UNICODE, which Windows turns into VK_PACKET and WM_CHAR
+// whatever this PC's layout is.
+
+/// The keystrokes that type the character starting at byte `at` of a text
+/// body of `length` bytes: a press and a release for each of its code units,
+/// in `out`, with how many in `count`. Returns how many bytes it took, or zero
+/// at the end of the body.
+///
+/// A character outside the Basic Multilingual Plane -- most emoji -- is two
+/// code units, a surrogate pair, and both halves come back together, so the
+/// caller sends them in one SendInput and nothing typed at the PC can land
+/// between them and leave each half alone. A half without its other half, or
+/// a stray odd byte, takes its bytes and types nothing (`count` zero): it
+/// would only reach the application as garbage.
+size_t BuildTextCharInput(const unsigned char* body, size_t length, size_t at,
+                          INPUT out[4], int* count);
+
 // ── Caps Lock ────────────────────────────────────────────────────────────────
 //
 // Caps Lock is a toggle, and the Mac used to keep it in step by sending a

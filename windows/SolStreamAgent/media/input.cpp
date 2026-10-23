@@ -241,17 +241,21 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             break;
         }
         case kInputText: {
-            // UTF-16 code units, sent one at a time as a unicode keystroke.
-            for (size_t i = 0; i + 1 < length; i += 2) {
-                INPUT unit{};
-                unit.type = INPUT_KEYBOARD;
-                unit.ki.wScan = ReadBE16(body + i);
-                unit.ki.dwFlags = KEYEVENTF_UNICODE;
-                SendInput(1, &unit, sizeof(INPUT));
-                unit.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-                SendInput(1, &unit, sizeof(INPUT));
+            // UTF-16 code units, a character at a time as unicode keystrokes:
+            // both halves of an emoji in the one SendInput. See keys.h.
+            bool typed = true;
+            size_t at = 0;
+            while (at < length) {
+                INPUT keys[4];
+                int count = 0;
+                const size_t used = BuildTextCharInput(body, length, at, keys, &count);
+                if (used == 0) { break; }
+                at += used;
+                if (count > 0 && SendInput((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
+                    typed = false;
+                }
             }
-            return true;
+            return typed;
         }
         default:
             return false;

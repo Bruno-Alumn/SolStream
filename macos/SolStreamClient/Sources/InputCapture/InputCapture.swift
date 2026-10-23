@@ -511,7 +511,23 @@ public final class InputCapture {
                     || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
-            guard let key = held ?? Self.hostKey(forMacKey: event.keyCode,
+            // A key already down on the host is let go of as it was pressed.
+            // Anything else is first asked whether a key typed it at all.
+            var keyCode = event.keyCode
+            if held == nil {
+                switch keyOrigin(of: event) {
+                case .key:
+                    break
+                case .standIn(let code):
+                    keyCode = code
+                case .text(let text):
+                    // Nothing was pressed on the host, so a release has
+                    // nothing to let go of.
+                    if event.type == .keyDown { sendText(text) }
+                    return true
+                }
+            }
+            guard let key = held ?? Self.hostKey(forMacKey: keyCode,
                                                  isISO: keyboardIsISO(event)) else {
                 noteUnmapped(event.keyCode)
                 return false
@@ -570,6 +586,170 @@ public final class InputCapture {
         default:
             return false
         }
+    }
+
+    // MARK: - Text that no key typed
+
+    /// Where a key event's character came from.
+    enum KeyOrigin: Equatable {
+        /// A key: sent by position, as every key typed on a keyboard is.
+        case key
+        /// No key, but a character a key exists for -- Return, Tab, Delete,
+        /// Escape -- which is sent as that key, by its Mac key code.
+        case standIn(UInt16)
+        /// No key: the text itself is sent, and the PC types it as it is.
+        case text(String)
+    }
+
+    /// Whether a key event came from a key, or only carries text.
+    ///
+    /// Software can post a key event that names no real key: it sets the
+    /// event's text and leaves the key code at 0, which is the A key. An
+    /// automation tool typing "echo Hello" into the window did exactly that,
+    /// and since keys go by position, every letter reached the PC as A. The
+    /// Character Viewer can do the same for a window that is not a text view.
+    ///
+    /// The test is whether the key could have typed the text: what the key
+    /// types on this Mac's keyboard layout, with and without Shift, Caps Lock
+    /// and Option, against the event's `charactersIgnoringModifiers`, which
+    /// for a real key the system works out from that same layout with Shift
+    /// alone. A real key always matches one of them; a posted event carries
+    /// whatever text it was given, and an event's text is the one thing a
+    /// keystroke made by software has to get right. Other signals were
+    /// weighed and are not used. Where an event came from says nothing that
+    /// can be relied on: its source state is whatever the poster chose, HID
+    /// included, and its process ID is that of every program that remaps keys
+    /// as well -- and a remapper's keys, which carry real key codes, must go
+    /// by position like any other. Testing only key code 0 against "a" would
+    /// miss the A key's place on AZERTY or a Cyrillic layout, and any poster
+    /// that picks another code.
+    ///
+    /// Left as keys whatever their text: anything held with ⌘ or ⌃, so every
+    /// shortcut goes by position as before; an event with no text, which is
+    /// every dead key's press and every test before this one; the arrows and
+    /// function keys, whose text is private-use code points no layout table
+    /// gives; and anything the layout cannot be asked about. A control
+    /// character no key could have typed is the key that types it -- an
+    /// automation tool's "\r" is Return -- or, failing that, left alone.
+    ///
+    /// `keyTypes` is asked only when the answer depends on it, and returns
+    /// everything the key types on the layout, or nil when it cannot say.
+    static func keyOrigin(characters: String?, flags: NSEvent.ModifierFlags,
+                          keyTypes: () -> Set<String>?) -> KeyOrigin {
+        guard flags.isDisjoint(with: [.command, .control]),
+              let characters, !characters.isEmpty else { return .key }
+        let scalars = characters.unicodeScalars
+        if scalars.contains(where: { (0xF700...0xF8FF).contains($0.value) }) { return .key }
+        guard let typed = keyTypes(), !typed.isEmpty, !typed.contains(characters) else {
+            return .key
+        }
+        if scalars.count == 1, let code = standInKey(for: scalars[scalars.startIndex]) {
+            return .standIn(code)
+        }
+        if scalars.contains(where: isControl) { return .key }
+        return .text(characters)
+    }
+
+    /// `keyOrigin` for an event, with this Mac's keyboard layout.
+    private func keyOrigin(of event: NSEvent) -> KeyOrigin {
+        Self.keyOrigin(characters: event.charactersIgnoringModifiers,
+                       flags: event.modifierFlags) { [keyTypes] in
+            keyTypes(event.keyCode, event)
+        }
+    }
+
+    /// Everything a key types on the keyboard layout in use. Replaceable so
+    /// the tests do not depend on the layout of the Mac that runs them.
+    var keyTypes: (UInt16, NSEvent) -> Set<String>? = {
+        InputCapture.charactersOnLayout(keyCode: $0, event: $1)
+    }
+
+    /// What a key types on the current keyboard layout with each state of
+    /// Shift, Caps Lock and Option, dead keys given as their own character;
+    /// nil when the layout has no table to ask.
+    static func charactersOnLayout(keyCode: UInt16, event: NSEvent?) -> Set<String>? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else {
+            return nil
+        }
+        let table = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(table) else { return nil }
+        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+        var keyboardType = UInt32(LMGetKbdType())
+        if let fromEvent = event?.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType),
+           fromEvent > 0 {
+            keyboardType = UInt32(truncatingIfNeeded: fromEvent)
+        }
+        var typed: Set<String> = []
+        for shift in [0, shiftKey] {
+            for caps in [0, alphaLock] {
+                for option in [0, optionKey] {
+                    var deadKeys: UInt32 = 0
+                    var length = 0
+                    var units = [UniChar](repeating: 0, count: 8)
+                    let status = UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDown),
+                                                UInt32(((shift | caps | option) >> 8) & 0xFF),
+                                                keyboardType,
+                                                OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                                                &deadKeys, units.count, &length, &units)
+                    if status == noErr, length > 0 {
+                        typed.insert(String(utf16CodeUnits: units, count: length))
+                    }
+                }
+            }
+        }
+        return typed
+    }
+
+    /// The Mac key that types a control character, for one no key typed.
+    static func standInKey(for scalar: Unicode.Scalar) -> UInt16? {
+        switch scalar {
+        case "\r", "\n", "\u{03}": return 0x24  // Return
+        case "\t": return 0x30                  // Tab
+        case "\u{08}", "\u{7F}": return 0x33    // Delete, which is Backspace
+        case "\u{1B}": return 0x35              // Escape
+        default: return nil
+        }
+    }
+
+    private static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value < 0x20 || (0x7F...0x9F).contains(scalar.value)
+    }
+
+    /// Send text that no key typed: the Character Viewer, dictation, or an
+    /// event `keyOrigin` found carried only text.
+    ///
+    /// As characters, which the host types with KEYEVENTF_UNICODE whatever
+    /// its layout -- the way every host on SMT/1 has taken them. A line break
+    /// and a tab go as Return and Tab instead, since a Windows application
+    /// acts on those keys and may ignore the bare characters; other control
+    /// characters are dropped. Nothing about the modifiers is sent: a
+    /// character comes complete, and Alt held under one could make a menu of
+    /// it.
+    public func sendText(_ text: String) {
+        guard isCapturing, let send = onInput else { return }
+        var run = String.UnicodeScalarView()
+        func flush() {
+            guard !run.isEmpty else { return }
+            SMTInput.text(String(run)).forEach(send)
+            run.removeAll()
+        }
+        var previous: Unicode.Scalar?
+        for scalar in text.unicodeScalars {
+            defer { previous = scalar }
+            if let code = Self.standInKey(for: scalar) {
+                // \r\n is one line break.
+                if scalar == "\n", previous == "\r" { continue }
+                flush()
+                guard let key = Self.hostKey(forMacKey: code, isISO: false) else { continue }
+                let state = Self.modifiers(from: modifierFlagsNow())
+                send(keyPacket(key, pressed: true, modifiers: state))
+                send(keyPacket(key, pressed: false, modifiers: state))
+            } else if !Self.isControl(scalar), !(0xF700...0xF8FF).contains(scalar.value) {
+                run.append(scalar)
+            }
+        }
+        flush()
     }
 
     /// Say, once per key code, that a key was dropped instead of sent.

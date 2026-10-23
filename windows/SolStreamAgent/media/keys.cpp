@@ -91,6 +91,49 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
     return true;
 }
 
+size_t BuildTextCharInput(const unsigned char* body, size_t length, size_t at,
+                          INPUT out[4], int* count) {
+    *count = 0;
+    if (at >= length) {
+        return 0;
+    }
+    if (length - at < 2) {
+        return length - at;
+    }
+    const auto unitAt = [body](size_t i) {
+        return (WORD) (((WORD) body[i] << 8) | body[i + 1]);
+    };
+    const auto isHigh = [](WORD unit) { return unit >= 0xD800 && unit <= 0xDBFF; };
+    const auto isLow = [](WORD unit) { return unit >= 0xDC00 && unit <= 0xDFFF; };
+    const WORD first = unitAt(at);
+    WORD units[2] = {first, 0};
+    int unitCount = 1;
+    size_t used = 2;
+    if (isHigh(first)) {
+        if (length - at < 4 || !isLow(unitAt(at + 2))) {
+            return used;
+        }
+        units[1] = unitAt(at + 2);
+        unitCount = 2;
+        used = 4;
+    } else if (isLow(first)) {
+        return used;
+    }
+    // A press and a release for each half, in order: what Windows' own
+    // remoting and every other injector of text sends, and what an
+    // application reading WM_CHAR puts back together.
+    for (int i = 0; i < unitCount; ++i) {
+        for (int up = 0; up < 2; ++up) {
+            INPUT& input = out[(*count)++];
+            input = INPUT{};
+            input.type = INPUT_KEYBOARD;
+            input.ki.wScan = units[i];
+            input.ki.dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0);
+        }
+    }
+    return used;
+}
+
 bool CapsLockNeedsReading(const CapsLockBelief& belief, uint64_t nowMs) {
     // A clock that has gone backwards says nothing about how old the belief
     // is, so it is asked again rather than trusted for ever.

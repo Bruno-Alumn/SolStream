@@ -2356,6 +2356,53 @@ void TestScanKeys() {
     CHECK(!BuildScanKeyInput(0xE0F2, true, &in));
 }
 
+/// Text the Mac could not send as a key -- an emoji from its Character Viewer,
+/// dictation, keystrokes another program typed -- goes in as unicode
+/// keystrokes, a character at a time, with both halves of an emoji together.
+void TestTextInput() {
+    using media::BuildTextCharInput;
+    INPUT keys[4];
+    int count = -1;
+
+    // "Hé": one press and release per character, by code unit, no virtual key.
+    const unsigned char he[] = {0x00, 'H', 0x00, 0xE9};
+    CHECK(BuildTextCharInput(he, sizeof(he), 0, keys, &count) == 2);
+    CHECK(count == 2);
+    CHECK(keys[0].type == INPUT_KEYBOARD && keys[0].ki.wVk == 0 && keys[0].ki.wScan == L'H');
+    CHECK(keys[0].ki.dwFlags == KEYEVENTF_UNICODE);
+    CHECK(keys[1].ki.wScan == L'H' && keys[1].ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+    CHECK(BuildTextCharInput(he, sizeof(he), 2, keys, &count) == 2);
+    CHECK(count == 2 && keys[0].ki.wScan == 0xE9);
+    // The end of the body.
+    CHECK(BuildTextCharInput(he, sizeof(he), 4, keys, &count) == 0 && count == 0);
+
+    // U+1F600 is the surrogate pair D83D DE00: four keystrokes from one call,
+    // so they go to Windows in one SendInput, each half pressed and let go.
+    const unsigned char grin[] = {0xD8, 0x3D, 0xDE, 0x00, 0x00, '!'};
+    CHECK(BuildTextCharInput(grin, sizeof(grin), 0, keys, &count) == 4);
+    CHECK(count == 4);
+    CHECK(keys[0].ki.wScan == 0xD83D && keys[0].ki.dwFlags == KEYEVENTF_UNICODE);
+    CHECK(keys[1].ki.wScan == 0xD83D
+          && keys[1].ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+    CHECK(keys[2].ki.wScan == 0xDE00 && keys[2].ki.dwFlags == KEYEVENTF_UNICODE);
+    CHECK(keys[3].ki.wScan == 0xDE00
+          && keys[3].ki.dwFlags == (KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+    CHECK(BuildTextCharInput(grin, sizeof(grin), 4, keys, &count) == 2);
+    CHECK(count == 2 && keys[0].ki.wScan == L'!');
+
+    // Half a pair, either half, types nothing and is stepped over.
+    const unsigned char loneHigh[] = {0xD8, 0x3D, 0x00, 'a'};
+    CHECK(BuildTextCharInput(loneHigh, sizeof(loneHigh), 0, keys, &count) == 2 && count == 0);
+    CHECK(BuildTextCharInput(loneHigh, sizeof(loneHigh), 2, keys, &count) == 2
+          && count == 2 && keys[0].ki.wScan == L'a');
+    const unsigned char loneLow[] = {0xDE, 0x00};
+    CHECK(BuildTextCharInput(loneLow, sizeof(loneLow), 0, keys, &count) == 2 && count == 0);
+    const unsigned char cutPair[] = {0xD8, 0x3D, 0xDE};
+    CHECK(BuildTextCharInput(cutPair, sizeof(cutPair), 0, keys, &count) == 2 && count == 0);
+    // A stray odd byte at the end is taken, and types nothing.
+    CHECK(BuildTextCharInput(cutPair, sizeof(cutPair), 2, keys, &count) == 1 && count == 0);
+}
+
 /// The Mac's Caps Lock state, carried on every key, is matched by pressing
 /// Caps Lock here only when the PC's differs -- and what the PC's is comes from
 /// Windows, except just after a press from here, which Windows may not have
@@ -3233,6 +3280,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDecideTakeover();
     TestHolderHearing();
     TestScanKeys();
+    TestTextInput();
     TestCapsLock();
     TestHoldOrder();
     TestStrandedWindows();
