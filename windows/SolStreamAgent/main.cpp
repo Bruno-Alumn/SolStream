@@ -89,9 +89,6 @@
 #endif
 #include "vdd.h"
 
-// Defined with ChooseCaptureDisplay; the watcher calls it.
-void RechooseCaptureDisplayIfStale();
-
 namespace {
 
 using solstream::DeriveMediaKeys;
@@ -394,6 +391,73 @@ std::vector<Display> EnumerateDisplays() {
     std::vector<Display> displays;
     EnumDisplayMonitors(nullptr, nullptr, MonitorProc, reinterpret_cast<LPARAM>(&displays));
     return displays;
+}
+
+/// Pick what is captured: the virtual display when there is one, so a crop
+/// can never be a crop out of somebody's real screen. At startup, again once
+/// the window has installed one, and again whenever the displays change under
+/// the choice (RechooseCaptureDisplayIfStale). A session already streaming
+/// keeps the display it opened on; the next one uses this.
+void ChooseCaptureDisplay() {
+    std::wstring chosen;
+    const std::vector<Display> displays = EnumerateDisplays();
+    const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
+    for (const Display& display : displays) {
+        if (!configured.empty() && display.device_name == configured) {
+            chosen = ToWide(display.device_name);
+            Log("[agent] capturing %s [%s]", display.device_name.c_str(),
+                display.adapter.c_str());
+            break;
+        }
+    }
+    if (chosen.empty()) {
+        for (const Display& display : displays) {
+            // Ours only. This used to match "virtual" or "idd" anywhere in the
+            // adapter name, which is every phone-as-monitor and remote-desktop
+            // product's display too — and capturing one of those streams a
+            // screen SolStream did not size, from a display it does not
+            // control. Better the primary below, which at least says plainly
+            // what it is.
+            const std::string& adapter = display.adapter;
+            if (solstream::IsSolStreamDisplayDriver(ToWide(adapter))) {
+                chosen = ToWide(display.device_name);
+                Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
+                break;
+            }
+        }
+    }
+    if (chosen.empty()) {
+        for (const Display& display : displays) {
+            if (display.primary) {
+                chosen = ToWide(display.device_name);
+                Log("[agent] no virtual display; falling back to %s",
+                    display.device_name.c_str());
+                break;
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_capture_mutex);
+    g_capture_display = chosen;
+}
+
+/// Choose again when the displays have changed under the choice; see
+/// capture_display.h. `displays` is what the watcher's last look found
+/// (LookAtDisplays).
+void RechooseCaptureDisplayIfStale(const std::vector<Display>& displays) {
+    std::vector<solstream::PresentDisplay> present;
+    for (const Display& display : displays) {
+        solstream::PresentDisplay entry;
+        entry.name = ToWide(display.device_name);
+        entry.ours = solstream::IsSolStreamDisplayDriver(ToWide(display.adapter));
+        present.push_back(entry);
+    }
+    const std::wstring current = CaptureDisplay();
+    if (solstream::CaptureDisplayIsStale(current, present, solstream::VirtualDisplayDevice())) {
+        Log("[agent] the displays changed under %s; choosing what to capture again",
+            current.empty() ? "no capture display" : ToUtf8(current).c_str());
+        ChooseCaptureDisplay();
+    }
 }
 
 /// Point a display at the mode that best fits a requested canvas.
@@ -765,14 +829,12 @@ uint64_t IdFromWindow(HWND window) {
 /// do, and the capture path wants a monitor handle. A device restart renumbers
 /// these, which is a known trap on this machine -- so the lookup is done every
 /// time rather than cached.
-/// `maybe_unused`: both callers are inside SOLSTREAM_MEDIA, so a build without
-/// it warns about a function that is not dead, merely not needed there.
-[[maybe_unused]] HMONITOR MonitorFromDeviceName(const std::string& device_name) {
+HMONITOR MonitorFromDeviceName(const std::wstring& device_name) {
     struct Search {
         std::wstring wanted;
         HMONITOR found = nullptr;
     } search;
-    search.wanted = ToWide(device_name);
+    search.wanted = device_name;
     EnumDisplayMonitors(nullptr, nullptr,
         [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
             auto* state = reinterpret_cast<Search*>(param);
@@ -2050,12 +2112,12 @@ std::vector<HWND> g_rescued;
 /// see. False when SolStream is capturing a real monitor: what is on that is
 /// visible to the person sitting at the PC, and rearranging their windows
 /// because a dialog opened would be interference, not help.
-bool WorkOutCaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
+bool WorkOutCaptureDisplayIsInvisible(const std::vector<Display>& displays, RECT& capture,
+                                      RECT& rescue_to) {
     const std::wstring capture_display = CaptureDisplay();
     if (capture_display.empty()) {
         return false;
     }
-    const std::vector<Display> displays = EnumerateDisplays();
     const Display* captured = nullptr;
     const Display* primary = nullptr;
     for (const Display& display : displays) {
@@ -2077,25 +2139,31 @@ bool WorkOutCaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
     return true;
 }
 
-/// The same answer, cached for a few seconds. It moves only when the display
-/// layout does, and working it out enumerates every monitor and asks the
-/// display stack for each one's adapter -- which, asked on every watcher tick,
-/// was most of what an idle host spent its time on. Watcher thread only.
-bool CaptureDisplayIsInvisible(RECT& capture, RECT& rescue_to) {
-    static bool known = false;
-    static bool invisible = false;
-    static RECT cached_capture{};
-    static RECT cached_rescue_to{};
-    static ULONGLONG checked_at = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (!known || now - checked_at >= 3000) {
-        known = true;
-        checked_at = now;
-        invisible = WorkOutCaptureDisplayIsInvisible(cached_capture, cached_rescue_to);
-    }
-    capture = cached_capture;
-    rescue_to = cached_rescue_to;
-    return invisible;
+/// What the watcher's last look at the displays found: whether the capture
+/// display is one nobody can see, and if so where it is and where what strays
+/// onto it goes. Watcher thread only.
+struct CaptureVisibility {
+    bool invisible = false;
+    RECT capture{};
+    RECT rescue_to{};
+};
+CaptureVisibility g_capture_visibility;
+
+/// How often the watcher looks at the displays. They move only when the layout
+/// does, and looking enumerates every monitor and asks the display stack for
+/// each one's adapter -- which, done on every watcher tick, was most of what an
+/// idle host spent its time on.
+constexpr ULONGLONG kDisplayLookMs = 3000;
+
+/// Look at the displays once, and answer the two questions they settle:
+/// whether the capture display has to be chosen again, and then whether the
+/// one chosen is one nobody can see. Watcher thread only, which runs in every
+/// host, headless and session 0 included.
+void LookAtDisplays() {
+    const std::vector<Display> displays = EnumerateDisplays();
+    RechooseCaptureDisplayIfStale(displays);
+    g_capture_visibility.invisible = WorkOutCaptureDisplayIsInvisible(
+        displays, g_capture_visibility.capture, g_capture_visibility.rescue_to);
 }
 
 struct StrandedSearch {
@@ -2194,11 +2262,12 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
 /// Moving it is not answering it. Whatever the dialog asks stays the user's
 /// decision — this only puts the question somewhere they can read it.
 void RescueStrandedWindows() {
-    StrandedSearch search;
-    RECT rescue_to{};
-    if (!CaptureDisplayIsInvisible(search.capture, rescue_to)) {
+    if (!g_capture_visibility.invisible) {
         return;
     }
+    StrandedSearch search;
+    search.capture = g_capture_visibility.capture;
+    const RECT rescue_to = g_capture_visibility.rescue_to;
     EnterCriticalSection(&g_lock_cs);
     for (int i = 0; i < kMaxLocks; ++i) {
         if (g_locks[i].active) {
@@ -2488,6 +2557,8 @@ constexpr ULONGLONG kRescueIntervalMs = 900;
 DWORD WINAPI WatcherProc(LPVOID) {
     DWORD interval = kWatchIdleMs;
     ULONGLONG rescued_at = 0;
+    bool looked = false;
+    ULONGLONG looked_at = 0;
     for (;;) {
         if (g_watcher_wake) {
             WaitForSingleObject(g_watcher_wake, interval);
@@ -2578,7 +2649,11 @@ DWORD WINAPI WatcherProc(LPVOID) {
         const ULONGLONG now = GetTickCount64();
         if (now - rescued_at >= kRescueIntervalMs) {
             rescued_at = now;
-            RechooseCaptureDisplayIfStale();
+            if (!looked || now - looked_at >= kDisplayLookMs) {
+                looked = true;
+                looked_at = now;
+                LookAtDisplays();
+            }
             RescueStrandedWindows();
         }
         NotifyWindowsChangedIfSettled();
@@ -3325,24 +3400,6 @@ UINT MonitorDpi(HMONITOR monitor) {
     return monitor && SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &x, &y)) ? x : 0;
 }
 
-/// The effective DPI of the capture display, or 0 when there is none.
-UINT CaptureDisplayDpi() {
-    const std::wstring capture_display = CaptureDisplay();
-    struct Search { const std::wstring* name; HMONITOR found; } search{&capture_display, nullptr};
-    EnumDisplayMonitors(nullptr, nullptr,
-        [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
-            auto* search = reinterpret_cast<Search*>(param);
-            MONITORINFOEXW info{};
-            info.cbSize = sizeof(info);
-            if (GetMonitorInfoW(monitor, &info) && *search->name == info.szDevice) {
-                search->found = monitor;
-                return FALSE;
-            }
-            return TRUE;
-        }, reinterpret_cast<LPARAM>(&search));
-    return MonitorDpi(search.found);
-}
-
 std::string WindowsJson(const std::vector<WindowInfo>& windows) {
     std::string out = "{\"type\":\"windows\",\"windows\":[";
     // Every window grows or shrinks by the ratio of the two scalings when it is
@@ -3350,7 +3407,8 @@ std::string WindowsJson(const std::vector<WindowInfo>& windows) {
     // rest by DWM's bitmap stretch — so the size the Mac should open at is that
     // ratio times the size it is now. Asked of the MONITOR, not the window: an
     // unaware window answers 96 wherever it is.
-    const UINT capture_dpi = CaptureDisplayDpi();
+    // 0 when there is no capture display.
+    const UINT capture_dpi = MonitorDpi(MonitorFromDeviceName(CaptureDisplay()));
     for (size_t i = 0; i < windows.size(); ++i) {
         const WindowInfo& window = windows[i];
         std::string entry = i ? "," : "";
@@ -3729,7 +3787,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             FieldString(line, "display", displayName);
             HWND window = id ? WindowFromId(static_cast<uint64_t>(id)) : nullptr;
             HMONITOR monitor = displayName.empty() ? nullptr
-                                                   : MonitorFromDeviceName(displayName);
+                                                   : MonitorFromDeviceName(ToWide(displayName));
             if (!window && !monitor) {
                 return "{\"type\":\"media\",\"ok\":false,\"message\":\"no such target\"}";
             }
@@ -3816,7 +3874,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         HWND targetWindow =
             targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
         HMONITOR targetMonitor =
-            displayName.empty() ? nullptr : MonitorFromDeviceName(displayName);
+            displayName.empty() ? nullptr : MonitorFromDeviceName(ToWide(displayName));
         if (targetWindow || targetMonitor) {
             solstream::media::MediaConfig config;
             config.window = targetWindow;
@@ -5282,79 +5340,6 @@ int PrintLicenses() {
                "which is distributed under this licence:\n\n", stdout);
     std::fwrite(text, 1, SizeofResource(nullptr, found), stdout);
     return 0;
-}
-
-/// Pick what is captured: the virtual display when there is one, so a crop
-/// can never be a crop out of somebody's real screen. At startup, again once
-/// the window has installed one, and again whenever the displays change under
-/// the choice (RechooseCaptureDisplayIfStale). A session already streaming
-/// keeps the display it opened on; the next one uses this.
-void ChooseCaptureDisplay() {
-    std::wstring chosen;
-    const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
-    for (const Display& display : EnumerateDisplays()) {
-        if (!configured.empty() && display.device_name == configured) {
-            chosen = ToWide(display.device_name);
-            Log("[agent] capturing %s [%s]", display.device_name.c_str(),
-                display.adapter.c_str());
-            break;
-        }
-    }
-    for (const Display& display : EnumerateDisplays()) {
-        if (!chosen.empty()) {
-            break;
-        }
-        // Ours only. This used to match "virtual" or "idd" anywhere in the
-        // adapter name, which is every phone-as-monitor and remote-desktop
-        // product's display too — and capturing one of those streams a screen
-        // SolStream did not size, from a display it does not control. Better
-        // the primary below, which at least says plainly what it is.
-        const std::string& adapter = display.adapter;
-        if (solstream::IsSolStreamDisplayDriver(ToWide(adapter))) {
-            chosen = ToWide(display.device_name);
-            Log("[agent] capturing %s [%s]", display.device_name.c_str(), adapter.c_str());
-            break;
-        }
-    }
-    if (chosen.empty()) {
-        for (const Display& display : EnumerateDisplays()) {
-            if (display.primary) {
-                chosen = ToWide(display.device_name);
-                Log("[agent] no virtual display; falling back to %s",
-                    display.device_name.c_str());
-                break;
-            }
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(g_capture_mutex);
-    g_capture_display = chosen;
-}
-
-/// Choose again when the displays have changed under the choice; see
-/// capture_display.h. Every few seconds at most: it asks for every display.
-/// Watcher thread only, which runs in every host, headless and session 0
-/// included.
-void RechooseCaptureDisplayIfStale() {
-    static ULONGLONG checked_at = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (checked_at != 0 && now - checked_at < 3000) {
-        return;
-    }
-    checked_at = now;
-    std::vector<solstream::PresentDisplay> present;
-    for (const Display& display : EnumerateDisplays()) {
-        solstream::PresentDisplay entry;
-        entry.name = ToWide(display.device_name);
-        entry.ours = solstream::IsSolStreamDisplayDriver(ToWide(display.adapter));
-        present.push_back(entry);
-    }
-    const std::wstring current = CaptureDisplay();
-    if (solstream::CaptureDisplayIsStale(current, present, solstream::VirtualDisplayDevice())) {
-        Log("[agent] the displays changed under %s; choosing what to capture again",
-            current.empty() ? "no capture display" : ToUtf8(current).c_str());
-        ChooseCaptureDisplay();
-    }
 }
 
 /// The setup or host window waiting on this elevated process, to be told how
