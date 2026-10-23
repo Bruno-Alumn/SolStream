@@ -4,6 +4,7 @@ import XCTest
 @testable import InputCapture
 import MediaSession
 @testable import SolStreamClient
+import VideoDecoder
 
 /// Checks when gaming mode holds the mouse while following the PC's cursor.
 ///
@@ -252,6 +253,91 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertFalse(mouse.locked)
     }
 
+    // MARK: - The click that makes the window key
+
+    /// A click on a stream window that was not key reaches the PC
+    /// application: the Calculator digit it used to lose.
+    func testTheClickThatMakesTheWindowKeyIsSent() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        mouse.viewPress(at: 1)
+        mouse.lift()
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1), .abs(400, 300), .release(1)])
+        XCTAssertFalse(mouse.locked)
+    }
+
+    /// A press the monitor already sent is not sent again by the view.
+    func testAMonitoredClickIsSentOnce() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        mouse.viewPress(at: 1, monitored: true)
+        mouse.lift()
+        mouse.viewPress(at: 2, monitored: true)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1), .abs(400, 300), .release(1),
+                                       .abs(400, 300), .press(1)])
+    }
+
+    /// The same press handed over twice is one click.
+    func testTheSamePressIsOneClick() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        mouse.viewPress(at: 1)
+        mouse.viewPress(at: 1)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1)])
+    }
+
+    /// In gaming mode the click that brings the window forward takes the
+    /// mouse and fires nothing.
+    func testInGamingTheFirstClickOnlyTakesTheMouse() {
+        InputCapture.pointerMode = .gaming
+        InputCapture.followsHostCursor = false
+        let mouse = Mouse()
+        mouse.viewPress(at: 1)
+        XCTAssertTrue(mouse.locked)
+        XCTAssertFalse(mouse.packets.contains(.press(1)), "the focusing click fired in the game")
+        mouse.lift()
+        XCTAssertFalse(mouse.packets.contains(.release(1)), "a release with no press was sent")
+        // The next click is a click.
+        mouse.packets.removeAll()
+        mouse.viewPress(at: 2, monitored: true)
+        XCTAssertEqual(mouse.packets, [.press(1)])
+    }
+
+    /// Following the PC's cursor, the same: a game with its cursor hidden
+    /// gets the mouse and no shot.
+    func testFollowingTheFirstClickOnlyTakesTheMouse() {
+        InputCapture.pointerMode = .gaming
+        InputCapture.followsHostCursor = true
+        let mouse = Mouse()
+        mouse.capture.hostReportsCursorVisibility = true
+        mouse.pointer = nil
+        mouse.capture.hostCursorVisibilityChanged(hidden: true)
+        XCTAssertFalse(mouse.locked)
+        mouse.pointer = CGPoint(x: 0.5, y: 0.5)
+        mouse.viewPress(at: 1)
+        XCTAssertTrue(mouse.locked)
+        XCTAssertEqual(mouse.packets, [])
+    }
+
+    /// The stream view takes the first click, and hands every press on.
+    func testTheStreamViewTakesTheFirstClick() throws {
+        let view = MetalView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        XCTAssertTrue(view.acceptsFirstMouse(for: nil))
+        var handed: [NSEvent.EventType] = []
+        view.onMouseDown = { handed.append($0.type) }
+        for type in [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(
+                with: type, location: NSPoint(x: 50, y: 50), modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            switch type {
+            case .leftMouseDown: view.mouseDown(with: event)
+            case .rightMouseDown: view.rightMouseDown(with: event)
+            default: view.otherMouseDown(with: event)
+            }
+        }
+        XCTAssertEqual(handed, [.leftMouseDown, .rightMouseDown, .otherMouseDown])
+    }
+
     func testClickToCaptureSendsThePositionAndTheClick() {
         InputCapture.pointerMode = .gaming
         let mouse = Mouse()
@@ -489,6 +575,17 @@ private final class Mouse {
     func press(flags: UInt = 0) { capture.handleMouseEvent(event(.leftMouseDown, flags: flags)) }
     func lift() { capture.handleMouseEvent(event(.leftMouseUp)) }
 
+    /// A press the stream view is handed, at `time`: the click that made the
+    /// window key, unless the monitor saw it first.
+    func viewPress(at time: TimeInterval, monitored: Bool = false) {
+        let press = event(.leftMouseDown, timestamp: time)
+        if monitored {
+            capture.noteMonitored(press)
+            capture.handleMouseEvent(press)
+        }
+        capture.handleFirstMouse(press)
+    }
+
     /// A move to the middle of the picture, carrying `delta` in points.
     func move(by delta: CGPoint) {
         capture.handleMouseEvent(event(.mouseMoved, delta: delta))
@@ -518,11 +615,11 @@ private final class Mouse {
     /// and back moves the location by wherever the window server thinks this
     /// unshown window is -- so the location is put back by the difference.
     private func event(_ type: NSEvent.EventType, delta: CGPoint = .zero,
-                       flags: UInt = 0) -> NSEvent {
+                       flags: UInt = 0, timestamp: TimeInterval = 0) -> NSEvent {
         let wanted = NSPoint(x: size.width / 2, y: size.height / 2)
         let plain = NSEvent.mouseEvent(with: type, location: wanted,
                                        modifierFlags: NSEvent.ModifierFlags(rawValue: flags),
-                                       timestamp: 0, windowNumber: window.windowNumber,
+                                       timestamp: timestamp, windowNumber: window.windowNumber,
                                        context: nil, eventNumber: 0, clickCount: 1,
                                        pressure: type == .leftMouseUp ? 0 : 1)!
         guard delta != .zero, let cg = plain.cgEvent else { return plain }

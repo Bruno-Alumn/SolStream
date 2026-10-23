@@ -466,6 +466,7 @@ public final class InputCapture {
                        .mouseMoved, .leftMouseDragged, .rightMouseDragged,
                        .otherMouseDragged, .scrollWheel]
         ) { [weak self] event in
+            self?.noteMonitored(event)
             self?.handleMouseEvent(event)
             return event
         }
@@ -998,9 +999,54 @@ public final class InputCapture {
         return true
     }
 
+    /// A press the monitor has seen: which, and when.
+    private struct Press: Equatable {
+        let type: NSEvent.EventType
+        let timestamp: TimeInterval
+        let number: Int
+    }
+
+    private var lastMonitoredPress: Press?
+
+    private static func press(_ event: NSEvent) -> Press? {
+        guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) else {
+            return nil
+        }
+        return Press(type: event.type, timestamp: event.timestamp, number: event.eventNumber)
+    }
+
+    /// Note a press the monitor has handled, so `handleFirstMouse` does not
+    /// send it a second time. Not private so the tests can stand in for the
+    /// monitor.
+    func noteMonitored(_ event: NSEvent) {
+        if let press = Self.press(event) { lastMonitoredPress = press }
+    }
+
+    /// A press the stream view was handed, which the monitor may not have
+    /// seen.
+    ///
+    /// The monitor is installed when the window becomes key -- and a click on
+    /// a window that is not key makes it key on the way to the view, after
+    /// the monitors have already been run. So the click that brought the
+    /// window forward never reached the PC: the first digit typed into
+    /// Calculator on the PC was lost, every time the window was clicked into.
+    /// The view now takes that first click (`acceptsFirstMouse`) and hands
+    /// it here, and a click on a stream window does in the PC application
+    /// what it would on a Mac tool window: focus and click at once.
+    ///
+    /// Every press the view is handed comes here, the monitored ones too, and
+    /// those are passed over. In gaming mode the click takes the mouse, if a
+    /// click would, and goes no further: a click that only meant "this
+    /// window" must not fire in a game.
+    public func handleFirstMouse(_ event: NSEvent) {
+        guard let press = Self.press(event), press != lastMonitoredPress else { return }
+        lastMonitoredPress = press
+        handleMouseEvent(event, firstMouse: true)
+    }
+
     /// Not private so the packets a click or a move produces can be tested
     /// against real `NSEvent`s, as `handleKeyEvent`'s are.
-    func handleMouseEvent(_ event: NSEvent) {
+    func handleMouseEvent(_ event: NSEvent, firstMouse: Bool = false) {
         guard isCapturing, let view = targetView else { return }
         // The monitor is application-wide, so with two streamed windows open a
         // click on the other one arrives here too — and converted into THIS
@@ -1023,6 +1069,12 @@ public final class InputCapture {
             }
         }
 
+        if firstMouse, Self.pointerMode == .gaming {
+            if !isPointerCaptured {
+                _ = takesPointer(on: event, in: view, deliversClick: false)
+            }
+            return
+        }
         if isPointerCaptured {
             handleCapturedPointer(event, in: view)
             return
@@ -1276,8 +1328,11 @@ public final class InputCapture {
 
     /// Capture the mouse if this event is the one gaming mode takes it on.
     ///
+    /// - Parameter deliversClick: false for a click that only brought the
+    ///   window forward, which takes the mouse and is not itself sent.
     /// - Returns: true when the event has been handled as a captured one.
-    private func takesPointer(on event: NSEvent, in view: NSView) -> Bool {
+    private func takesPointer(on event: NSEvent, in view: NSView,
+                              deliversClick: Bool = true) -> Bool {
         let isClick = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
         let isMove = [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
                       .otherMouseDragged].contains(event.type)
@@ -1301,7 +1356,7 @@ public final class InputCapture {
             // mouse is taken first, and this event goes as a captured one --
             // a click as the button alone.
             capturePointer(isClick ? "a click in the picture" : "the PC's cursor is hidden")
-            handleCapturedPointer(event, in: view)
+            if deliversClick { handleCapturedPointer(event, in: view) }
             return true
         }
         // The click that captures is also delivered: it is usually the one
@@ -1309,7 +1364,7 @@ public final class InputCapture {
         // host cursor where it was clicked, and motion is relative from there.
         sendPosition(for: event, in: view)
         capturePointer("a click in the picture")
-        return false
+        return !deliversClick
     }
 
     /// Where the Mac's pointer is in the picture right now, as 0...1 from its

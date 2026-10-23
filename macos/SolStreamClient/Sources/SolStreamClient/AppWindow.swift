@@ -458,6 +458,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
             self?.pointerCaptureChanged(captured)
         }
         inputCapture = capture
+        // The click that makes this window key, which the capture's monitor
+        // runs too early to see.
+        view.onMouseDown = { [weak capture] event in capture?.handleFirstMouse(event) }
         // An emoji from the Character Viewer, or dictation, goes to the PC
         // as the text it is. The view must have the keyboard focus for the
         // system to offer either.

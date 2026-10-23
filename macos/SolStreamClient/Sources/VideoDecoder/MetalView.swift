@@ -108,6 +108,34 @@ public final class MetalView: NSView {
         addCursorRect(bounds, cursor: remoteCursor)
     }
 
+    // MARK: - Clicks
+
+    /// Told of every button press the view is handed, so the click that
+    /// brings the window forward can still reach the PC: see
+    /// `InputCapture.handleFirstMouse`.
+    public var onMouseDown: ((NSEvent) -> Void)?
+
+    /// A click on a stream window that is not the key one goes through to the
+    /// application in it, as on a Mac tool window. Only this view: the title
+    /// bar and the quality pill in it are not part of it and are unchanged,
+    /// and the status card's own controls answer for themselves.
+    public override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    public override func mouseDown(with event: NSEvent) {
+        onMouseDown?(event)
+        super.mouseDown(with: event)
+    }
+
+    public override func rightMouseDown(with event: NSEvent) {
+        onMouseDown?(event)
+        super.rightMouseDown(with: event)
+    }
+
+    public override func otherMouseDown(with event: NSEvent) {
+        onMouseDown?(event)
+        super.otherMouseDown(with: event)
+    }
+
     // MARK: - Text from outside the keyboard
 
     /// Told of text inserted into the view by the system rather than typed:
