@@ -34,8 +34,14 @@ namespace solstream {
 
 /// How many times one restore will ask. The first carries the window across
 /// monitors and may be rescaled after it; the second lands on the same monitor
-/// and is kept; the third is for an application that lays itself out again a
-/// beat late. Past that the window is holding a size of its own.
+/// and is kept; the third is for a window whose second answer moved it again.
+/// Past that the window is holding a size of its own.
+///
+/// No pause between them. The rescaling was measured happening inside the
+/// SetWindowPlacement call itself -- read back at once and again 500 ms later,
+/// File Explorer was at the same rescaled size both times, and at the exact
+/// one after the second call -- so a wait would find nothing new, and it would
+/// be paid on every window at every disconnect.
 constexpr int kRestorePlacementAttempts = 3;
 
 /// How far a window's restored rectangle is from the one it was asked for, as
@@ -100,6 +106,17 @@ constexpr uint64_t kBootSlackSeconds = 60;
 /// further from this one than the slack is another; and a record written later
 /// into its run than this run has lasted cannot be from this one either.
 bool RecordIsFromThisBoot(const OwedRecord& record, uint64_t boot_second, uint64_t tick_ms);
+
+/// What to write down: every window a slot holds, then each one a stopped host
+/// left behind that no slot has taken since.
+std::vector<OwedWindow> OwedToWrite(const std::vector<OwedWindow>& held,
+                                    const std::vector<OwedWindow>& left_behind);
+
+/// Take this window's entry out of `owed`. True, with it in `taken`, when the
+/// entry is for this same process; an entry for the handle under another
+/// process is out of date, and is dropped without being taken.
+bool TakeOwed(std::vector<OwedWindow>& owed, uint64_t window, uint32_t pid,
+              uint64_t process_created, OwedWindow* taken);
 
 /// The record as text: a header line, the line saying when it was written, then
 /// one line of numbers per window.

@@ -108,6 +108,38 @@ bool RecordIsFromThisBoot(const OwedRecord& record, uint64_t boot_second, uint64
     return apart <= kBootSlackSeconds && record.written <= tick_ms;
 }
 
+std::vector<OwedWindow> OwedToWrite(const std::vector<OwedWindow>& held,
+                                    const std::vector<OwedWindow>& left_behind) {
+    std::vector<OwedWindow> out = held;
+    for (const OwedWindow& owed : left_behind) {
+        bool taken = false;
+        for (const OwedWindow& slot : held) {
+            taken = taken || slot.window == owed.window;
+        }
+        if (!taken) {
+            out.push_back(owed);
+        }
+    }
+    return out;
+}
+
+bool TakeOwed(std::vector<OwedWindow>& owed, uint64_t window, uint32_t pid,
+              uint64_t process_created, OwedWindow* taken) {
+    for (size_t i = 0; i < owed.size(); ++i) {
+        if (owed[i].window != window) {
+            continue;
+        }
+        const bool same = owed[i].pid == pid && owed[i].process_created == process_created
+                       && process_created != 0;
+        if (same && taken) {
+            *taken = owed[i];
+        }
+        owed.erase(owed.begin() + (std::ptrdiff_t) i);
+        return same;
+    }
+    return false;
+}
+
 std::string FormatOwedWindows(const OwedRecord& record) {
     std::ostringstream out;
     out << kOwedHeader << "\n";

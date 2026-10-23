@@ -2980,6 +2980,54 @@ void TestOwedWindows(const std::wstring& scratch) {
     CHECK(!SaveOwedWindows(scratch + L"\\no such folder\\owed.txt", record));
 }
 
+void TestLeftBehind() {
+    auto owed = [](uint64_t window, uint32_t pid, uint64_t created, LONG x) {
+        OwedWindow entry;
+        entry.window = window;
+        entry.pid = pid;
+        entry.process_created = created;
+        entry.placement = PlacementAt(x, 0, 100, 100);
+        return entry;
+    };
+    // What is written: the slots, then whatever was left behind that no slot
+    // has taken -- a window skipped as not answering stays written down.
+    const std::vector<OwedWindow> held = {owed(1, 10, 100, 0), owed(2, 20, 200, 0)};
+    const std::vector<OwedWindow> left = {owed(2, 20, 200, -500), owed(3, 30, 300, -900)};
+    std::vector<OwedWindow> out = OwedToWrite(held, left);
+    CHECK(out.size() == 3);
+    CHECK(out.size() == 3 && out[0].window == 1 && out[1].window == 2 && out[2].window == 3);
+    // The slot's entry, not the one left behind, for a window in both.
+    CHECK(out.size() == 3 && out[1].placement.rcNormalPosition.left == 0);
+    CHECK(OwedToWrite({}, left).size() == 2);
+    CHECK(OwedToWrite(held, {}).size() == 2);
+    CHECK(OwedToWrite({}, {}).empty());
+
+    // A session that streams a window still owed takes what it is owed.
+    std::vector<OwedWindow> list = left;
+    OwedWindow taken;
+    CHECK(TakeOwed(list, 3, 30, 300, &taken));
+    CHECK(taken.window == 3 && taken.placement.rcNormalPosition.left == -900);
+    CHECK(list.size() == 1 && list[0].window == 2);
+    // Only once.
+    CHECK(!TakeOwed(list, 3, 30, 300, &taken));
+    // Not by another process that has the handle now; that entry is out of
+    // date, and goes.
+    taken = OwedWindow{};
+    CHECK(!TakeOwed(list, 2, 20, 201, &taken));
+    CHECK(taken.window == 0);
+    CHECK(list.empty());
+    list = left;
+    CHECK(!TakeOwed(list, 2, 21, 200, &taken));
+    CHECK(list.size() == 1 && list[0].window == 3);
+    // A process that cannot be identified is never the one.
+    list = {owed(4, 40, 0, 0)};
+    CHECK(!TakeOwed(list, 4, 40, 0, &taken));
+    // A window nothing is owed for leaves the list alone.
+    list = left;
+    CHECK(!TakeOwed(list, 9, 90, 900, nullptr));
+    CHECK(list.size() == 2);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -3068,6 +3116,7 @@ int wmain(int argc, wchar_t** argv) {
     TestRestorePlacement();
     TestPlacementForRestore();
     TestOwedWindows(scratch);
+    TestLeftBehind();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
