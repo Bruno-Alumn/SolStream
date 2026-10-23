@@ -33,6 +33,7 @@
 #include <mutex>
 
 #include "keys.h"
+#include "smt.h"
 
 namespace solstream::media {
 
@@ -125,13 +126,11 @@ private:
     std::atomic<uint64_t> duplicates_{0};
     std::atomic<uint64_t> failed_{0};
 
-    /// A 1024-slot window of sequence numbers already applied, the same shape as
-    /// the replay window a layer below and for the same reason: repeats must be
-    /// free, and an event must never be applied twice. Only the receive thread
-    /// touches these; Reset runs with that thread joined.
-    uint64_t seen_[16] = {};
-    uint32_t highest_ = 0;
-    bool started_ = false;
+    /// A 1024-slot window of sequence numbers already applied: the replay
+    /// window a layer below, for the same reason -- repeats must be free, and
+    /// an event must never be applied twice. Only the receive thread touches
+    /// it; Reset runs with that thread joined.
+    smt::ReplayWindow seen_;
     /// Each key's and button's newest event applied, so an older one that
     /// arrives after it is passed over. See keys.h; cleared with the above.
     HoldOrder holdOrder_;

@@ -4,7 +4,6 @@
 
 #include <dwmapi.h>
 
-#include <cstring>
 #include <optional>
 
 namespace solstream::media {
@@ -13,17 +12,8 @@ namespace {
 static_assert(kInputButton == 3 && kInputKey == 6 && kInputKeyScan == 8,
               "HoldTarget in keys.cpp names the kinds by number");
 
-uint32_t ReadBE32(const unsigned char* p) {
-    return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16)
-         | ((uint32_t) p[2] << 8) | (uint32_t) p[3];
-}
-
-uint16_t ReadBE16(const unsigned char* p) {
-    return (uint16_t) (((uint16_t) p[0] << 8) | (uint16_t) p[1]);
-}
-
 int16_t ReadBE16s(const unsigned char* p) {
-    return (int16_t) ReadBE16(p);
+    return (int16_t) (uint16_t) smt::ReadBE(p, 2);
 }
 
 /// Whether this PC's Caps Lock is on, as the window taking the keys sees it,
@@ -76,6 +66,18 @@ bool IsExtended(unsigned short vk) {
         default:
             return false;
     }
+}
+
+/// A virtual key going down or up, with the scan code and the extended flag
+/// Windows expects alongside it.
+INPUT VirtualKeyInput(WORD vk, bool down) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = (WORD) MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    input.ki.dwFlags = (down ? 0 : KEYEVENTF_KEYUP)
+                     | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+    return input;
 }
 
 }  // namespace
@@ -135,7 +137,8 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
         case kInputMouseAbs: {
             if (length < 4) { return false; }
             LONG x = 0, y = 0;
-            if (!ScreenPoint(ReadBE16(body), ReadBE16(body + 2), &x, &y)) {
+            if (!ScreenPoint((uint16_t) smt::ReadBE(body, 2),
+                             (uint16_t) smt::ReadBE(body + 2, 2), &x, &y)) {
                 return false;
             }
             // SendInput's absolute coordinates are normalised over the VIRTUAL
@@ -215,19 +218,15 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
         }
         case kInputKey: {
             if (length < 3) { return false; }
-            const unsigned short vk = ReadBE16(body);
+            const WORD vk = (WORD) smt::ReadBE(body, 2);
             const bool down = body[2] != 0;
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = vk;
-            input.ki.wScan = (WORD) MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-            input.ki.dwFlags = (down ? 0 : KEYEVENTF_KEYUP)
-                             | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+            input = VirtualKeyInput(vk, down);
             TrackKey(vk, down);
             break;
         }
         case kInputKeyScan: {
             if (length < 3) { return false; }
-            const uint16_t code = ReadBE16(body);
+            const uint16_t code = (uint16_t) smt::ReadBE(body, 2);
             const bool down = body[2] != 0;
             // Before the key, so that the letter it types already has the
             // Mac's case. On a press only: a release types nothing.
@@ -270,7 +269,7 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     const int count = plaintext[1];
     size_t at = 4;
     for (int i = 0; i < count && at + 6 <= length; ++i) {
-        const uint32_t seq = ReadBE32(plaintext + at);
+        const uint32_t seq = (uint32_t) smt::ReadBE(plaintext + at, 4);
         const unsigned char kind = plaintext[at + 4];
         const size_t bodyLen = plaintext[at + 5];
         const unsigned char* body = plaintext + at + 6;
@@ -291,12 +290,9 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
         // after the last new event, so the event was gone from both machines and
         // a key-up lost that way left the key down with nothing to release it.
         // Recording now happens below, after ApplyOne has had its attempt.
-        if (started_ && seq <= highest_) {
-            const uint32_t behind = highest_ - seq;
-            if (behind >= 1024 || ((seen_[behind / 64] >> (behind % 64)) & 1)) {
-                duplicates_.fetch_add(1);
-                continue;
-            }
+        if (seen_.SeenOrTooOld(seq)) {
+            duplicates_.fetch_add(1);
+            continue;
         }
 
         // RECORDED WHETHER OR NOT IT APPLIED. A failure used to be left out of
@@ -320,19 +316,7 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
             failed_.fetch_add(1);
         }
 
-        if (!started_) {
-            started_ = true;
-            highest_ = seq;
-            std::memset(seen_, 0, sizeof(seen_));
-            seen_[0] = 1;
-        } else if (seq > highest_) {
-            smt::SlideWindow(seen_, seq - highest_);
-            highest_ = seq;
-            seen_[0] |= 1;
-        } else {
-            const uint32_t behind = highest_ - seq;
-            seen_[behind / 64] |= 1ull << (behind % 64);
-        }
+        seen_.Record(seq);
     }
 
     // The acknowledgement is the highest CONTIGUOUS sequence: the client stops
@@ -357,10 +341,10 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     // forgotten and neither applied, which for a key-up means a key held down
     // until the session ends.
     uint32_t acked = acked_.load();
-    while (started_ && acked < highest_) {
-        const uint32_t behind = highest_ - (acked + 1);
+    while (seen_.started && acked < seen_.highest) {
+        const uint64_t behind = seen_.highest - (acked + 1);
         if (behind >= 1024) { break; }
-        if (!((seen_[behind / 64] >> (behind % 64)) & 1)) { break; }
+        if (!((seen_.bits[behind / 64] >> (behind % 64)) & 1)) { break; }
         ++acked;
     }
     acked_.store(acked);
@@ -368,13 +352,11 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
 }
 
 void InputInjector::Reset() {
-    started_ = false;
-    highest_ = 0;
+    seen_ = {};
     acked_.store(0);
     applied_.store(0);
     duplicates_.store(0);
     failed_.store(0);
-    std::memset(seen_, 0, sizeof(seen_));
     holdOrder_ = HoldOrder{};
     // Asked afresh each session: the PC's Caps Lock may have been changed at
     // the PC since the last one.
@@ -424,11 +406,7 @@ void InputInjector::ReleaseAll() {
                 continue;
             }
         } else {
-            const WORD vk = (WORD) keysDown_[i];
-            up.type = INPUT_KEYBOARD;
-            up.ki.wVk = vk;
-            up.ki.wScan = (WORD) MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-            up.ki.dwFlags = KEYEVENTF_KEYUP | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+            up = VirtualKeyInput((WORD) keysDown_[i], false);
         }
         SendInput(1, &up, sizeof(INPUT));
     }
