@@ -2658,6 +2658,20 @@ std::wstring OwedWindowsPath() {
     return path;
 }
 
+/// The slot's tenancy also versions its recovery debt, so stale startup work
+/// cannot delete a newer session's entry for the same handle.
+solstream::OwedWindow OwedForRestore(const WindowLock& saved) {
+    solstream::OwedWindow entry;
+    entry.window = IdFromWindow(saved.window);
+    entry.pid = saved.pid;
+    entry.process_created = saved.process_created;
+    entry.removed_style = (uint64_t) saved.removed_style;
+    entry.topmost = saved.saved_topmost;
+    entry.placement = saved.saved_placement;
+    entry.revision = saved.generation;
+    return entry;
+}
+
 /// Write down every window this host owes a restore, as the slots say now.
 ///
 /// For the next host, should this one be killed before it can give them back
@@ -2679,14 +2693,8 @@ void RecordOwedWindows() {
         if (!g_locks[i].active || g_locks[i].process_created == 0) {
             continue;
         }
-        solstream::OwedWindow entry;
-        entry.window = IdFromWindow(g_locks[i].window);
-        entry.pid = g_locks[i].pid;
-        entry.process_created = g_locks[i].process_created;
-        entry.removed_style = (uint64_t) g_locks[i].removed_style;
-        entry.topmost = g_locks[i].saved_topmost;
-        entry.placement = g_locks[i].saved_placement;
-        held.push_back(entry);
+        // The revision it carries is never written down.
+        held.push_back(OwedForRestore(g_locks[i]));
     }
     // A closed window is owed nothing. One whose process cannot be identified
     // stays owed in this host's memory, but is not safe to persist for another.
@@ -2907,20 +2915,6 @@ solstream::RestoreOutcome RestoreWindow(const WindowLock& saved) {
             (unsigned long long) IdFromWindow(window), z_order_error);
     }
     return solstream::RestoreOutcome::Restored;
-}
-
-/// The slot's tenancy also versions its recovery debt, so stale startup work
-/// cannot delete a newer session's entry for the same handle.
-solstream::OwedWindow OwedForRestore(const WindowLock& saved) {
-    solstream::OwedWindow entry;
-    entry.window = IdFromWindow(saved.window);
-    entry.pid = saved.pid;
-    entry.process_created = saved.process_created;
-    entry.removed_style = (uint64_t) saved.removed_style;
-    entry.topmost = saved.saved_topmost;
-    entry.placement = saved.saved_placement;
-    entry.revision = saved.generation;
-    return entry;
 }
 
 /// Finish a restore marked by BeginRestore. The queue and its in-progress mark
