@@ -3655,16 +3655,326 @@ bool FieldNumber(const std::string& json, const char* key, long long& out) {
     return true;
 }
 
+/// `auth`: check the client's v2 proof and, when it asks, agree the
+/// channel's keys.
+///
 /// - Parameter channel_cnonce: set to the client's nonce when a v2 auth agreed
 ///   channel keys, which tells the caller to switch framing once its reply has
 ///   gone out. `maybe_unused` because the only thing that writes it is compiled
 ///   out without SOLSTREAM_MEDIA, and a warning there is noise rather than news.
 /// - Parameter auth_failures: counts refused proofs on this connection, so the
 ///   caller can stop serving one that is only ever going to guess.
+std::string HandleAuth(const std::string& line, bool& authenticated,
+                       const std::string& challenge,
+                       [[maybe_unused]] std::string& channel_cnonce, int& auth_failures) {
+    // v2 first. The token itself never crosses the wire: the client proves
+    // it holds one against a challenge this connection just invented.
+    std::string proof, cnonce;
+    if (FieldString(line, "proof", proof) && FieldString(line, "cnonce", cnonce)) {
+        if (solstream::ProofMatches(g_token, challenge, cnonce, proof)) {
+            if (!authenticated) {
+                g_clients_authenticated.fetch_add(1);
+            }
+            authenticated = true;
+            // The channel's own keys, agreed in the same message that
+            // proved the token so it costs no extra round trip.
+            //
+            // Version 2 exactly, not "2 or more" and not "anything
+            // non-zero": a client that speaks a version this host does not
+            // must stay in the clear rather than have both ends read each
+            // other's bytes as the wrong thing.
+#ifdef SOLSTREAM_MEDIA
+            // Guarded: DeriveChannelKeys and g_pending_channel exist only with
+            // SOLSTREAM_MEDIA, and the mingw cross-build compiles without it.
+            long long wants = 0;
+            std::string cpubHex;
+            if (FieldNumber(line, "channelCrypto", wants) && wants == 2
+                && FieldString(line, "cpub", cpubHex)) {
+                const std::vector<unsigned char> cpub = FromHex(cpubHex);
+                std::vector<unsigned char> hpub;
+                BCRYPT_KEY_HANDLE pair = nullptr;
+                if (cpub.size() == 65 && cpub[0] == 0x04) {
+                    pair = NewEcdhKeyPair(hpub);
+                }
+                if (pair) {
+                    const std::vector<unsigned char> secret = EcdhSecret(pair, cpub);
+                    // Destroyed here, before the reply is even built. The
+                    // private half existing no longer than it must is the
+                    // whole of what forward secrecy is.
+                    BCryptDestroyKey(pair);
+                    std::string hostAuth;
+                    if (secret.size() == 32
+                        && solstream::media::DeriveChannelKeys(
+                               g_pending_channel, g_token, challenge, cnonce,
+                               cpub, hpub, secret, hostAuth)) {
+                        channel_cnonce = cnonce;
+                        const std::string hpubHex = ToHex(hpub);
+                        return "{\"type\":\"auth\",\"ok\":true"
+                               ",\"channelCrypto\":2"
+                               ",\"hpub\":\"" + hpubHex + "\""
+                               ",\"hauth\":\"" + hostAuth + "\"}";
+                    }
+                }
+                Log("[agent] could not agree channel keys; staying in the clear");
+            }
+#endif  // SOLSTREAM_MEDIA
+            // Logged because which auth path a client took is the first question
+            // when one misbehaves.
+            Log("[agent] client authenticated with a v2 proof");
+            return "{\"type\":\"auth\",\"ok\":true}";
+        }
+        ++auth_failures;
+        Log("[agent] rejected a bad auth proof (%d on this connection)",
+            auth_failures);
+        return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
+    }
+
+    // No v1 fallback. Accepting a cleartext `token` would be a downgrade to
+    // an authorised session with no channel keys -- window titles, the
+    // application list and the clipboard all in the clear -- since
+    // `channelCrypto` is only negotiated in the v2 branch above.
+    if (std::string ignored; FieldString(line, "token", ignored)) {
+        ++auth_failures;
+        Log("[agent] refused a cleartext token: this host authenticates with a "
+            "v2 proof only (%d refusal%s on this connection)",
+            auth_failures, auth_failures == 1 ? "" : "s");
+        return "{\"type\":\"auth\",\"ok\":false,\"message\":\"this host needs a "
+               "v2 proof, not a token. Update SolStream on the Mac.\"}";
+    }
+    // Counted, not slept off: a delay here would hold the one client slot
+    // shut against the paired Mac, which is the attacker's goal rather than
+    // his cost. See kMaxAuthFailures.
+    ++auth_failures;
+    Log("[agent] rejected a bad token (%d refusal%s on this connection)",
+        auth_failures, auth_failures == 1 ? "" : "s");
+    return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
+}
+
+// ── Media session ────────────────────────────────────────────────────────────
+//
+// What replaces GameStream's setup entirely: no HTTP pairing, no HTTPS
+// /launch, no seven RTSP round trips. Two programs that have already
+// authenticated each other agree an ephemeral key and start sending.
+std::string HandleMedia(const std::string& line) {
+    std::string op;
+    FieldString(line, "op", op);
+#ifdef SOLSTREAM_MEDIA
+    if (op == "stop") {
+        solstream::media::MediaSession::Instance().Stop();
+        Log("[media] session stopped on request");
+        return "{\"type\":\"media\",\"ok\":true,\"op\":\"stop\"}";
+    }
+    if (op == "stats") {
+        return "{\"type\":\"media\",\"ok\":true,\"op\":\"stats\",\"stats\":"
+               + solstream::media::MediaSession::Instance().StatsJson() + "}";
+    }
+    if (op == "retarget") {
+        long long id = 0;
+        std::string displayName;
+        FieldNumber(line, "window", id);
+        FieldString(line, "display", displayName);
+        HWND window = id ? WindowFromId(static_cast<uint64_t>(id)) : nullptr;
+        HMONITOR monitor = displayName.empty() ? nullptr
+                                               : MonitorFromDeviceName(ToWide(displayName));
+        if (!window && !monitor) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"no such target\"}";
+        }
+        const bool ok =
+            solstream::media::MediaSession::Instance().Retarget(window, monitor);
+        return std::string("{\"type\":\"media\",\"ok\":")
+             + (ok ? "true" : "false") + ",\"op\":\"retarget\"}";
+    }
+#endif
+    if (op != "open") {
+        return "{\"type\":\"media\",\"ok\":false,\"message\":\"unknown op\"}";
+    }
+    std::string cpubHex, cnonceHex;
+    FieldString(line, "cpub", cpubHex);
+    FieldString(line, "cnonce", cnonceHex);
+    const std::vector<unsigned char> cpub = FromHex(cpubHex);
+    const std::vector<unsigned char> cnonce = FromHex(cnonceHex);
+    if (cpub.size() != 65 || cpub[0] != 0x04 || cnonce.size() != 32) {
+        return "{\"type\":\"media\",\"ok\":false,\"message\":\"bad key material\"}";
+    }
+
+    std::vector<unsigned char> hpub;
+    BCRYPT_KEY_HANDLE keyPair = NewEcdhKeyPair(hpub);
+    if (!keyPair) {
+        return "{\"type\":\"media\",\"ok\":false,\"message\":\"no key pair\"}";
+    }
+    const std::vector<unsigned char> secret = EcdhSecret(keyPair, cpub);
+    BCryptDestroyKey(keyPair);
+    if (secret.size() != 32) {
+        return "{\"type\":\"media\",\"ok\":false,\"message\":\"agreement failed\"}";
+    }
+
+    const std::string hnonceHex = RandomHex(32);
+    const std::vector<unsigned char> hnonce = FromHex(hnonceHex);
+    const unsigned long long hcount = ++g_media_count;
+    SaveMediaCount(hcount);
+    const std::vector<unsigned char> okm =
+        DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0, g_token);
+    if (okm.size() != 108) {
+        return "{\"type\":\"media\",\"ok\":false,\"message\":\"derivation failed\"}";
+    }
+
+    // hostAuth, bytes 80..92. The Mac derives the same 108 bytes and checks
+    // this: if it matches, both ends hold the same keys, and that is worth
+    // knowing HERE rather than discovering it as every packet failing its
+    // tag with nothing to say why.
+    const std::string hauth = ToHex(okm.data() + 80, 12);
+    const std::string hpubHex = ToHex(hpub);
+    // Keys agreed. Now start the media path itself, if the client named
+    // something to capture. A client that only wants the keys -- the
+    // handshake test does -- gets them and nothing starts, which is what
+    // made step 4 measurable before step 6 existed.
+    std::string started = "false";
+    std::string startError;
+    // What the sound will be sent as, said in the reply so the Mac knows
+    // without waiting for a packet. Empty -- and so not said -- without sound.
+    std::string audioCodecReply, audioSourceReply;
+    // What this host's input takes beyond what every host does. A Mac
+    // sends keys by position only when this says "scancodes", and by
+    // virtual key otherwise -- which every host, this one included, still
+    // takes -- so either end can be the older one.
+    std::string inputReply;
+#ifdef SOLSTREAM_MEDIA
+    inputReply = ",\"scancodes\":1";
+    long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
+    // Zero means "host decides", which is what an absent field leaves behind.
+    long long width = 0, height = 0;
+    std::string displayName;
+    FieldNumber(line, "window", targetId);
+    FieldString(line, "display", displayName);
+    FieldNumber(line, "fps", fps);
+    FieldNumber(line, "bitrate", bitrate);
+    FieldNumber(line, "audio", audio);
+    FieldNumber(line, "width", width);
+    FieldNumber(line, "height", height);
+    // Sound quality and source. Absent from every Mac that predates them,
+    // which therefore gets the whole PC's sound as PCM, as it always has.
+    std::string audioCodec, audioSource;
+    FieldString(line, "audioSource", audioSource);
+    long long audioBitrate = 0, audioFrameMs = 0;
+    FieldString(line, "audioCodec", audioCodec);
+    FieldNumber(line, "audioBitrate", audioBitrate);
+    FieldNumber(line, "audioFrameMs", audioFrameMs);
+    HWND targetWindow =
+        targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
+    HMONITOR targetMonitor =
+        displayName.empty() ? nullptr : MonitorFromDeviceName(ToWide(displayName));
+    if (targetWindow || targetMonitor) {
+        solstream::media::MediaConfig config;
+        config.window = targetWindow;
+        config.monitor = targetMonitor;
+        config.fps = (UINT) (fps > 0 && fps <= 240 ? fps : 60);
+        // An upper bound as well as a lower one. This arrives as a long long
+        // and was only ever checked for being too small, so a client asking
+        // for five billion bit/s had it wrapped into a UINT -- 705 Mbit/s,
+        // a number nobody chose -- and the sender then paced at twice that,
+        // which is line rate on any link this runs over. Out of range falls
+        // back to the default rather than clamping, because a bitrate that
+        // far out is a client bug, not a preference worth honouring.
+        config.bitrate =
+            (UINT) (bitrate > 1000000 && bitrate <= 500000000 ? bitrate : 20000000);
+        // The Mac asks for a canvas so that its crops are pixel-exact
+        // against the capture display; when it asks for nothing, the first
+        // captured frame decides, exactly as before. Clamped here as well as
+        // on the Mac because a number off the wire is a number off the wire:
+        // above 4096 the H.264 encoders this runs on open and then never
+        // produce a frame, which looks from the Mac like a session that
+        // agreed to stream and went silent.
+        config.width = (UINT) (width > 0 ? (width > 4096 ? 4096 : width) : 0);
+        config.height = (UINT) (height > 0 ? (height > 4096 ? 4096 : height) : 0);
+        config.audio = audio != 0;
+        // Opus only when named. A bitrate outside what libopus does well with
+        // stereo falls back to Standard's, and a packet length other than the
+        // three the Mac offers to 10 ms, rather than either being clamped: as
+        // with the video's, a number that far out is a client bug.
+        if (audioCodec == "opus") {
+            config.audioEncoding.codec = solstream::media::AudioEncoding::Codec::Opus;
+            config.audioEncoding.bitrate =
+                (unsigned) (audioBitrate >= 24000 && audioBitrate <= 510000
+                                ? audioBitrate : 128000);
+            config.audioEncoding.frameMs =
+                (unsigned) (audioFrameMs == 5 || audioFrameMs == 10 || audioFrameMs == 20
+                                ? audioFrameMs : 10);
+        }
+        if (config.audio) {
+            audioCodecReply = audioCodec == "opus" ? "opus" : "pcm";
+        }
+        // The streamed apps' sound only: the processes of every window the
+        // Mac is managing, read afresh by the audio thread as they change.
+        // Said only when this Windows can do it, so that the Mac hears
+        // when it gets the whole PC's sound instead; see audio_source.h.
+        if (config.audio) {
+            audioSourceReply = solstream::media::AudioSourceReply(
+                audioSource == "apps", solstream::media::AppSoundSupported());
+            if (audioSourceReply == "apps") {
+                config.audioProcesses = [] { return StreamedProcesses(); };
+            } else if (audioSource == "apps") {
+                Log("[media] only the streamed apps' sound needs Windows build 20348 "
+                    "or later; sending the whole PC's");
+            }
+        }
+        config.port = solstream::kDefaultMediaPort;
+        // Start does not return until the capture and the encoder have both
+        // opened or one of them has failed, so `streaming` below is what
+        // happened rather than what was intended. It used to be the latter:
+        // capture and encode are set up on the capture thread, this returned
+        // as soon as that thread existed, and a WGC or encoder failure
+        // arrived seconds later in the host's log only -- the Mac had
+        // already closed its picker and sat on "Waiting for video" for ever.
+        started = solstream::media::MediaSession::Instance().Start(
+                      okm.data(), config, &startError)
+                      ? "true" : "false";
+    } else {
+        startError = "no window or display named";
+    }
+#else
+    startError = "this build has no media path";
+#endif
+    Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s%s%s",
+        hcount, started.c_str(), startError.empty() ? "" : " -- ",
+        startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str(),
+        audioSourceReply.empty() ? "" : " from ", audioSourceReply.c_str());
+    return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
+           ",\"hpub\":\"" + hpubHex + "\""
+           ",\"hnonce\":\"" + hnonceHex + "\""
+           ",\"hcount\":\"" + std::to_string(hcount) + "\""
+           ",\"hauth\":\"" + hauth + "\""
+           ",\"streaming\":" + started
+           + (startError.empty() ? std::string()
+                                 : ",\"message\":\"" + JsonEscape(startError) + "\"")
+           + (audioCodecReply.empty() ? std::string()
+                                      : ",\"audioCodec\":\"" + audioCodecReply + "\"")
+           + (audioSourceReply.empty() ? std::string()
+                                       : ",\"audioSource\":\"" + audioSourceReply + "\"")
+           + inputReply
+           + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
+}
+
+/// The window a command names by its "id", or null with `refusal` set to the
+/// reply: `needs` when there is no id, "no such window" when it names none
+/// this host will act on.
+HWND WindowArg(const std::string& line, const char* needs, std::string& refusal) {
+    long long id = 0;
+    if (!FieldNumber(line, "id", id)) {
+        refusal = std::string("{\"type\":\"error\",\"message\":\"") + needs + "\"}";
+        return nullptr;
+    }
+    HWND window = WindowFromId(static_cast<uint64_t>(id));
+    if (!window) {
+        refusal = "{\"type\":\"error\",\"message\":\"no such window\"}";
+    }
+    return window;
+}
+
+/// One command from the client, and the reply to it. See HandleAuth for
+/// `channel_cnonce` and `auth_failures`.
 std::string HandleCommand(const std::string& line, bool& authenticated,
                           const std::string& challenge,
-                          [[maybe_unused]] std::string& channel_cnonce,
-                          int& auth_failures) {
+                          std::string& channel_cnonce, int& auth_failures) {
     std::string command;
     if (!FieldString(line, "cmd", command)) {
         return "{\"type\":\"error\",\"message\":\"missing cmd\"}";
@@ -3704,295 +4014,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "auth") {
-        // v2 first. The token itself never crosses the wire: the client proves
-        // it holds one against a challenge this connection just invented.
-        std::string proof, cnonce;
-        if (FieldString(line, "proof", proof) && FieldString(line, "cnonce", cnonce)) {
-            if (solstream::ProofMatches(g_token, challenge, cnonce, proof)) {
-                if (!authenticated) {
-                    g_clients_authenticated.fetch_add(1);
-                }
-                authenticated = true;
-                // The channel's own keys, agreed in the same message that
-                // proved the token so it costs no extra round trip.
-                //
-                // Version 2 exactly, not "2 or more" and not "anything
-                // non-zero": a client that speaks a version this host does not
-                // must stay in the clear rather than have both ends read each
-                // other's bytes as the wrong thing.
-#ifdef SOLSTREAM_MEDIA
-                // Guarded: DeriveChannelKeys and g_pending_channel exist only with
-                // SOLSTREAM_MEDIA, and the mingw cross-build compiles without it.
-                long long wants = 0;
-                std::string cpubHex;
-                if (FieldNumber(line, "channelCrypto", wants) && wants == 2
-                    && FieldString(line, "cpub", cpubHex)) {
-                    const std::vector<unsigned char> cpub = FromHex(cpubHex);
-                    std::vector<unsigned char> hpub;
-                    BCRYPT_KEY_HANDLE pair = nullptr;
-                    if (cpub.size() == 65 && cpub[0] == 0x04) {
-                        pair = NewEcdhKeyPair(hpub);
-                    }
-                    if (pair) {
-                        const std::vector<unsigned char> secret = EcdhSecret(pair, cpub);
-                        // Destroyed here, before the reply is even built. The
-                        // private half existing no longer than it must is the
-                        // whole of what forward secrecy is.
-                        BCryptDestroyKey(pair);
-                        std::string hostAuth;
-                        if (secret.size() == 32
-                            && solstream::media::DeriveChannelKeys(
-                                   g_pending_channel, g_token, challenge, cnonce,
-                                   cpub, hpub, secret, hostAuth)) {
-                            channel_cnonce = cnonce;
-                            const std::string hpubHex = ToHex(hpub);
-                            return "{\"type\":\"auth\",\"ok\":true"
-                                   ",\"channelCrypto\":2"
-                                   ",\"hpub\":\"" + hpubHex + "\""
-                                   ",\"hauth\":\"" + hostAuth + "\"}";
-                        }
-                    }
-                    Log("[agent] could not agree channel keys; staying in the clear");
-                }
-#endif  // SOLSTREAM_MEDIA
-                // Logged because which auth path a client took is the first question
-                // when one misbehaves.
-                Log("[agent] client authenticated with a v2 proof");
-                return "{\"type\":\"auth\",\"ok\":true}";
-            }
-            ++auth_failures;
-            Log("[agent] rejected a bad auth proof (%d on this connection)",
-                auth_failures);
-            return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
-        }
-
-        // No v1 fallback. Accepting a cleartext `token` would be a downgrade to
-        // an authorised session with no channel keys -- window titles, the
-        // application list and the clipboard all in the clear -- since
-        // `channelCrypto` is only negotiated in the v2 branch above.
-        if (std::string ignored; FieldString(line, "token", ignored)) {
-            ++auth_failures;
-            Log("[agent] refused a cleartext token: this host authenticates with a "
-                "v2 proof only (%d refusal%s on this connection)",
-                auth_failures, auth_failures == 1 ? "" : "s");
-            return "{\"type\":\"auth\",\"ok\":false,\"message\":\"this host needs a "
-                   "v2 proof, not a token. Update SolStream on the Mac.\"}";
-        }
-        // Counted, not slept off: a delay here would hold the one client slot
-        // shut against the paired Mac, which is the attacker's goal rather than
-        // his cost. See kMaxAuthFailures.
-        ++auth_failures;
-        Log("[agent] rejected a bad token (%d refusal%s on this connection)",
-            auth_failures, auth_failures == 1 ? "" : "s");
-        return "{\"type\":\"auth\",\"ok\":false,\"message\":\"bad token\"}";
+        return HandleAuth(line, authenticated, challenge, channel_cnonce, auth_failures);
     }
 
     if (g_require_auth && !authenticated) {
         return "{\"type\":\"error\",\"message\":\"unauthenticated\",\"needsAuth\":true}";
     }
 
-    // ── Media session ────────────────────────────────────────────────────────
-    //
-    // What replaces GameStream's setup entirely: no HTTP pairing, no HTTPS
-    // /launch, no seven RTSP round trips. Two programs that have already
-    // authenticated each other agree an ephemeral key and start sending.
     if (command == "media") {
-        std::string op;
-        FieldString(line, "op", op);
-#ifdef SOLSTREAM_MEDIA
-        if (op == "stop") {
-            solstream::media::MediaSession::Instance().Stop();
-            Log("[media] session stopped on request");
-            return "{\"type\":\"media\",\"ok\":true,\"op\":\"stop\"}";
-        }
-        if (op == "stats") {
-            return "{\"type\":\"media\",\"ok\":true,\"op\":\"stats\",\"stats\":"
-                   + solstream::media::MediaSession::Instance().StatsJson() + "}";
-        }
-        if (op == "retarget") {
-            long long id = 0;
-            std::string displayName;
-            FieldNumber(line, "window", id);
-            FieldString(line, "display", displayName);
-            HWND window = id ? WindowFromId(static_cast<uint64_t>(id)) : nullptr;
-            HMONITOR monitor = displayName.empty() ? nullptr
-                                                   : MonitorFromDeviceName(ToWide(displayName));
-            if (!window && !monitor) {
-                return "{\"type\":\"media\",\"ok\":false,\"message\":\"no such target\"}";
-            }
-            const bool ok =
-                solstream::media::MediaSession::Instance().Retarget(window, monitor);
-            return std::string("{\"type\":\"media\",\"ok\":")
-                 + (ok ? "true" : "false") + ",\"op\":\"retarget\"}";
-        }
-#endif
-        if (op != "open") {
-            return "{\"type\":\"media\",\"ok\":false,\"message\":\"unknown op\"}";
-        }
-        std::string cpubHex, cnonceHex;
-        FieldString(line, "cpub", cpubHex);
-        FieldString(line, "cnonce", cnonceHex);
-        const std::vector<unsigned char> cpub = FromHex(cpubHex);
-        const std::vector<unsigned char> cnonce = FromHex(cnonceHex);
-        if (cpub.size() != 65 || cpub[0] != 0x04 || cnonce.size() != 32) {
-            return "{\"type\":\"media\",\"ok\":false,\"message\":\"bad key material\"}";
-        }
-
-        std::vector<unsigned char> hpub;
-        BCRYPT_KEY_HANDLE keyPair = NewEcdhKeyPair(hpub);
-        if (!keyPair) {
-            return "{\"type\":\"media\",\"ok\":false,\"message\":\"no key pair\"}";
-        }
-        const std::vector<unsigned char> secret = EcdhSecret(keyPair, cpub);
-        BCryptDestroyKey(keyPair);
-        if (secret.size() != 32) {
-            return "{\"type\":\"media\",\"ok\":false,\"message\":\"agreement failed\"}";
-        }
-
-        const std::string hnonceHex = RandomHex(32);
-        const std::vector<unsigned char> hnonce = FromHex(hnonceHex);
-        const unsigned long long hcount = ++g_media_count;
-        SaveMediaCount(hcount);
-        const std::vector<unsigned char> okm =
-            DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0, g_token);
-        if (okm.size() != 108) {
-            return "{\"type\":\"media\",\"ok\":false,\"message\":\"derivation failed\"}";
-        }
-
-        // hostAuth, bytes 80..92. The Mac derives the same 108 bytes and checks
-        // this: if it matches, both ends hold the same keys, and that is worth
-        // knowing HERE rather than discovering it as every packet failing its
-        // tag with nothing to say why.
-        const std::string hauth = ToHex(okm.data() + 80, 12);
-        const std::string hpubHex = ToHex(hpub);
-        // Keys agreed. Now start the media path itself, if the client named
-        // something to capture. A client that only wants the keys -- the
-        // handshake test does -- gets them and nothing starts, which is what
-        // made step 4 measurable before step 6 existed.
-        std::string started = "false";
-        std::string startError;
-        // What the sound will be sent as, said in the reply so the Mac knows
-        // without waiting for a packet. Empty -- and so not said -- without sound.
-        std::string audioCodecReply, audioSourceReply;
-        // What this host's input takes beyond what every host does. A Mac
-        // sends keys by position only when this says "scancodes", and by
-        // virtual key otherwise -- which every host, this one included, still
-        // takes -- so either end can be the older one.
-        std::string inputReply;
-#ifdef SOLSTREAM_MEDIA
-        inputReply = ",\"scancodes\":1";
-        long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
-        // Zero means "host decides", which is what an absent field leaves behind.
-        long long width = 0, height = 0;
-        std::string displayName;
-        FieldNumber(line, "window", targetId);
-        FieldString(line, "display", displayName);
-        FieldNumber(line, "fps", fps);
-        FieldNumber(line, "bitrate", bitrate);
-        FieldNumber(line, "audio", audio);
-        FieldNumber(line, "width", width);
-        FieldNumber(line, "height", height);
-        // Sound quality and source. Absent from every Mac that predates them,
-        // which therefore gets the whole PC's sound as PCM, as it always has.
-        std::string audioCodec, audioSource;
-        FieldString(line, "audioSource", audioSource);
-        long long audioBitrate = 0, audioFrameMs = 0;
-        FieldString(line, "audioCodec", audioCodec);
-        FieldNumber(line, "audioBitrate", audioBitrate);
-        FieldNumber(line, "audioFrameMs", audioFrameMs);
-        HWND targetWindow =
-            targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
-        HMONITOR targetMonitor =
-            displayName.empty() ? nullptr : MonitorFromDeviceName(ToWide(displayName));
-        if (targetWindow || targetMonitor) {
-            solstream::media::MediaConfig config;
-            config.window = targetWindow;
-            config.monitor = targetMonitor;
-            config.fps = (UINT) (fps > 0 && fps <= 240 ? fps : 60);
-            // An upper bound as well as a lower one. This arrives as a long long
-            // and was only ever checked for being too small, so a client asking
-            // for five billion bit/s had it wrapped into a UINT -- 705 Mbit/s,
-            // a number nobody chose -- and the sender then paced at twice that,
-            // which is line rate on any link this runs over. Out of range falls
-            // back to the default rather than clamping, because a bitrate that
-            // far out is a client bug, not a preference worth honouring.
-            config.bitrate =
-                (UINT) (bitrate > 1000000 && bitrate <= 500000000 ? bitrate : 20000000);
-            // The Mac asks for a canvas so that its crops are pixel-exact
-            // against the capture display; when it asks for nothing, the first
-            // captured frame decides, exactly as before. Clamped here as well as
-            // on the Mac because a number off the wire is a number off the wire:
-            // above 4096 the H.264 encoders this runs on open and then never
-            // produce a frame, which looks from the Mac like a session that
-            // agreed to stream and went silent.
-            config.width = (UINT) (width > 0 ? (width > 4096 ? 4096 : width) : 0);
-            config.height = (UINT) (height > 0 ? (height > 4096 ? 4096 : height) : 0);
-            config.audio = audio != 0;
-            // Opus only when named. A bitrate outside what libopus does well with
-            // stereo falls back to Standard's, and a packet length other than the
-            // three the Mac offers to 10 ms, rather than either being clamped: as
-            // with the video's, a number that far out is a client bug.
-            if (audioCodec == "opus") {
-                config.audioEncoding.codec = solstream::media::AudioEncoding::Codec::Opus;
-                config.audioEncoding.bitrate =
-                    (unsigned) (audioBitrate >= 24000 && audioBitrate <= 510000
-                                    ? audioBitrate : 128000);
-                config.audioEncoding.frameMs =
-                    (unsigned) (audioFrameMs == 5 || audioFrameMs == 10 || audioFrameMs == 20
-                                    ? audioFrameMs : 10);
-            }
-            if (config.audio) {
-                audioCodecReply = audioCodec == "opus" ? "opus" : "pcm";
-            }
-            // The streamed apps' sound only: the processes of every window the
-            // Mac is managing, read afresh by the audio thread as they change.
-            // Said only when this Windows can do it, so that the Mac hears
-            // when it gets the whole PC's sound instead; see audio_source.h.
-            if (config.audio) {
-                audioSourceReply = solstream::media::AudioSourceReply(
-                    audioSource == "apps", solstream::media::AppSoundSupported());
-                if (audioSourceReply == "apps") {
-                    config.audioProcesses = [] { return StreamedProcesses(); };
-                } else if (audioSource == "apps") {
-                    Log("[media] only the streamed apps' sound needs Windows build 20348 "
-                        "or later; sending the whole PC's");
-                }
-            }
-            config.port = solstream::kDefaultMediaPort;
-            // Start does not return until the capture and the encoder have both
-            // opened or one of them has failed, so `streaming` below is what
-            // happened rather than what was intended. It used to be the latter:
-            // capture and encode are set up on the capture thread, this returned
-            // as soon as that thread existed, and a WGC or encoder failure
-            // arrived seconds later in the host's log only -- the Mac had
-            // already closed its picker and sat on "Waiting for video" for ever.
-            started = solstream::media::MediaSession::Instance().Start(
-                          okm.data(), config, &startError)
-                          ? "true" : "false";
-        } else {
-            startError = "no window or display named";
-        }
-#else
-        startError = "this build has no media path";
-#endif
-        Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s%s%s",
-            hcount, started.c_str(), startError.empty() ? "" : " -- ",
-            startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str(),
-            audioSourceReply.empty() ? "" : " from ", audioSourceReply.c_str());
-        return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
-               ",\"hpub\":\"" + hpubHex + "\""
-               ",\"hnonce\":\"" + hnonceHex + "\""
-               ",\"hcount\":\"" + std::to_string(hcount) + "\""
-               ",\"hauth\":\"" + hauth + "\""
-               ",\"streaming\":" + started
-               + (startError.empty() ? std::string()
-                                     : ",\"message\":\"" + JsonEscape(startError) + "\"")
-               + (audioCodecReply.empty() ? std::string()
-                                          : ",\"audioCodec\":\"" + audioCodecReply + "\"")
-               + (audioSourceReply.empty() ? std::string()
-                                           : ",\"audioSource\":\"" + audioSourceReply + "\"")
-               + inputReply
-               + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
+        return HandleMedia(line);
     }
 
     if (command == "displays") {
@@ -4134,15 +4164,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "place") {
-        long long id = 0, x = 0, y = 0, w = 0, h = 0;
-        if (!FieldNumber(line, "id", id) || !FieldNumber(line, "x", x) ||
-            !FieldNumber(line, "y", y) || !FieldNumber(line, "w", w) ||
-            !FieldNumber(line, "h", h)) {
+        long long x = 0, y = 0, w = 0, h = 0;
+        if (!FieldNumber(line, "x", x) || !FieldNumber(line, "y", y)
+            || !FieldNumber(line, "w", w) || !FieldNumber(line, "h", h)) {
             return "{\"type\":\"error\",\"message\":\"place needs id,x,y,w,h\"}";
         }
-        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        std::string refusal;
+        HWND window = WindowArg(line, "place needs id,x,y,w,h", refusal);
         if (!window) {
-            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+            return refusal;
         }
         RECT client{};
         long long missed = 0;
@@ -4191,15 +4221,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "lock") {
-        long long id = 0, on = 1;
-        if (!FieldNumber(line, "id", id)) {
-            return "{\"type\":\"error\",\"message\":\"lock needs id\"}";
-        }
-        FieldNumber(line, "on", on);
-        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        std::string refusal;
+        HWND window = WindowArg(line, "lock needs id", refusal);
         if (!window) {
-            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+            return refusal;
         }
+        long long on = 1;
+        FieldNumber(line, "on", on);
         bool ok = true;
         if (on) {
             // A reconnecting Mac asks at once, while its last session's
@@ -4217,15 +4245,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "topmost") {
-        long long id = 0, on = 1;
-        if (!FieldNumber(line, "id", id)) {
-            return "{\"type\":\"error\",\"message\":\"topmost needs id\"}";
-        }
-        FieldNumber(line, "on", on);
-        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        std::string refusal;
+        HWND window = WindowArg(line, "topmost needs id", refusal);
         if (!window) {
-            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+            return refusal;
         }
+        long long on = 1;
+        FieldNumber(line, "on", on);
         // Pinning a managed window above ordinary ones stops other apps
         // covering the tile. Safe for our own tiles because they never
         // overlap each other.
@@ -4266,13 +4292,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "focus") {
-        long long id = 0;
-        if (!FieldNumber(line, "id", id)) {
-            return "{\"type\":\"error\",\"message\":\"focus needs id\"}";
-        }
-        HWND window = WindowFromId(static_cast<uint64_t>(id));
+        std::string refusal;
+        HWND window = WindowArg(line, "focus needs id", refusal);
         if (!window) {
-            return "{\"type\":\"error\",\"message\":\"no such window\"}";
+            return refusal;
         }
 
         const bool foreground = ForceForeground(window);
