@@ -17,7 +17,6 @@ public final class AudioRenderer {
     // Audio format: 16-bit signed PCM, 48kHz, stereo
     private let sampleRate: Double = 48000
     private let channelCount: UInt32 = 2
-    private let bitsPerChannel: UInt32 = 16
 
     /// Interleaved stereo samples waiting to be played (internal for the callback).
     let ringBuffer = AudioRingBuffer(latency: Buffering.lowLatency.latency)
@@ -186,19 +185,8 @@ public final class AudioRenderer {
         self.audioUnit = audioUnit
 
         // Set the stream format: 48kHz, 16-bit signed, stereo.
-        var streamFormat = AudioStreamBasicDescription(
-            mSampleRate: sampleRate,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsSignedInteger |
-                          kAudioFormatFlagsNativeEndian |
-                          kAudioFormatFlagIsPacked,
-            mBytesPerPacket: UInt32(bitsPerChannel / 8) * channelCount,
-            mFramesPerPacket: 1,
-            mBytesPerFrame: UInt32(bitsPerChannel / 8) * channelCount,
-            mChannelsPerFrame: channelCount,
-            mBitsPerChannel: bitsPerChannel,
-            mReserved: 0
-        )
+        var streamFormat = AudioStreamBasicDescription.pcm16(sampleRate: sampleRate,
+                                                             channels: Int(channelCount))
 
         let formatStatus = AudioUnitSetProperty(
             audioUnit,

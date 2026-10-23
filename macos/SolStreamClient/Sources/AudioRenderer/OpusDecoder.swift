@@ -134,13 +134,8 @@ final class OpusDecoder {
             mSampleRate: sampleRate, mFormatID: kAudioFormatOpus, mFormatFlags: 0,
             mBytesPerPacket: 0, mFramesPerPacket: UInt32(frames), mBytesPerFrame: 0,
             mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 0, mReserved: 0)
-        var pcm = AudioStreamBasicDescription(
-            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagsNativeEndian
-                | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: UInt32(2 * channels), mFramesPerPacket: 1,
-            mBytesPerFrame: UInt32(2 * channels), mChannelsPerFrame: UInt32(channels),
-            mBitsPerChannel: 16, mReserved: 0)
+        var pcm = AudioStreamBasicDescription.pcm16(sampleRate: sampleRate, channels: channels)
+
         var made: AudioConverterRef?
         let status = AudioConverterNew(&opus, &pcm, &made)
         guard status == noErr, let made else {
@@ -188,4 +183,18 @@ private let supplyPacket: AudioConverterComplexInputDataProc = {
     description?.pointee = decoder.inputDescription
     packets.pointee = 1
     return noErr
+}
+
+extension AudioStreamBasicDescription {
+    /// Interleaved, packed, native-endian signed 16-bit PCM: what Opus is
+    /// decoded to, and what the output unit is fed.
+    static func pcm16(sampleRate: Double, channels: Int) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagsNativeEndian
+                | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(2 * channels), mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(2 * channels), mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 16, mReserved: 0)
+    }
 }

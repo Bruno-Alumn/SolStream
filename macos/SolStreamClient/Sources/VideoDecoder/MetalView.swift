@@ -37,7 +37,6 @@ public final class MetalView: NSView {
     private let pendingLock = NSLock()
     private var pendingPixelBuffer: CVPixelBuffer?
     private var presentScheduled = false
-    private(set) var framesSkipped = 0
 
     public override init(frame frameRect: NSRect) {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -160,15 +159,14 @@ public final class MetalView: NSView {
 
     // MARK: - Status overlay
 
-    /// Update the overlay. Passing `pin` shows the pairing code prominently.
-    public func setStatus(_ title: String, detail: String? = nil,
-                          pin: String? = nil, busy: Bool = true) {
-        overlay.update(title: title, detail: detail, pin: pin, busy: busy, isError: false)
+    /// Update the overlay.
+    public func setStatus(_ title: String, detail: String? = nil, busy: Bool = true) {
+        overlay.update(title: title, detail: detail, busy: busy, isError: false)
     }
 
     /// Show a terminal error, with a Retry button if a handler is provided.
     public func setError(_ title: String, detail: String? = nil) {
-        overlay.update(title: title, detail: detail, pin: nil, busy: false, isError: true)
+        overlay.update(title: title, detail: detail, busy: false, isError: true)
     }
 
     public var onRetry: (() -> Void)? {
@@ -185,7 +183,6 @@ public final class MetalView: NSView {
     /// Present a decoded frame. Safe to call from any thread.
     public func displayFrame(_ pixelBuffer: CVPixelBuffer) {
         pendingLock.lock()
-        if pendingPixelBuffer != nil { framesSkipped += 1 }
         pendingPixelBuffer = pixelBuffer
         let alreadyScheduled = presentScheduled
         presentScheduled = true
@@ -259,7 +256,7 @@ public final class MetalView: NSView {
     }
 }
 
-/// The "connecting / pairing / failed" card drawn over the video surface.
+/// The "connecting / failed" card drawn over the video surface.
 private final class StatusOverlay: NSView {
     private let card = DS.card()
     private let spinner = NSProgressIndicator()
@@ -268,7 +265,6 @@ private final class StatusOverlay: NSView {
     private let failedDot = DS.Dot(state: .danger)
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
-    private let pinLabel = NSTextField(labelWithString: "")
     private let retryButton = DS.Button(title: "Try Again", style: .primary, target: nil, action: nil)
 
     var onRetry: (() -> Void)?
@@ -307,14 +303,6 @@ private final class StatusOverlay: NSView {
         detailLabel.alignment = .center
         detailLabel.maximumNumberOfLines = 3
 
-        // The PIN is the hero of that screen: the confusion is never the digits,
-        // it is not knowing where they go, so they are large and the instruction
-        // sits directly under them.
-        pinLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 46, weight: .medium)
-        pinLabel.textColor = DS.accentInk
-        pinLabel.alignment = .center
-        pinLabel.isHidden = true
-
         retryButton.target = self
         retryButton.action = #selector(retryTapped)
         retryButton.isHidden = true
@@ -325,7 +313,7 @@ private final class StatusOverlay: NSView {
         titleRow.alignment = .centerY
         titleRow.spacing = DS.Space.x2
 
-        let stack = NSStackView(views: [spinner, pinLabel, titleRow, detailLabel, retryButton])
+        let stack = NSStackView(views: [spinner, titleRow, detailLabel, retryButton])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = DS.Space.x2
@@ -365,19 +353,12 @@ private final class StatusOverlay: NSView {
         return inCard ? super.hitTest(point) : nil
     }
 
-    func update(title: String, detail: String?, pin: String?, busy: Bool, isError: Bool) {
+    func update(title: String, detail: String?, busy: Bool, isError: Bool) {
         titleLabel.stringValue = title
         failedDot.isHidden = !isError
 
         detailLabel.stringValue = detail ?? ""
         detailLabel.isHidden = (detail ?? "").isEmpty
-
-        if let pin, !pin.isEmpty {
-            pinLabel.stringValue = pin.map(String.init).joined(separator: " ")
-            pinLabel.isHidden = false
-        } else {
-            pinLabel.isHidden = true
-        }
 
         spinner.isHidden = !busy
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
