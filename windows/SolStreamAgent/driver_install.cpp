@@ -79,20 +79,10 @@ const std::string kManualInstall =
     " You can install the Virtual Display Driver yourself from "
     "github.com/VirtualDrivers/Virtual-Display-Driver, then open SolStream again.";
 
-/// A record from `root`\`key`: kStateKey in HKLM everywhere but the tests.
-std::wstring ReadStateIn(HKEY root, const wchar_t* key, const wchar_t* name) {
-    wchar_t value[MAX_PATH] = {0};
-    DWORD size = sizeof(value);
-    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value,
-                     &size)
-        != ERROR_SUCCESS) {
-        return {};
-    }
-    return value;
-}
-
+/// A record from kStateKey in HKLM. What the tests reach reads `root`\`key`
+/// with ReadRegString instead, so theirs can be a key of their own.
 std::wstring ReadState(const wchar_t* name) {
-    return ReadStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
+    return ReadRegString(HKEY_LOCAL_MACHINE, kStateKey, name);
 }
 
 /// Whether `root`\`key` has the record at all, empty or not.
@@ -902,9 +892,9 @@ DeviceRemoval ClassifyRemoval(const RemovalAnswers& answers) {
 
 bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalSteps& steps,
                           std::string& note) {
-    std::wstring instance = ReadStateIn(root, key, kDeviceValue);
-    const std::wstring mark = ReadStateIn(root, key, kDeviceMarkValue);
-    const std::wstring staged = ReadStateIn(root, key, kInfValue);
+    std::wstring instance = ReadRegString(root, key, kDeviceValue);
+    const std::wstring mark = ReadRegString(root, key, kDeviceMarkValue);
+    const std::wstring staged = ReadRegString(root, key, kInfValue);
 
     // A PC set up by an earlier build has the package recorded and no device
     // record at all: that build took every device of the driver's away
@@ -1001,7 +991,7 @@ bool RemoveRecordedDriver(HKEY root, const wchar_t* key, const DriverRemovalStep
     if (steps.other_device_present(outcome == DeviceRemoval::Removed ? instance
                                                                      : std::wstring())) {
         for (const wchar_t* value : {kSettingsValue, kSettingsFileValue, kSettingsBackupValue}) {
-            const std::wstring path = ReadStateIn(root, key, value);
+            const std::wstring path = ReadRegString(root, key, value);
             if (!path.empty()) {
                 note += "Left the display driver's settings, " + ToUtf8(path)
                       + ", because another virtual display on this PC uses them.\n";
@@ -1020,7 +1010,7 @@ bool RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& no
     // the driver's and SolStream's, and never through a link. Its record goes
     // only with the folder: let go while the folder stays, nothing would say
     // again that the folder was SolStream's.
-    const std::wstring folder = ReadStateIn(root, key, kSettingsValue);
+    const std::wstring folder = ReadRegString(root, key, kSettingsValue);
     if (!folder.empty()) {
         if (RemoveDriverSettingsFolder(folder)) {
             DeleteStateIn(root, key, kSettingsValue);
@@ -1033,7 +1023,7 @@ bool RemoveRecordedDriverSettings(HKEY root, const wchar_t* key, std::string& no
     // The settings file written into somebody else's folder, and the copy of
     // it, on the same terms.
     for (const wchar_t* value : {kSettingsFileValue, kSettingsBackupValue}) {
-        const std::wstring path = ReadStateIn(root, key, value);
+        const std::wstring path = ReadRegString(root, key, value);
         if (path.empty()) {
             continue;
         }

@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <windows.h>
+
 #include <string>
 
 namespace solstream {
@@ -55,6 +57,10 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 /// C:\VirtualDisplayDriver -- both read out of MttVDD.dll itself. One answer
 /// for everything that reads, writes or removes it.
 std::wstring VddSettingsFolder();
+
+/// A string value from `root`\`key`, in the 64-bit view of the registry, or
+/// empty when it is not there, is not a string, or is longer than MAX_PATH.
+std::wstring ReadRegString(HKEY root, const wchar_t* key, const wchar_t* name);
 
 /// Added to vdd_settings.xml's name for the copy kept of it before SolStream
 /// first changes it. Named once, so what uninstall deletes is what this writes.

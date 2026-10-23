@@ -108,13 +108,21 @@ void Add(std::string& note, const std::string& line) {
 
 }  // namespace
 
+std::wstring ReadRegString(HKEY root, const wchar_t* key, const wchar_t* name) {
+    wchar_t value[MAX_PATH] = {0};
+    DWORD size = sizeof(value);
+    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, value,
+                     &size)
+        != ERROR_SUCCESS) {
+        return {};
+    }
+    return value;
+}
+
 std::wstring VddSettingsFolder() {
-    wchar_t configured[MAX_PATH] = {0};
-    DWORD size = sizeof(configured);
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver",
-                     L"VDDPATH", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, configured,
-                     &size) == ERROR_SUCCESS
-        && configured[0] != L'\0') {
+    const std::wstring configured = ReadRegString(
+        HKEY_LOCAL_MACHINE, L"SOFTWARE\\MikeTheTech\\VirtualDisplayDriver", L"VDDPATH");
+    if (!configured.empty()) {
         return configured;
     }
     // The literal the driver falls back to, not %SystemDrive%: MttVDD.dll
