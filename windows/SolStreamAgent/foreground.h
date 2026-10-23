@@ -10,10 +10,17 @@
 // stuck connection still counted as the live one.
 //
 // So a holder Windows already reports as hung is never joined, and the asking
-// is done on a thread of its own with a bound on the wait, which covers the
-// first seconds of a hang, before Windows reports it. A thread that is still
-// stuck when the bound runs out is left to finish on its own; it holds nothing
-// the command thread needs.
+// -- the window's restore and raise as well, which wait on the window's own
+// app -- is done on a thread of its own with a bound on the wait, which covers
+// the first seconds of a hang, before Windows reports it. A thread that is
+// still stuck when the bound runs out is left to finish on its own; it holds
+// nothing the command thread needs.
+//
+// Two rules keep those threads from doing harm later (ForegroundTurns). Only
+// one at a time joins a queue, so that a hang cannot gather a thread for every
+// click. And one that finishes after a newer request puts THAT request's
+// window in front, rather than its own, which the user has since moved on
+// from.
 //
 // Header-only, so the test program can check it.
 
@@ -25,6 +32,8 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -41,6 +50,48 @@ constexpr DWORD kForegroundWaitMs = 500;
 inline bool JoinsHolderQueue(DWORD holder_thread, DWORD self_thread, bool holder_hung) {
     return holder_thread != 0 && holder_thread != self_thread && !holder_hung;
 }
+
+/// The requests for the foreground, in order. Begun on the command thread,
+/// one at a time; read by the threads doing the asking.
+class ForegroundTurns {
+public:
+    struct Turn {
+        uint64_t generation = 0;
+        /// This turn may join the holder's queue, and gives that up in Finish.
+        bool mayJoin = false;
+    };
+
+    /// A new request, for `window`. It may join a queue only when no earlier
+    /// one is still doing so.
+    Turn Begin(HWND window) {
+        target_.store(window);
+        Turn turn;
+        turn.generation = latest_.fetch_add(1) + 1;
+        turn.mayJoin = !joining_.exchange(true);
+        return turn;
+    }
+
+    /// Whether a newer request has come since `turn` began.
+    bool Overtaken(const Turn& turn) const { return latest_.load() != turn.generation; }
+
+    /// The window `turn` should put in front now: its own, `own`, until it is
+    /// overtaken, and the newest request's after that.
+    HWND Wanted(const Turn& turn, HWND own) const {
+        return Overtaken(turn) ? target_.load() : own;
+    }
+
+    /// `turn` has finished, joined queue and all.
+    void Finish(const Turn& turn) {
+        if (turn.mayJoin) {
+            joining_.store(false);
+        }
+    }
+
+private:
+    std::atomic<uint64_t> latest_{0};
+    std::atomic<HWND> target_{nullptr};
+    std::atomic<bool> joining_{false};
+};
 
 inline DWORD WINAPI RunBoundedJob(void* param) {
     const std::unique_ptr<std::function<void()>> job(static_cast<std::function<void()>*>(param));

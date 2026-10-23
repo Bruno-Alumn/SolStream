@@ -796,6 +796,10 @@ uint64_t IdFromWindow(HWND window) {
     return search.found;
 }
 
+/// ForceForeground's requests, so that the threads it leaves behind when an
+/// app hangs neither pile up nor put an old window in front; see foreground.h.
+solstream::ForegroundTurns g_foreground_turns;
+
 /// Actually give a window the keyboard focus, and say whether it worked.
 ///
 /// SetForegroundWindow on its own is not enough. Windows refuses a foreground
@@ -828,47 +832,67 @@ bool ForceForeground(HWND window) {
     if (IsHungAppWindow(window)) {
         return false;
     }
-    if (IsIconic(window)) {
-        ShowWindow(window, SW_RESTORE);
-    }
-    // Z-order first, and unconditionally: raising is not subject to the
-    // foreground restriction, and it is what capture needs even in the case
-    // where focus cannot be won. Synchronous: the foreground attempts below
-    // depend on the window already being on top, and an asynchronous raise
-    // lost the first of them in a live session -- "could not take the
-    // foreground" until a later attempt landed. The hung check above is what
-    // keeps this from blocking.
-    SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    BringWindowToTop(window);
 
-    if (GetForegroundWindow() == window) {
-        return true;
-    }
-
-    // On a thread of its own, with a bound: joined to the holder's queue, the
-    // calls below wait on the holder, and a hung one would hold this thread
-    // and every command behind it. See foreground.h.
-    const bool answered = solstream::RunWithin(solstream::kForegroundWaitMs, [window] {
-        // A message queue of its own, which AttachThreadInput needs.
-        MSG msg;
-        PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
-        const DWORD self_thread = GetCurrentThreadId();
-        const HWND holder = GetForegroundWindow();
-        const DWORD holder_thread = holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
-        const bool attached =
-            solstream::JoinsHolderQueue(holder_thread, self_thread,
-                                        holder && IsHungAppWindow(holder))
-            && AttachThreadInput(self_thread, holder_thread, TRUE);
-
-        SetForegroundWindow(window);
-        // Both, because they answer different questions: which top-level
-        // window is active, and which control inside it takes the keys.
-        SetActiveWindow(window);
-        SetFocus(window);
-
-        if (attached) {
-            AttachThreadInput(self_thread, holder_thread, FALSE);
+    // All of it on a thread of its own, with a bound. The restore and the raise
+    // wait on the window's app, which IsHungAppWindow calls hung only after
+    // some seconds, and joined to the holder's queue the foreground calls wait
+    // on the holder; either one hung would hold this thread and every command
+    // behind it. See foreground.h.
+    const solstream::ForegroundTurns::Turn turn = g_foreground_turns.Begin(window);
+    const bool answered = solstream::RunWithin(solstream::kForegroundWaitMs, [window, turn] {
+        if (IsIconic(window)) {
+            ShowWindow(window, SW_RESTORE);
         }
+        // Z-order first, and unconditionally: raising is not subject to the
+        // foreground restriction, and it is what capture needs even in the
+        // case where focus cannot be won. Synchronous: the foreground attempts
+        // below depend on the window already being on top, and an asynchronous
+        // raise lost the first of them in a live session -- "could not take
+        // the foreground" until a later attempt landed.
+        SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        BringWindowToTop(window);
+
+        // Overtaken while stuck in the raise: the newer request's window goes
+        // in front, not this one.
+        const HWND wanted = g_foreground_turns.Wanted(turn, window);
+        if (wanted && wanted != window && !IsHungAppWindow(wanted)) {
+            SetWindowPos(wanted, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        }
+        if (wanted && GetForegroundWindow() != wanted && !IsHungAppWindow(wanted)) {
+            // A message queue of its own, which AttachThreadInput needs.
+            MSG msg;
+            PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+            const DWORD self_thread = GetCurrentThreadId();
+            const HWND holder = GetForegroundWindow();
+            const DWORD holder_thread =
+                holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
+            // Not while an earlier request is still joined to a queue: a hang
+            // would otherwise gather a stuck thread for every click.
+            const bool attached =
+                turn.mayJoin
+                && solstream::JoinsHolderQueue(holder_thread, self_thread,
+                                               holder && IsHungAppWindow(holder))
+                && AttachThreadInput(self_thread, holder_thread, TRUE);
+
+            SetForegroundWindow(wanted);
+            // Both, because they answer different questions: which top-level
+            // window is active, and which control inside it takes the keys.
+            SetActiveWindow(wanted);
+            SetFocus(wanted);
+
+            // Overtaken while asking: put the newest request's window back in
+            // front, which this thread may still do while it is joined.
+            const HWND newest = g_foreground_turns.Wanted(turn, window);
+            if (newest && newest != wanted && !IsHungAppWindow(newest)) {
+                SetForegroundWindow(newest);
+            }
+
+            if (attached) {
+                AttachThreadInput(self_thread, holder_thread, FALSE);
+            }
+        }
+        g_foreground_turns.Finish(turn);
     });
     if (!answered) {
         Log("[focus] the window in front on the PC did not answer within %lu ms; "

@@ -2560,6 +2560,30 @@ void TestForegroundBound() {
     CHECK(!JoinsHolderQueue(0, 10, false));
     CHECK(!JoinsHolderQueue(10, 10, false));
 
+    // One request at a time joins a queue; the next may again once it is done.
+    const HWND first = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1000));
+    const HWND second = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x2000));
+    ForegroundTurns turns;
+    const ForegroundTurns::Turn one = turns.Begin(first);
+    CHECK(one.mayJoin);
+    CHECK(!turns.Overtaken(one));
+    CHECK(turns.Wanted(one, first) == first);
+    const ForegroundTurns::Turn two = turns.Begin(second);
+    CHECK(!two.mayJoin);   // the first is still joined, perhaps stuck
+    // The first, finishing late, puts the newer request's window in front.
+    CHECK(turns.Overtaken(one));
+    CHECK(turns.Wanted(one, first) == second);
+    CHECK(!turns.Overtaken(two));
+    CHECK(turns.Wanted(two, second) == second);
+    // Finishing a turn that never joined gives up nothing.
+    turns.Finish(two);
+    CHECK(!turns.Begin(second).mayJoin);
+    turns.Finish(one);
+    const ForegroundTurns::Turn three = turns.Begin(first);
+    CHECK(three.mayJoin);
+    CHECK(turns.Wanted(two, second) == first);
+    turns.Finish(three);
+
     // Quick work is waited for, and has happened by the time it returns.
     bool ran = false;
     CHECK(RunWithin(kForegroundWaitMs, [&ran] { ran = true; }));
