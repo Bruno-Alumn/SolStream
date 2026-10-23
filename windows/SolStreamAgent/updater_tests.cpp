@@ -2586,9 +2586,9 @@ void TestAudioSource() {
 
 void TestReceiveFailures() {
     using namespace media;
-    CHECK(kWsaMessageTooBig == WSAEMSGSIZE);
-    CHECK(kWsaConnectionReset == WSAECONNRESET);
-    CHECK(kWsaTimedOut == WSAETIMEDOUT);
+    static_assert(kWsaMessageTooBig == WSAEMSGSIZE);
+    static_assert(kWsaConnectionReset == WSAECONNRESET);
+    static_assert(kWsaTimedOut == WSAETIMEDOUT);
     // The timeout and an empty datagram are nothing.
     CHECK(ClassifyReceiveFailure(0) == ReceiveFailure::None);
     CHECK(ClassifyReceiveFailure(WSAETIMEDOUT) == ReceiveFailure::None);
