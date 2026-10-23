@@ -7,7 +7,7 @@ import SolStreamLogging
 
 /// Decodes H.264 frames with VideoToolbox's hardware decoder.
 ///
-/// Frames arrive from the depacketizer in Annex-B form (start-code delimited).
+/// Frames arrive from the reassembler in Annex-B form (start-code delimited).
 /// VideoToolbox does not accept Annex-B: a `CMSampleBuffer` must hold AVCC —
 /// each NAL unit prefixed with its big-endian length, matching the
 /// `nalUnitHeaderLength` the format description was created with. Feeding it
@@ -92,18 +92,19 @@ public final class VideoDecoder {
         let nalUnits = Self.splitAnnexB(annexB)
         guard !nalUnits.isEmpty else { return }
 
-        var pictureNALs: [Data] = []
+        var pictureNALs: [Range<Int>] = []
         var parameterSetsChanged = false
         // The host's flag, or an IDR slice in the picture itself.
         var startsOver = isIDR
 
         for nal in nalUnits {
-            guard let first = nal.first else { continue }
-            switch first & 0x1F {
+            switch annexB[nal.lowerBound] & 0x1F {
             case 7:  // SPS
-                if sps != nal { sps = nal; parameterSetsChanged = true }
+                let unit = annexB[nal]
+                if sps != unit { sps = Data(unit); parameterSetsChanged = true }
             case 8:  // PPS
-                if pps != nal { pps = nal; parameterSetsChanged = true }
+                let unit = annexB[nal]
+                if pps != unit { pps = Data(unit); parameterSetsChanged = true }
             case 6, 9, 12:  // SEI, access unit delimiter, filler — not needed
                 continue
             case 5:  // a slice of an IDR picture
@@ -145,10 +146,8 @@ public final class VideoDecoder {
 
         guard let formatDescription, let session else {
             // Nothing to decode against yet — ask the host for an IDR so the
-            // parameter sets show up. This has to keep retrying rather than
-            // fire once: joining an in-progress session (/resume) drops us
-            // mid-GOP, and the control channel we send the request on isn't
-            // even connected until after PLAY, so the first attempts are lost.
+            // parameter sets show up, and keep asking: the request is one
+            // datagram, and it can be lost.
             if requestKeyframeNow(throttled: true) {
                 Log.info("[decode] no parameter sets yet — requesting an IDR frame")
             }
@@ -157,13 +156,10 @@ public final class VideoDecoder {
 
         guard !pictureNALs.isEmpty else { return }
 
-        var avcc = Data()
-        for nal in pictureNALs {
-            withUnsafeBytes(of: UInt32(nal.count).bigEndian) { avcc.append(contentsOf: $0) }
-            avcc.append(nal)
-        }
-
-        guard let sampleBuffer = Self.makeSampleBuffer(avcc, formatDescription: formatDescription) else {
+        let avccBytes = pictureNALs.reduce(0) { $0 + 4 + $1.count }
+        guard let sampleBuffer = Self.makeSampleBuffer(annexB, nals: pictureNALs,
+                                                       length: avccBytes,
+                                                       formatDescription: formatDescription) else {
             return
         }
 
@@ -183,53 +179,48 @@ public final class VideoDecoder {
             noteDecodeFailure(status)
         } else if !loggedFirstFrame {
             loggedFirstFrame = true
-            Log.info("[decode] first frame submitted (\(avcc.count) bytes, IDR: \(isIDR))")
-        }
-    }
-
-    public func flush() {
-        lock.lock()
-        defer { lock.unlock() }
-        if let session {
-            VTDecompressionSessionWaitForAsynchronousFrames(session)
+            Log.info("[decode] first frame submitted (\(avccBytes) bytes, IDR: \(isIDR))")
         }
     }
 
     // MARK: - Annex-B
 
     /// Split an Annex-B byte stream into NAL units, dropping the start codes.
-    static func splitAnnexB(_ data: Data) -> [Data] {
-        var units: [Data] = []
-        let bytes = [UInt8](data)
-        let count = bytes.count
-        guard count > 4 else { return units }
+    /// The ranges are indices into `data` itself, so nothing is copied.
+    static func splitAnnexB(_ data: Data) -> [Range<Int>] {
+        let base = data.startIndex
+        return data.withUnsafeBytes { bytes -> [Range<Int>] in
+            var units: [Range<Int>] = []
+            let count = bytes.count
+            guard count > 4 else { return units }
 
-        /// Returns the length of the start code at `index`, or 0.
-        func startCodeLength(at index: Int) -> Int {
-            guard index + 3 <= count else { return 0 }
-            if bytes[index] == 0 && bytes[index + 1] == 0 {
-                if bytes[index + 2] == 1 { return 3 }
-                if index + 4 <= count && bytes[index + 2] == 0 && bytes[index + 3] == 1 { return 4 }
+            /// Returns the length of the start code at `index`, or 0.
+            func startCodeLength(at index: Int) -> Int {
+                guard index + 3 <= count else { return 0 }
+                if bytes[index] == 0 && bytes[index + 1] == 0 {
+                    if bytes[index + 2] == 1 { return 3 }
+                    if index + 4 <= count && bytes[index + 2] == 0 && bytes[index + 3] == 1 { return 4 }
+                }
+                return 0
             }
-            return 0
-        }
 
-        var index = 0
-        // Skip to the first start code.
-        while index < count, startCodeLength(at: index) == 0 { index += 1 }
+            var index = 0
+            // Skip to the first start code.
+            while index < count, startCodeLength(at: index) == 0 { index += 1 }
 
-        while index < count {
-            let prefix = startCodeLength(at: index)
-            guard prefix > 0 else { break }
-            let nalStart = index + prefix
-            var nalEnd = nalStart
-            while nalEnd < count, startCodeLength(at: nalEnd) == 0 { nalEnd += 1 }
-            if nalEnd > nalStart {
-                units.append(Data(bytes[nalStart..<nalEnd]))
+            while index < count {
+                let prefix = startCodeLength(at: index)
+                guard prefix > 0 else { break }
+                let nalStart = index + prefix
+                var nalEnd = nalStart
+                while nalEnd < count, startCodeLength(at: nalEnd) == 0 { nalEnd += 1 }
+                if nalEnd > nalStart {
+                    units.append((base + nalStart)..<(base + nalEnd))
+                }
+                index = nalEnd
             }
-            index = nalEnd
+            return units
         }
-        return units
     }
 
     /// Put a failure the output callback saw where the next `decode()` will
@@ -396,17 +387,20 @@ public final class VideoDecoder {
         session = nil
     }
 
-    private static func makeSampleBuffer(_ data: Data,
+    /// A sample buffer holding `nals` of `annexB` in AVCC form: each NAL unit
+    /// after its four-byte big-endian length, written straight into a block
+    /// of `length` bytes allocated once.
+    private static func makeSampleBuffer(_ annexB: Data, nals: [Range<Int>], length: Int,
                                          formatDescription: CMVideoFormatDescription) -> CMSampleBuffer? {
         var blockBuffer: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: nil,
-            blockLength: data.count,
+            blockLength: length,
             blockAllocator: nil,
             customBlockSource: nil,
             offsetToData: 0,
-            dataLength: data.count,
+            dataLength: length,
             flags: kCMBlockBufferAssureMemoryNowFlag,
             blockBufferOut: &blockBuffer
         )
@@ -415,15 +409,25 @@ public final class VideoDecoder {
             return nil
         }
 
-        status = data.withUnsafeBytes { buffer in
-            CMBlockBufferReplaceDataBytes(with: buffer.baseAddress!,
-                                          blockBuffer: blockBuffer,
-                                          offsetIntoDestination: 0,
-                                          dataLength: data.count)
-        }
-        guard status == kCMBlockBufferNoErr else {
-            Log.error("[decode] CMBlockBufferReplaceDataBytes failed: \(status)")
+        var destination: UnsafeMutablePointer<CChar>?
+        status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                             totalLengthOut: nil, dataPointerOut: &destination)
+        guard status == kCMBlockBufferNoErr, let destination else {
+            Log.error("[decode] CMBlockBufferGetDataPointer failed: \(status)")
             return nil
+        }
+        annexB.withUnsafeBytes { source in
+            var out = UnsafeMutableRawPointer(destination)
+            for nal in nals {
+                withUnsafeBytes(of: UInt32(nal.count).bigEndian) { prefix in
+                    out.copyMemory(from: prefix.baseAddress!, byteCount: 4)
+                }
+                out = out.advanced(by: 4)
+
+                out.copyMemory(from: source.baseAddress!.advanced(by: nal.lowerBound - annexB.startIndex),
+                               byteCount: nal.count)
+                out = out.advanced(by: nal.count)
+            }
         }
 
         var timing = CMSampleTimingInfo(
@@ -431,7 +435,8 @@ public final class VideoDecoder {
             presentationTimeStamp: CMTime(seconds: CACurrentMediaTime(), preferredTimescale: 90000),
             decodeTimeStamp: .invalid
         )
-        var sampleSize = data.count
+        var sampleSize = length
+
         var sampleBuffer: CMSampleBuffer?
 
         status = CMSampleBufferCreateReady(

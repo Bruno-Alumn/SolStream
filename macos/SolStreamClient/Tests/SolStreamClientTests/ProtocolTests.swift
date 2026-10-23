@@ -27,7 +27,7 @@ final class ProtocolTests: XCTestCase {
 
     func testAnnexBSplitFindsEveryNalUnit() {
         let frame = sampleAnnexBFrame(sliceBytes: 32)
-        let units = VideoDecoder.splitAnnexB(frame)
+        let units = VideoDecoder.splitAnnexB(frame).map { Data(frame[$0]) }
         XCTAssertEqual(units.count, 3)
         XCTAssertEqual(units[0].first! & 0x1F, 7, "first NAL is SPS")
         XCTAssertEqual(units[1].first! & 0x1F, 8, "second NAL is PPS")
@@ -37,7 +37,8 @@ final class ProtocolTests: XCTestCase {
     func testAnnexBSplitHandlesThreeByteStartCodes() {
         var frame = Data([0x00, 0x00, 0x01, 0x67, 0x01, 0x02])
         frame.append(contentsOf: [0x00, 0x00, 0x00, 0x01, 0x68, 0x03])
-        let units = VideoDecoder.splitAnnexB(frame)
+        let units = VideoDecoder.splitAnnexB(frame).map { Data(frame[$0]) }
+
         XCTAssertEqual(units.count, 2)
         XCTAssertEqual(units[0], Data([0x67, 0x01, 0x02]))
         XCTAssertEqual(units[1], Data([0x68, 0x03]))
