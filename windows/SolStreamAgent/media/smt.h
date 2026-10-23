@@ -32,15 +32,12 @@
 
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
 #endif
 
 namespace solstream::smt {
-
-using Bytes = std::vector<unsigned char>;
 
 constexpr int kHeaderBytes = 8;
 constexpr int kTagBytes = 16;
@@ -84,12 +81,6 @@ struct Direction {
     unsigned char fixed[6] = {};   ///< the nonce's fixed field, never transmitted
     uint64_t counter = 0;
 };
-
-inline void AppendBE(Bytes& out, uint64_t value, int width) {
-    for (int i = width - 1; i >= 0; --i) {
-        out.push_back((unsigned char) ((value >> (8 * i)) & 0xFF));
-    }
-}
 
 inline void PutBE(unsigned char* out, uint64_t value, int width) {
     for (int i = 0; i < width; ++i) {
