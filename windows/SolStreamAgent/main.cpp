@@ -1455,6 +1455,16 @@ solstream::media::Channel g_pending_channel;
 /// both impossible: anything addressed elsewhere goes out in the clear, which
 /// is what a client that has negotiated nothing is expecting to read.
 SOCKET g_channel_socket = INVALID_SOCKET;
+
+/// Forget the channel's keys, and which socket they were for, under the send
+/// lock SendLine reads them under.
+void ResetChannel() {
+    EnterCriticalSection(&g_send_cs);
+    g_channel.Reset();
+    g_pending_channel.Reset();
+    g_channel_socket = INVALID_SOCKET;
+    LeaveCriticalSection(&g_send_cs);
+}
 #endif
 
 /// Which cursor watcher is the current one.
@@ -4681,11 +4691,7 @@ void ServeClient(SOCKET client) {
     // reset used to sit below the send, where it could not prevent that. Winsock
     // also reuses SOCKET values freely, so clearing the binding here is what
     // stops a recycled handle from inheriting the last connection's keys.
-    EnterCriticalSection(&g_send_cs);
-    g_channel.Reset();
-    g_pending_channel.Reset();
-    g_channel_socket = INVALID_SOCKET;
-    LeaveCriticalSection(&g_send_cs);
+    ResetChannel();
 #endif
 
     // Greet with the protocol version and the display list, so the Mac can pick
@@ -4973,11 +4979,7 @@ void ServeAndRetire(SOCKET client) {
     // does; holding the derived keys until the NEXT client happens
     // to connect keeps a recorded session decryptable for exactly
     // as long as nobody reconnects.
-    EnterCriticalSection(&g_send_cs);
-    g_channel.Reset();
-    g_pending_channel.Reset();
-    g_channel_socket = INVALID_SOCKET;
-    LeaveCriticalSection(&g_send_cs);
+    ResetChannel();
 #endif
     // Stopped before the socket closes: the watcher writes to it.
     StopCursorWatcher();
