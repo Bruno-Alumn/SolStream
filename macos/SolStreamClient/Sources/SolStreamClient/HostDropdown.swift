@@ -82,7 +82,7 @@ final class HostDropdown: DS.Box {
     // their 8px corners sit concentric inside its 12px ones.
     private enum M {
         static let rowHeight: CGFloat = DS.Metric.rowHeight
-        static let compactHeight: CGFloat = DS.Metric.rowHeight - DS.Space.x3
+        static let compactHeight: CGFloat = DS.Metric.rowHeightCompact
         static let rowInsetX: CGFloat = DS.Space.x3
         static let listPad: CGFloat = DS.Space.x1
         static let gap: CGFloat = DS.Space.x3

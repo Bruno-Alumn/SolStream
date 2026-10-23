@@ -108,7 +108,6 @@ public enum DS {
     /// numbers — Nocturne set most labels in mono, and a screen where
     /// everything is "data" has no data in it. Labels are sentence case; no
     /// caps, no tracking.
-    public static var display: NSFont { .systemFont(ofSize: 26, weight: .semibold) }
     public static var title: NSFont { .systemFont(ofSize: 20, weight: .semibold) }
     public static var headline: NSFont { .systemFont(ofSize: 15, weight: .semibold) }
     public static var body: NSFont { .systemFont(ofSize: 13, weight: .regular) }
@@ -127,7 +126,6 @@ public enum DS {
         public static let x4: CGFloat = 16
         public static let x5: CGFloat = 20
         public static let x6: CGFloat = 24
-        public static let x8: CGFloat = 32
         public static let x12: CGFloat = 48
     }
 
@@ -469,16 +467,16 @@ public enum DS {
             didSet { applyPlaceholder() }
         }
 
-        public init(placeholder: String, mono: Bool = false, readOnly: Bool = false) {
+        public init(placeholder: String, mono: Bool = false) {
             self.placeholder = placeholder
             super.init(frame: .zero)
             font = mono ? DS.mono : DS.body
-            textColor = readOnly ? DS.textSecondary : DS.text
+            textColor = DS.text
             isBordered = false
             isBezeled = false
             drawsBackground = false
             focusRingType = .none
-            isEditable = !readOnly
+            isEditable = true
             isSelectable = true
             lineBreakMode = .byTruncatingTail
             cell?.usesSingleLineMode = true
