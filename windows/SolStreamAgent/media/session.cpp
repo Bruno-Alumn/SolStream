@@ -208,6 +208,39 @@ struct MediaSession::Impl {
     size_t SendSealed(const unsigned char* plaintext, size_t length);
     void WaitUntil(long long deadline);
     void HandlePlaintext(const unsigned char* plaintext, size_t length);
+
+    /// Microseconds from the session's start to `at`, a QPC reading.
+    long long MicrosSinceStart(long long at) const {
+        return (at - startedAt) * 1000000 / g_frequency.QuadPart;
+    }
+    /// Copies of the two pointers, taken under `mediaLock`. Whoever reads
+    /// counters from them holds the copies, and the capture thread can end the
+    /// pass in the meantime without destroying what is being read.
+    void CopyMedia(std::shared_ptr<Capture>& capturePtr,
+                   std::shared_ptr<Encoder>& encoderPtr) const {
+        std::lock_guard<std::mutex> guard(mediaLock);
+        capturePtr = capture;
+        encoderPtr = encoder;
+    }
+    /// Ask this pass's encoder for a keyframe, through a copy of the pointer:
+    /// the pass may be the one the capture thread is closing. With
+    /// `countAgainstLimit`, the request is first counted against the client's
+    /// request limit -- and only when there is an encoder to ask.
+    void AskEncoderForIdr(bool countAgainstLimit) {
+        std::shared_ptr<Encoder> encoderPtr;
+        {
+            std::lock_guard<std::mutex> guard(mediaLock);
+            encoderPtr = encoder;
+        }
+        if (!encoderPtr) { return; }
+        if (countAgainstLimit) { lastIdrAt.store(Now()); }
+        encoderPtr->RequestIdr();
+    }
+    /// Destroy both BCrypt key handles, if they exist.
+    void DropKeys() {
+        if (toClient.key) { BCryptDestroyKey(toClient.key); toClient.key = nullptr; }
+        if (fromClient.key) { BCryptDestroyKey(fromClient.key); fromClient.key = nullptr; }
+    }
 };
 
 // ── Sealing and sending ──────────────────────────────────────────────────────
@@ -263,8 +296,7 @@ void MediaSession::Impl::SendPicture(const Picture& picture) {
     const size_t size = picture.bytes.size();
     if (size == 0) { return; }
 
-    const uint32_t captureUs = (uint32_t)
-        ((picture.capturedAt - startedAt) * 1000000 / g_frequency.QuadPart);
+    const uint32_t captureUs = (uint32_t) MicrosSinceStart(picture.capturedAt);
 
     // METER TO A RATE, WITH NO FRAME-PERIOD CAP.
     //
@@ -463,26 +495,16 @@ void MediaSession::Impl::RunCapture() {
             if (decision.send) { queue.push_back(std::move(picture)); }
         }
         if (decision.send) { queueReady.notify_one(); }
-        // Through a copy of the pointer, and outside the queue lock so that the
-        // two are never held at once: this runs on an encoder work-queue thread,
-        // and the pass it belongs to is one the capture thread can be tearing
-        // down at the same moment -- `encoder` is exactly what it clears.
-        if (decision.askIdr) {
-            std::shared_ptr<Encoder> encoderPtr;
-            {
-                std::lock_guard<std::mutex> guard(mediaLock);
-                encoderPtr = encoder;
-            }
-            if (encoderPtr) {
-                // Counted against the client's request limit, as the
-                // first-contact keyframe is. The client has no reason to ask
-                // while the P-frames are dropped, but one that does anyway,
-                // over a loss of its own just before, is then not sent a
-                // second keyframe within the limit.
-                lastIdrAt.store(Now());
-                encoderPtr->RequestIdr();
-            }
-        }
+        // Outside the queue lock so that the two are never held at once: this
+        // runs on an encoder work-queue thread, and the pass it belongs to is
+        // one the capture thread can be tearing down at the same moment --
+        // `encoder` is exactly what it clears.
+        //
+        // Counted against the client's request limit, as the first-contact
+        // keyframe is. The client has no reason to ask while the P-frames are
+        // dropped, but one that does anyway, over a loss of its own just
+        // before, is then not sent a second keyframe within the limit.
+        if (decision.askIdr) { AskEncoderForIdr(true); }
     });
 
     uint64_t lastSerial = 0;
@@ -570,9 +592,7 @@ void MediaSession::Impl::SenderLoop() {
             stat[1] = 0;
             stat[2] = stat[3] = 0;
             smt::PutBE(stat + 4, input.Acknowledged(), 4);
-            const uint64_t hostUs =
-                (uint64_t) ((now - startedAt) * 1000000 / g_frequency.QuadPart);
-            smt::PutBE(stat + 8, hostUs, 8);
+            smt::PutBE(stat + 8, (uint64_t) MicrosSinceStart(now), 8);
             SendSealed(stat, sizeof(stat));
         }
 
@@ -591,11 +611,7 @@ void MediaSession::Impl::SenderLoop() {
             // that writes to a file, and the capture thread would be waiting.
             std::shared_ptr<Capture> capturePtr;
             std::shared_ptr<Encoder> encoderPtr;
-            {
-                std::lock_guard<std::mutex> guard(mediaLock);
-                capturePtr = capture;
-                encoderPtr = encoder;
-            }
+            CopyMedia(capturePtr, encoderPtr);
             Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
@@ -679,9 +695,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
             unsigned char pong[17] = {};
             pong[0] = smt::kTypePong;
             if (length >= 9) { memcpy(pong + 1, plaintext + 1, 8); }
-            const uint64_t hostUs =
-                (uint64_t) ((Now() - startedAt) * 1000000 / g_frequency.QuadPart);
-            smt::PutBE(pong + 9, hostUs, 8);
+            smt::PutBE(pong + 9, (uint64_t) MicrosSinceStart(Now()), 8);
             SendSealed(pong, sizeof(pong));
             break;
         }
@@ -699,15 +713,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
                 if (MillisBetween(lastIdrAt.load(), now) > 200.0) {
                     lastIdrAt.store(now);
                     idrRequests.fetch_add(1);
-                    // Through a copy, for the same reason as everywhere else:
-                    // this is the receive thread, and the pass it is asking for
-                    // a keyframe may be the one the capture thread is closing.
-                    std::shared_ptr<Encoder> encoderPtr;
-                    {
-                        std::lock_guard<std::mutex> guard(mediaLock);
-                        encoderPtr = encoder;
-                    }
-                    if (encoderPtr) { encoderPtr->RequestIdr(); }
+                    AskEncoderForIdr(false);
                 }
             }
             break;
@@ -798,12 +804,7 @@ void MediaSession::Impl::ReceiveLoop() {
             // limit is started from it, so a client that asks as it opens is
             // not sent a second one.
             lastIdrAt.store(Now());
-            std::shared_ptr<Encoder> encoderPtr;
-            {
-                std::lock_guard<std::mutex> guard(mediaLock);
-                encoderPtr = encoder;
-            }
-            if (encoderPtr) { encoderPtr->RequestIdr(); }
+            AskEncoderForIdr(false);
         }
         lastHeardAt.store(Now());
         HandlePlaintext(plaintext, plaintextLen);
@@ -870,19 +871,15 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     // overwrites both handles with fresh ones, so whatever leaked can never be
     // reached again -- a port that is taken, retried a few times, quietly costs
     // a key handle per attempt.
-    auto dropKeys = [&s] {
-        if (s.toClient.key) { BCryptDestroyKey(s.toClient.key); s.toClient.key = nullptr; }
-        if (s.fromClient.key) { BCryptDestroyKey(s.fromClient.key); s.fromClient.key = nullptr; }
-    };
     if (!s.toClient.key || !s.fromClient.key) {
-        dropKeys();   // one of the two may have imported
+        s.DropKeys();   // one of the two may have imported
         if (error) { *error = "the media keys would not import"; }
         return false;
     }
 
     s.socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s.socket == INVALID_SOCKET) {
-        dropKeys();
+        s.DropKeys();
         if (error) { *error = "no UDP socket"; }
         return false;
     }
@@ -915,7 +912,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     if (bind(s.socket, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
         closesocket(s.socket);
         s.socket = INVALID_SOCKET;
-        dropKeys();
+        s.DropKeys();
         if (error) { *error = "UDP port " + std::to_string(config.port) + " is taken"; }
         return false;
     }
@@ -1048,8 +1045,7 @@ void MediaSession::Stop() {
         closesocket(s.socket);
         s.socket = INVALID_SOCKET;
     }
-    if (s.toClient.key) { BCryptDestroyKey(s.toClient.key); s.toClient.key = nullptr; }
-    if (s.fromClient.key) { BCryptDestroyKey(s.fromClient.key); s.fromClient.key = nullptr; }
+    s.DropKeys();
     {
         std::lock_guard<std::mutex> guard(s.queueLock);
         s.queue.clear();
@@ -1102,11 +1098,7 @@ std::string MediaSession::StatsJson() const {
     // check and the call.
     std::shared_ptr<Capture> capturePtr;
     std::shared_ptr<Encoder> encoderPtr;
-    {
-        std::lock_guard<std::mutex> guard(s.mediaLock);
-        capturePtr = s.capture;
-        encoderPtr = s.encoder;
-    }
+    s.CopyMedia(capturePtr, encoderPtr);
     snprintf(buffer, sizeof(buffer),
                 "{\"running\":%s,\"pictures\":%llu,\"dropped\":%llu"
                 ",\"datagrams\":%llu,\"bytes\":%llu"
