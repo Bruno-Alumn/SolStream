@@ -48,6 +48,15 @@ bool ProofMatchesHmac(const std::vector<unsigned char>& key,
 /// host's log live.
 std::wstring LocalDataPath(const wchar_t* file);
 
+/// Read up to `limit` bytes from the start of the file at `path` into `out`,
+/// with one ReadFile, sharing it for reading only. A longer file is cut, not
+/// refused. False when it cannot be opened or read.
+bool ReadSmallFile(const std::wstring& path, size_t limit, std::string& out);
+
+/// Replace the file at `path` with `bytes`, creating it if need be and sharing
+/// it with nobody while it is written. True when all of it was written.
+bool WriteWholeFile(const std::wstring& path, const std::string& bytes);
+
 /// What RunHidden answers when there is no exit code to give: the process never
 /// started, or it was still running at the timeout and was killed. Neither value
 /// is one netsh, schtasks, pnputil or powershell answers with.

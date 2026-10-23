@@ -1407,22 +1407,14 @@ std::string LoadOrCreateToken() {
     if (path.empty()) {
         return {};
     }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        char buffer[128] = {};
-        DWORD read = 0;
-        const bool ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0;
-        CloseHandle(file);
-        if (ok) {
-            std::string existing(buffer, read);
-            while (!existing.empty()
-                   && (existing.back() == '\n' || existing.back() == '\r' || existing.back() == ' ')) {
-                existing.pop_back();
-            }
-            if (existing.size() >= 16) {
-                return existing;
-            }
+    std::string existing;
+    if (solstream::ReadSmallFile(path, 127, existing) && !existing.empty()) {
+        while (!existing.empty()
+               && (existing.back() == '\n' || existing.back() == '\r' || existing.back() == ' ')) {
+            existing.pop_back();
+        }
+        if (existing.size() >= 16) {
+            return existing;
         }
     }
 
@@ -1430,13 +1422,7 @@ std::string LoadOrCreateToken() {
     if (fresh.empty()) {
         return {};
     }
-    file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        DWORD written = 0;
-        WriteFile(file, fresh.data(), (DWORD) fresh.size(), &written, nullptr);
-        CloseHandle(file);
-    }
+    solstream::WriteWholeFile(path, fresh);
     return fresh;
 }
 
@@ -1451,19 +1437,11 @@ unsigned long long LoadMediaCount() {
     if (path.empty()) {
         return 0;
     }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+    std::string text;
+    if (!solstream::ReadSmallFile(path, 31, text) || text.empty()) {
         return 0;
     }
-    char buffer[32] = {};
-    DWORD read = 0;
-    const bool ok = ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr) && read > 0;
-    CloseHandle(file);
-    if (!ok) {
-        return 0;
-    }
-    return std::strtoull(buffer, nullptr, 10);
+    return std::strtoull(text.c_str(), nullptr, 10);
 }
 
 /// Written before the keys derived from it are used, not after: a crash between
@@ -1475,18 +1453,7 @@ void SaveMediaCount(unsigned long long count) {
     if (path.empty()) {
         return;
     }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return;
-    }
-    char text[32] = {};
-    const int written = std::snprintf(text, sizeof(text), "%llu", count);
-    if (written > 0) {
-        DWORD put = 0;
-        WriteFile(file, text, (DWORD) written, &put, nullptr);
-    }
-    CloseHandle(file);
+    solstream::WriteWholeFile(path, std::to_string(count));
 }
 
 /// Auth v2: the Mac proves it holds the token instead of sending it.
