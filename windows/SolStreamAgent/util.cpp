@@ -208,6 +208,37 @@ std::wstring LocalDataPath(const wchar_t* file) {
     return dir + L"\\" + file;
 }
 
+bool ReadSmallFile(const std::wstring& path, size_t limit, std::string& out) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::string text(limit, '\0');
+    DWORD read = 0;
+    const bool ok = ReadFile(file, text.data(), (DWORD) text.size(), &read, nullptr) != FALSE;
+    CloseHandle(file);
+    if (!ok) {
+        return false;
+    }
+    text.resize(read);
+    out = std::move(text);
+    return true;
+}
+
+bool WriteWholeFile(const std::wstring& path, const std::string& bytes) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    const bool ok = WriteFile(file, bytes.data(), (DWORD) bytes.size(), &written, nullptr)
+                    && written == bytes.size();
+    CloseHandle(file);
+    return ok;
+}
+
 /// The program a command line starts: its first word, unquoted.
 std::wstring CommandProgram(const std::wstring& command) {
     if (command.empty()) {

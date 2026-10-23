@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <sstream>
 
+#include "util.h"
+
 namespace solstream {
 
 namespace {
@@ -337,21 +339,12 @@ OwedRecord LoadOwedWindows(const std::wstring& path) {
     if (path.empty()) {
         return {};
     }
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        return {};
-    }
     // Eight windows of a line each is well under this; anything longer is not
     // a record this host wrote.
-    std::string text(64 * 1024, '\0');
-    DWORD read = 0;
-    const bool ok = ReadFile(file, text.data(), (DWORD) text.size(), &read, nullptr);
-    CloseHandle(file);
-    if (!ok) {
+    std::string text;
+    if (!ReadSmallFile(path, 64 * 1024, text)) {
         return {};
     }
-    text.resize(read);
     return ParseOwedWindows(text);
 }
 
