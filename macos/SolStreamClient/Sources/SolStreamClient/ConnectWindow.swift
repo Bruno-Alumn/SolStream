@@ -126,7 +126,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // ground under the buttons on every launch. The title bar is transparent
         // and the content runs under it, so the window reads as one surface with
         // the traffic lights sitting on it.
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 300),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 300),
                           styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "SolStream"
@@ -335,11 +335,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     func close() {
+        tearDown()
+        window.orderOut(nil)
+    }
+
+    /// Stop everything that would go on refreshing a window nobody sees.
+    private func tearDown() {
         removeEscapeToQuit()
         browser.stop()
         stopWatchingNetwork()
         stopProbing()
-        window.orderOut(nil)
     }
 
     /// Cancelling the probe does not stop one already connecting, and its
@@ -904,10 +909,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        removeEscapeToQuit()
-        browser.stop()
-        stopWatchingNetwork()
-        stopProbing()
+        tearDown()
         if NSApp.windows.allSatisfy({ !$0.isVisible || $0 === window }) {
             NSApp.terminate(nil)
         }

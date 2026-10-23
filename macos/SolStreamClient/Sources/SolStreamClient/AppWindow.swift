@@ -24,6 +24,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// closures by id, and the owner has to know which window it means.
     let remoteWindowID: UInt64
     private let display: RemoteDisplay
+    /// The capture display as the popover names it: "DISPLAY2 · 2560×1600".
+    private let hostDisplay: String
 
     /// Where this window's client area sits on the capture display.
     private(set) var tile: CGRect
@@ -90,6 +92,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.agent = agent
         self.remoteWindowID = remote.id
         self.display = display
+        hostDisplay = "\(display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
+            + "· \(display.width)×\(display.height)"
         self.tile = tile
         super.init()
         build(title: remote.title,
@@ -139,8 +143,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             stats.audioActive = snapshot.audioFrames > 0
             stats.hostIgnoresSoundQuality = self.session.hostIgnoresSoundQuality
             stats.hostSendsWholePC = self.session.hostSendsWholePC
-            stats.hostDisplay = "\(self.display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
-                + "· \(self.display.width)×\(self.display.height)"
+            stats.hostDisplay = self.hostDisplay
             stats.hostReportsCursor = self.inputCapture?.hostReportsCursorVisibility ?? false
             self.pill.stats = stats
         }
@@ -744,9 +747,20 @@ final class AppWindow: NSObject, NSWindowDelegate {
         if !window.styleMask.contains(.resizable) {
             window.styleMask.insert(.resizable)
         }
-        applyMinimumSize(CGSize(width: placement.minimumSize.width,
-                                height: max(placement.minimumSize.height - strip, 1)),
-                         scale: scale)
+        // The host window reports its minimum itself (WM_GETMINMAXINFO). It
+        // used to be inferred from "asked for less, got more", which a failed
+        // placement looks like too, and latched a floor the size of the whole
+        // display. Clamped to the screen, the one mistake dragging cannot undo.
+        let minimum = CGSize(width: placement.minimumSize.width,
+                             height: max(placement.minimumSize.height - strip, 1))
+        if minimum.width > 0, minimum.height > 0 {
+            let lowest = points(minimum)
+            if lowest != window.contentMinSize {
+                window.contentMinSize = lowest
+                Log.info("[window] host minimum is \(Int(minimum.width))x\(Int(minimum.height)); "
+                         + "this window stops at \(Int(lowest.width))x\(Int(lowest.height)) points")
+            }
+        }
         var maximum = placement.maximumSize
         if maximum.height > 0 { maximum.height = max(maximum.height - strip, 1) }
         if maximum.width > 0 || maximum.height > 0 {
@@ -760,34 +774,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
                          + "this window stops at \(Int(ceiling.width))x\(Int(ceiling.height)) points")
             }
         }
-    }
-
-    /// Teach this window the size the host application refuses to go below.
-    ///
-    /// The value is reported by the host window itself (WM_GETMINMAXINFO), not
-    /// inferred. Inferring it from "we asked for less and got more" is what the
-    /// first version did, and that is indistinguishable from a placement that
-    /// simply failed — in which case the size read back is the host window's
-    /// current one, and a floor the size of the whole display gets latched. The
-    /// macOS window then cannot be dragged smaller at all, which is exactly how
-    /// it went wrong.
-    ///
-    /// Clamped to the screen regardless. A minimum larger than the display can
-    /// only be wrong, and it is the one mistake here the user cannot undo by
-    /// dragging.
-    private func applyMinimumSize(_ hostPixels: CGSize, scale: CGFloat) {
-        guard let window, scale > 0,
-              hostPixels.width > 0, hostPixels.height > 0 else { return }
-        var target = NSSize(width: (hostPixels.width / scale).rounded(),
-                            height: (hostPixels.height / scale).rounded())
-        if let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size {
-            target.width = min(target.width, visible.width)
-            target.height = min(target.height, visible.height)
-        }
-        guard target != window.contentMinSize else { return }
-        window.contentMinSize = target
-        Log.info("[window] host minimum is \(Int(hostPixels.width))x\(Int(hostPixels.height)); "
-                 + "this window stops at \(Int(target.width))x\(Int(target.height)) points")
     }
 
     /// Make this window exactly as tall and wide as the crop it is showing.

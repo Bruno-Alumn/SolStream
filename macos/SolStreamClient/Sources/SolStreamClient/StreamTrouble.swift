@@ -60,34 +60,25 @@ extension AppDelegate {
     ///   already on the windows.
     static func notice(for trouble: StreamTrouble, channel: ChannelOutlook, host: String,
                        canRestart: Bool, finalErrorShown: Bool) -> StreamNotice {
-        let waiting = StreamNotice.status(title: "Reconnecting…",
-                                          detail: "Waiting for \(host) to answer")
-        switch channel {
-        case .gone:
+        switch (channel, trouble) {
+        case (.gone, _):
             if finalErrorShown { return .keep }
             return .error(title: "Lost the connection",
                           detail: "\(host) is no longer connected. Try Again to pick the app again.")
-        case .returning:
-            if case .stalled(let seconds) = trouble {
-                return .status(title: "Reconnecting…",
-                               detail: "No picture for \(seconds)s — asking \(host) for a new frame")
-            }
-            return waiting
-        case .up:
-            switch trouble {
-            case .stalled(let seconds):
-                return .status(title: "Reconnecting…",
-                               detail: "No picture for \(seconds)s — asking \(host) for a new frame")
-            case .lost:
-                return .restart
-            case .failed(let message):
-                return canRestart ? .restart : .error(title: "Stream failed", detail: message)
-            case .restartFailed(let message):
-                return canRestart
-                    ? .restart
-                    : .error(title: "Lost the stream",
-                             detail: message ?? "\(host) did not start streaming again.")
-            }
+        case (_, .stalled(let seconds)):
+            return .status(title: "Reconnecting…",
+                           detail: "No picture for \(seconds)s — asking \(host) for a new frame")
+        case (.returning, _):
+            return .status(title: "Reconnecting…", detail: "Waiting for \(host) to answer")
+        case (.up, .lost):
+            return .restart
+        case (.up, .failed(let message)):
+            return canRestart ? .restart : .error(title: "Stream failed", detail: message)
+        case (.up, .restartFailed(let message)):
+            return canRestart
+                ? .restart
+                : .error(title: "Lost the stream",
+                         detail: message ?? "\(host) did not start streaming again.")
         }
     }
 }

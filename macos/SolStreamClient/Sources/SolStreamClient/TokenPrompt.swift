@@ -28,14 +28,13 @@ enum TokenPrompt {
     @MainActor
     static func present(host: String, rejected: Bool, over parent: NSWindow?,
                         completion: @escaping (String?) -> Void) {
-        let sheet = Sheet(host: host, rejected: rejected, completion: completion)
         guard let parent else {
             // No window to hang a sheet on — during early startup, or in tests.
             // Answering nil is honest: the caller treats it as "not supplied".
             completion(nil)
             return
         }
-        sheet.present(over: parent)
+        Sheet(host: host, rejected: rejected, completion: completion).present(over: parent)
     }
 
     /// The sheet itself. Retained by its own completion handler until dismissed,

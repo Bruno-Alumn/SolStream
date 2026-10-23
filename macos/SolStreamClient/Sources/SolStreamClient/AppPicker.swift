@@ -26,11 +26,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         /// Stable across the list, so the tile colour never depends on position.
         let key: String
         let isRunning: Bool
-        /// The application paints its own window buttons, which the crop cannot
-        /// remove without taking its tabs with them.
-        let drawsOwnControls: Bool
         let choice: Choice
         var score: Int = 0
+
+        /// The application paints its own window buttons, which the crop cannot
+        /// remove without taking its tabs with them: what the note says.
+        var drawsOwnControls: Bool { note != nil }
     }
 
     /// Not private: the token sheet hangs off it, so that asking for a token
@@ -261,31 +262,18 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             ? rows[tableView.selectedRow].key : nil
 
         var built: [Row] = windows.map {
-            // Annotate the exception, not the rule. A Windows-drawn title bar is
-            // the normal case and is simply cropped away, so saying "title bar
-            // hidden" on nearly every row told the user nothing — and read as a
-            // claim about the window's state on the PC right now, which it never
-            // was. What is worth flagging is the opposite: an application that
-            // draws its own caption inside the client area, whose minimise and
-            // close buttons therefore arrive inside the stream.
-            //
-            // Said quietly: on the selected row's second line, where the choice
-            // is being made, and in every such row's tooltip. It used to be said
-            // twice on every row — in the subtitle and again as an "own
-            // controls" chip — and on a PC where most open windows are modern
-            // apps that sat on nearly every row, which is the same mistake as
-            // the old "title bar hidden" one.
+            // Only the exception is noted, quietly: an application that draws
+            // its own window buttons, which therefore arrive inside the stream.
             Row(title: $0.title,
                 subtitle: "Open window",
                 note: $0.hidesCaptionWhenCropped ? nil : "own window buttons",
                 key: "\($0.className)/\($0.id)",
                 isRunning: true,
-                drawsOwnControls: !$0.hidesCaptionWhenCropped,
                 choice: .running($0))
         }
         built += apps.map {
             Row(title: $0.name, subtitle: "Installed app", key: $0.path,
-                isRunning: false, drawsOwnControls: false, choice: .launch($0))
+                isRunning: false, choice: .launch($0))
         }
 
         allRows = built

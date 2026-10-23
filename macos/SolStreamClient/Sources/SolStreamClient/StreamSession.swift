@@ -21,7 +21,7 @@ final class StreamSession {
     let host: String
 
     /// The full streamed canvas, in pixels. Windows express their crops in it.
-    private(set) var canvasSize: CGSize
+    let canvasSize: CGSize
 
     private let media: MediaClient
     private var decoder: VideoDecoder?
@@ -286,12 +286,7 @@ final class StreamSession {
             // is again by the line above — so the teardown down there never runs
             // for a session that failed to start, and the renderer sat on the
             // device until the whole session was released.
-            stopObservingAudioSettings()
-            audioLock.lock()
-            let renderer = audioRenderer
-            audioRenderer = nil
-            audioLock.unlock()
-            renderer?.stop()
+            releaseAudioRenderer()
             return
         }
         startWatchdog()
@@ -352,6 +347,16 @@ final class StreamSession {
     /// shuts the socket down and waits up to a second for the receive thread to
     /// leave, which is what `applicationWillTerminate` relies on -- the host has
     /// to see the BYE or it stays busy for the next client.
+    /// Stop following the sound settings and hand the output device back.
+    private func releaseAudioRenderer() {
+        stopObservingAudioSettings()
+        audioLock.lock()
+        let renderer = audioRenderer
+        audioRenderer = nil
+        audioLock.unlock()
+        renderer?.stop()
+    }
+
     func stop() {
         guard isRunning else { return }
         isRunning = false
@@ -369,12 +374,7 @@ final class StreamSession {
         sinkLock.lock()
         sinks.removeAll()
         sinkLock.unlock()
-        stopObservingAudioSettings()
-        audioLock.lock()
-        let renderer = audioRenderer
-        audioRenderer = nil
-        audioLock.unlock()
-        renderer?.stop()
+        releaseAudioRenderer()
         // The pointer numbers were collected all along and never once read, so
         // "my clicks stopped working" left no trace on this side at all — the
         // whole diagnosis had to come from the host. `dropped` being large is
