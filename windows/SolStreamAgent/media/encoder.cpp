@@ -353,12 +353,6 @@ bool Encoder::Impl::Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight
     return true;
 }
 
-/// Copy one NV12 texture into a system-memory media buffer.
-///
-/// NV12 is a full-resolution Y plane followed by an interleaved half-height UV
-/// plane, and the mapped row pitch is almost never the width -- the driver picks
-/// its own alignment. Copying `height * pitch` bytes straight through would put
-/// the padding in the stream and shear the picture.
 /// BGRA on the GPU to NV12 in a media buffer, entirely on the CPU.
 ///
 /// BT.709 limited range, integer coefficients, nearest-neighbour scaling. It is
@@ -429,6 +423,12 @@ bool Encoder::Impl::ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcH
     return true;
 }
 
+/// Copy one NV12 texture into a system-memory media buffer.
+///
+/// NV12 is a full-resolution Y plane followed by an interleaved half-height UV
+/// plane, and the mapped row pitch is almost never the width -- the driver picks
+/// its own alignment. Copying `height * pitch` bytes straight through would put
+/// the padding in the stream and shear the picture.
 bool Encoder::Impl::ReadBackNv12(int slot, IMFMediaBuffer** out) {
     if (!staging) {
         D3D11_TEXTURE2D_DESC desc{};
