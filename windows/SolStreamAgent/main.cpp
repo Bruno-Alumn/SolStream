@@ -87,6 +87,9 @@
 #endif
 #include "vdd.h"
 
+// Defined with ChooseCaptureDisplay; the watcher calls it.
+void RechooseCaptureDisplayIfStale();
+
 namespace {
 
 using solstream::FoldCase;
@@ -2906,6 +2909,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         const ULONGLONG now = GetTickCount64();
         if (now - rescued_at >= kRescueIntervalMs) {
             rescued_at = now;
+            RechooseCaptureDisplayIfStale();
             RescueStrandedWindows();
         }
         NotifyWindowsChangedIfSettled();
@@ -5375,6 +5379,8 @@ void ChooseCaptureDisplay() {
 
 /// Choose again when the displays have changed under the choice; see
 /// capture_display.h. Every few seconds at most: it asks for every display.
+/// Watcher thread only, which runs in every host, headless and session 0
+/// included.
 void RechooseCaptureDisplayIfStale() {
     static ULONGLONG checked_at = 0;
     const ULONGLONG now = GetTickCount64();
@@ -5382,9 +5388,12 @@ void RechooseCaptureDisplayIfStale() {
         return;
     }
     checked_at = now;
-    std::vector<std::wstring> present;
+    std::vector<solstream::PresentDisplay> present;
     for (const Display& display : EnumerateDisplays()) {
-        present.push_back(ToWide(display.device_name));
+        solstream::PresentDisplay entry;
+        entry.name = ToWide(display.device_name);
+        entry.ours = solstream::IsSolStreamDisplayDriver(ToWide(display.adapter));
+        present.push_back(entry);
     }
     const std::wstring current = CaptureDisplay();
     if (solstream::CaptureDisplayIsStale(current, present, solstream::VirtualDisplayDevice())) {
@@ -6367,7 +6376,6 @@ int wmain(int argc, wchar_t** argv) {
             status.driver_off = off;
             status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
-            RechooseCaptureDisplayIfStale();
             status.display_detail = status.virtual_display
                 ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
                 : L"not installed";

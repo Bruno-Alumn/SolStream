@@ -2661,20 +2661,26 @@ void TestCaptureDisplayIsStale() {
     const std::wstring one = L"\\\\.\\DISPLAY1";
     const std::wstring three = L"\\\\.\\DISPLAY3";
     const std::wstring four = L"\\\\.\\DISPLAY4";
+    const PresentDisplay monitor{one, false};
+    const PresentDisplay ours3{three, true};
+    const PresentDisplay ours4{four, true};
+    const PresentDisplay foreign3{three, false};
     // Nothing has changed: no choosing again, with or without a virtual display.
-    CHECK(!CaptureDisplayIsStale(three, {one, three}, three));
-    CHECK(!CaptureDisplayIsStale(one, {one}, L""));
+    CHECK(!CaptureDisplayIsStale(three, {monitor, ours3}, three));
+    CHECK(!CaptureDisplayIsStale(one, {monitor}, L""));
     // The virtual display came back under another number.
-    CHECK(CaptureDisplayIsStale(three, {one, four}, four));
+    CHECK(CaptureDisplayIsStale(three, {monitor, ours4}, four));
     // It attached after the host had settled for the primary.
-    CHECK(CaptureDisplayIsStale(one, {one, three}, three));
+    CHECK(CaptureDisplayIsStale(one, {monitor, ours3}, three));
+    // Another product's virtual display is never switched to.
+    CHECK(!CaptureDisplayIsStale(one, {monitor, foreign3}, three));
     // It went away: the primary is chosen instead.
-    CHECK(CaptureDisplayIsStale(three, {one}, L""));
+    CHECK(CaptureDisplayIsStale(three, {monitor}, L""));
     // Attached but not yet among the monitors: wait for it, rather than choose
     // something that would not include it.
-    CHECK(!CaptureDisplayIsStale(one, {one}, three));
+    CHECK(!CaptureDisplayIsStale(one, {monitor}, three));
     // Nothing was chosen while there were displays to choose from.
-    CHECK(CaptureDisplayIsStale(L"", {one}, L""));
+    CHECK(CaptureDisplayIsStale(L"", {monitor}, L""));
     CHECK(!CaptureDisplayIsStale(L"", {}, L""));
 }
 
