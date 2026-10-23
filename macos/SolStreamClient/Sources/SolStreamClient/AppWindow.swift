@@ -511,16 +511,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         requestResize()
     }
 
-    func windowWillStartLiveResize(_ notification: Notification) {
-        // The user is dragging the frame, not working in the application. Left
-        // running, the pointer sits on the host window's own edge while both
-        // sides are being resized, and the host starts a resize of its own on
-        // top of ours — which is where the glitching during a drag comes from.
-        inputCapture?.isSuspended = true
-    }
-
     func windowDidEndLiveResize(_ notification: Notification) {
-        inputCapture?.isSuspended = false
         // The resize took the release of any button the PC was holding.
         inputCapture?.releaseStrandedButtons("the window was resized")
         guard !isMatchingHostSize else { return }

@@ -115,6 +115,12 @@ public final class InputCapture {
     /// `gamingSensitivity`, read when the mouse is taken and when it changes
     /// rather than from the defaults on every move of a 1000 Hz mouse.
     private var sensitivity = CGFloat(InputCapture.gamingSensitivity)
+    /// `pointerMode` and `followsHostCursor`, read when capture starts and
+    /// when they change, for the same reason.
+    private var mode = InputCapture.pointerMode
+    private var followsCursor = InputCapture.followsHostCursor
+    /// Runs on the main thread, and so before the post that changed a
+    /// setting returns: nothing reads the copies above stale.
     private var modeObserver: NSObjectProtocol?
     private var policy = CapturePolicy()
 
@@ -402,6 +408,7 @@ public final class InputCapture {
     /// and every handler already guards on `targetView`, so there is nothing
     /// here that a window is needed for.
     public func enableCapture() {
+        readMouseSettings()
         guard !isCapturing else { return }
         isCapturing = true
         if modeObserver == nil {
@@ -410,6 +417,7 @@ public final class InputCapture {
             ) { [weak self] _ in
                 guard let self else { return }
                 self.sensitivity = CGFloat(Self.gamingSensitivity)
+                self.readMouseSettings()
                 // Desktop gives the mouse back; following switched on in a
                 // menu does too. Asked of the pointer as it is, which is over
                 // whatever control changed the setting, not the picture.
@@ -425,6 +433,11 @@ public final class InputCapture {
         // pointer is over the picture. Never after ⌃⌥, until a click.
         apply(policy.wantsCapture(after: .reconsider, moment(pointerInside: pointerIsOverPicture())),
               because: "the window became key with the PC's cursor hidden")
+    }
+
+    private func readMouseSettings() {
+        mode = Self.pointerMode
+        followsCursor = Self.followsHostCursor
     }
 
     /// Disable capture. Called when the window resigns key.
@@ -964,28 +977,21 @@ public final class InputCapture {
 
     // MARK: - Mouse
 
-    /// A hint that the macOS window frame is being dragged.
-    ///
-    /// Pointer input pauses for the duration: the user is resizing the window,
-    /// not working in the application, and the pointer sitting on the host
-    /// window's own edge while both sides are being resized makes the host start
-    /// a resize of its own on top of ours.
-    ///
-    /// A HINT, AND NOT THE ANSWER ON ITS OWN. This used to be the whole gate,
-    /// set from `windowWillStartLiveResize` and cleared from
-    /// `windowDidEndLiveResize` — and AppKit does not guarantee that pair. A drag
-    /// interrupted by the window being closed, by the frame being set from the
-    /// host mid-drag, or by anything else that ends the resize session another
-    /// way leaves the flag set, and then the pointer is dead for the rest of the
-    /// window's life. Every symptom of that is "I can resize the window but I
-    /// cannot click or scroll in it", with the video still perfect and not one
-    /// line in any log to say why. `inLiveResize` is the same fact asked of
-    /// AppKit instead of remembered, so it cannot get stuck.
-    public var isSuspended = false
-
     /// Pointer events dropped because a resize was in progress. Reported with
     /// the rest of the input counters, so a pause that never ended is visible
     /// rather than deduced.
+    ///
+    /// Pointer input pauses while the macOS window frame is dragged: the user
+    /// is resizing the window, not working in the application, and the pointer
+    /// sitting on the host window's own edge while both sides are being
+    /// resized makes the host start a resize of its own on top of ours.
+    ///
+    /// Asked of AppKit's `inLiveResize` on every event rather than remembered.
+    /// A flag set from `windowWillStartLiveResize` and cleared from
+    /// `windowDidEndLiveResize` used to be the gate, and AppKit does not
+    /// guarantee that pair: a drag ended any other way left the pointer dead
+    /// for the rest of the window's life, with the video still perfect and not
+    /// one line in any log to say why.
     public private(set) var droppedWhileResizing: UInt64 = 0
 
     /// Emit one absolute pointer position from a unit point inside the picture,
@@ -997,13 +1003,7 @@ public final class InputCapture {
     public func sendUnitPosition(x: Double, y: Double) -> Bool {
         guard let source = sourceRect, let canvas = canvasSize,
               canvas.width > 0, canvas.height > 0 else { return false }
-        let target = Self.canvasPoint(unit: CGPoint(x: x, y: y), source: source,
-                                      edgeGuard: edgeGuard)
-        positionsSent += 1
-        onInput?(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
-                                            y: Int(target.y.rounded()),
-                                            referenceWidth: Int(canvas.width),
-                                            referenceHeight: Int(canvas.height)))
+        sendCanvasPoint(unit: CGPoint(x: x, y: y), source: source, canvas: canvas)
         return true
     }
 
@@ -1019,10 +1019,13 @@ public final class InputCapture {
     private var lastMonitoredPress: Press?
     private var lastHandledPress: Press?
 
+    private static let buttonDowns: Set<NSEvent.EventType> =
+        [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+    private static let drags: Set<NSEvent.EventType> =
+        [.leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+
     private static func press(_ event: NSEvent) -> Press? {
-        guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) else {
-            return nil
-        }
+        guard buttonDowns.contains(event.type) else { return nil }
         return Press(type: event.type, timestamp: event.timestamp, number: event.eventNumber)
     }
 
@@ -1101,17 +1104,9 @@ public final class InputCapture {
         if let window = event.window, window !== view.window, heldButtons.isEmpty {
             return
         }
-        if isSuspended || view.inLiveResize || (view.window?.inLiveResize ?? false) {
+        if view.inLiveResize || (view.window?.inLiveResize ?? false) {
             droppedWhileResizing &+= 1
-            // The flag alone is not trusted: if nothing is actually being
-            // dragged, whatever set it has gone away without clearing it.
-            if isSuspended && !view.inLiveResize && !(view.window?.inLiveResize ?? false) {
-                isSuspended = false
-                Log.info("[input] the resize pause outlived the resize; resuming"
-                         + " (\(droppedWhileResizing) pointer events dropped)")
-            } else {
-                return
-            }
+            return
         }
 
         if event.type == .mouseMoved, !heldButtons.isEmpty, buttonsPressedNow() == 0 {
@@ -1120,11 +1115,10 @@ public final class InputCapture {
         // A drag whose press the PC was not given -- one that began a resize
         // or a move of the window, or was made outside the picture -- is not
         // the PC's either, and nor is its release, below.
-        if !isPointerCaptured, heldButtons.isEmpty,
-           [.leftMouseDragged, .rightMouseDragged, .otherMouseDragged].contains(event.type) {
+        if !isPointerCaptured, heldButtons.isEmpty, Self.drags.contains(event.type) {
             return
         }
-        if firstMouse, Self.pointerMode == .gaming {
+        if firstMouse, mode == .gaming {
             if !isPointerCaptured {
                 _ = takesPointer(on: event, in: view, deliversClick: false)
             }
@@ -1134,7 +1128,7 @@ public final class InputCapture {
             handleCapturedPointer(event, in: view)
             return
         }
-        if Self.pointerMode == .gaming {
+        if mode == .gaming {
             if takesPointer(on: event, in: view) { return }
             if gameReadsMotion {
                 handleUncapturedOverGame(event)
@@ -1158,21 +1152,10 @@ public final class InputCapture {
             // the video -- and those used to reach the host as clicks at
             // whatever coordinate the pointer was last moved to.
             guard sendPosition(for: event, in: view) else { return }
-            if let button = button(for: event) {
-                // A Shift-click is a Shift-click only if the host has Shift.
-                syncModifiers(to: event.modifierFlags)
-                heldButtons.insert(button)
-                onInput?(SMTInput.mouseButton(button, pressed: true))
-            }
+            pressButton(event)
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            // Only a button the host was told is down: a lone release is not
-            // something to hand an application.
-            guard let button = button(for: event), heldButtons.remove(button) != nil else {
-                return
-            }
-            sendPosition(for: event, in: view)
-            onInput?(SMTInput.mouseButton(button, pressed: false))
+            releaseButton(event, positionIn: view)
 
         case .scrollWheel:
             // Position first, and only scroll at all if that position landed
@@ -1186,19 +1169,39 @@ public final class InputCapture {
             // is under the cursor, so the pointer has to be where the wheel was
             // turned before the wheel arrives.
             guard sendPosition(for: event, in: view) else { return }
-            let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
-                                        deltaY: event.scrollingDeltaY,
-                                        precise: event.hasPreciseScrollingDeltas,
-                                        residual: scrollResidual)
-            scrollResidual = wheel.residual
-            if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
-            if wheel.horizontal != 0 {
-                onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal))
-            }
+            sendWheel(event)
 
         default:
             break
         }
+    }
+
+    /// Press a button on the host, with the modifiers it was pressed with: a
+    /// Shift-click is a Shift-click only if the host has Shift.
+    private func pressButton(_ event: NSEvent) {
+        guard let button = button(for: event) else { return }
+        syncModifiers(to: event.modifierFlags)
+        heldButtons.insert(button)
+        onInput?(SMTInput.mouseButton(button, pressed: true))
+    }
+
+    /// Release a button on the host -- only one it was told is down, since a
+    /// lone release is not something to hand an application. Given a view,
+    /// the position goes first.
+    private func releaseButton(_ event: NSEvent, positionIn view: NSView? = nil) {
+        guard let button = button(for: event), heldButtons.remove(button) != nil else { return }
+        if let view { sendPosition(for: event, in: view) }
+        onInput?(SMTInput.mouseButton(button, pressed: false))
+    }
+
+    private func sendWheel(_ event: NSEvent) {
+        let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
+                                    deltaY: event.scrollingDeltaY,
+                                    precise: event.hasPreciseScrollingDeltas,
+                                    residual: scrollResidual)
+        scrollResidual = wheel.residual
+        if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
+        if wheel.horizontal != 0 { onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal)) }
     }
 
     // MARK: - Following the host's cursor
@@ -1332,11 +1335,14 @@ public final class InputCapture {
     /// now, because a game that shows a cursor has stopped reading raw motion.
     public func hostCursorVisibilityChanged(hidden: Bool) {
         let wasHidden = policy.hostCursorHidden
-        let inside = isCapturing && (pointerIsOverPicture() || !heldButtons.isEmpty)
+        // Only gaming mode ever takes the mouse, so only it asks where the
+        // pointer is.
+        let inside = isCapturing && mode == .gaming
+            && (pointerIsOverPicture() || !heldButtons.isEmpty)
         apply(policy.wantsCapture(after: .hostCursor(hidden: hidden), moment(pointerInside: inside)),
               because: hidden ? "the PC hid its cursor" : "the PC showed its cursor")
-        guard wasHidden, !hidden, isCapturing, !isPointerCaptured, Self.pointerMode == .gaming,
-              policy.isFollowing(Self.followsHostCursor),
+        guard wasHidden, !hidden, isCapturing, !isPointerCaptured, mode == .gaming,
+              policy.isFollowing(followsCursor),
               let pointer = pointerUnitPoint() else { return }
         sendUnitPosition(x: pointer.x, y: pointer.y)
     }
@@ -1346,7 +1352,7 @@ public final class InputCapture {
     /// covering the picture. Only asked once a captured mouse has been ruled
     /// out.
     private var gameReadsMotion: Bool {
-        policy.isFollowing(Self.followsHostCursor) && policy.hostCursorHidden
+        policy.isFollowing(followsCursor) && policy.hostCursorHidden
     }
 
     /// Pointer events while `gameReadsMotion`, which mostly go nowhere.
@@ -1360,9 +1366,7 @@ public final class InputCapture {
     private func handleUncapturedOverGame(_ event: NSEvent) {
         switch event.type {
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            if let button = button(for: event), heldButtons.remove(button) != nil {
-                onInput?(SMTInput.mouseButton(button, pressed: false))
-            }
+            releaseButton(event)
         default:
             if event.type == .mouseMoved { mouseMovedSeen += 1 }
             withheldFromGame += 1
@@ -1370,7 +1374,7 @@ public final class InputCapture {
     }
 
     private func moment(pointerInside: Bool) -> CapturePolicy.Moment {
-        CapturePolicy.Moment(mode: Self.pointerMode, followsHostCursor: Self.followsHostCursor,
+        CapturePolicy.Moment(mode: mode, followsHostCursor: followsCursor,
                              isActive: isCapturing, pointerInside: pointerInside,
                              isCaptured: isPointerCaptured)
     }
@@ -1390,9 +1394,8 @@ public final class InputCapture {
     /// - Returns: true when the event has been handled as a captured one.
     private func takesPointer(on event: NSEvent, in view: NSView,
                               deliversClick: Bool = true) -> Bool {
-        let isClick = [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type)
-        let isMove = [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
-                      .otherMouseDragged].contains(event.type)
+        let isClick = Self.buttonDowns.contains(event.type)
+        let isMove = event.type == .mouseMoved || Self.drags.contains(event.type)
         guard isClick || isMove else { return false }
         // A click must land in the picture itself; a move may be a drag that
         // has carried a held button out of it.
@@ -1407,7 +1410,7 @@ public final class InputCapture {
         // now, when the answer would take the mouse.
         if isMove, heldButtons.isEmpty, !pointerIsOverPicture() { return false }
 
-        if policy.isFollowing(Self.followsHostCursor) {
+        if policy.isFollowing(followsCursor) {
             // The game has its cursor hidden and is reading motion, not
             // position: an absolute position now would turn its camera. So the
             // mouse is taken first, and this event goes as a captured one --
@@ -1437,9 +1440,8 @@ public final class InputCapture {
         guard NSWindow.windowNumber(at: onScreen, belowWindowWithWindowNumber: 0)
                 == window.windowNumber else { return nil }
         let point = view.convert(window.convertPoint(fromScreen: onScreen), from: nil)
-        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
         return Self.unitPoint(viewPoint: point, viewSize: view.bounds.size,
-                              source: source, isFlipped: view.isFlipped)
+                              source: source(for: view), isFlipped: view.isFlipped)
     }
 
     private func pointerIsOverPicture() -> Bool {
@@ -1448,10 +1450,15 @@ public final class InputCapture {
 
     /// Where an event falls in the picture, or nil when it is outside it.
     private func pictureUnitPoint(for event: NSEvent, in view: NSView) -> CGPoint? {
-        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
-        return Self.unitPoint(viewPoint: view.convert(event.locationInWindow, from: nil),
-                              viewSize: view.bounds.size, source: source,
-                              isFlipped: view.isFlipped)
+        Self.unitPoint(viewPoint: view.convert(event.locationInWindow, from: nil),
+                       viewSize: view.bounds.size, source: source(for: view),
+                       isFlipped: view.isFlipped)
+    }
+
+    /// The part of the canvas a view shows: `sourceRect`, or else the whole
+    /// canvas -- or the view's own size, before the canvas is known.
+    private func source(for view: NSView) -> CGRect {
+        sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
     }
 
     // MARK: - Captured pointer
@@ -1497,8 +1504,7 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             mouseMovedSeen += 1
-            let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? view.bounds.size)
-            let perPoint = view.bounds.width > 0 ? source.width / view.bounds.width : 1
+            let perPoint = view.bounds.width > 0 ? source(for: view).width / view.bounds.width : 1
             let motion = Self.relativeMotion(deltaX: event.deltaX, deltaY: event.deltaY,
                                              pixelsPerPoint: perPoint, sensitivity: sensitivity,
                                              residual: relativeResidual)
@@ -1509,31 +1515,16 @@ public final class InputCapture {
             }
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            if let button = button(for: event) {
-                syncModifiers(to: event.modifierFlags)
-                heldButtons.insert(button)
-                onInput?(SMTInput.mouseButton(button, pressed: true))
-            }
+            pressButton(event)
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            // Only a button the host was told is down. The mouse can be taken
-            // between a press and its release -- the game hiding its cursor, or
-            // the window coming forward under a click it never forwarded -- and
-            // a lone release is not something to hand an application.
-            if let button = button(for: event), heldButtons.remove(button) != nil {
-                onInput?(SMTInput.mouseButton(button, pressed: false))
-            }
+            // The mouse can be taken between a press and its release -- the
+            // game hiding its cursor, or the window coming forward under a
+            // click it never forwarded -- so this may have no press to match.
+            releaseButton(event)
 
         case .scrollWheel:
-            let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
-                                        deltaY: event.scrollingDeltaY,
-                                        precise: event.hasPreciseScrollingDeltas,
-                                        residual: scrollResidual)
-            scrollResidual = wheel.residual
-            if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
-            if wheel.horizontal != 0 {
-                onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal))
-            }
+            sendWheel(event)
 
         default:
             break
@@ -1604,7 +1595,7 @@ public final class InputCapture {
         let bounds = view.bounds
         guard bounds.width > 0, bounds.height > 0 else { return false }
 
-        let source = sourceRect ?? CGRect(origin: .zero, size: canvasSize ?? bounds.size)
+        let source = self.source(for: view)
         let canvas = canvasSize ?? source.size
         guard canvas.width > 0, canvas.height > 0 else { return false }
 
@@ -1620,16 +1611,19 @@ public final class InputCapture {
             positionsOutside += 1
             return false
         }
-
-        let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
-        let x = Int(target.x.rounded())
-        let y = Int(target.y.rounded())
-
-        positionsSent += 1
-        onInput?(SMTInput.mouseMoveAbsolute(x: x, y: y,
-                                                 referenceWidth: Int(canvas.width),
-                                                 referenceHeight: Int(canvas.height)))
+        sendCanvasPoint(unit: unit, source: source, canvas: canvas)
         return true
+    }
+
+    /// Send a unit point within the crop as an absolute position on the
+    /// canvas, kept clear of its edges by `edgeGuard`.
+    private func sendCanvasPoint(unit: CGPoint, source: CGRect, canvas: CGSize) {
+        let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
+        positionsSent += 1
+        onInput?(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
+                                            y: Int(target.y.rounded()),
+                                            referenceWidth: Int(canvas.width),
+                                            referenceHeight: Int(canvas.height)))
     }
 
     /// Where a point in the view falls within the video, as 0...1 from its
@@ -1646,6 +1640,25 @@ public final class InputCapture {
     /// whenever the host cannot give us the size we asked for.
     static func unitPoint(viewPoint: CGPoint, viewSize: CGSize,
                           source: CGRect, isFlipped: Bool) -> CGPoint? {
+        guard let unit = rawUnitPoint(viewPoint: viewPoint, viewSize: viewSize,
+                                      source: source, isFlipped: isFlipped),
+              (0...1).contains(unit.x), (0...1).contains(unit.y) else { return nil }
+        return unit
+    }
+
+    /// The same mapping, but pinned to the edge instead of refused when the
+    /// point falls outside the picture.
+    static func clampedUnitPoint(viewPoint: CGPoint, viewSize: CGSize,
+                                 source: CGRect, isFlipped: Bool) -> CGPoint? {
+        guard let unit = rawUnitPoint(viewPoint: viewPoint, viewSize: viewSize,
+                                      source: source, isFlipped: isFlipped) else { return nil }
+        return CGPoint(x: min(max(unit.x, 0), 1), y: min(max(unit.y, 0), 1))
+    }
+
+    /// The mapping itself, neither refused nor pinned outside the picture;
+    /// nil only when there is no picture to map into.
+    private static func rawUnitPoint(viewPoint: CGPoint, viewSize: CGSize,
+                                     source: CGRect, isFlipped: Bool) -> CGPoint? {
         guard viewSize.width > 0, viewSize.height > 0,
               source.width > 0, source.height > 0 else { return nil }
 
@@ -1657,11 +1670,8 @@ public final class InputCapture {
                             y: (viewSize.height - shown.height) / 2)
         // macOS is bottom-left origin, Windows is top-left, hence the flip.
         let fromTop = isFlipped ? viewPoint.y : viewSize.height - viewPoint.y
-
-        let unit = CGPoint(x: (viewPoint.x - inset.x) / shown.width,
-                           y: (fromTop - inset.y) / shown.height)
-        guard (0...1).contains(unit.x), (0...1).contains(unit.y) else { return nil }
-        return unit
+        return CGPoint(x: (viewPoint.x - inset.x) / shown.width,
+                       y: (fromTop - inset.y) / shown.height)
     }
 
     /// Turn a unit position within the crop into a canvas coordinate, kept
@@ -1680,24 +1690,6 @@ public final class InputCapture {
         let safe = source.insetBy(dx: insetX, dy: insetY)
         return CGPoint(x: min(max(source.minX + unit.x * source.width, safe.minX), safe.maxX),
                        y: min(max(source.minY + unit.y * source.height, safe.minY), safe.maxY))
-    }
-
-    /// The same mapping, but pinned to the edge instead of refused when the
-    /// point falls outside the picture.
-    static func clampedUnitPoint(viewPoint: CGPoint, viewSize: CGSize,
-                                 source: CGRect, isFlipped: Bool) -> CGPoint? {
-        guard viewSize.width > 0, viewSize.height > 0,
-              source.width > 0, source.height > 0 else { return nil }
-
-        let fit = min(viewSize.width / source.width, viewSize.height / source.height)
-        let shown = CGSize(width: source.width * fit, height: source.height * fit)
-        guard shown.width > 0, shown.height > 0 else { return nil }
-
-        let inset = CGPoint(x: (viewSize.width - shown.width) / 2,
-                            y: (viewSize.height - shown.height) / 2)
-        let fromTop = isFlipped ? viewPoint.y : viewSize.height - viewPoint.y
-        return CGPoint(x: min(max((viewPoint.x - inset.x) / shown.width, 0), 1),
-                       y: min(max((fromTop - inset.y) / shown.height, 0), 1))
     }
 
     private func button(for event: NSEvent) -> SMTInput.MouseButton? {
