@@ -244,6 +244,31 @@ final class TextInputTests: XCTestCase {
         XCTAssertEqual(wire.packets, [.text("x")])
     }
 
+    /// A posted event with no text at all is not a dead key: the program's
+    /// next character is still text, not the A key.
+    func testAnEventWithNoTextIsNotADeadKey() {
+        let wire = Wire()
+        wire.clear()
+        wire.send(.keyDown, keyCode: 0, text: "")
+        wire.send(.keyUp, keyCode: 0, text: "")
+        wire.clear()
+        wire.type("é")
+        XCTAssertEqual(wire.packets, [.text("é")])
+    }
+
+    /// A dead key left pending when the window lets go of the keyboard does
+    /// not reach past it: the first posted character after is text.
+    func testADeadKeyDoesNotOutliveTheCapture() {
+        let wire = Wire()
+        wire.send(.keyDown, keyCode: 0x18, text: "", ignoringModifiers: "´")
+        wire.send(.keyUp, keyCode: 0x18, text: "", ignoringModifiers: "´")
+        wire.capture.disableCapture()
+        wire.capture.enableCapture()
+        wire.clear()
+        wire.type("é")
+        XCTAssertEqual(wire.packets, [.text("é")])
+    }
+
     /// A text-only event is consumed, so it cannot also act on this Mac, and
     /// its release sends nothing: nothing was pressed.
     func testTextIsConsumedAndItsReleaseSendsNothing() {

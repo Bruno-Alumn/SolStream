@@ -445,6 +445,7 @@ public final class InputCapture {
         releaseHeldInput()
         removeMonitors()
         scrollResidual = .zero
+        followsDeadKey = false
     }
 
     // MARK: - Monitors
@@ -516,7 +517,8 @@ public final class InputCapture {
             // except the key after a dead key, see `followsDeadKey`.
             let afterDeadKey = followsDeadKey
             if event.type == .keyDown {
-                followsDeadKey = (event.characters ?? "").isEmpty
+                followsDeadKey = Self.isDeadKeyPress(characters: event.characters,
+                                                     ignoringModifiers: event.charactersIgnoringModifiers)
             }
             var keyCode = event.keyCode
             if held == nil, !(afterDeadKey && event.type == .keyDown) {
@@ -605,6 +607,15 @@ public final class InputCapture {
     /// ´ instead of finishing it. By position, the PC composes it the way
     /// its layout does.
     private var followsDeadKey = false
+
+    /// A dead key's press types nothing yet but still names its key: its
+    /// `charactersIgnoringModifiers` is the accent, or the letter under ⌥.
+    /// A posted event with no text at all names nothing, and is not one --
+    /// counted as one, it would send the program's next character by
+    /// position, as the A key.
+    static func isDeadKeyPress(characters: String?, ignoringModifiers: String?) -> Bool {
+        (characters ?? "").isEmpty && !(ignoringModifiers ?? "").isEmpty
+    }
 
     /// Where a key event's character came from.
     enum KeyOrigin: Equatable {
@@ -861,6 +872,7 @@ public final class InputCapture {
         heldButtons.removeAll()
         lastModifierFlags = []
         lastDeviceFlags = 0
+        followsDeadKey = false
         let flags = modifierFlagsNow()
         syncCapsLock(to: flags.contains(.capsLock))
         syncModifiers(to: flags)
