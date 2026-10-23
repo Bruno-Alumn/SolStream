@@ -29,17 +29,16 @@ long long Now() {
     return now.QuadPart;
 }
 
-/// What the frame-arrived handler checks before it touches anything of the
-/// capture's, owned jointly with that handler, the way `itemClosed` is.
+/// What the capture's two handlers touch, owned jointly with them.
 ///
-/// revoke() unhooks the handler but does not wait for an invocation already
-/// under way. One that had entered the handler and not yet taken the mutex
-/// could be held off across the whole of Stop, the Teardown that drops the
-/// last reference to the Capture, and ~Impl -- and then lock a mutex that
-/// lived inside the freed Impl. Here the mutex and the flag live as long as
-/// the handler's own copy of the pointer, so the handler can always take the
-/// one and read the other, and touches the Impl only when the flag says it is
-/// still there.
+/// revoke() unhooks the frame-arrived handler but does not wait for an
+/// invocation already under way. One that had entered the handler and not yet
+/// taken the mutex could be held off across the whole of Stop, the Teardown
+/// that drops the last reference to the Capture, and ~Impl -- and then lock a
+/// mutex that lived inside the freed Impl. Here the mutex and the flag live as
+/// long as the handler's own copy of the pointer, so the handler can always
+/// take the one and read the other, and touches the Impl only when the flag
+/// says it is still there.
 struct ArrivalGate {
     /// Held by the handler for the whole of OnFrame, and taken by Stop and by
     /// RecreatePoolIfNeeded. See Stop for what goes wrong without it. It is
@@ -53,6 +52,9 @@ struct ArrivalGate {
     /// is what makes Stop wait for an arrival that is already running, and
     /// what keeps a late one off an Impl that has gone.
     std::atomic<bool> running{false};
+    /// Set by the item-closed handler, the only thing of the capture's it
+    /// touches, for the same reason: revoke() does not wait for it either.
+    std::atomic<bool> closed{false};
 };
 
 }  // namespace
@@ -72,12 +74,6 @@ struct Capture::Impl {
     /// a still one, and the retained frame was re-encoded for the rest of the
     /// session.
     GraphicsCaptureItem::Closed_revoker itemClosedEvent;
-    /// Set by that handler, and owned jointly with it. revoke() unhooks the
-    /// handler but does not wait for an invocation already under way, so the
-    /// handler touches nothing of Impl's -- only this flag, which its own copy
-    /// of the pointer keeps alive however late it runs.
-    std::shared_ptr<std::atomic<bool>> itemClosed =
-        std::make_shared<std::atomic<bool>>(false);
 
     /// The retained frame. One texture, copied into on every arrival, so the
     /// WGC frame can be closed immediately -- the frame pool has two buffers and
@@ -98,7 +94,7 @@ struct Capture::Impl {
     uint64_t serial = 0;
     long long capturedAt = 0;
     uint64_t delivered = 0;
-    /// The handler's mutex and the running flag. See ArrivalGate.
+    /// The handlers' mutex and flags. See ArrivalGate.
     std::shared_ptr<ArrivalGate> gate = std::make_shared<ArrivalGate>();
 
     bool Begin(GraphicsCaptureItem newItem);
@@ -168,10 +164,10 @@ bool Capture::Impl::Begin(GraphicsCaptureItem newItem) {
             }
             OnFrame(sender);
         });
-    itemClosed->store(false);
+    gate->closed.store(false);
     itemClosedEvent = item.Closed(auto_revoke,
-        [closed = itemClosed](GraphicsCaptureItem const&, auto&&) {
-            closed->store(true);
+        [shared = gate](GraphicsCaptureItem const&, auto&&) {
+            shared->closed.store(true);
         });
 
     width = (UINT) size.Width;
@@ -387,7 +383,7 @@ void Capture::Stop() {
 }
 
 bool Capture::Running() const {
-    return impl_ && impl_->gate->running.load() && !impl_->itemClosed->load();
+    return impl_ && impl_->gate->running.load() && !impl_->gate->closed.load();
 }
 
 ID3D11Device* Capture::Device() const { return impl_ ? impl_->device.get() : nullptr; }
