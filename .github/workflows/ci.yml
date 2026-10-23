@@ -68,25 +68,12 @@ jobs:
           cp "$vector/SHA256SUMS.sig" "$tampered/"
           refuses "$test_key" "$tampered/SHA256SUMS" "One byte changed"
 
-          # The same awk the release workflow uses, so a docs/updates.md the
-          # release could not read the key from fails here first.
-          production_key=$(awk '/compiled into both programs:/ {found = 1; next} found && NF {print $1; exit}' docs/updates.md)
-          if ! [[ "$production_key" =~ ^[A-Za-z0-9+/]{87}=$ ]] || [ "$production_key" = "$test_key" ]; then
-            echo "::error file=docs/updates.md::Could not read the production public key from docs/updates.md."
-            exit 1
-          fi
+          # Read, and held to both programs' copies, by the script the release
+          # workflow runs before it signs, so a docs/updates.md the release
+          # could not read the key from, or a program whose copy differs from
+          # it, fails here a commit earlier.
+          production_key=$(bash scripts/check-public-key.sh)
           refuses "$production_key" "$vector/SHA256SUMS" "The test vector under the production key"
-
-          # The key is written three times. A program whose copy differs from
-          # the document would refuse every release after the one it came in,
-          # and nothing else would notice until then. release.yml checks the
-          # same before it signs; this is the same failure a commit earlier.
-          for source in macos/SolStreamClient/Sources/SolStreamClient/UpdateFormats.swift windows/SolStreamAgent/updater.h; do
-            if ! grep -qF "\"$production_key\"" "$source"; then
-              echo "::error file=$source::does not carry the production public key in docs/updates.md."
-              exit 1
-            fi
-          done
       - name: Run the release's signing and checking steps with a throwaway key
         # release.yml writes, signs and checks SHA256SUMS with OpenSSL and
         # Python's standard library only, so that nothing else runs beside the
@@ -215,41 +202,10 @@ jobs:
       - name: Check update signatures with the built setup
         # The host is its own updater; this is the contract's CLI
         # (docs/updates.md) run against the test vector, on the setup under its
-        # release name and from outside an install folder, as release.yml runs
-        # it before publishing.
+        # release name, as release.yml runs it before publishing.
         run: |
           $version = Get-Content VERSION -TotalCount 1
-          $exe = (Resolve-Path "dist\SolStreamSetup-$version.exe").Path
-          $vector = (Resolve-Path "tests\update-vector").Path
-          $testKey = (Get-Content "$vector\test-key.pub.b64" -TotalCount 1).Trim()
-
-          # The same signature over a SHA256SUMS with one byte changed.
-          $tampered = (New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP "tampered-vector")).FullName
-          $bytes = [IO.File]::ReadAllBytes("$vector\SHA256SUMS")
-          $bytes[0] = $bytes[0] -bxor 1
-          [IO.File]::WriteAllBytes("$tampered\SHA256SUMS", $bytes)
-          Copy-Item "$vector\SHA256SUMS.sig" $tampered
-
-          function Test-Signature([string[]] $arguments, [int] $expected, [string] $what) {
-              $start = [Diagnostics.ProcessStartInfo]::new($exe)
-              $start.UseShellExecute = $false
-              foreach ($argument in @("--verify-update-signature") + $arguments) { $start.ArgumentList.Add($argument) }
-              $process = [Diagnostics.Process]::Start($start)
-              # A build that does not know the flag opens its setup window
-              # instead, and nobody on a runner is going to close it.
-              if (-not $process.WaitForExit(60000)) {
-                  $process.Kill($true)
-                  throw "${what}: still running after a minute"
-              }
-              if ($process.ExitCode -ne $expected) {
-                  throw "${what}: exit code $($process.ExitCode), expected $expected"
-              }
-              Write-Host "${what}: $expected, as expected"
-          }
-
-          Test-Signature @("$vector\SHA256SUMS", "$vector\SHA256SUMS.sig", $testKey) 0 "test vector, test key"
-          Test-Signature @("$tampered\SHA256SUMS", "$tampered\SHA256SUMS.sig", $testKey) 1 "one byte changed"
-          Test-Signature @("$vector\SHA256SUMS", "$vector\SHA256SUMS.sig") 1 "test vector, compiled-in key"
+          ./scripts/check-update-signature.ps1 -Setup "dist\SolStreamSetup-$version.exe"
       # The updater's unit tests (version order, SHA256SUMS parsing, the
       # redirect allow-list, anti-rollback). package-windows.ps1 configures with
       # BUILD_TESTING off and windows-cross cannot run what it compiles, so this
