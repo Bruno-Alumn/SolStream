@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace solstream {
@@ -42,6 +43,14 @@ std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
 bool ProofMatchesHmac(const std::vector<unsigned char>& key,
                       const std::vector<unsigned char>& message,
                       const std::vector<unsigned char>& proof);
+
+/// Exactly four hex digits at `at` in `text`, either case, as a JSON \u escape
+/// carries them. False when there are fewer than four or one is not hex.
+bool ParseHex4(std::string_view text, size_t at, unsigned& out);
+
+/// Append one code point to `out` as UTF-8. The caller has already replaced
+/// surrogates and anything past U+10FFFF.
+void AppendUtf8(std::string& out, unsigned code);
 
 /// `%LOCALAPPDATA%\SolStream\<file>`, creating the directory if needed. Empty
 /// when LOCALAPPDATA is not set. Where the token, the media counter and the

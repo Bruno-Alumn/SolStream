@@ -3775,47 +3775,6 @@ std::string WindowStatusJson(uint64_t id) {
 /// separators, so C:\\Users\\x opens the same file as C:\Users\x. Device names do
 /// not: they are matched literally, and \\\\.\\DISPLAY7 resolves to nothing at
 /// all.
-/// Parse exactly four hex digits at `at`.
-bool ParseHex4(const std::string& json, size_t at, unsigned& out) {
-    if (at + 3 >= json.size()) {
-        return false;
-    }
-    unsigned code = 0;
-    for (int k = 0; k < 4; ++k) {
-        const char digit = json[at + k];
-        code <<= 4;
-        if (digit >= '0' && digit <= '9') {
-            code |= static_cast<unsigned>(digit - '0');
-        } else if (digit >= 'a' && digit <= 'f') {
-            code |= static_cast<unsigned>(digit - 'a' + 10);
-        } else if (digit >= 'A' && digit <= 'F') {
-            code |= static_cast<unsigned>(digit - 'A' + 10);
-        } else {
-            return false;
-        }
-    }
-    out = code;
-    return true;
-}
-
-void AppendUtf8(std::string& out, unsigned code) {
-    if (code < 0x80) {
-        out.push_back(static_cast<char>(code));
-    } else if (code < 0x800) {
-        out.push_back(static_cast<char>(0xC0 | (code >> 6)));
-        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-    } else if (code < 0x10000) {
-        out.push_back(static_cast<char>(0xE0 | (code >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (code >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
-    }
-}
-
 bool FieldString(const std::string& json, const char* key, std::string& out) {
     const std::string needle = std::string("\"") + key + "\"";
     size_t at = json.find(needle);
@@ -3856,7 +3815,7 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
             case 't':  value.push_back('\t'); break;
             case 'u': {
                 unsigned code = 0;
-                if (!ParseHex4(json, i + 1, code)) {
+                if (!solstream::ParseHex4(json, i + 1, code)) {
                     return false;
                 }
                 i += 4;
@@ -3869,7 +3828,7 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
                 if (code >= 0xD800 && code <= 0xDBFF) {
                     unsigned low = 0;
                     if (i + 6 < json.size() && json[i + 1] == '\\' && json[i + 2] == 'u'
-                        && ParseHex4(json, i + 3, low)
+                        && solstream::ParseHex4(json, i + 3, low)
                         && low >= 0xDC00 && low <= 0xDFFF) {
                         code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                         i += 6;
@@ -3879,7 +3838,7 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
                 } else if (code >= 0xDC00 && code <= 0xDFFF) {
                     code = 0xFFFD;      // stray low surrogate
                 }
-                AppendUtf8(value, code);
+                solstream::AppendUtf8(value, code);
                 break;
             }
             default:

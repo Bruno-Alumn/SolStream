@@ -166,6 +166,46 @@ std::vector<unsigned char> FromHex(const std::string& hex) {
     return out;
 }
 
+bool ParseHex4(std::string_view text, size_t at, unsigned& out) {
+    if (at + 3 >= text.size()) {
+        return false;
+    }
+    unsigned code = 0;
+    for (int k = 0; k < 4; ++k) {
+        const char digit = text[at + k];
+        code <<= 4;
+        if (digit >= '0' && digit <= '9') {
+            code |= static_cast<unsigned>(digit - '0');
+        } else if (digit >= 'a' && digit <= 'f') {
+            code |= static_cast<unsigned>(digit - 'a' + 10);
+        } else if (digit >= 'A' && digit <= 'F') {
+            code |= static_cast<unsigned>(digit - 'A' + 10);
+        } else {
+            return false;
+        }
+    }
+    out = code;
+    return true;
+}
+
+void AppendUtf8(std::string& out, unsigned code) {
+    if (code < 0x80) {
+        out.push_back(static_cast<char>(code));
+    } else if (code < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (code >> 6)));
+        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else if (code < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (code >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (code >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (code & 0x3F)));
+    }
+}
+
 std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
                                       const std::vector<unsigned char>& data) {
     BCRYPT_ALG_HANDLE algorithm = nullptr;
