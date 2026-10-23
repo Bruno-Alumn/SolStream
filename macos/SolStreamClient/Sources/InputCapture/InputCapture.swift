@@ -1044,6 +1044,79 @@ public final class InputCapture {
         handleMouseEvent(event, firstMouse: true)
     }
 
+    // MARK: - Presses that belong to the window
+
+    /// Buttons pressed where the press belongs to the Mac window rather than
+    /// to the picture -- its resize border, or outside the picture -- and so
+    /// were not sent, with everything after them until they come up.
+    private var withheldButtons: Set<SMTInput.MouseButton> = []
+
+    /// How far inside the window's frame AppKit starts a resize, in points,
+    /// along an edge and around a corner.
+    ///
+    /// The window has no visible border, and the band it resizes from lies
+    /// over the edge of the picture. A press there is the start of a resize,
+    /// not a click, but the monitor sees it before AppKit does and before
+    /// `inLiveResize` says so -- so the press went to the PC, the drag's
+    /// first moves with it, and a console resized from its corner began a
+    /// QuickEdit selection that froze its output. AppKit's own band is not
+    /// published; these cover it as measured by eye, and the corners, where
+    /// it is wider, more. The cost is a click on the outermost few points of
+    /// the picture, which is where `edgeGuard` keeps the PC's pointer from
+    /// landing anyway.
+    static let resizeEdge: CGFloat = 5
+    static let resizeCorner: CGFloat = 12
+
+    /// Whether a point in window coordinates is on the band a resize starts
+    /// from.
+    static func isOnResizeBorder(_ point: CGPoint, windowSize: CGSize) -> Bool {
+        let fromLeft = point.x, fromRight = windowSize.width - point.x
+        let fromBottom = point.y, fromTop = windowSize.height - point.y
+        let nearSide = min(fromLeft, fromRight), nearEnd = min(fromBottom, fromTop)
+        return min(nearSide, nearEnd) < resizeEdge
+            || (nearSide < resizeCorner && nearEnd < resizeCorner)
+    }
+
+    /// Whether this event is part of a press that belongs to the window, and
+    /// so must not reach the PC.
+    ///
+    /// The left button pressed on the resize border, or anywhere outside the
+    /// picture -- the title bar, where a press moves the window -- is
+    /// withheld, and so is everything that press leads to: its drags, which
+    /// would move the PC's pointer along the window's edge, and its release,
+    /// which would reach the PC alone. `inLiveResize` stops the drag once
+    /// AppKit has started it, but AppKit only says so after the press.
+    ///
+    /// Not kept beyond the press: AppKit's resize loop can swallow the
+    /// release, so any move with no button down, or the next press, clears
+    /// it. A press withheld here never takes the mouse in gaming mode either.
+    private func withholdsWindowGesture(_ event: NSEvent, in view: NSView) -> Bool {
+        switch event.type {
+        case .mouseMoved:
+            withheldButtons.removeAll()
+            return false
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            guard let button = button(for: event) else { return false }
+            withheldButtons.remove(button)
+            guard event.type == .leftMouseDown, let window = view.window else { return false }
+            let onBorder = window.styleMask.contains(.resizable)
+                && !window.styleMask.contains(.fullScreen)
+                && Self.isOnResizeBorder(event.locationInWindow, windowSize: window.frame.size)
+            guard onBorder || pictureUnitPoint(for: event, in: view) == nil else { return false }
+            withheldButtons.insert(button)
+            return true
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            return !withheldButtons.isEmpty && heldButtons.isEmpty
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            guard let button = button(for: event), withheldButtons.remove(button) != nil else {
+                return false
+            }
+            return !heldButtons.contains(button)
+        default:
+            return false
+        }
+    }
+
     /// Not private so the packets a click or a move produces can be tested
     /// against real `NSEvent`s, as `handleKeyEvent`'s are.
     func handleMouseEvent(_ event: NSEvent, firstMouse: Bool = false) {
@@ -1069,6 +1142,9 @@ public final class InputCapture {
             }
         }
 
+        if !isPointerCaptured, withholdsWindowGesture(event, in: view) {
+            return
+        }
         if firstMouse, Self.pointerMode == .gaming {
             if !isPointerCaptured {
                 _ = takesPointer(on: event, in: view, deliversClick: false)
@@ -1111,11 +1187,13 @@ public final class InputCapture {
             }
 
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            sendPosition(for: event, in: view)
-            if let button = button(for: event) {
-                heldButtons.remove(button)
-                onInput?(SMTInput.mouseButton(button, pressed: false))
+            // Only a button the host was told is down: a lone release is not
+            // something to hand an application.
+            guard let button = button(for: event), heldButtons.remove(button) != nil else {
+                return
             }
+            sendPosition(for: event, in: view)
+            onInput?(SMTInput.mouseButton(button, pressed: false))
 
         case .scrollWheel:
             // Position first, and only scroll at all if that position landed
