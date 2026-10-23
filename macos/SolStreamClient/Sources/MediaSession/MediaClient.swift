@@ -25,15 +25,8 @@ public final class MediaClient {
         public var framesComplete: UInt64 = 0
         public var framesDamaged: UInt64 = 0
         public var datagramsReceived: UInt64 = 0
-        public var datagramsRejected: UInt64 = 0
         public var bytesReceived: UInt64 = 0
         public var audioPackets: UInt64 = 0
-        // There was a `glassToDecodeMs` here. It was declared, reported as zero
-        // for the life of every session, and nothing ever computed it: turning
-        // the host's capture clock into milliseconds on this side needs a clock
-        // offset that was never estimated. The host measures the same interval
-        // end to end -- "glass->wire last/min/mean" in its five-second line -- so
-        // a field that could only ever say nothing is worse than no field.
 
         /// The round trip as the keyframe repeat takes it: before the first
         /// pong `rttMs` reads 0, and the path is unknown rather than short.
@@ -701,32 +694,28 @@ public final class MediaClient {
             // none of it arriving: the request or the IDR was lost. Ask again
             // -- just past the host's 200 ms rate limit, so the repeat is never
             // the one it ignores. See `KeyframeHold.reaskDue`.
+            //
+            // Taken in the same hold of the lock: the receive thread writes
+            // `lastHeardAt` on every datagram that authenticates, roughly two
+            // hundred times a second.
             self.stateLock.lock()
             if self.hold.reaskDue(now: DispatchTime.now().uptimeNanoseconds,
                                   roundTrip: self.stats.roundTrip) {
                 self.needKeyframe = true
             }
+            let heardAt = self.lastHeardAt
+            let snapshot = self.stats
             self.stateLock.unlock()
 
             if ticks % 5 == 0 { self.sendFeedback() }        // 50 ms
             if ticks % 100 == 0 { self.sendPing() }          // 1 s
 
-            // Copied under the lock: the receive thread writes it on every
-            // datagram that authenticates, roughly two hundred times a second.
-            self.stateLock.lock()
-            let heardAt = self.lastHeardAt
-            self.stateLock.unlock()
             let silentMs = Self.millis(since: heardAt)
             if silentMs > 5000 {
                 Log.error("[media] the host has been silent for 5 s")
                 self.endedByItself()
             }
-            if ticks % 5 == 0 {
-                self.stateLock.lock()
-                let snapshot = self.stats
-                self.stateLock.unlock()
-                self.onStats?(snapshot)
-            }
+            if ticks % 5 == 0 { self.onStats?(snapshot) }
         }
         source.resume()
         timer = source
@@ -784,22 +773,15 @@ public final class MediaClient {
                 lastTickAt = DispatchTime.now().uptimeNanoseconds
             }
             let datagram = Data(buffer[0..<n])
+            let opened = SMTPacket.open(datagram, direction: fromHost, window: &window)
             stateLock.lock()
             stats.datagramsReceived &+= 1
             stats.bytesReceived &+= UInt64(n)
+            if opened != nil { lastHeardAt = DispatchTime.now().uptimeNanoseconds }
             stateLock.unlock()
-
-            guard let (plaintext, _) = SMTPacket.open(datagram, direction: fromHost,
-                                                      window: &window) else {
-                stateLock.lock()
-                stats.datagramsRejected &+= 1
-                stateLock.unlock()
-                continue
-            }
-            stateLock.lock()
-            lastHeardAt = DispatchTime.now().uptimeNanoseconds
-            stateLock.unlock()
+            guard let (plaintext, _) = opened else { continue }
             handle(plaintext)
+
         }
     }
 

@@ -142,18 +142,19 @@ public enum SMTInput {
     /// A key by virtual key and the same key by scan code are different
     /// targets, which costs nothing: a session sends one kind or the other.
     static func holdTarget(of event: Data) -> (target: UInt32, releases: Bool)? {
-        let bytes = [UInt8](event)
-        guard bytes.count >= 2, let kind = Kind(rawValue: bytes[0]) else { return nil }
-        let body = bytes.dropFirst(2)
-        guard body.count == Int(bytes[1]) else { return nil }
+        let start = event.startIndex
+        guard event.count >= 2, let kind = Kind(rawValue: event[start]) else { return nil }
+        let bodyCount = event.count - 2
+        guard bodyCount == Int(event[start + 1]) else { return nil }
+        let body = start + 2
         let kindBits = UInt32(kind.rawValue) << 16
         switch kind {
-        case .button where body.count >= 2:
-            return (kindBits | UInt32(body[body.startIndex]), body[body.startIndex + 1] == 0)
+        case .button where bodyCount >= 2:
+            return (kindBits | UInt32(event[body]), event[body + 1] == 0)
         case .key, .keyScan:
-            guard body.count >= 3 else { return nil }
-            let code = UInt32(body[body.startIndex]) << 8 | UInt32(body[body.startIndex + 1])
-            return (kindBits | code, body[body.startIndex + 2] == 0)
+            guard bodyCount >= 3 else { return nil }
+            let code = UInt32(event[body]) << 8 | UInt32(event[body + 1])
+            return (kindBits | code, event[body + 2] == 0)
         default:
             return nil
         }
@@ -172,15 +173,17 @@ public enum SMTInput {
     /// go of a key the hand is holding. `events` must be in sequence order.
     static func releasesStillOwed(_ events: [(seq: UInt32, blob: Data)])
         -> [(seq: UInt32, blob: Data)] {
+        let holds = events.map { holdTarget(of: $0.blob) }
         var last: [UInt32: Int] = [:]
-        for (index, event) in events.enumerated() {
-            if let hold = holdTarget(of: event.blob) { last[hold.target] = index }
+        for (index, hold) in holds.enumerated() {
+            if let hold { last[hold.target] = index }
         }
-        return events.enumerated().compactMap { index, event in
-            guard let hold = holdTarget(of: event.blob), hold.releases,
+        return events.indices.compactMap { index in
+            guard let hold = holds[index], hold.releases,
                   last[hold.target] == index else { return nil }
-            return event
+            return events[index]
         }
+
     }
 
     /// Characters no keycode can express, as UTF-16 code units.

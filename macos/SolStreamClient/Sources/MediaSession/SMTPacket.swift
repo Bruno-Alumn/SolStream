@@ -150,17 +150,21 @@ public enum SMTPacket {
     public static func open(_ datagram: Data, direction: SMTDirection,
                             window: inout SMTReplayWindow) -> (Data, UInt64)? {
         guard datagram.count >= SMT.overhead else { return nil }
-        let bytes = [UInt8](datagram)
-        guard bytes[0] >> 4 == 1 else { return nil }
-        let counter = readBE(bytes[2..<8])
+        let (version, counter) = datagram.withUnsafeBytes { raw -> (UInt8, UInt64) in
+            var counter: UInt64 = 0
+            for i in 2..<SMT.headerBytes { counter = (counter << 8) | UInt64(raw[i]) }
+            return (raw[0] >> 4, counter)
+        }
+        guard version == 1 else { return nil }
         guard !window.seenOrTooOld(counter) else { return nil }
 
         let header = datagram.prefix(SMT.headerBytes)
         let body = datagram.dropFirst(SMT.headerBytes).dropLast(SMT.tagBytes)
         let tag = datagram.suffix(SMT.tagBytes)
-        guard let nonce = try? AES.GCM.Nonce(data: direction.fixed
-                                                 + datagram.subdata(in: datagram.startIndex + 2
-                                                                    ..< datagram.startIndex + 8)),
+        var nonceBytes = Data(capacity: 12)
+        nonceBytes.append(direction.fixed)
+        nonceBytes.append(datagram[(datagram.startIndex + 2)..<(datagram.startIndex + 8)])
+        guard let nonce = try? AES.GCM.Nonce(data: nonceBytes),
               let box = try? AES.GCM.SealedBox(nonce: nonce, ciphertext: body, tag: tag),
               let plain = try? AES.GCM.open(box, using: direction.key,
                                             authenticating: header)

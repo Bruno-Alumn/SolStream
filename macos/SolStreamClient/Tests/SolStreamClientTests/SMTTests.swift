@@ -238,7 +238,7 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertEqual(pictures.count, 1)
         XCTAssertEqual(pictures.first?.bytes, payload)
         XCTAssertEqual(pictures.first?.isIdr, true)
-        XCTAssertEqual(reassembler.lastCompleteFrame, 1)
+        XCTAssertEqual(pictures.first?.frameId, 1)
     }
 
     func testAPictureLostWholeIsReportedDamaged() {

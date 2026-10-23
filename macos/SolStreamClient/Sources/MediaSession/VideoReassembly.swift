@@ -23,9 +23,6 @@ public final class VideoReassembler {
         public let frameId: UInt32
         public let bytes: Data
         public let isIdr: Bool
-        public let captureUs: UInt32
-        /// Milliseconds from this picture's first fragment to its last.
-        public let spreadMs: Double
     }
 
     public var onPicture: ((Picture) -> Void)?
@@ -38,8 +35,6 @@ public final class VideoReassembler {
 
     public private(set) var complete: UInt64 = 0
     public private(set) var damaged: UInt64 = 0
-    public private(set) var fragments: UInt64 = 0
-    public private(set) var lastCompleteFrame: UInt32 = 0
 
     /// Close a picture this long after its LAST fragment, not its first.
     ///
@@ -87,8 +82,6 @@ public final class VideoReassembler {
         var covered: [(start: Int, end: Int)] = []
         var total = -1
         var isIdr = false
-        var captureUs: UInt32 = 0
-        var firstSeen: UInt64
         var lastSeen: UInt64
 
         /// Record `[start, end)` as present, absorbing any range it touches or
@@ -132,23 +125,36 @@ public final class VideoReassembler {
     /// start a fresh assembly that then times out and asks for a keyframe.
     private var finished: Set<UInt32> = []
     private var highestSeen: UInt32 = 0
+    /// The buffer of the last picture that completed or was retired, kept so
+    /// the next picture does not allocate half a megabyte. It is not cleared:
+    /// a picture is emitted only once `covered` spans all of [0, total), and
+    /// `covered` records only what this picture's own fragments wrote.
+    private var spare: [UInt8]?
 
     public init() {}
+
+    private func takeBuffer() -> [UInt8] {
+        if let buffer = spare {
+            spare = nil
+            return buffer
+        }
+        return [UInt8](repeating: 0, count: 512 * 1024)
+    }
 
     private static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
 
     public func ingest(_ plaintext: Data) {
         guard plaintext.count > 16 else { return }
-        let b = [UInt8](plaintext)
+        plaintext.withUnsafeBytes { ingest($0) }
+    }
+
+    private func ingest(_ b: UnsafeRawBufferPointer) {
         guard b[0] == SMT.typeVideo else { return }
-        fragments &+= 1
 
         let flags = b[1]
         let frameId = (UInt32(b[4]) << 24) | (UInt32(b[5]) << 16)
                     | (UInt32(b[6]) << 8) | UInt32(b[7])
         let fragOff = (Int(b[8]) << 16) | (Int(b[9]) << 8) | Int(b[10])
-        let captureUs = (UInt32(b[12]) << 24) | (UInt32(b[13]) << 16)
-                      | (UInt32(b[14]) << 8) | UInt32(b[15])
         let payloadCount = b.count - 16
         guard payloadCount > 0, finished.contains(frameId) == false else { return }
 
@@ -179,14 +185,13 @@ public final class VideoReassembler {
         // half a megabyte per fragment, about a gigabyte a second at 20 Mbit/s,
         // on the receive thread. Every path below puts it back or retires it.
         var assembly = building.removeValue(forKey: frameId)
-            ?? Assembly(bytes: [UInt8](repeating: 0, count: 512 * 1024),
-                        firstSeen: stamp, lastSeen: stamp)
+            ?? Assembly(bytes: takeBuffer(), lastSeen: stamp)
         let end = fragOff + payloadCount
         if end > Self.maxPictureBytes {
             // Past what the wire format can address, so refuse the whole
             // picture and say so. Assembling the part that fits would hand the
             // decoder a picture with a hole where the rest belongs.
-            building.removeValue(forKey: frameId)
+            spare = assembly.bytes
             finished.insert(frameId)
             damaged &+= 1
             onDamaged?(frameId)
@@ -202,16 +207,13 @@ public final class VideoReassembler {
             assembly.bytes.append(contentsOf:
                 repeatElement(UInt8(0), count: grown - assembly.bytes.count))
         }
-        b.withUnsafeBufferPointer { source in
-            assembly.bytes.withUnsafeMutableBufferPointer { destination in
-                destination.baseAddress!.advanced(by: fragOff)
-                    .update(from: source.baseAddress!.advanced(by: 16), count: payloadCount)
-            }
+        assembly.bytes.withUnsafeMutableBytes { destination in
+            destination.baseAddress!.advanced(by: fragOff)
+                .copyMemory(from: b.baseAddress!.advanced(by: 16), byteCount: payloadCount)
         }
         assembly.cover(fragOff, end)
         assembly.lastSeen = stamp
         if flags & SMT.flagIdr != 0 { assembly.isIdr = true }
-        if flags & SMT.flagFrameStart != 0 { assembly.captureUs = captureUs }
         if flags & SMT.flagFrameEnd != 0 { assembly.total = end }
 
         if assembly.isComplete {
@@ -237,13 +239,10 @@ public final class VideoReassembler {
             let picture = Picture(
                 frameId: frameId,
                 bytes: Data(assembly.bytes[0..<assembly.total]),
-                isIdr: assembly.isIdr,
-                captureUs: assembly.captureUs == 0 ? captureUs : assembly.captureUs,
-                spreadMs: Double(stamp - assembly.firstSeen) / 1e6)
-            building.removeValue(forKey: frameId)
+                isIdr: assembly.isIdr)
+            spare = assembly.bytes
             finished.insert(frameId)
             complete &+= 1
-            if frameId > lastCompleteFrame { lastCompleteFrame = frameId }
             onPicture?(picture)
         } else {
             building[frameId] = assembly
@@ -260,6 +259,7 @@ public final class VideoReassembler {
             let idleMs = Double(stamp - assembly.lastSeen) / 1e6
             if idleMs > idleTimeoutMs {
                 building.removeValue(forKey: frameId)
+                spare = assembly.bytes
                 finished.insert(frameId)
                 damaged &+= 1
                 onDamaged?(frameId)
@@ -274,7 +274,7 @@ public final class VideoReassembler {
     private func retire(olderThan frameId: UInt32, reporting: Bool) {
         let older = building.keys.filter { $0 < frameId }.sorted()
         for lost in older {
-            building.removeValue(forKey: lost)
+            if let assembly = building.removeValue(forKey: lost) { spare = assembly.bytes }
             finished.insert(lost)
             damaged &+= 1
             if reporting { onDamaged?(lost) }
@@ -287,9 +287,4 @@ public final class VideoReassembler {
         finished = finished.filter { $0 >= floor }
     }
 
-    public func reset() {
-        building.removeAll()
-        finished.removeAll()
-        highestSeen = 0
-    }
 }
