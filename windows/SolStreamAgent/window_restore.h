@@ -52,8 +52,13 @@ constexpr int kRestorePlacementFailed = -1;
 
 /// Apply `saved` through `set`, read it back through `get`, and apply it again
 /// while the window has landed somewhere else and is getting closer. Returns
-/// the number of times `set` was called, or kRestorePlacementFailed when either
-/// Windows call failed. `matched` says whether it ended where it was asked to be.
+/// the number of times `set` was called, or kRestorePlacementFailed when the
+/// first `set` failed. `matched` says whether it ended where it was asked to be.
+///
+/// Once a `set` has worked the window has been given its place, so a later
+/// failure -- a `get` that cannot read it back, a second `set` refused -- ends
+/// the tries without undoing that. Called failed, the restore would be owed
+/// again, and the snapshot replayed later over whatever the user had done since.
 int RestorePlacement(const WINDOWPLACEMENT& saved,
                      const std::function<bool(const WINDOWPLACEMENT&)>& set,
                      const std::function<bool(WINDOWPLACEMENT&)>& get,

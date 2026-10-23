@@ -2811,7 +2811,8 @@ void TestRestorePlacement() {
         CHECK(calls == kRestorePlacementAttempts);
         CHECK(!matched);
     }
-    // A refused Windows call is a failed restore, however many calls came first.
+    // Refused the first time, the restore failed; once one call has put the
+    // window back, a later failure ends the tries without undoing it.
     {
         FakeWindow window;
         window.fail_set = true;
@@ -2820,7 +2821,22 @@ void TestRestorePlacement() {
         CHECK(!matched);
         FakeWindow unread;
         unread.fail_get = true;
-        CHECK(Restore(unread, saved, &matched) == kRestorePlacementFailed);
+        unread.dpi = 120;   // already on that monitor, so it lands exactly
+        matched = true;
+        // Put back, but not read back: given its place, and not tried again.
+        CHECK(Restore(unread, saved, &matched) == 1);
+        CHECK(!matched);
+        CHECK(unread.sets == 1);
+        CHECK(PlacementDistance(want, unread.normal) == 0);
+        // A second try refused after a first that worked: the first stands.
+        int calls = 0;
+        const int tries = RestorePlacement(
+            saved,
+            [&calls](const WINDOWPLACEMENT&) { return ++calls == 1; },
+            [](WINDOWPLACEMENT& p) { p.rcNormalPosition = RECT{0, 0, 10, 10}; return true; },
+            &matched);
+        CHECK(tries == 1);
+        CHECK(calls == 2);
         CHECK(!matched);
     }
     CHECK(PlacementDistance(RECT{0, 0, 10, 10}, RECT{1, -1, 12, 7}) == 1 + 1 + 2 + 3);

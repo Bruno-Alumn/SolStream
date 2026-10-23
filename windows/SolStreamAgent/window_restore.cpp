@@ -61,13 +61,13 @@ int RestorePlacement(const WINDOWPLACEMENT& saved,
     long long best = LLONG_MAX;
     for (int attempt = 0; attempt < kRestorePlacementAttempts; ++attempt) {
         if (!set(saved)) {
-            return kRestorePlacementFailed;
+            return calls == 0 ? kRestorePlacementFailed : calls;
         }
         ++calls;
         WINDOWPLACEMENT now{};
         now.length = sizeof(now);
         if (!get(now)) {
-            return kRestorePlacementFailed;
+            break;
         }
         const long long distance = PlacementDistance(saved.rcNormalPosition,
                                                      now.rcNormalPosition);

@@ -3166,11 +3166,17 @@ solstream::RestoreOutcome RestoreWindow(const WindowLock& saved) {
     // Drop back out of the always-on-top band unless the window was already in
     // it: left set, the window floats above everything the user does next with
     // no visible cause. Asynchronous, because nothing measures it.
+    //
+    // A refusal is said, but does not make the restore owed again: the frame
+    // and place below are given back regardless, and a restore tried again
+    // later would put the window back where it was before the session, over
+    // wherever the user has moved it since.
     const bool z_order_failed =
         SetWindowPos(window, saved.saved_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
                      0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
                      | SWP_ASYNCWINDOWPOS) == FALSE;
+    const DWORD z_order_error = z_order_failed ? GetLastError() : 0;
     // And put it back where it was. Managed windows are parked on the virtual
     // display, whose origin sits off the side of the real desktop, so a window
     // left at those coordinates is not merely misplaced -- it is invisible, on
@@ -3207,10 +3213,16 @@ solstream::RestoreOutcome RestoreWindow(const WindowLock& saved) {
         const RECT& wanted = saved.saved_placement.rcNormalPosition;
         WINDOWPLACEMENT now{};
         now.length = sizeof(now);
-        GetWindowPlacement(window, &now);
+        const bool read_back = GetWindowPlacement(window, &now) != FALSE;
         const RECT& got = now.rcNormalPosition;
         const std::string title = WindowTitleForLog(window);
-        if (matched) {
+        if (!read_back) {
+            Log("[restore] \"%s\" asked back to %ldx%ld at %ld,%ld; where it settled "
+                "could not be read (%d %s)",
+                title.empty() ? "(untitled)" : title.c_str(),
+                wanted.right - wanted.left, wanted.bottom - wanted.top,
+                wanted.left, wanted.top, tries, tries == 1 ? "try" : "tries");
+        } else if (matched) {
             Log("[restore] \"%s\" back at %ldx%ld at %ld,%ld (%d %s)%s",
                 title.empty() ? "(untitled)" : title.c_str(),
                 wanted.right - wanted.left, wanted.bottom - wanted.top,
@@ -3226,8 +3238,12 @@ solstream::RestoreOutcome RestoreWindow(const WindowLock& saved) {
                 tries, tries == 1 ? "try" : "tries", visible ? "" : ", left hidden");
         }
     }
-    return z_order_failed ? solstream::RestoreOutcome::Retry
-                          : solstream::RestoreOutcome::Restored;
+    if (z_order_failed) {
+        Log("[restore] window %llu could not be put back in its place in the "
+            "window order (%lu); its frame and place are back",
+            (unsigned long long) IdFromWindow(window), z_order_error);
+    }
+    return solstream::RestoreOutcome::Restored;
 }
 
 /// The slot's tenancy also versions its recovery debt, so stale startup work
