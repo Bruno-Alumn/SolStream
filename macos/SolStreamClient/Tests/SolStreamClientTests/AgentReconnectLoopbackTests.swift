@@ -349,16 +349,17 @@ final class AgentReconnectLoopbackTests: XCTestCase {
 
     // MARK: - Asking for the displays again
 
-    /// An answer with no display in it -- one that did not parse -- leaves the
-    /// greeting's list alone; a real one replaces it.
-    func testAnEmptyDisplayAnswerDoesNotWipeTheList() throws {
+    /// A reply with no list in it is no answer: the caller is told nil and the
+    /// greeting's list is kept. A list with nothing in it is an answer, and
+    /// replaces the list, so a display that has gone is not streamed from.
+    func testADisplayAnswerWithNoListKeepsTheListAndAnEmptyOneReplacesIt() throws {
         let seen = Observations()
         let host = ScriptedHost { _, connection in
             connection.greetWithoutAuth()
             seen.set("first", ScriptedHost.json(connection.readLine(timeout: 5))?["cmd"])
-            connection.send(#"{"type":"displays","displays":[]}"#)
+            connection.send(#"{"type":"displays"}"#)
             _ = connection.readLine(timeout: 5)
-            connection.send(ScriptedHost.displays.replacingOccurrences(of: "1920", with: "2560"))
+            connection.send(#"{"type":"displays","displays":[]}"#)
             Thread.sleep(forTimeInterval: 2)
         }
         let port = try host.start()
@@ -368,19 +369,22 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         connectAndWaitForGreeting(agent)
         XCTAssertEqual(agent.displays.map(\.width), [1920])
 
-        let empty = expectation(description: "empty answer")
+        let noList = expectation(description: "reply with no list")
+        agent.refreshDisplays { displays in
+            XCTAssertNil(displays, "the caller is told there was no answer")
+            noList.fulfill()
+        }
+        wait(for: [noList], timeout: 5)
+        XCTAssertEqual(seen.get("first") as? String, "displays")
+        XCTAssertEqual(agent.displays.map(\.width), [1920], "the greeting's list is kept")
+
+        let empty = expectation(description: "empty list")
         agent.refreshDisplays { displays in
             XCTAssertEqual(displays, [], "the caller is told what came")
             empty.fulfill()
         }
         wait(for: [empty], timeout: 5)
-        XCTAssertEqual(seen.get("first") as? String, "displays")
-        XCTAssertEqual(agent.displays.map(\.width), [1920], "the greeting's list is kept")
-
-        let real = expectation(description: "real answer")
-        agent.refreshDisplays { _ in real.fulfill() }
-        wait(for: [real], timeout: 5)
-        XCTAssertEqual(agent.displays.map(\.width), [2560])
+        XCTAssertEqual(agent.displays, [], "a PC with no display says so")
     }
 
     // MARK: - Helpers

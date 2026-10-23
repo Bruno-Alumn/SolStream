@@ -35,6 +35,12 @@ public struct RemoteDisplay: Sendable, Equatable {
         let lowered = adapter.lowercased()
         return lowered.contains("virtual") || lowered.contains("idd")
     }
+
+    /// The same display at another size, as a canvas reply reports it.
+    public func resized(width: Int, height: Int) -> RemoteDisplay {
+        RemoteDisplay(name: name, adapter: adapter, x: x, y: y, width: width, height: height,
+                      isPrimary: isPrimary, isCaptured: isCaptured)
+    }
 }
 
 /// A top-level window on the Windows host.
@@ -1318,16 +1324,20 @@ public final class AgentConnection {
     }
 
     /// Ask for the host's displays.
-    public func refreshDisplays(completion: (([RemoteDisplay]) -> Void)? = nil) {
+    ///
+    /// The completion gets nil when there was no usable answer -- the request
+    /// failed, or the reply held no list -- and the list already held is kept.
+    /// An answer of no displays is an answer, though: a PC whose session is
+    /// locked or whose virtual display has just gone can say so, and keeping
+    /// the old list would stream from a display that is not there.
+    public func refreshDisplays(completion: (([RemoteDisplay]?) -> Void)? = nil) {
         send(["cmd": "displays"]) { [weak self] result in
-            guard case .success(let message) = result else {
-                completion?([])
+            guard case .success(let message) = result,
+                  let displays = Self.parseDisplays(message) else {
+                completion?(nil)
                 return
             }
-            let displays = Self.parseDisplays(message)
-            // An empty answer is one that did not parse: a PC always has a
-            // display. It must not wipe the list the greeting gave.
-            if !displays.isEmpty { self?.setDisplays(displays) }
+            self?.setDisplays(displays)
             completion?(displays)
         }
     }
@@ -2048,7 +2058,7 @@ public final class AgentConnection {
             sessionLostAt = nil
             busySince = nil
             busyRetries = 0
-            let snapshot = Self.parseDisplays(message)
+            let snapshot = Self.parseDisplays(message) ?? []
             setDisplays(snapshot)
             Log.info("[agent] \(snapshot.count) display(s): "
                      + snapshot.map { "\($0.name) \($0.width)x\($0.height)" }.joined(separator: ", "))
@@ -2163,8 +2173,10 @@ public final class AgentConnection {
         return String(decoding: rest[..<close], as: UTF8.self)
     }
 
-    private static func parseDisplays(_ message: [String: Any]) -> [RemoteDisplay] {
-        guard let raw = message["displays"] as? [[String: Any]] else { return [] }
+    /// nil for a reply that holds no list at all, which is not the same as a
+    /// list with nothing in it.
+    private static func parseDisplays(_ message: [String: Any]) -> [RemoteDisplay]? {
+        guard let raw = message["displays"] as? [[String: Any]] else { return nil }
         return raw.compactMap { entry in
             guard let name = entry["name"] as? String,
                   let x = entry["x"] as? Int, let y = entry["y"] as? Int,

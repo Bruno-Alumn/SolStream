@@ -531,13 +531,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// was none, and streaming the real monitor. A plain request, which every
     /// host answers; failing that, the list already held.
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow]) {
-        let held = agent.displays
         agent.refreshDisplays { [weak self] displays in
             DispatchQueue.main.async {
                 self?.start(host: host, agent: agent, targets: targets,
-                            displays: displays.isEmpty ? held : displays)
+                            displays: Self.displaysToUse(answer: displays, held: agent.displays))
             }
         }
+    }
+
+    /// The capture display after a canvas change: as the PC lists it now, or,
+    /// with no listing to go on, at the size the canvas reply said it set --
+    /// never at its old size, which every crop would then be worked out from.
+    static func resizedCapture(_ capture: RemoteDisplay, listed: [RemoteDisplay]?,
+                               achieved: CGSize?) -> RemoteDisplay {
+        if let listed = listed?.first(where: { $0.name == capture.name }) { return listed }
+        guard let achieved else { return capture }
+        return capture.resized(width: Int(achieved.width), height: Int(achieved.height))
+    }
+
+    /// The displays to pick from: the PC's answer when it gave one, even an
+    /// empty one, and the list already held only when there was no answer.
+    static func displaysToUse(answer: [RemoteDisplay]?, held: [RemoteDisplay]) -> [RemoteDisplay] {
+        answer ?? held
     }
 
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow],
@@ -578,9 +593,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // virtual-desktop coordinates.
             agent.refreshDisplays { displays in
                 DispatchQueue.main.async {
-                    let updated = displays.first { $0.name == capture.name } ?? capture
+                    let updated = Self.resizedCapture(capture, listed: displays, achieved: achieved)
                     Log.info("[app] host now rendering at \(updated.width)x\(updated.height) "
-                             + "@ \(updated.x),\(updated.y)")
+                             + "@ \(updated.x),\(updated.y)"
+                             + (displays?.contains { $0.name == capture.name } == true
+                                ? "" : " (not listed again; the size it said it set)"))
                     self.openApps(host: host, agent: agent, targets: targets,
                                   display: updated, config: self.baseConfig)
                 }
