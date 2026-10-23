@@ -6,17 +6,35 @@
 // as not for clipboard tools, which is how a password manager keeps a password
 // out of clipboard history -- and has to keep it off the Mac too.
 //
-// Kept out of main.cpp so the tests can reach it. The transfer itself, and the
-// lock around Windows' clipboard, stay there.
+// Kept out of main.cpp so the tests can reach it, and the transfer with it:
+// the replies to the Mac's `clipboard` command, and the lock around Windows'
+// clipboard they take.
 
 #pragma once
 
 #include <windows.h>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 
 namespace solstream {
+
+// Transport and payload budgets. These have to be picked together, and together
+// with the matching pair in AgentConnection.swift, because the clipboard is the
+// one command whose payload is sized by the user rather than by the protocol.
+//
+// JSON escaping can expand text sixfold — a control byte becomes \u00xx — so the
+// line limit must clear six times the payload cap at both ends. Getting this
+// wrong is not a truncated clipboard: whichever side hits its line cap first
+// tears down the control channel mid-session.
+constexpr size_t kMaxClipboardBytes = 256 * 1024;
+constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
+// A set from the Mac is cut to the cap while its lines still end in LF, then
+// given Windows' CRs, which can double it -- and is taken at whatever size it
+// arrives. So the line limit has to clear six times that as well.
+static_assert(6 * 2 * kMaxClipboardBytes < kMaxLineBytes,
+              "a clipboard set, escaped at worst, must fit in a line");
 
 /// Text as Windows keeps it on the clipboard: every line ending CRLF.
 ///
@@ -74,5 +92,20 @@ HGLOBAL ClipboardDwordData(DWORD value);
 /// Windows' clipboard history or its cloud clipboard. The caller must have the
 /// clipboard open and own it, having emptied it.
 void MarkClipboardPrivate();
+
+/// Bumped by Windows whenever anything changes the clipboard, so the Mac can poll
+/// for "has it changed" without transferring the contents every time.
+DWORD ClipboardSequence();
+
+/// The reply to a `clipboard` that asks what is there: its text in the Mac's
+/// line endings, cut to kMaxClipboardBytes, or none when it is private.
+std::string ClipboardGetJson();
+
+/// The reply to a `clipboard` that carries text, having put it on Windows'
+/// clipboard in Windows' line endings.
+std::string ClipboardSetJson(const std::string& text);
+
+/// The reply to a `clipboard` whose sequence number is still the current one.
+std::string ClipboardUnchangedJson();
 
 }  // namespace solstream
