@@ -1,5 +1,7 @@
 #include "util.h"
 
+#include <bcrypt.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
@@ -162,6 +164,38 @@ std::vector<unsigned char> FromHex(const std::string& hex) {
         out.push_back((unsigned char) ((high << 4) | low));
     }
     return out;
+}
+
+std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
+                                      const std::vector<unsigned char>& data) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                                    nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG))) {
+        return {};
+    }
+    std::vector<unsigned char> out(32);
+    const bool ok = BCRYPT_SUCCESS(BCryptHash(algorithm, (PUCHAR) key.data(),
+                                              (ULONG) key.size(), (PUCHAR) data.data(),
+                                              (ULONG) data.size(), out.data(), 32));
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return ok ? out : std::vector<unsigned char>{};
+}
+
+bool ProofMatchesHmac(const std::vector<unsigned char>& key,
+                      const std::vector<unsigned char>& message,
+                      const std::vector<unsigned char>& proof) {
+    if (proof.size() != 32) {
+        return false;
+    }
+    const std::vector<unsigned char> expected = HmacSha256(key, message);
+    if (expected.size() != 32) {
+        return false;
+    }
+    unsigned char difference = 0;
+    for (size_t i = 0; i < 32; ++i) {
+        difference |= (unsigned char) (expected[i] ^ proof[i]);
+    }
+    return difference == 0;
 }
 
 std::wstring LocalDataPath(const wchar_t* file) {
