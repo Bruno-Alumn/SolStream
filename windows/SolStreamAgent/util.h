@@ -33,6 +33,16 @@ std::string ToHex(const unsigned char* bytes, size_t count);
 std::string ToHex(const std::vector<unsigned char>& bytes);
 std::vector<unsigned char> FromHex(const std::string& hex);
 
+/// HMAC-SHA256 through BCrypt, or empty if BCrypt refuses.
+std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
+                                      const std::vector<unsigned char>& data);
+
+/// Whether `proof` is HMAC-SHA256(key, message), compared in constant time.
+/// False for a proof that is not 32 bytes, or when BCrypt refuses.
+bool ProofMatchesHmac(const std::vector<unsigned char>& key,
+                      const std::vector<unsigned char>& message,
+                      const std::vector<unsigned char>& proof);
+
 /// `%LOCALAPPDATA%\SolStream\<file>`, creating the directory if needed. Empty
 /// when LOCALAPPDATA is not set. Where the token, the media counter and the
 /// host's log live.

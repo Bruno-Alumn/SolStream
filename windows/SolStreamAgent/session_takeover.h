@@ -45,7 +45,7 @@ std::vector<unsigned char> TakeoverProofMessage(const std::vector<unsigned char>
                                                 const std::vector<unsigned char>& cnonce,
                                                 const std::string& client_id);
 
-/// HMAC-SHA256 through BCrypt, or empty if BCrypt refuses.
+/// HmacSha256 (util.h) under the name the tests know it by.
 std::vector<unsigned char> TakeoverHmac(const std::vector<unsigned char>& key,
                                         const std::vector<unsigned char>& data);
 
