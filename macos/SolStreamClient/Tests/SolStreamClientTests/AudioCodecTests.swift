@@ -266,16 +266,19 @@ final class AudioCodecTests: XCTestCase {
 
     /// The popover's "all the PC's sound" is said only when the streamed apps'
     /// alone was asked for and the whole PC's promised -- as a host on
-    /// Windows 10 answers -- and not with the sound off.
+    /// Windows 10 answers -- and not with the sound off, nor for a host that
+    /// predates the choice and so said nothing about it.
     func testTheMacNoticesAHostThatSendsTheWholePCsSound() {
         let apps = StreamConfig(audio: true, audioSource: .apps)
-        XCTAssertTrue(StreamSession.hostSendsWholePC(asked: apps, answered: .system))
-        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: apps, answered: .apps))
+        XCTAssertTrue(StreamSession.hostSendsWholePC(asked: apps, answered: .system, stated: true))
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: apps, answered: .system, stated: false))
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: apps, answered: .apps, stated: true))
         var silent = apps
         silent.audio = false
-        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: silent, answered: .system))
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: silent, answered: .system, stated: true))
         let everything = StreamConfig(audio: true, audioSource: .system)
-        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: everything, answered: .system))
+        XCTAssertFalse(StreamSession.hostSendsWholePC(asked: everything, answered: .system,
+                                                      stated: true))
     }
 
     // MARK: - Helpers

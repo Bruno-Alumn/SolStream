@@ -1164,6 +1164,9 @@ public final class AgentConnection {
         /// Whose sound the host said it will send; the whole PC's from a host
         /// that said nothing.
         public var audioSource: AudioSource = .system
+        /// The host named its sound's source, rather than predating the choice
+        /// and so saying nothing.
+        public var audioSourceStated = false
         /// The host takes keys by position, as scan codes. False for a host
         /// that said nothing, which takes them only by virtual key.
         public var takesScanCodes = false
@@ -1320,6 +1323,7 @@ public final class AgentConnection {
         }
         return MediaSession(keys: keys, port: port, streaming: streaming, message: message2,
                             audioCodec: audioCodec, audioSource: audioSource,
+                            audioSourceStated: reply["audioSource"] != nil,
                             takesScanCodes: Self.takesScanCodes(inReply: reply))
     }
 

@@ -327,13 +327,13 @@ final class QualityPillTests: XCTestCase {
         stats.hostSendsWholePC = true
         pill.stats = stats
         XCTAssertTrue(Self.words(in: detail).contains(
-            "Playing all the PC's sound: the streamed apps' alone needs Windows 11."))
+            "Playing from the PC. This version of Windows sends all the PC's sound."))
         Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
         XCTAssertLessThanOrEqual(detail.bounds.height, 460)
         stats.audioActive = false
         pill.stats = stats
         XCTAssertTrue(Self.words(in: detail).contains(
-            "Nothing playing. The PC sends all its sound: the streamed apps' alone needs Windows 11."))
+            "Nothing playing on the PC right now. This version of Windows sends all the PC's sound."))
         Self.assertInside(detail, [try XCTUnwrap(Self.settingsLink(in: detail))])
         XCTAssertLessThanOrEqual(detail.bounds.height, 460)
     }

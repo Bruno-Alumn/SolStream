@@ -25,7 +25,7 @@ final class QualityPill: DS.Box {
         /// one that predates the choice does; see StreamSession.
         var hostIgnoresSoundQuality: Bool = false
         /// The host answered a request for the streamed apps' sound with the
-        /// whole PC's, as one on Windows 10 does; see StreamSession.
+        /// whole PC's, as one on Windows 10 does, and said so; see StreamSession.
         var hostSendsWholePC: Bool = false
         var hostDisplay: String = ""
         /// The host reports its cursor going away -- declared on its pushes,
@@ -580,9 +580,8 @@ final class QualityPill: DS.Box {
         }
         if muted { return audioActive ? "Muted on this Mac. The PC is still playing." : "Muted on this Mac." }
         if wholePC {
-            return audioActive
-                ? "Playing all the PC's sound: the streamed apps' alone needs Windows 11."
-                : "Nothing playing. The PC sends all its sound: the streamed apps' alone needs Windows 11."
+            return (audioActive ? "Playing from the PC." : "Nothing playing on the PC right now.")
+                + " This version of Windows sends all the PC's sound."
         }
         return audioActive ? "Playing from the PC." : "Nothing playing on the PC right now."
     }
