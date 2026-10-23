@@ -143,10 +143,9 @@ public final class InputCapture {
     /// nil for not over it. Unset, the window server is asked.
     var pointerStandIn: (() -> CGPoint?)?
 
-    /// Modifier flags as the host was last brought to them, so transitions can
-    /// be turned into individual key down/up events. `lastDeviceFlags` holds
-    /// only the modifier keys' device bits; see `heldModifierBits`.
-    private var lastModifierFlags: NSEvent.ModifierFlags = []
+    /// The modifier keys the host was last brought to, as device bits, so
+    /// transitions can be turned into individual key down/up events; see
+    /// `heldModifierBits`.
     private var lastDeviceFlags: UInt = 0
 
     /// The host takes keys by position, as scan codes, and so is sent them
@@ -180,13 +179,18 @@ public final class InputCapture {
     /// keyboard that sent it, and a Mac can have an ANSI one built in and an
     /// ISO one plugged in; the last keyboard used stands in when it does not.
     static func isISOKeyboard(_ event: NSEvent) -> Bool {
-        var type = Int64(LMGetKbdType())
-        if let fromEvent = event.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType),
-           fromEvent > 0 {
-            type = fromEvent
-        }
-        return KBGetLayoutType(Int16(truncatingIfNeeded: type))
+        KBGetLayoutType(Int16(truncatingIfNeeded: keyboardType(of: event)))
             == PhysicalKeyboardLayoutType(kKeyboardISO)
+    }
+
+    /// The keyboard type an event names, or the last keyboard used's when it
+    /// names none.
+    private static func keyboardType(of event: NSEvent?) -> Int64 {
+        if let fromEvent = event?.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType),
+           fromEvent > 0 {
+            return fromEvent
+        }
+        return Int64(LMGetKbdType())
     }
 
     /// The packet for one key, in whichever form the host takes.
@@ -230,8 +234,10 @@ public final class InputCapture {
     ///
     /// Mac Control keeps mapping to Windows Control too, so muscle memory from
     /// either side works. That makes two physical keys share one Windows key,
-    /// which `otherKeyHolds` exists to handle.
-    let modifierKeys: [ModifierKey] = [
+    /// which `modifierChanges` exists to handle.
+    ///
+    /// Left then right, family by family in `modifierFamilies`' order.
+    static let modifierKeys: [ModifierKey] = [
         ModifierKey(macKeyCode: 0x38, windowsKeyCode: 0xA0, scanCode: 0x2A,
                     deviceMask: 0x0000_0002),  // L shift
         ModifierKey(macKeyCode: 0x3C, windowsKeyCode: 0xA1, scanCode: 0x36,
@@ -250,32 +256,16 @@ public final class InputCapture {
                     deviceMask: 0x0000_0010),  // R cmd → R ctrl
     ]
 
-    /// Is some *other* physical Mac key that maps to the same Windows key still
-    /// down?
-    ///
-    /// Control and Command both become Windows Control, so releasing one while
-    /// the other is held would send a key-up for a key the user is still
-    /// pressing: the host drops out of Control mid-chord, and the next letter
-    /// gets typed into the document instead of running the shortcut. The
-    /// symmetric case matters less but is skipped for the same reason — a second
-    /// key-down for a key already down is noise.
-    static func otherKeyHolds(_ key: ModifierKey, flags: UInt,
-                              among keys: [ModifierKey]) -> Bool {
-        keys.contains {
-            $0.windowsKeyCode == key.windowsKeyCode
-                && $0.macKeyCode != key.macKeyCode
-                && (flags & $0.deviceMask) != 0
-        }
-    }
-
     /// Each modifier's shared flag, and the device bits of its left and
     /// right keys.
-    private static let modifierFamilies: [(flag: UInt, left: UInt, right: UInt)] = [
-        (NSEvent.ModifierFlags.shift.rawValue, 0x0000_0002, 0x0000_0004),
-        (NSEvent.ModifierFlags.control.rawValue, 0x0000_0001, 0x0000_2000),
-        (NSEvent.ModifierFlags.option.rawValue, 0x0000_0020, 0x0000_0040),
-        (NSEvent.ModifierFlags.command.rawValue, 0x0000_0008, 0x0000_0010),
-    ]
+    private static let modifierFamilies: [(flag: UInt, left: UInt, right: UInt)] =
+        zip([NSEvent.ModifierFlags.shift, .control, .option, .command],
+            stride(from: 0, to: modifierKeys.count, by: 2)).map { flag, left in
+            (flag.rawValue, modifierKeys[left].deviceMask, modifierKeys[left + 1].deviceMask)
+        }
+
+    /// The device bits of the two ⌘ keys.
+    private static let commandBits = modifierFamilies[3].left | modifierFamilies[3].right
 
     /// Which modifier keys an event's flags say are down, as device bits.
     ///
@@ -301,9 +291,15 @@ public final class InputCapture {
 
     /// The modifier key events that take the host from `old` to `new`, both
     /// device bits from `heldModifierBits`: releases first, then presses, and
-    /// each Windows key once, since Control and Command share one -- so letting
-    /// go of one while the other is held sends nothing, as `otherKeyHolds`
-    /// describes.
+    /// each Windows key once.
+    ///
+    /// Control and Command both become Windows Control, so letting go of one
+    /// while the other is held sends nothing. A key-up there would release a
+    /// key the user is still pressing: the host drops out of Control
+    /// mid-chord, and the next letter gets typed into the document instead of
+    /// running the shortcut. The symmetric case matters less but is skipped
+    /// for the same reason -- a second key-down for a key already down is
+    /// noise.
     static func modifierChanges(from old: UInt, to new: UInt,
                                 among keys: [ModifierKey]) -> [(key: ModifierKey, pressed: Bool)] {
         func held(_ bits: UInt) -> [UInt16: ModifierKey] {
@@ -363,11 +359,9 @@ public final class InputCapture {
     /// does not.
     ///
     /// By macOS key code, as the host was told it: a key's release is sent the
-    /// way its press was, whatever else is held by then.
-    private var heldKeys: [UInt16: HostKey] = [:]
-
-    /// The subset of `heldKeys` pressed while ⌘ was down — see `releaseChordKeys`.
-    private var chordKeys: Set<UInt16> = []
+    /// way its press was, whatever else is held by then. `chord` marks a key
+    /// pressed while ⌘ was down -- see `releaseChordKeys`.
+    private var heldKeys: [UInt16: (key: HostKey, chord: Bool)] = [:]
 
     /// Whether a key is physically down on this Mac right now, by macOS key
     /// code. Replaceable so the tests decide rather than the keyboard of the
@@ -445,7 +439,6 @@ public final class InputCapture {
         releaseHeldInput()
         removeMonitors()
         scrollResidual = .zero
-        followsDeadKey = false
     }
 
     // MARK: - Monitors
@@ -534,8 +527,8 @@ public final class InputCapture {
                     return true
                 }
             }
-            guard let key = held ?? Self.hostKey(forMacKey: keyCode,
-                                                 isISO: keyboardIsISO(event)) else {
+            guard let key = held?.key ?? Self.hostKey(forMacKey: keyCode,
+                                                      isISO: keyboardIsISO(event)) else {
                 noteUnmapped(event.keyCode)
                 return false
             }
@@ -547,20 +540,17 @@ public final class InputCapture {
                 if !keyStateAnswers, isKeyPhysicallyDown(event.keyCode) {
                     keyStateAnswers = true
                 }
-                heldKeys[event.keyCode] = key
                 // macOS does not reliably deliver the key-up for a key released
                 // while ⌘ is still held, and a key-down the host never sees
                 // released auto-repeats forever. Which keys were part of a ⌘
                 // chord is recorded here so they can be let go when ⌘ is.
-                if held == nil, event.modifierFlags.contains(.command) {
-                    chordKeys.insert(event.keyCode)
-                }
+                heldKeys[event.keyCode] = (key, held?.chord
+                                                ?? event.modifierFlags.contains(.command))
             } else {
                 heldKeys[event.keyCode] = nil
-                chordKeys.remove(event.keyCode)
             }
             onInput?(keyPacket(key, pressed: pressed,
-                               modifiers: modifiers(from: event.modifierFlags)))
+                               modifiers: Self.modifiers(from: event.modifierFlags)))
             // Everything that reached the host is consumed. The window is a
             // Windows application as far as the keyboard is concerned, so ⇥ must
             // not move focus around our own view tree and Space must not press
@@ -702,11 +692,7 @@ public final class InputCapture {
         let table = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue()
         guard let bytes = CFDataGetBytePtr(table) else { return nil }
         let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
-        var keyboardType = UInt32(LMGetKbdType())
-        if let fromEvent = event?.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType),
-           fromEvent > 0 {
-            keyboardType = UInt32(truncatingIfNeeded: fromEvent)
-        }
+        let keyboardType = UInt32(truncatingIfNeeded: Self.keyboardType(of: event))
         var typed: Set<String> = []
         for shift in [0, shiftKey] {
             for caps in [0, alphaLock] {
@@ -867,12 +853,7 @@ public final class InputCapture {
     /// release, and on a first start with nothing held, nothing at all.
     public func inputBecameLive() {
         guard isCapturing else { return }
-        heldKeys.removeAll()
-        chordKeys.removeAll()
-        heldButtons.removeAll()
-        lastModifierFlags = []
-        lastDeviceFlags = 0
-        followsDeadKey = false
+        forgetHostState()
         let flags = modifierFlagsNow()
         syncCapsLock(to: flags.contains(.capsLock))
         syncModifiers(to: flags)
@@ -892,12 +873,15 @@ public final class InputCapture {
     /// one puts it right.
     private func syncModifiers(to flags: NSEvent.ModifierFlags) {
         let held = Self.heldModifierBits(flags.rawValue, last: lastDeviceFlags)
-        let modifiers = modifiers(from: flags)
-        for change in Self.modifierChanges(from: lastDeviceFlags, to: held, among: modifierKeys) {
-            onInput?(keyPacket(change.key.hostKey, pressed: change.pressed, modifiers: modifiers))
+        if held != lastDeviceFlags {
+            let modifiers = Self.modifiers(from: flags)
+            for change in Self.modifierChanges(from: lastDeviceFlags, to: held,
+                                               among: Self.modifierKeys) {
+                onInput?(keyPacket(change.key.hostKey, pressed: change.pressed,
+                                   modifiers: modifiers))
+            }
         }
-        let commandWentUp = lastModifierFlags.contains(.command) && !flags.contains(.command)
-        lastModifierFlags = flags
+        let commandWentUp = lastDeviceFlags & Self.commandBits != 0 && !flags.contains(.command)
         lastDeviceFlags = held
         if commandWentUp {
             releaseChordKeys()
@@ -922,16 +906,18 @@ public final class InputCapture {
     /// walking, and W was up on the PC until macOS repeated it -- or for good,
     /// with key repeat off.
     private func releaseChordKeys() {
-        for code in chordKeys.sorted() {
-            if keyStateAnswers, isKeyPhysicallyDown(code) { continue }
-            guard let key = heldKeys.removeValue(forKey: code) else { continue }
-            onInput?(keyPacket(key, pressed: false, modifiers: []))
+        for code in heldKeys.filter({ $0.value.chord }).keys.sorted() {
+            if keyStateAnswers, isKeyPhysicallyDown(code) {
+                heldKeys[code]?.chord = false
+                continue
+            }
+            guard let held = heldKeys.removeValue(forKey: code) else { continue }
+            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
         }
-        chordKeys.removeAll()
         guard keyStateAnswers else { return }
         for code in heldKeys.keys.sorted() where !isKeyPhysicallyDown(code) {
-            guard let key = heldKeys.removeValue(forKey: code) else { continue }
-            onInput?(keyPacket(key, pressed: false, modifiers: []))
+            guard let held = heldKeys.removeValue(forKey: code) else { continue }
+            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
         }
     }
 
@@ -939,26 +925,29 @@ public final class InputCapture {
     /// keeps the key down — and Windows auto-repeats a key it never sees
     /// released, so a single missed key-up types forever.
     private func releaseHeldInput() {
-        for key in heldKeys.values {
-            onInput?(keyPacket(key, pressed: false, modifiers: []))
+        for held in heldKeys.values {
+            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
         }
-        heldKeys.removeAll()
-        chordKeys.removeAll()
-
         for button in heldButtons {
             onInput?(SMTInput.mouseButton(button, pressed: false))
         }
-        heldButtons.removeAll()
-
         // Deduplicated: Control and Command share a Windows key code, so a hand
         // holding both would otherwise send two ups for it.
         var released: Set<UInt16> = []
-        for key in modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
+        for key in Self.modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             guard released.insert(key.windowsKeyCode).inserted else { continue }
             onInput?(keyPacket(key.hostKey, pressed: false, modifiers: []))
         }
-        lastModifierFlags = []
+        forgetHostState()
+    }
+
+    /// Forget every key, button and modifier the host was told is down: it
+    /// has just been let go of them, or a new session holds none.
+    private func forgetHostState() {
+        heldKeys.removeAll()
+        heldButtons.removeAll()
         lastDeviceFlags = 0
+        followsDeadKey = false
     }
 
     /// The modifier bitmask that rides along with a key event.
@@ -975,10 +964,6 @@ public final class InputCapture {
         if flags.contains(.option) { result.insert(.alt) }
         if flags.contains(.capsLock) { result.insert(.capsLock) }
         return result
-    }
-
-    private func modifiers(from flags: NSEvent.ModifierFlags) -> SMTInput.Modifiers {
-        Self.modifiers(from: flags)
     }
 
     // MARK: - Mouse

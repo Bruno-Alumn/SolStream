@@ -6,10 +6,8 @@ import XCTest
 /// Checks the keyboard translation: Command carries Windows Control, the
 /// Windows key is unreachable, and SolStream's own shortcuts stay on this Mac.
 final class KeyboardMappingTests: XCTestCase {
-    private let capture = InputCapture()
-
     private func key(_ macKeyCode: UInt16) -> InputCapture.ModifierKey {
-        guard let match = capture.modifierKeys.first(where: { $0.macKeyCode == macKeyCode }) else {
+        guard let match = InputCapture.modifierKeys.first(where: { $0.macKeyCode == macKeyCode }) else {
             fatalError("no modifier mapping for mac key 0x\(String(macKeyCode, radix: 16))")
         }
         return match
@@ -27,7 +25,7 @@ final class KeyboardMappingTests: XCTestCase {
     /// be a local application must never do.
     func testNoKeyCanReachTheWindowsKey() {
         let windowsKey: Set<UInt16> = [0x5B, 0x5C]
-        for entry in capture.modifierKeys {
+        for entry in InputCapture.modifierKeys {
             XCTAssertFalse(windowsKey.contains(entry.windowsKeyCode),
                            "mac key 0x\(String(entry.macKeyCode, radix: 16)) still sends the Windows key")
         }
@@ -43,42 +41,6 @@ final class KeyboardMappingTests: XCTestCase {
     func testControlStillSendsControl() {
         XCTAssertEqual(key(leftControl).windowsKeyCode, 0xA2)
         XCTAssertEqual(key(rightControl).windowsKeyCode, 0xA3)
-    }
-
-    // MARK: - Two keys, one Windows key
-
-    /// Letting go of ⌘ while ⌃ is still held must not tell the host Control is
-    /// up: the user is still pressing it, and the host would drop out of the
-    /// chord and type the next letter into the document.
-    func testReleasingCommandKeepsControlDownWhileControlIsHeld() {
-        let bothDown = key(leftCommand).deviceMask | key(leftControl).deviceMask
-        // ⌘ has just come up; ⌃ is still down in the reported flags.
-        let afterCommandUp = bothDown & ~key(leftCommand).deviceMask
-        XCTAssertTrue(InputCapture.otherKeyHolds(key(leftCommand), flags: afterCommandUp,
-                                                 among: capture.modifierKeys),
-                      "the key-up for ⌘ would have released a Control the hand is still holding")
-    }
-
-    func testReleasingTheLastOneDoesSendTheKeyUp() {
-        XCTAssertFalse(InputCapture.otherKeyHolds(key(leftControl), flags: 0,
-                                                  among: capture.modifierKeys))
-    }
-
-    /// The left and right halves are separate Windows keys, so one must not
-    /// suppress the other.
-    func testTheTwoSidesAreIndependent() {
-        let rightControlDown = key(rightControl).deviceMask
-        XCTAssertFalse(InputCapture.otherKeyHolds(key(leftCommand), flags: rightControlDown,
-                                                  among: capture.modifierKeys))
-    }
-
-    /// Shift is nobody else's key code, so it is never suppressed.
-    func testShiftIsUnaffected() {
-        let everythingElse = capture.modifierKeys
-            .filter { $0.macKeyCode != 0x38 }
-            .reduce(UInt(0)) { $0 | $1.deviceMask }
-        XCTAssertFalse(InputCapture.otherKeyHolds(key(0x38), flags: everythingElse,
-                                                  among: capture.modifierKeys))
     }
 
     // MARK: - What stays on this Mac
@@ -361,7 +323,7 @@ final class KeyboardMappingTests: XCTestCase {
 
     /// Control and Command share Windows Control: the changes say it once.
     func testTheChangesSayEachWindowsKeyOnce() {
-        let keys = capture.modifierKeys
+        let keys = InputCapture.modifierKeys
         let both = leftCommandBit | leftControlBit
         XCTAssertEqual(InputCapture.modifierChanges(from: 0, to: both, among: keys)
                         .map { [$0.key.windowsKeyCode, $0.pressed ? 1 : 0] }, [[0xA2, 1]])

@@ -137,16 +137,14 @@ final class KeyboardMapTests: XCTestCase {
                 XCTAssertFalse([0x5B, 0x5C].contains(vk(mac, iso: iso)))
             }
         }
-        let capture = InputCapture()
-        for key in capture.modifierKeys {
+        for key in InputCapture.modifierKeys {
             XCTAssertFalse([0xE05B, 0xE05C].contains(key.scanCode))
         }
     }
 
     /// Command is Control by position too, side for side.
     func testCommandIsControlByPlace() {
-        let capture = InputCapture()
-        let byMac = Dictionary(uniqueKeysWithValues: capture.modifierKeys.map { ($0.macKeyCode, $0) })
+        let byMac = Dictionary(uniqueKeysWithValues: InputCapture.modifierKeys.map { ($0.macKeyCode, $0) })
         XCTAssertEqual(byMac[0x37]?.scanCode, 0x1D)    // left ⌘
         XCTAssertEqual(byMac[0x36]?.scanCode, 0xE01D)  // right ⌘
         XCTAssertEqual(byMac[0x3B]?.scanCode, 0x1D)    // left ⌃
