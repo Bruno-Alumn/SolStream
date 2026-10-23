@@ -110,33 +110,6 @@ bool SameFile(HANDLE a, HANDLE b) {
            && x.nFileIndexHigh == y.nFileIndexHigh && x.nFileIndexLow == y.nFileIndexLow;
 }
 
-void RemoveTree(const std::wstring& path) {
-    WIN32_FIND_DATAW found{};
-    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            const std::wstring name = found.cFileName;
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            const std::wstring child = path + L"\\" + name;
-            const bool junction = (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                // A junction is removed as itself, never followed into.
-                if (junction) {
-                    RemoveDirectoryW(child.c_str());
-                } else {
-                    RemoveTree(child);
-                }
-            } else {
-                DeleteFileW(child.c_str());
-            }
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-    }
-    RemoveDirectoryW(path.c_str());
-}
-
 /// `link`, a new empty folder, made a junction to `target` -- what something
 /// running as the same user can do to %LOCALAPPDATA%\SolStream\Updates.
 bool MakeJunction(const std::wstring& link, const std::wstring& target) {
@@ -1122,6 +1095,31 @@ void TestDriverSettingsJunction(const std::wstring& scratch) {
     CHECK(Exists(elsewhere + L"\\vdd_settings.xml"));
     RemoveDirectoryW(folder.c_str());
     RemoveTree(elsewhere);
+}
+
+/// RemoveTree takes a folder and everything under it, and a junction inside
+/// it as itself: uninstall runs it elevated over the install folder, and the
+/// download over a folder of its own, and neither may reach through a link.
+void TestRemoveTree(const std::wstring& scratch) {
+    const std::wstring folder = scratch + L"\\Tree";
+    CHECK(CreateDirectoryW(folder.c_str(), nullptr));
+    CHECK(CreateDirectoryW((folder + L"\\inner").c_str(), nullptr));
+    CHECK(WriteAll(folder + L"\\top.txt", "x"));
+    CHECK(WriteAll(folder + L"\\inner\\deep.txt", "x"));
+    CHECK(SetFileAttributesW((folder + L"\\top.txt").c_str(), FILE_ATTRIBUTE_READONLY));
+    const std::wstring elsewhere = scratch + L"\\tree-elsewhere";
+    CHECK(CreateDirectoryW(elsewhere.c_str(), nullptr));
+    CHECK(WriteAll(elsewhere + L"\\keep.txt", "x"));
+    const bool linked = MakeJunction(folder + L"\\link", elsewhere);
+    RemoveTree(folder);
+    CHECK(!Exists(folder));
+    if (linked) {
+        CHECK(Exists(elsewhere + L"\\keep.txt"));
+    } else {
+        std::printf("  (tree junction test skipped: could not make a junction here)\n");
+    }
+    RemoveTree(elsewhere);
+    CHECK(!Exists(elsewhere));
 }
 
 /// Uninstall lets a settings record go only with what it names. A folder that
@@ -3243,6 +3241,7 @@ int wmain(int argc, wchar_t** argv) {
     TestInstallNote();
     TestJunction(scratch);
     TestDriverSettingsFolder(scratch);
+    TestRemoveTree(scratch);
     TestDriverSettingsFile(scratch);
     TestDriverSettingsJunction(scratch);
     TestDriverSettingsRecords(scratch);

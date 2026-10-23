@@ -48,6 +48,12 @@ enum class DriverStep {
 /// rather than in util.h only because installer.cpp needs it too.
 std::string RandomHex(size_t count);
 
+/// Delete a folder and everything in it. A junction or link inside it is
+/// removed as itself and never followed: what it points at is somewhere else,
+/// and this runs elevated over folders a user could have put one in. Here
+/// rather than in util.h only because installer.cpp needs it too.
+void RemoveTree(const std::wstring& path);
+
 /// Where SolStream's driver stands on this PC.
 enum class DriverState {
     Missing,         ///< no device of it at all: setup may install one

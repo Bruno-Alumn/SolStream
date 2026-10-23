@@ -189,30 +189,6 @@ bool Exists(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-/// Delete a folder this file made, and everything in it. Only ever given the
-/// private directory above, whose whole contents came from the zip.
-void RemoveFolder(const std::wstring& path) {
-    WIN32_FIND_DATAW found{};
-    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            const std::wstring name = found.cFileName;
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            const std::wstring child = path + L"\\" + name;
-            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                RemoveFolder(child);
-            } else {
-                SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
-                DeleteFileW(child.c_str());
-            }
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-    }
-    RemoveDirectoryW(path.c_str());
-}
-
 /// Does this device's hardware ID list name the driver's?
 bool HasDriverHardwareId(HDEVINFO set, SP_DEVINFO_DATA& device) {
     wchar_t ids[1024] = {0};
@@ -507,6 +483,36 @@ std::string RandomHex(size_t count) {
     return ToHex(bytes);
 }
 
+void RemoveTree(const std::wstring& path) {
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name = found.cFileName;
+            if (name == L"." || name == L"..") {
+                continue;
+            }
+            const std::wstring child = path + L"\\" + name;
+            const bool link = (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                if (link) {
+                    RemoveDirectoryW(child.c_str());
+                } else {
+                    RemoveTree(child);
+                }
+            } else {
+                // A link's attributes would be its target's.
+                if (!link) {
+                    SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+                }
+                DeleteFileW(child.c_str());
+            }
+        } while (FindNextFileW(search, &found));
+        FindClose(search);
+    }
+    RemoveDirectoryW(path.c_str());
+}
+
 DriverState CurrentDriverState() {
     bool found = false;
     // A device Windows starts at the next restart is not off: it is an install
@@ -628,7 +634,7 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         }
         struct Cleanup {
             std::wstring path;
-            ~Cleanup() { RemoveFolder(path); }
+            ~Cleanup() { RemoveTree(path); }
         } cleanup{work};
 
         const std::wstring zip = work + L"\\driver.zip";

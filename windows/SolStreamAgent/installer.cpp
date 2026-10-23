@@ -402,28 +402,6 @@ std::wstring DirectoryOf(const std::wstring& path) {
     return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash);
 }
 
-void RemoveTree(const std::wstring& path) {
-    WIN32_FIND_DATAW found{};
-    HANDLE search = FindFirstFileW((path + L"\\*").c_str(), &found);
-    if (search != INVALID_HANDLE_VALUE) {
-        do {
-            const std::wstring name = found.cFileName;
-            if (name == L"." || name == L"..") {
-                continue;
-            }
-            const std::wstring child = path + L"\\" + name;
-            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                RemoveTree(child);
-            } else {
-                SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
-                DeleteFileW(child.c_str());
-            }
-        } while (FindNextFileW(search, &found));
-        FindClose(search);
-    }
-    RemoveDirectoryW(path.c_str());
-}
-
 /// Add/Remove Programs shows a size, and an entry with no size looks like a
 /// broken one. Kilobytes, which is the unit that registry value is in.
 DWORD TreeSizeKb(const std::wstring& path) {
