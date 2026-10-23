@@ -36,9 +36,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// picture's own troubles must not paint over it. See `notice(for:)`.
     private var connectionLostShown = false
 
-    /// Fields a command-line flag set, which the Settings window does not
-    /// override; see `StreamSettings.apply`.
-    private var settingsOverrides: Set<StreamSettings.Override> = []
     private var settingsWindow: SettingsWindow?
     private var settingsObservers: [NSObjectProtocol] = []
     /// A settings change waiting out its debounce; see `scheduleMediaRestart`.
@@ -134,7 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error("[stream] --sound-from \(from) is not apps or pc; using Settings")
             }
         }
-        settingsOverrides = overrides
+        // Fields a command-line flag set, which the Settings window does not
+        // override; see `StreamSettings.apply`.
         QualityPill.commandLineOverrides = overrides
 
         let host = value(after: "--host")
@@ -452,8 +450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             guard let existing = LaunchMatch.afterLaunch(
                                 app.name, in: windows, knownPIDs: knownPIDs) else {
-                                self.picker?.clearBusy()
-                                self.picker?.showFailure("\(app.name) didn't open a window.")
+                                self.failOpen("\(app.name) didn't open a window.")
                                 return
                             }
                             Log.info("[app] \"\(app.name)\" was already open; "
@@ -470,8 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.picker?.clearBusy()
-                            self.picker?.showFailure("\(app.name) opened a window that vanished.")
+                            self.failOpen("\(app.name) opened a window that vanished.")
                             return
                         }
                         self.attach(target, host: host, agent: agent)
@@ -479,6 +475,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    /// Says on the picker, still up, why there is no stream to look at.
+    private func failOpen(_ message: String) {
+        picker?.clearBusy()
+        picker?.showFailure(message)
     }
 
     /// Stream one window, keeping the picker up until there is one to look at.
@@ -559,13 +561,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                        displays: [RemoteDisplay]) {
         guard let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
-            picker?.clearBusy()
-            picker?.showFailure("\(host) did not offer a display to capture.")
+            failOpen("\(host) did not offer a display to capture.")
             return
         }
-        Log.info("[app] capture display \(capture.name) "
-                 + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
-                 + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
+        Self.logCapture(capture)
         // Only ever resize a virtual display. A physical monitor is somebody's
         // actual screen, and changing its mode to suit a remote client would be
         // rude at best.
@@ -605,6 +604,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private static func logCapture(_ capture: RemoteDisplay) {
+        Log.info("[app] capture display \(capture.name) "
+                 + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
+                 + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
+    }
+
     /// Stream one or more Windows applications, each in its own native window.
     ///
     /// The agent is consulted BEFORE the stream launches, because the encode
@@ -629,9 +634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Once only — see `startLaunching`. Cleared after the guard, so a
             // push that carried no usable display still leaves a way in.
             agent.onDisplays = nil
-            Log.info("[app] capture display \(capture.name) "
-                     + "\(capture.width)x\(capture.height) @ \(capture.x),\(capture.y) "
-                     + "[\(capture.adapter)]\(capture.isVirtual ? " virtual" : "")")
+            Self.logCapture(capture)
 
             agent.windows { [weak self] windows in
                 guard let self else { return }
@@ -714,30 +717,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func openApps(host: String, agent: AgentConnection,
                           targets: [RemoteWindow], display: RemoteDisplay,
                           config baseConfig: StreamConfig) {
-        // What is really being sent, said before any of it is sent.
-        //
-        // "Stream one application" is not a capture boundary. The host encodes
-        // ONE DISPLAY and each window below shows a crop of the decoded frame,
-        // so every pixel of that display is encoded, encrypted and put on the
-        // wire whatever the crops happen to show. On the virtual display that
-        // costs nobody anything, because nothing else is ever on it — which is
-        // the whole reason the virtual display exists. On a real monitor it
-        // means the entire desktop of the person sitting at that PC crosses the
-        // network while this application's own interface says one application is
-        // being streamed. The host falls back to a real monitor by itself
-        // whenever the virtual display driver is missing or stopped, and says so
-        // only in its own log, on the machine nobody is looking at.
+        // The host encodes the whole display and each window shows a crop, so
+        // on a real monitor everything on it is sent; asked before any of it is.
         guard confirmWholeDisplayCapture(host: host, display: display, targets: targets) else {
-            picker?.clearBusy()
-            picker?.showFailure("Nothing was streamed. \(display.name) on \(host) is a real "
-                                + "monitor, so everything on it would have been sent, not "
-                                + "just \(targets.count == 1 ? "this window" : "these windows").")
+            failOpen("Nothing was streamed. \(display.name) on \(host) is a real "
+                     + "monitor, so everything on it would have been sent, not "
+                     + "just \(targets.count == 1 ? "this window" : "these windows").")
             return
         }
 
         // What the Settings window chose, under whatever the command line set.
         var config = StreamSettings.shared.apply(to: baseConfig, host: host,
-                                                 overrides: settingsOverrides)
+                                                 overrides: QualityPill.commandLineOverrides)
         Log.info("[stream] \(Self.describe(config))")
         // The encode canvas matches the capture display, which makes the scale
         // factor 1.0 and every crop pixel-exact. Fixed for the session: the
@@ -779,17 +770,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let media = await agent.openMediaSession(request) else {
                 Updater.shared.isStreaming = false
                 Log.error("[app] \(host) refused the media session")
-                self.picker?.clearBusy()
-                self.picker?.showFailure("\(host) refused to start streaming.")
+                self.failOpen("\(host) refused to start streaming.")
                 return
             }
             guard media.streaming else {
                 Updater.shared.isStreaming = false
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
-                self.picker?.clearBusy()
-                self.picker?.showFailure("\(host) agreed to stream and then did not: "
-                                         + (media.message ?? "it gave no reason"))
+                self.failOpen("\(host) agreed to stream and then did not: "
+                              + (media.message ?? "it gave no reason"))
                 return
             }
             self.mediaRequest = request
@@ -853,20 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // capture, encoder, sender and receive threads, the socket and
                 // the keys all survive until something starts a new session, and
                 // any key or mouse button still held is never released.
-                self.session?.stop()
-                self.session = nil
-                self.mediaRequest = nil
-                self.streamConfig = nil
-                self.streamDisplay = nil
-                self.streamHost = nil
-                self.pendingRestart?.cancel()
-                self.pendingRestart = nil
-                agent.closeMediaSession()
-                self.clipboard?.stop()
-                self.clipboard = nil
-                // An update the person asked for during the stream installs
-                // from here, and relaunches.
-                MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+                self.endStream { agent.closeMediaSession() }
                 // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
                 // tell a new connection from the last one's teardown still
                 // running, and answers "busy". Nothing needs the disconnect: the
@@ -1000,7 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // debounce and the recovery guards treat it like any other.
         if let request = mediaRequest,
            Self.applying(StreamSettings.shared, to: request, config: config, host: host,
-                         overrides: settingsOverrides) != nil {
+                         overrides: QualityPill.commandLineOverrides) != nil {
             Log.info("[app] settings changed while the stream was opening")
             scheduleMediaRestart()
         }
@@ -1287,7 +1263,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let fresh = Self.applying(StreamSettings.shared, to: request, config: config,
-                                        host: host, overrides: settingsOverrides) else {
+                                        host: host,
+                                        overrides: QualityPill.commandLineOverrides) else {
             // Balanced at home is the same 20 Mbps as Automatic: nothing to do.
             return
         }
@@ -1548,19 +1525,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             $0.close()
         }
 
-        clipboard?.stop()
-        clipboard = nil
-        session?.stop()
-        session = nil
-        pendingRestart?.cancel()
-        pendingRestart = nil
-        streamHost = nil
-        MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+        endStream()
         agent?.disconnect()
         agent = nil
         picker?.close()
         picker = nil
         showConnectWindow()
+    }
+
+    /// Stop the stream and its clipboard sync, and forget what it was opened
+    /// with. `closing` runs just before an update the person asked for during
+    /// the stream is let go, which installs it and may relaunch the app.
+    private func endStream(closing: () -> Void = {}) {
+        session?.stop()
+        session = nil
+        mediaRequest = nil
+        streamConfig = nil
+        streamDisplay = nil
+        streamHost = nil
+        pendingRestart?.cancel()
+        pendingRestart = nil
+        clipboard?.stop()
+        clipboard = nil
+        closing()
+        MainActor.assumeIsolated { Updater.shared.isStreaming = false }
     }
 
     /// Whether a Host menu item has anything to act on. Disconnect was on with
