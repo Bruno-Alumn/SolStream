@@ -9,7 +9,7 @@ import XCTest
 /// the connect window: the same PC listed twice, identically, with no way to
 /// tell which entry reached which instance.
 final class HostDedupeTests: XCTestCase {
-    private func host(_ name: String, _ address: String?) -> DiscoveredHost {
+    private func host(_ name: String, _ address: String) -> DiscoveredHost {
         DiscoveredHost(name: name, address: address)
     }
 
@@ -56,14 +56,14 @@ final class HostDedupeTests: XCTestCase {
 /// exact string match does not notice: seen for real, "DESKTOP-EXAMPLE(1)" from
 /// discovery sat directly above "DESKTOP-EXAMPLE.local" from recents.
 final class RecentsAgainstDiscoveryTests: XCTestCase {
-    private func host(_ name: String, _ address: String?) -> DiscoveredHost {
+    private func host(_ name: String, _ address: String) -> DiscoveredHost {
         DiscoveredHost(name: name, address: address)
     }
 
     func testARecentThatIsAlreadyDiscoveredIsDropped() {
         let rows = HostBrowser.recentsWorthShowing(
             ["DESKTOP-EXAMPLE.local"],
-            discovered: [host("DESKTOP-EXAMPLE", nil)])
+            discovered: [host("DESKTOP-EXAMPLE", "192.168.1.40")])
         XCTAssertTrue(rows.isEmpty)
     }
 
@@ -72,7 +72,7 @@ final class RecentsAgainstDiscoveryTests: XCTestCase {
     func testTheRenamedAdvertisementStillMatchesTheRememberedHostname() {
         let rows = HostBrowser.recentsWorthShowing(
             ["DESKTOP-EXAMPLE.local"],
-            discovered: [host("DESKTOP-EXAMPLE(1)", nil)])
+            discovered: [host("DESKTOP-EXAMPLE(1)", "192.168.1.40")])
         XCTAssertTrue(rows.isEmpty, "one PC was listed twice")
     }
 
@@ -88,7 +88,7 @@ final class RecentsAgainstDiscoveryTests: XCTestCase {
     func testMatchingIgnoresCase() {
         let rows = HostBrowser.recentsWorthShowing(
             ["desktop-example.LOCAL"],
-            discovered: [host("DESKTOP-EXAMPLE", nil)])
+            discovered: [host("DESKTOP-EXAMPLE", "192.168.1.40")])
         XCTAssertTrue(rows.isEmpty)
     }
 

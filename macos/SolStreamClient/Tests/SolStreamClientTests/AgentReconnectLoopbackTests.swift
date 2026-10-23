@@ -170,7 +170,7 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         let nonce = try XCTUnwrap(Data(smtHex: takeover["cnonce"] as? String ?? ""))
         let proof = try XCTUnwrap(AgentConnection.takeoverProof(
             token: Self.token, challenge: challenge, clientNonce: nonce, clientID: clientID))
-        XCTAssertEqual(takeover["proof"] as? String, AgentConnection.hex(proof))
+        XCTAssertEqual(takeover["proof"] as? String, proof.smtHex)
         XCTAssertEqual(seen.get("bytesBeforeAnswer") as? Int, 0,
                        "nothing may follow the takeover until it is answered")
         XCTAssertEqual(seen.get("sealedRequest") as? Bool, true,

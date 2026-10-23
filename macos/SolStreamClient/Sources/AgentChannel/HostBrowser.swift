@@ -8,13 +8,11 @@ public struct DiscoveredHost: Sendable, Equatable, Identifiable, Hashable {
     public let name: String
     /// The address it answered from. Always known: a host is discovered BY
     /// answering, so there is nothing left to resolve.
-    public let address: String?
+    public let address: String
 
     public var id: String { name }
 
-    public var connectTarget: String {
-        address ?? "\(name).local"
-    }
+    public var connectTarget: String { address }
 }
 
 /// Finds SolStream hosts, so nobody has to type an IP address.
@@ -38,12 +36,10 @@ public final class HostBrowser {
     private static let answerPrefix = "SOLSTREAM-HOST/1 "
 
     private var fd: Int32 = -1
-    private var thread: Thread?
     private var timer: DispatchSourceTimer?
-    private var found: [String: DiscoveredHost] = [:]
-    /// When each host last answered, on the monotonic clock. Same keys as
-    /// `found`, and guarded by the same lock.
-    private var lastHeard: [String: UInt64] = [:]
+    /// Each host by the address it answered from, and when it last answered,
+    /// on the monotonic clock. Guarded by `lock`.
+    private var found: [String: (host: DiscoveredHost, heard: UInt64)] = [:]
     private let lock = NSLock()
     /// Guarded by `lock`. Which run of discovery is current: a receive thread
     /// keeps going only while its own generation is, so a thread still inside
@@ -109,7 +105,6 @@ public final class HostBrowser {
         }
         thread.name = "solstream.discovery"
         thread.start()
-        self.thread = thread
 
         // Asked repeatedly rather than once: a PC that was asleep, or a Mac that
         // has just joined the network, has to be able to appear without the user
@@ -145,12 +140,10 @@ public final class HostBrowser {
         let done = finished
         finished = nil
         found.removeAll()
-        lastHeard.removeAll()
         lock.unlock()
 
         timer?.cancel()
         timer = nil
-        thread = nil
 
         DispatchQueue.global(qos: .utility).async {
             if done?.wait(timeout: .now() + 1.0) == .success {
@@ -208,14 +201,10 @@ public final class HostBrowser {
         // never the earlier of the two, but a wrapping subtraction cannot trap
         // if that assumption is ever wrong, and the wrong answer it would give
         // is "expire this host", which the next ask undoes.
-        let stale = lastHeard.filter { now &- $0.value > Self.hostTimeout }.map(\.key)
+        let stale = found.filter { now &- $0.value.heard > Self.hostTimeout }.map(\.key)
         guard !stale.isEmpty else { lock.unlock(); return }
-        for address in stale {
-            found.removeValue(forKey: address)
-            lastHeard.removeValue(forKey: address)
-        }
-        let snapshot = Array(found.values)
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        for address in stale { found.removeValue(forKey: address) }
+        let snapshot = sortedSnapshot()
         lock.unlock()
         Log.info("[browse] \(stale.count) host(s) stopped answering; dropping them")
         DispatchQueue.main.async { [weak self] in self?.onChange?(snapshot) }
@@ -247,16 +236,20 @@ public final class HostBrowser {
             lock.lock()
             guard running, generation == run else { lock.unlock(); return }
             let host = DiscoveredHost(name: name, address: address)
-            let changed = found[address] != host
-            found[address] = host
-            lastHeard[address] = DispatchTime.now().uptimeNanoseconds
-            let snapshot = Array(found.values)
-                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            let changed = found[address]?.host != host
+            found[address] = (host, DispatchTime.now().uptimeNanoseconds)
+            let snapshot = sortedSnapshot()
             lock.unlock()
             if changed {
                 DispatchQueue.main.async { [weak self] in self?.onChange?(snapshot) }
             }
         }
+    }
+
+    /// Every host found, by name. Call with `lock` held.
+    private func sortedSnapshot() -> [DiscoveredHost] {
+        found.values.map(\.host)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     /// Which remembered addresses are worth their own row, given what discovery
@@ -277,9 +270,9 @@ public final class HostBrowser {
                                            discovered: [DiscoveredHost]) -> [String] {
         var known: Set<String> = []
         for host in discovered {
-            known.insert(host.connectTarget.lowercased())
-            if let address = host.address { known.insert(address.lowercased()) }
+            known.insert(host.address.lowercased())
             known.insert("\(host.name).local".lowercased())
+
             if let base = baseName(of: host.name) {
                 known.insert(base.lowercased())
                 known.insert("\(base).local".lowercased())

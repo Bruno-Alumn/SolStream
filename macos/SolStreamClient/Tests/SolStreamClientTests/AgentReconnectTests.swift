@@ -1,5 +1,6 @@
 import XCTest
 @testable import AgentChannel
+import MediaSession
 
 /// Coming back to a host that is still holding this Mac's last connection: when
 /// to go on knocking, and how to ask for the session back.
@@ -87,7 +88,7 @@ final class AgentReconnectTests: XCTestCase {
     func testTakeoverProofMatchesTheHostsVector() throws {
         let proof = try XCTUnwrap(AgentConnection.takeoverProof(
             token: token, challenge: challenge, clientNonce: clientNonce, clientID: clientID))
-        XCTAssertEqual(AgentConnection.hex(proof),
+        XCTAssertEqual(proof.smtHex,
                        "2e9724ecddb956360f9455f33d31d1157c2a3d13aac41a4c8085879862b2bc38")
         let other = try XCTUnwrap(AgentConnection.takeoverProof(
             token: token, challenge: challenge, clientNonce: clientNonce,
@@ -100,7 +101,7 @@ final class AgentReconnectTests: XCTestCase {
             token: token, challenge: challenge, clientNonce: clientNonce, clientID: clientID))
         XCTAssertEqual(request["cmd"] as? String, "takeover")
         XCTAssertEqual(request["client"] as? String, clientID)
-        XCTAssertEqual(request["cnonce"] as? String, AgentConnection.hex(clientNonce))
+        XCTAssertEqual(request["cnonce"] as? String, clientNonce.smtHex)
         XCTAssertEqual(request["proof"] as? String,
                        "2e9724ecddb956360f9455f33d31d1157c2a3d13aac41a4c8085879862b2bc38")
         // The token itself never goes.

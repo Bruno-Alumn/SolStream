@@ -104,9 +104,6 @@ public struct RemoteApp: Sendable, Equatable, Identifiable, Hashable {
 /// A tracked window's live state on the host.
 public struct RemoteWindowStatus: Sendable, Equatable {
     public let isAlive: Bool
-    public let isMinimized: Bool
-    public let frame: CGRect
-    public let captionInset: Int
     /// Something on the host is drawn over this window, so the crop is showing
     /// that instead of the application.
     public let isOccluded: Bool
@@ -282,11 +279,9 @@ public final class AgentConnection {
     /// Shared secret for the agent, when it asks for one. Remembered per host so
     /// it is entered once rather than every session.
     private var token: String?
-    /// The two nonces from the auth v2 handshake, kept because the media key
-    /// schedule is derived from the same exchange that authenticated it -- there
-    /// is no second handshake and no second secret.
+    /// The challenge from this connection's greeting, which the auth proof
+    /// answers and the channel keys are derived from.
     private var authChallenge: String?
-    private var authClientNonce: Data?
     /// Whether the host offered to encrypt the channel, and the keys once it is.
     ///
     /// Negotiated rather than assumed. A mismatch here is not a degraded
@@ -297,12 +292,7 @@ public final class AgentConnection {
     /// Held between sending the proof and reading the reply that names the
     /// host's half. Dropped the moment the keys are derived.
     private var pendingEphemeral: P256.KeyAgreement.PrivateKey?
-    private var pendingChallenge: String?
     private var pendingClientNonce: String?
-
-    public static func storedToken(for host: String) -> String? {
-        TokenStore.token(for: host)
-    }
 
     /// Whether a token is held for `host`, without reading it.
     public static func hasStoredToken(for host: String) -> Bool {
@@ -313,10 +303,13 @@ public final class AgentConnection {
         TokenStore.set(token, for: host)
     }
 
-    /// Drop a token the host refused, so the next connection asks for a new one
-    /// rather than silently retrying something already known to be wrong.
-    public static func forgetToken(for host: String) {
-        TokenStore.remove(for: host)
+    /// `count` bytes from the system's secure generator, or nil if it failed.
+    static func randomBytes(_ count: Int) -> Data? {
+        var bytes = Data(count: count)
+        let status = bytes.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!)
+        }
+        return status == errSecSuccess ? bytes : nil
     }
 
     /// Answer a `needsToken` with what the user typed.
@@ -347,7 +340,7 @@ public final class AgentConnection {
             // cleared `wantsConnection`, so there was no way back short of
             // restarting the app. Ask again instead — the socket is untouched
             // and the challenge from the greeting is still good.
-            guard Self.bytes(fromHex: trimmed) != nil else {
+            guard Data(smtHex: trimmed) != nil else {
                 Log.error("[agent] the token typed for \(self.host) is not hexadecimal; "
                           + "asking again rather than dropping the connection")
                 self.report(.needsToken(host: self.host, rejected: true))
@@ -376,7 +369,7 @@ public final class AgentConnection {
     public init(host: String, port: UInt16 = StreamPorts.agent, token: String? = nil) {
         self.host = host
         self.port = port
-        self.token = token ?? Self.storedToken(for: host)
+        self.token = token ?? TokenStore.token(for: host)
         self.clientID = Self.clientIDDefaultsOverride.map { Self.clientID(in: $0) }
             ?? Self.installClientID
         self.busyTiming = Self.busyTimingOverride ?? .standard
@@ -412,13 +405,8 @@ public final class AgentConnection {
         if let stored = defaults.string(forKey: clientIDKey), isClientID(stored) {
             return stored
         }
-        var bytes = Data(count: 16)
-        let generated = bytes.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
-        }
-        let fresh = generated == errSecSuccess
-            ? hex(bytes)
-            : UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let fresh = randomBytes(16)?.smtHex
+            ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         defaults.set(fresh, forKey: clientIDKey)
         return fresh
     }
@@ -529,8 +517,8 @@ public final class AgentConnection {
     /// token or challenge that is not hex of the right length.
     static func takeoverProof(token: String, challenge: String, clientNonce: Data,
                               clientID: String) -> Data? {
-        guard let tokenBytes = bytes(fromHex: token), !tokenBytes.isEmpty,
-              let challengeBytes = bytes(fromHex: challenge), challengeBytes.count == 32,
+        guard let tokenBytes = Data(smtHex: token), !tokenBytes.isEmpty,
+              let challengeBytes = Data(smtHex: challenge), challengeBytes.count == 32,
               clientNonce.count == 32, isClientID(clientID) else { return nil }
         var message = Data("SolStream agent takeover v1".utf8)
         message += challengeBytes
@@ -548,7 +536,7 @@ public final class AgentConnection {
             return nil
         }
         return ["cmd": "takeover", "client": clientID,
-                "cnonce": hex(clientNonce), "proof": hex(proof)]
+                "cnonce": clientNonce.smtHex, "proof": proof.smtHex]
     }
 
     /// How long a takeover may take to be answered. The host waits up to eight
@@ -629,11 +617,7 @@ public final class AgentConnection {
         // the answer to whatever was asked next.
         guard let connection, pending.isEmpty, !authInFlight,
               let token, !token.isEmpty else { return false }
-        var clientNonce = Data(count: 32)
-        let generated = clientNonce.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
-        }
-        guard generated == errSecSuccess,
+        guard let clientNonce = Self.randomBytes(32),
               let request = Self.takeoverRequest(token: token, challenge: challenge,
                                                  clientNonce: clientNonce, clientID: clientID),
               var line = try? JSONSerialization.data(withJSONObject: request) else {
@@ -1009,15 +993,10 @@ public final class AgentConnection {
     private func authenticate(with token: String) -> Bool {
         guard let connection,
               let challenge = authChallenge,
-              let tokenBytes = Self.bytes(fromHex: token),
-              let challengeBytes = Self.bytes(fromHex: challenge),
-              challengeBytes.count == 32 else { return false }
-
-        var clientNonce = Data(count: 32)
-        let generated = clientNonce.withUnsafeMutableBytes {
-            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
-        }
-        guard generated == errSecSuccess else { return false }
+              let tokenBytes = Data(smtHex: token),
+              let challengeBytes = Data(smtHex: challenge),
+              challengeBytes.count == 32,
+              let clientNonce = Self.randomBytes(32) else { return false }
 
         var message = Data("SolStream agent auth v2".utf8)
         message += challengeBytes
@@ -1025,14 +1004,10 @@ public final class AgentConnection {
         let proof = HMAC<SHA256>.authenticationCode(for: message,
                                                     using: SymmetricKey(data: tokenBytes))
 
-        // Kept: the same two nonces seed the media key schedule, so the handshake
-        // that authenticates is also the one that agrees the keys.
-        self.authClientNonce = clientNonce
-
         var request: [String: Any] = [
             "cmd": "auth",
-            "proof": Self.hex(Data(proof)),
-            "cnonce": Self.hex(clientNonce),
+            "proof": Data(proof).smtHex,
+            "cnonce": clientNonce.smtHex,
             // Which Mac this is, so the host can hand this session back to it
             // -- and to no other -- if it reconnects while the host is still
             // holding it. See `clientID`.
@@ -1046,9 +1021,10 @@ public final class AgentConnection {
             let ephemeral = P256.KeyAgreement.PrivateKey()
             request["channelCrypto"] = 2
             request["cpub"] = ephemeral.publicKey.x963Representation.smtHex
+            // The challenge stays in `authChallenge`: only a new greeting
+            // changes it, and that drops `pendingEphemeral` as it does.
             pendingEphemeral = ephemeral
-            pendingChallenge = challenge
-            pendingClientNonce = Self.hex(clientNonce)
+            pendingClientNonce = clientNonce.smtHex
         }
         guard let line = try? JSONSerialization.data(withJSONObject: request) else {
             return false
@@ -1092,23 +1068,6 @@ public final class AgentConnection {
         for item in held {
             send(item.request, completion: item.completion)
         }
-    }
-
-    static func hex(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
-
-    static func bytes(fromHex hex: String) -> Data? {
-        guard hex.count % 2 == 0 else { return nil }
-        var out = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
-            out.append(byte)
-            index = next
-        }
-        return out
     }
 
     /// What the host should capture, and how.
@@ -1239,10 +1198,7 @@ public final class AgentConnection {
         }
         let priv = P256.KeyAgreement.PrivateKey()
         let cpub = priv.publicKey.x963Representation
-        var cnonce = Data(count: 32)
-        guard cnonce.withUnsafeMutableBytes({
-            SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
-        }) == errSecSuccess else { return nil }
+        guard let cnonce = Self.randomBytes(32) else { return nil }
 
         var message: [String: Any] = ["cmd": "media", "op": "open", "ver": 1,
                                       "cpub": cpub.smtHex, "cnonce": cnonce.smtHex]
@@ -1558,10 +1514,6 @@ public final class AgentConnection {
             }
             completion(RemoteWindowStatus(
                 isAlive: alive,
-                isMinimized: message["minimized"] as? Bool ?? false,
-                frame: CGRect(x: message["x"] as? Int ?? 0, y: message["y"] as? Int ?? 0,
-                              width: message["w"] as? Int ?? 0, height: message["h"] as? Int ?? 0),
-                captionInset: message["captionInset"] as? Int ?? 0,
                 isOccluded: message["occluded"] as? Bool ?? false,
                 occludedBy: message["occludedBy"] as? String))
         }
@@ -1746,17 +1698,11 @@ public final class AgentConnection {
             }
             if isComplete || error != nil {
                 Log.info("[agent] connection closed")
-                self.noteConnectionLost()
-                self.stopHeartbeat()
-                // Nil it here too, not just fail the waiters: connect() refuses
-                // to run while `connection` is non-nil, so a closed-but-retained
-                // NWConnection makes reconnecting impossible for the rest of the
-                // process's life.
-                self.connection?.cancel()
-                self.connection = nil
-                self.failPending(error ?? AgentError.disconnected)
-                self.report(.disconnected)
-                self.scheduleReconnect()
+                // Which also nils `connection`, not just fails the waiters:
+                // connect() refuses to run while it is non-nil, so a
+                // closed-but-retained NWConnection makes reconnecting impossible
+                // for the rest of the process's life.
+                self.dropConnection(error ?? AgentError.disconnected)
                 return
             }
             self.receive()
@@ -1924,7 +1870,7 @@ public final class AgentConnection {
                 // it carries the host's half of the exchange. The switch happens
                 // here and not a message earlier or later.
                 if let ephemeral = pendingEphemeral,
-                   let challenge = pendingChallenge,
+                   let challenge = authChallenge,
                    let clientNonce = pendingClientNonce,
                    let hpubHex = message["hpub"] as? String,
                    let hpub = Data(smtHex: hpubHex),
@@ -1987,7 +1933,8 @@ public final class AgentConnection {
                 }
             } else {
                 Log.error("[agent] token rejected")
-                Self.forgetToken(for: host)
+                TokenStore.remove(for: host)
+
                 // And forget it here too, not only on disk. It was cleared from
                 // UserDefaults and left in this object, so a reconnect before the
                 // user had typed a new one read the field rather than the store
