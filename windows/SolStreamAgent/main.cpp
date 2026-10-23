@@ -3102,10 +3102,17 @@ void RestoreWindow(const WindowLock& saved) {
     // the ratio of the two scalings AFTER taking the size it is given, so one
     // SetWindowPlacement put File Explorer back at 0.625 of its size on a 125%
     // monitor -- and the next session opened at that size, and shrank it again.
+    //
+    // And never shown by it: a window its application hid while it was ours --
+    // closed to the tray -- is given its place back hidden. See
+    // PlacementForRestore.
     if (saved.saved_placement.length == sizeof(WINDOWPLACEMENT)) {
+        const bool visible = IsWindowVisible(window) != FALSE;
+        const WINDOWPLACEMENT placement =
+            solstream::PlacementForRestore(saved.saved_placement, visible);
         bool matched = false;
         const int tries = solstream::RestorePlacement(
-            saved.saved_placement,
+            placement,
             [window](const WINDOWPLACEMENT& placement) {
                 return SetWindowPlacement(window, &placement) != FALSE;
             },
@@ -3120,18 +3127,19 @@ void RestoreWindow(const WindowLock& saved) {
         const RECT& got = now.rcNormalPosition;
         const std::string title = WindowTitleForLog(window);
         if (matched) {
-            Log("[restore] \"%s\" back at %ldx%ld at %ld,%ld (%d %s)",
+            Log("[restore] \"%s\" back at %ldx%ld at %ld,%ld (%d %s)%s",
                 title.empty() ? "(untitled)" : title.c_str(),
                 wanted.right - wanted.left, wanted.bottom - wanted.top,
-                wanted.left, wanted.top, tries, tries == 1 ? "try" : "tries");
+                wanted.left, wanted.top, tries, tries == 1 ? "try" : "tries",
+                visible ? "" : ", left hidden");
         } else {
             Log("[restore] \"%s\" asked back to %ldx%ld at %ld,%ld and settled at "
-                "%ldx%ld at %ld,%ld after %d %s",
+                "%ldx%ld at %ld,%ld after %d %s%s",
                 title.empty() ? "(untitled)" : title.c_str(),
                 wanted.right - wanted.left, wanted.bottom - wanted.top,
                 wanted.left, wanted.top,
                 got.right - got.left, got.bottom - got.top, got.left, got.top,
-                tries, tries == 1 ? "try" : "tries");
+                tries, tries == 1 ? "try" : "tries", visible ? "" : ", left hidden");
         }
     }
 }

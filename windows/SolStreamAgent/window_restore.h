@@ -51,6 +51,17 @@ int RestorePlacement(const WINDOWPLACEMENT& saved,
                      const std::function<bool(WINDOWPLACEMENT&)>& get,
                      bool* matched = nullptr);
 
+/// The placement to give back: `saved`, except that a window hidden now stays
+/// hidden.
+///
+/// An application that hides to the notification area -- Discord, Steam,
+/// Teams -- keeps its window, its handle and its process when the user closes
+/// it, and only stops showing it. The placement saved before the session says
+/// "shown", so putting it back as saved would bring back a window the user had
+/// just put away. Hidden, it still gets its place and size back, for whenever
+/// the application shows it again.
+WINDOWPLACEMENT PlacementForRestore(const WINDOWPLACEMENT& saved, bool visible);
+
 /// One window a host owes a restore to, as it is written down.
 struct OwedWindow {
     uint64_t window = 0;      // the HWND, as the Mac also knows it

@@ -60,6 +60,14 @@ int RestorePlacement(const WINDOWPLACEMENT& saved,
     return calls;
 }
 
+WINDOWPLACEMENT PlacementForRestore(const WINDOWPLACEMENT& saved, bool visible) {
+    WINDOWPLACEMENT placement = saved;
+    if (!visible) {
+        placement.showCmd = SW_HIDE;
+    }
+    return placement;
+}
+
 std::string FormatOwedWindows(const std::vector<OwedWindow>& windows) {
     std::ostringstream out;
     out << kOwedHeader << "\n";

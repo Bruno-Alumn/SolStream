@@ -2826,6 +2826,26 @@ void TestRestorePlacement() {
     CHECK(PlacementDistance(RECT{0, 0, 10, 10}, RECT{1, -1, 12, 7}) == 1 + 1 + 2 + 3);
 }
 
+void TestPlacementForRestore() {
+    WINDOWPLACEMENT saved = PlacementAt(1000, 300, 1406, 792);
+    saved.flags = WPF_SETMINPOSITION;
+    saved.ptMinPosition = POINT{-32000, -32000};
+    for (const UINT show : {(UINT) SW_SHOWNORMAL, (UINT) SW_SHOWMAXIMIZED,
+                            (UINT) SW_SHOWMINIMIZED}) {
+        saved.showCmd = show;
+        // Shown: exactly as it was saved.
+        const WINDOWPLACEMENT shown = PlacementForRestore(saved, true);
+        CHECK(shown.showCmd == show);
+        // Hidden since -- gone to the tray -- it stays hidden whatever it was,
+        // and still gets its place back.
+        const WINDOWPLACEMENT hidden = PlacementForRestore(saved, false);
+        CHECK(hidden.showCmd == SW_HIDE);
+        CHECK(PlacementDistance(hidden.rcNormalPosition, saved.rcNormalPosition) == 0);
+        CHECK(hidden.length == saved.length && hidden.flags == saved.flags);
+        CHECK(hidden.ptMinPosition.x == -32000);
+    }
+}
+
 void TestOwedWindows(const std::wstring& scratch) {
     OwedWindow first;
     first.window = 0xFFFFFFFFull;
@@ -2998,6 +3018,7 @@ int wmain(int argc, wchar_t** argv) {
     TestReceiveFailures();
     TestCaptureDisplayIsStale();
     TestRestorePlacement();
+    TestPlacementForRestore();
     TestOwedWindows(scratch);
 
     RemoveTree(scratch);
