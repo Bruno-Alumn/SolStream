@@ -5942,9 +5942,6 @@ int wmain(int argc, wchar_t** argv) {
         bind_address = "0.0.0.0";
     }
 
-    // Loopback needs no token: reaching it already means running as a user on
-    // this machine, which is strictly more access than the agent grants. Keeping
-    // that exemption is what lets an SSH port forward work without one.
     // --no-auth used to be honoured anywhere, with a warning. A warning is the
     // wrong instrument: the agent starts from a scheduled task at logon, so the
     // log line lands in a file nobody is reading, on a machine whose owner
@@ -6298,12 +6295,13 @@ int wmain(int argc, wchar_t** argv) {
 
     // Keep the window's numbers current while it is up.
     std::thread status([bind_address]() {
+        // Neither changes while the host runs: a PC's new name takes effect
+        // at its next start, and the token is read once, at this one.
+        const std::wstring computer_name = ToWide(ComputerName());
+        const std::wstring pairing_token = ToWide(g_token);
         while (!solstream::HostWindowClosed()) {
             solstream::HostStatus status;
-            wchar_t name[256] = {};
-            DWORD size = 256;
-            GetComputerNameW(name, &size);
-            status.computer_name = name;
+            status.computer_name = computer_name;
             // Listening on everything means the bind address says nothing about
             // where to look, so find an address that does. Re-read every tick
             // rather than cached: a laptop that joins a network, or a VPN that
@@ -6311,7 +6309,7 @@ int wmain(int argc, wchar_t** argv) {
             status.address = bind_address == "0.0.0.0"
                                  ? ToWide(BestLocalAddress())
                                  : ToWide(bind_address);
-            status.pairing_token = ToWide(g_token);
+            status.pairing_token = pairing_token;
             status.tailscale_address = solstream::TailscaleAddress();
             status.agent_listening = true;
             status.connected_clients = g_clients_authenticated.load();
