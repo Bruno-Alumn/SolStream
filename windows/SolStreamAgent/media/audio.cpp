@@ -523,14 +523,12 @@ bool HasProcessLoopback() {
 
 /// The streamed apps' sound, and nothing else, until `running` says stop.
 void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
-             const std::function<bool()>& running, std::atomic<bool>& started,
-             std::atomic<int>& appSources) {
+             const std::function<bool()>& running, std::atomic<int>& appSources) {
     std::vector<ProcessTap> taps;
     std::vector<DWORD> current;
     std::vector<HANDLE> events;
     std::vector<float> pending;
     ULONGLONG nextCheck = 0;
-    started.store(true);
     Log("[media] audio from the streamed apps only");
 
     while (running()) {
@@ -630,7 +628,6 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
     }
 
     for (ProcessTap& tap : taps) { CloseTap(tap); }
-    started.store(false);
 }
 
 // ── The whole PC's sound ────────────────────────────────────────────────────
@@ -728,7 +725,7 @@ std::wstring DefaultDeviceId(IMMDeviceEnumerator* enumerator) {
 /// the pause in between as it takes any silence: it plays from its cushion,
 /// then waits for the next sound and cushions again.
 void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
-                std::atomic<bool>& started, std::atomic<uint64_t>& silent) {
+                std::atomic<uint64_t>& silent) {
     Loopback loopback;
     Reopener reopen;
     ReadTrouble trouble;
@@ -758,7 +755,6 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
                     loopback.format->nSamplesPerSec, loopback.format->nChannels,
                     loopback.format->wBitsPerSample);
             }
-            started.store(true);
             // To 48 kHz, whatever the endpoint is running at. The Mac's renderer
             // is fixed at 48 kHz, and a rate field it ignores would be a silent
             // half-speed bug rather than a loud one. It is also the rate Opus
@@ -821,7 +817,6 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
     }
 
     CloseLoopback(loopback);
-    started.store(false);
 }
 
 }  // namespace
@@ -844,13 +839,13 @@ void AudioCapture::Run(const AudioEncoding& encoding, const Processes& processes
     const auto running = [&] { return !stop_.load() && keepGoing(); };
 
     if (processes && HasProcessLoopback()) {
-        RunApps(processes, packetizer, running, started_, appSources_);
+        RunApps(processes, packetizer, running, appSources_);
     } else {
         if (processes) {
             Log("[media] only the streamed apps' sound needs Windows 10 build 20348 or "
                 "later; sending the whole PC's");
         }
-        RunWholePc(packetizer, running, started_, silent_);
+        RunWholePc(packetizer, running, silent_);
     }
     appSources_.store(-1);
     if (ownsCom) { CoUninitialize(); }

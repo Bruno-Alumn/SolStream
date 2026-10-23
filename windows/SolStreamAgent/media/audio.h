@@ -56,9 +56,6 @@ struct AudioEncoding {
     Codec codec = Codec::Pcm;
     unsigned bitrate = 128000;   ///< Opus's target, bit/s
     unsigned frameMs = 5;        ///< the sound in one packet
-
-    /// The format byte on the wire.
-    unsigned char Format() const { return codec == Codec::Opus ? 2 : 1; }
 };
 
 class AudioCapture {
@@ -83,13 +80,11 @@ public:
 
     uint64_t Packets() const { return packets_.load(); }
     uint64_t Silent() const { return silent_.load(); }
-    bool Started() const { return started_.load(); }
     /// How many apps' sound is being captured, or -1 for the whole PC's.
     int AppSources() const { return appSources_.load(); }
 
 private:
     std::atomic<bool> stop_{false};
-    std::atomic<bool> started_{false};
     std::atomic<int> appSources_{-1};
     std::atomic<uint64_t> packets_{0};
     /// Atomic for the same reason as `packets_`, which it sits next to in the
