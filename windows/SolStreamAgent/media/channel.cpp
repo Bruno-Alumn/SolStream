@@ -210,8 +210,9 @@ bool OpenMessage(Channel& channel, std::string& buffer, std::string& message,
         return false;
     }
 
-    std::vector<unsigned char> record(buffer.begin() + 4,
-                                      buffer.begin() + 4 + sealedLength);
+    // Opened in place, in `buffer`. A record that fails leaves it garbage, and
+    // that is the end of the connection either way: see `fatal`.
+    unsigned char* record = reinterpret_cast<unsigned char*>(buffer.data() + 4);
     unsigned char* plaintext = nullptr;
     size_t plaintextLength = 0;
     uint64_t counter = 0;
@@ -219,8 +220,8 @@ bool OpenMessage(Channel& channel, std::string& buffer, std::string& message,
     // one. A replay window would be answering a question the transport below has
     // already answered; a mismatch here is tampering, not reordering.
     smt::ReplayWindow window;
-    if (!smt::Open(channel.fromClient, window, record.data(), record.size(),
-                   &plaintext, &plaintextLength, &counter)
+    if (!smt::Open(channel.fromClient, window, record, sealedLength, &plaintext,
+                   &plaintextLength, &counter)
         || counter != channel.fromClient.counter) {
         fatal = true;
         return false;

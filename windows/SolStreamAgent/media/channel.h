@@ -111,7 +111,8 @@ bool SealMessage(Channel& channel, const std::string& message,
 /// Returns false when more bytes are needed; `fatal` distinguishes that from a
 /// record that failed to authenticate, which must end the connection rather than
 /// be skipped -- a channel that quietly drops what it cannot open is a channel an
-/// attacker can silence one message at a time.
+/// attacker can silence one message at a time. The record is decrypted where it
+/// lies, so after a fatal failure `buffer` holds nothing worth reading.
 bool OpenMessage(Channel& channel, std::string& buffer, std::string& message,
                  bool& fatal);
 
