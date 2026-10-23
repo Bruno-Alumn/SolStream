@@ -160,6 +160,8 @@ endif()
 
 add_executable(SolStreamAgent
     main.cpp
+    # The auth proof and the SMT/1 key schedule.
+    agent_crypto.cpp
     host_window.cpp
     # Finds, verifies and installs updates from GitHub releases.
     updater.cpp
