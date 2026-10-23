@@ -1477,6 +1477,38 @@ std::vector<uint64_t> g_restoring_windows;
 constexpr int kClaimRestoreInProgress = -2;
 uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 
+/// The active slot holding this window, or -1. Call with `g_lock_cs` held.
+int FindSlotLocked(HWND window) {
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window == window) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/// Whether an active slot holds this window; and in `any`, whether any slot
+/// is active at all. Takes `g_lock_cs`.
+bool HeldWindow(HWND window, bool* any) {
+    bool held = false;
+    bool active = false;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (!g_locks[i].active) {
+            continue;
+        }
+        active = true;
+        if (g_locks[i].window == window) {
+            held = true;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (any) {
+        *any = active;
+    }
+    return held;
+}
+
 /// Is this window's thread too busy to answer messages?
 ///
 /// SetWindowPos, ShowWindow, SetWindowLongPtr and SetWindowPlacement on a window
@@ -1523,6 +1555,24 @@ int ResizeBorderThickness(HWND window) {
     }
     return GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
          + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+/// Whether the user could resize this window before SolStream touched it.
+///
+/// Resizable means a sizing border -- as the window had it before the lock
+/// took it away. A dialog like Character Map has none: Windows lets
+/// SetWindowPos make it any size, so it reports no meaningful minimum, but
+/// its controls are laid out once for one size and a smaller window simply
+/// cuts them off. The Mac has to hold such a window at the size it is.
+bool IsResizable(HWND window) {
+    if ((GetWindowLongPtrW(window, GWL_STYLE) & WS_THICKFRAME) != 0) {
+        return true;
+    }
+    EnterCriticalSection(&g_lock_cs);
+    const int slot = FindSlotLocked(window);
+    const bool removed = slot >= 0 && (g_locks[slot].removed_style & WS_THICKFRAME) != 0;
+    LeaveCriticalSection(&g_lock_cs);
+    return removed;
 }
 
 /// The client-area sizes this window accepts, in pixels, and whether it can be
@@ -1598,22 +1648,7 @@ ClientLimits ClientSizeLimits(HWND window) {
         limits.maximum.y = std::max<LONG>(limits.minimum.y, info.ptMaxTrackSize.y - furnitureH);
     }
 
-    // Resizable means a sizing border -- as the window had it before the lock
-    // took it away. A dialog like Character Map has none: Windows lets
-    // SetWindowPos make it any size, so it reports no meaningful minimum, but
-    // its controls are laid out once for one size and a smaller window simply
-    // cuts them off. The Mac has to hold such a window at the size it is.
-    limits.resizable = (style & WS_THICKFRAME) != 0;
-    if (!limits.resizable) {
-        EnterCriticalSection(&g_lock_cs);
-        for (int i = 0; i < kMaxLocks; ++i) {
-            if (g_locks[i].active && g_locks[i].window == window) {
-                limits.resizable = (g_locks[i].removed_style & WS_THICKFRAME) != 0;
-                break;
-            }
-        }
-        LeaveCriticalSection(&g_lock_cs);
-    }
+    limits.resizable = IsResizable(window);
     return limits;
 }
 
@@ -2374,18 +2409,7 @@ void ReportForegroundThief() {
     }
 
     bool streaming = false;
-    bool ours = false;
-    EnterCriticalSection(&g_lock_cs);
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (!g_locks[i].active) {
-            continue;
-        }
-        streaming = true;
-        if (g_locks[i].window == foreground) {
-            ours = true;
-        }
-    }
-    LeaveCriticalSection(&g_lock_cs);
+    const bool ours = HeldWindow(foreground, &streaming);
     if (!streaming) {
         return;
     }
@@ -2429,18 +2453,7 @@ void ReportPointerTarget() {
     }
 
     bool streaming = false;
-    bool ours = false;
-    EnterCriticalSection(&g_lock_cs);
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (!g_locks[i].active) {
-            continue;
-        }
-        streaming = true;
-        if (g_locks[i].window == root) {
-            ours = true;
-        }
-    }
-    LeaveCriticalSection(&g_lock_cs);
+    const bool ours = HeldWindow(root, &streaming);
     if (!streaming) {
         return;
     }
@@ -2594,10 +2607,9 @@ int ClaimSlot(HWND window) {
     if (solstream::RestoreInProgress(g_restoring_windows, IdFromWindow(window))) {
         return kClaimRestoreInProgress;
     }
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && g_locks[i].window == window) {
-            return i;
-        }
+    const int held = FindSlotLocked(window);
+    if (held >= 0) {
+        return held;
     }
     for (int i = 0; i < kMaxLocks; ++i) {
         if (g_locks[i].active) {
@@ -3119,11 +3131,9 @@ void RestoreWindowsLeftBehind() {
 /// Tell the watcher a new size is legitimate, because the Mac asked for it.
 void SetLockedGeometry(HWND window, const RECT& client) {
     EnterCriticalSection(&g_lock_cs);
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && g_locks[i].window == window) {
-            g_locks[i].desired = client;
-            break;
-        }
+    const int slot = FindSlotLocked(window);
+    if (slot >= 0) {
+        g_locks[slot].desired = client;
     }
     LeaveCriticalSection(&g_lock_cs);
 }
@@ -3407,12 +3417,9 @@ std::string WindowStatusJson(uint64_t id) {
     // window closed and drop it, and the next poll would say it was alive again.
     if (handle) {
         EnterCriticalSection(&g_lock_cs);
-        for (int i = 0; i < kMaxLocks; ++i) {
-            if (g_locks[i].active && g_locks[i].window == handle
-                && SlotWindowGone(g_locks[i])) {
-                handle = nullptr;
-                break;
-            }
+        const int slot = FindSlotLocked(handle);
+        if (slot >= 0 && SlotWindowGone(g_locks[slot])) {
+            handle = nullptr;
         }
         LeaveCriticalSection(&g_lock_cs);
     }
@@ -4060,7 +4067,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         long long missed = 0;
         // A window that cannot be resized is moved and keeps its own size; see
         // MoveClientArea. Not a miss: the size it reports is the size it is.
-        const bool fixed_size = !ClientSizeLimits(window).resizable;
+        const bool fixed_size = !IsResizable(window);
         const bool ok = fixed_size
             ? MoveClientArea(window, (int) x, (int) y, &client)
             : PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
