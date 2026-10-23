@@ -1141,12 +1141,13 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     }
 
     std::lock_guard<std::mutex> guard(s.lock);
-    // A reference of its own, not the caller's. On the cpuOnly path this texture
-    // is read in FeedLocked, and on an asynchronous transform FeedLocked runs
-    // from the event callback -- another thread, after Submit has returned and
-    // after the capture frame the caller was holding has gone out of scope. The
-    // reference is held until the next frame replaces it or Close drops it.
-    if (bgra != s.pendingBgra) {
+    // A reference of its own, not the caller's, on the cpuOnly path, the one
+    // place this texture is read after Submit: FeedLocked converts it there,
+    // and on an asynchronous transform FeedLocked runs from the event callback
+    // -- another thread, after the capture frame the caller was holding has
+    // gone out of scope. The reference is held until the next frame replaces
+    // it or Close drops it. The GPU path has already converted it above.
+    if (s.cpuOnly && bgra != s.pendingBgra) {
         bgra->AddRef();
         Release(s.pendingBgra);
         s.pendingBgra = bgra;
