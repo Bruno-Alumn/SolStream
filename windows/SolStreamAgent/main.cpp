@@ -1374,6 +1374,49 @@ solstream::media::Channel g_pending_channel;
 SOCKET g_channel_socket = INVALID_SOCKET;
 #endif
 
+/// Which cursor watcher is the current one.
+///
+/// A shared stop flag was not enough, and is gone. StopCursorWatcher waits two
+/// seconds for the thread to leave, and the thread can be inside SendLine for
+/// far longer than that -- SO_SNDTIMEO on this socket is thirty seconds, so a client whose
+/// receive window has filled up holds it there. When the wait timed out the
+/// handle was closed and the thread abandoned, and the NEXT client's
+/// StartCursorWatcher then cleared the stop flag out from under it: the
+/// abandoned thread carried on for ever, pushing cursor shapes down the new
+/// client's socket beside the new watcher's own. Each thread now keeps the
+/// generation it was started with and exits when it is no longer the current
+/// one, which no later Start can undo.
+volatile LONG g_cursor_generation = 0;
+
+/// Send one line to the authenticated client, if there is one, and say
+/// whether a send failed -- which means the client has gone; the serving
+/// thread notices that on its own recv.
+///
+/// Silent until that client has proved who it is. The socket is read and
+/// written to under the send lock, which the client's departure also takes
+/// before clearing it: released between the two, the socket could be closed
+/// and its value reissued to the next connection, and the line would land
+/// there. A CRITICAL_SECTION is recursive, so SendLine taking it again is fine.
+///
+/// `generation` is the cursor watcher's own, or 0 for any other push. Checked
+/// inside the lock as well: a watcher that waited there past
+/// StopCursorWatcher's timeout belongs to nobody.
+bool PushLine(const std::string& line, LONG generation = 0) {
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+        return true;
+    }
+    bool sent = true;
+    EnterCriticalSection(&g_send_cs);
+    const SOCKET client = g_push_client;
+    if (client != INVALID_SOCKET
+        && (generation == 0
+            || InterlockedCompareExchange(&g_cursor_generation, 0, 0) == generation)) {
+        sent = SendLine(client, line);
+    }
+    LeaveCriticalSection(&g_send_cs);
+    return sent;
+}
+
 /// The frame bits a geometry lock takes away, and the only style bits the agent
 /// ever writes. Everything else in the style word belongs to the application --
 /// WS_MAXIMIZE, WS_DISABLED while it shows a modal dialog, WS_CAPTION when it
@@ -1858,26 +1901,9 @@ std::vector<unsigned long> StreamedProcesses() {
 /// sent until something says otherwise, and up to a second of a dead
 /// application's corpse is a second too many.
 void NotifyWindowClosed(uint64_t id) {
-    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
-        return;
-    }
-    // Read the socket and write to it under the send lock, which the client's
-    // departure also takes before clearing it. Unlike the cursor thread, this
-    // watcher is never joined before the socket closes — so without this the
-    // handle could be closed and reissued to the *next* client between the read
-    // and the send, and this line would land on somebody else's connection.
-    // A CRITICAL_SECTION is recursive, so SendLine taking it again is fine.
-    EnterCriticalSection(&g_send_cs);
-    struct Unlock {
-        ~Unlock() { LeaveCriticalSection(&g_send_cs); }
-    } unlock;
-    const SOCKET client = g_push_client;
-    if (client == INVALID_SOCKET) {
-        return;
-    }
-    // A failure means the client has gone, which the serving thread finds out
-    // on its own recv. Nothing to do about it here.
-    SendLine(client, "{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
+    // Unlike the cursor thread, this watcher is never joined before the socket
+    // closes, which is why PushLine reads it under the send lock.
+    PushLine("{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
 }
 
 /// Set when a window somewhere on this PC has come, gone or been renamed, with
@@ -1973,22 +1999,11 @@ void NotifyWindowsChangedIfSettled() {
     g_window_titles_dirty.store(false);
     g_titles_pushed_at = now;
 
-    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
-        return;
-    }
-    EnterCriticalSection(&g_send_cs);
-    struct Unlock {
-        ~Unlock() { LeaveCriticalSection(&g_send_cs); }
-    } unlock;
-    const SOCKET client = g_push_client;
-    if (client == INVALID_SOCKET) {
-        return;
-    }
     // Deliberately just a nudge, with no list attached. The Mac asks for
     // `windows` when it wants them, and it needs `apps` in the same breath to
     // redraw the picker anyway — so sending a list here would either be half
     // the answer or a second copy of one it is about to fetch.
-    SendLine(client, "{\"type\":\"windowsChanged\"}");
+    PushLine("{\"type\":\"windowsChanged\"}");
 }
 
 /// Windows already carried back to a real monitor. Kept so that someone who
@@ -2317,35 +2332,26 @@ void ReportOcclusion() {
             Log("[occlusion] the streamed window is clear again");
         }
 
-        if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
-            continue;
-        }
-        EnterCriticalSection(&g_send_cs);
-        const SOCKET client = g_push_client;
-        if (client != INVALID_SOCKET) {
-            // Empty means "nothing is on top any more", and it has to stay empty
-            // when there is no window: naming the absence would leave the Mac
-            // showing a warning that never goes away.
-            //
-            // Otherwise the important case is an untitled one — the shell's modal
-            // dimmer has no title at all — so it needs a name, and its class is
-            // not it. "Shell_SystemDim is in front" tells a person nothing; "a
-            // Windows dialog is in front" tells them why their clicks are going
-            // nowhere, which is the whole reason for saying anything.
-            std::string by;
-            if (found) {
-                by = title;
-                if (by.empty()) {
-                    by = (cls.rfind("Shell_System", 0) == 0 || cls == "#32770")
-                         ? "a Windows dialog"
-                         : "another window";
-                }
+        // Empty means "nothing is on top any more", and it has to stay empty
+        // when there is no window: naming the absence would leave the Mac
+        // showing a warning that never goes away.
+        //
+        // Otherwise the important case is an untitled one — the shell's modal
+        // dimmer has no title at all — so it needs a name, and its class is
+        // not it. "Shell_SystemDim is in front" tells a person nothing; "a
+        // Windows dialog is in front" tells them why their clicks are going
+        // nowhere, which is the whole reason for saying anything.
+        std::string by;
+        if (found) {
+            by = title;
+            if (by.empty()) {
+                by = (cls.rfind("Shell_System", 0) == 0 || cls == "#32770")
+                     ? "a Windows dialog"
+                     : "another window";
             }
-            SendLine(client,
-                     "{\"type\":\"occluded\",\"id\":" + std::to_string(IdFromWindow(window))
-                     + ",\"by\":\"" + JsonEscape(by) + "\"}");
         }
-        LeaveCriticalSection(&g_send_cs);
+        PushLine("{\"type\":\"occluded\",\"id\":" + std::to_string(IdFromWindow(window))
+                 + ",\"by\":\"" + JsonEscape(by) + "\"}");
     }
 }
 
@@ -4298,21 +4304,6 @@ NamedCursor g_cursors[] = {
 };
 
 HANDLE g_cursor_thread = nullptr;
-volatile LONG g_cursor_stop = 0;
-/// Which cursor watcher is the current one.
-///
-/// A shared stop flag was not enough. StopCursorWatcher waits two seconds for
-/// the thread to leave, and the thread can be inside SendLine for far longer
-/// than that -- SO_SNDTIMEO on this socket is thirty seconds, so a client whose
-/// receive window has filled up holds it there. When the wait timed out the
-/// handle was closed and the thread abandoned, and the NEXT client's
-/// StartCursorWatcher then cleared the stop flag out from under it: the
-/// abandoned thread carried on for ever, pushing cursor shapes down the new
-/// client's socket beside the new watcher's own. Each thread now keeps the
-/// generation it was started with and exits when it is no longer the current
-/// one, which no later Start can undo.
-volatile LONG g_cursor_generation = 0;
-
 const char* CursorName(HCURSOR cursor) {
     // Before the table, so a system cursor that failed to load (a null handle)
     // cannot match a cursor that could not be read.
@@ -4356,8 +4347,7 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
     HCURSOR last = nullptr;
     bool last_hidden = false;
     bool logged_once = false;
-    while (InterlockedCompareExchange(&g_cursor_stop, 0, 0) == 0
-           && InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
+    while (InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
         if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
             // Not authenticated yet. Forget the last state too, so the first
             // push after authentication carries the current one rather than
@@ -4398,23 +4388,8 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
             std::string line = "{\"type\":\"cursor\",\"shape\":\"";
             line += hidden ? "hidden" : CursorName(current);
             line += "\",\"reportsHidden\":1}";
-            // Read the socket AND write to it under the send lock, which the
-            // client thread retires it under -- as NotifyWindowClosed does.
-            // Releasing the lock between the two left a window in which the
-            // socket could be closed and its value reissued to the next
-            // connection, and this line would land there. The generation is
-            // checked again inside for the same reason: a watcher that waited
-            // here past StopCursorWatcher's timeout belongs to nobody.
-            bool sent = true;
-            EnterCriticalSection(&g_send_cs);
-            const SOCKET client = g_push_client;
-            if (client != INVALID_SOCKET
-                && InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
-                // A failure means the client has gone; the serving thread
-                // notices that on its own recv.
-                sent = SendLine(client, line);
-            }
-            LeaveCriticalSection(&g_send_cs);
+            // Only while this watcher is still the current one; see PushLine.
+            const bool sent = PushLine(line, mine);
             if (!sent) {
                 break;
             }
@@ -4437,7 +4412,6 @@ void StartCursorWatcher(SOCKET client, bool authorised) {
     EnterCriticalSection(&g_send_cs);
     g_push_client = client;
     LeaveCriticalSection(&g_send_cs);
-    InterlockedExchange(&g_cursor_stop, 0);
     InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
     const LONG generation = InterlockedIncrement(&g_cursor_generation);
     g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc,
@@ -4445,9 +4419,8 @@ void StartCursorWatcher(SOCKET client, bool authorised) {
 }
 
 void StopCursorWatcher() {
-    InterlockedExchange(&g_cursor_stop, 1);
-    // And retire this generation, so a thread that outlives the wait below
-    // cannot be revived by the next Start clearing the stop flag.
+    // Retire this generation: the thread leaves at its next look, and one that
+    // outlives the wait below can never be the current one again.
     InterlockedIncrement(&g_cursor_generation);
     if (g_cursor_thread) {
         // Bounded by the 40ms poll, so this is a short wait, and it has to
