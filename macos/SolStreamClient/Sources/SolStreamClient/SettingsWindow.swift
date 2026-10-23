@@ -172,7 +172,7 @@ final class SettingsPane: NSView {
     let soundSourceDetail = SettingsPane.caption("")
     let soundQualityPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     let soundQualityDetail = SettingsPane.caption("")
-    let muteButton = NSButton(image: NSImage(), target: nil, action: nil)
+    private(set) lazy var muteButton = Self.makeMuteButton(target: self, action: #selector(muteToggled(_:)))
     let volumeSlider = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
     let volumeValue = DS.label("", font: DS.mono, colour: DS.textSecondary)
     let bufferingPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -244,7 +244,7 @@ final class SettingsPane: NSView {
     /// Every control from the settings as they are now.
     func refresh() {
         let quality = settings.videoQuality
-        qualityPopUp.selectItem(at: StreamSettings.VideoQuality.allCases.firstIndex(of: quality) ?? 0)
+        qualityPopUp.select(quality)
         qualityDetail.stringValue = quality.detail
         frameRateControl.selectedSegment = StreamSettings.frameRates.firstIndex(of: settings.frameRate)
             ?? StreamSettings.frameRates.count - 1
@@ -255,10 +255,10 @@ final class SettingsPane: NSView {
         soundSourceControl.selectedSegment = StreamSettings.SoundSource.allCases.firstIndex(of: soundSource) ?? 0
         soundSourceDetail.stringValue = soundSource.detail
         let soundQuality = settings.soundQuality
-        soundQualityPopUp.selectItem(at: StreamSettings.SoundQuality.allCases.firstIndex(of: soundQuality) ?? 0)
+        soundQualityPopUp.select(soundQuality)
         soundQualityDetail.stringValue = soundQuality.detail
         let buffering = settings.audioBuffering
-        bufferingPopUp.selectItem(at: StreamSettings.AudioBufferingChoice.allCases.firstIndex(of: buffering) ?? 0)
+        bufferingPopUp.select(buffering)
         bufferingDetail.stringValue = buffering.detail
         for control in [soundSourceControl, soundQualityPopUp, muteButton, volumeSlider,
                         bufferingPopUp] as [NSControl] {
@@ -341,10 +341,7 @@ final class SettingsPane: NSView {
         let muted = settings.isMuted
         let volume = settings.volume
         let applies = volumeSlider.isEnabled
-        muteButton.image = muted
-            ? NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
-            : NSImage(systemSymbolName: "speaker.wave.3.fill", variableValue: Double(volume),
-                      accessibilityDescription: nil)
+        muteButton.image = Self.speakerImage(muted: muted, volume: volume)
         muteButton.contentTintColor = muted && applies ? DS.accentInk : DS.textSecondary
         muteButton.setAccessibilityLabel(muted ? "Unmute" : "Mute")
         if movingSlider { volumeSlider.doubleValue = Double(volume) * 100 }
@@ -374,9 +371,7 @@ final class SettingsPane: NSView {
     }
 
     @objc private func qualityChosen(_ sender: NSPopUpButton) {
-        let all = StreamSettings.VideoQuality.allCases
-        guard all.indices.contains(sender.indexOfSelectedItem) else { return }
-        let quality = all[sender.indexOfSelectedItem]
+        guard let quality: StreamSettings.VideoQuality = sender.selectedChoice() else { return }
         qualityDetail.stringValue = quality.detail
         // Choosing the one already chosen must not restart the picture.
         guard quality != settings.videoQuality else { return }
@@ -410,9 +405,7 @@ final class SettingsPane: NSView {
     }
 
     @objc private func soundQualityChosen(_ sender: NSPopUpButton) {
-        let all = StreamSettings.SoundQuality.allCases
-        guard all.indices.contains(sender.indexOfSelectedItem) else { return }
-        let quality = all[sender.indexOfSelectedItem]
+        guard let quality: StreamSettings.SoundQuality = sender.selectedChoice() else { return }
         soundQualityDetail.stringValue = quality.detail
         // Choosing the one already chosen must not restart the picture.
         guard quality != settings.soundQuality else { return }
@@ -421,12 +414,7 @@ final class SettingsPane: NSView {
     }
 
     @objc private func volumeMoved(_ sender: NSSlider) {
-        write {
-            settings.volume = Float(sender.doubleValue / 100)
-            // Reaching for the volume means wanting to hear it; a slider that
-            // moved while nothing changed would look broken.
-            if settings.isMuted { settings.isMuted = false }
-        }
+        write { settings.setVolume(fromSlider: sender.doubleValue) }
         showVolume(movingSlider: false)
         if NSApp.currentEvent?.type == .leftMouseUp {
             Log.info("[settings] volume: \(Int((settings.volume * 100).rounded()))%")
@@ -434,20 +422,13 @@ final class SettingsPane: NSView {
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
-        write {
-            settings.isMuted.toggle()
-            // Unmuting into a volume of zero would change nothing you can hear
-            // and look as if the button had not worked, so it brings back half.
-            if !settings.isMuted, settings.volume == 0 { settings.volume = 0.5 }
-        }
+        write { settings.toggleMute() }
         Log.info("[settings] sound \(settings.isMuted ? "muted" : "unmuted")")
         showVolume(movingSlider: true)
     }
 
     @objc private func bufferingChosen(_ sender: NSPopUpButton) {
-        let all = StreamSettings.AudioBufferingChoice.allCases
-        guard all.indices.contains(sender.indexOfSelectedItem) else { return }
-        let buffering = all[sender.indexOfSelectedItem]
+        guard let buffering: StreamSettings.AudioBufferingChoice = sender.selectedChoice() else { return }
         bufferingDetail.stringValue = buffering.detail
         guard buffering != settings.audioBuffering else { return }
         Log.info("[settings] audio buffering: \(buffering.title)")
@@ -547,9 +528,7 @@ final class SettingsPane: NSView {
 
     private func build() {
         // ── Video ────────────────────────────────────────────────────────────
-        for quality in StreamSettings.VideoQuality.allCases {
-            qualityPopUp.addItem(withTitle: quality.title)
-        }
+        qualityPopUp.fill(with: StreamSettings.VideoQuality.allCases, selected: settings.videoQuality)
         Self.configure(popUp: qualityPopUp, label: "Video quality")
         qualityPopUp.target = self
         qualityPopUp.action = #selector(qualityChosen(_:))
@@ -573,25 +552,12 @@ final class SettingsPane: NSView {
         soundSourceControl.action = #selector(soundSourceChosen(_:))
         Self.reserveHeight(soundSourceDetail, for: StreamSettings.SoundSource.allCases.map(\.detail))
 
-        for quality in StreamSettings.SoundQuality.allCases {
-            soundQualityPopUp.addItem(withTitle: quality.title)
-        }
+        soundQualityPopUp.fill(with: StreamSettings.SoundQuality.allCases, selected: settings.soundQuality)
         Self.configure(popUp: soundQualityPopUp, label: "Sound quality")
         soundQualityPopUp.target = self
         soundQualityPopUp.action = #selector(soundQualityChosen(_:))
         Self.reserveHeight(soundQualityDetail,
                            for: StreamSettings.SoundQuality.allCases.map(\.detail))
-
-        muteButton.target = self
-        muteButton.action = #selector(muteToggled(_:))
-        muteButton.isBordered = false
-        muteButton.imagePosition = .imageOnly
-        muteButton.imageScaling = .scaleNone
-        muteButton.symbolConfiguration = .init(pointSize: 13, weight: .medium)
-        // Fixed, so the slider beside it does not shift as the icon changes
-        // between the slashed speaker and one with three waves.
-        muteButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        muteButton.setContentHuggingPriority(.required, for: .horizontal)
 
         volumeSlider.target = self
         volumeSlider.action = #selector(volumeMoved(_:))
@@ -602,9 +568,8 @@ final class SettingsPane: NSView {
         volumeValue.widthAnchor.constraint(equalToConstant: Self.sliderValueWidth).isActive = true
         let volumeLine = Self.line([muteButton, volumeSlider], spacing: DS.Space.x2)
 
-        for choice in StreamSettings.AudioBufferingChoice.allCases {
-            bufferingPopUp.addItem(withTitle: choice.title)
-        }
+        bufferingPopUp.fill(with: StreamSettings.AudioBufferingChoice.allCases,
+                            selected: settings.audioBuffering)
         Self.configure(popUp: bufferingPopUp, label: "Sound buffering")
         bufferingPopUp.target = self
         bufferingPopUp.action = #selector(bufferingChosen(_:))
@@ -897,6 +862,29 @@ final class SettingsPane: NSView {
         label.heightAnchor.constraint(equalToConstant: ceil(tallest)).isActive = true
     }
 
+    /// The speaker beside a volume slider, here and in the popover: slashed
+    /// while muted, otherwise with as many waves as the volume.
+    static func speakerImage(muted: Bool, volume: Float) -> NSImage? {
+        muted
+            ? NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
+            : NSImage(systemSymbolName: "speaker.wave.3.fill", variableValue: Double(volume),
+                      accessibilityDescription: nil)
+    }
+
+    /// The mute button beside a volume slider, here and in the popover.
+    static func makeMuteButton(target: AnyObject?, action: Selector?) -> NSButton {
+        let button = NSButton(image: NSImage(), target: target, action: action)
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleNone
+        button.symbolConfiguration = .init(pointSize: 13, weight: .medium)
+        // Fixed, so the slider beside it does not shift as the icon changes
+        // between the slashed speaker and one with three waves.
+        button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        return button
+    }
+
     private static func configure(popUp: NSPopUpButton, label: String) {
         popUp.font = DS.body
         popUp.setAccessibilityLabel(label)
@@ -909,6 +897,30 @@ final class SettingsPane: NSView {
         for word in words {
             word.label.textColor = dimmed ? DS.textFaint : word.colour
         }
+    }
+}
+
+extension NSPopUpButton {
+    /// One item per choice, in order, with `selected` chosen. `toolTips`
+    /// puts each choice's detail on its item, for a menu with no caption
+    /// under it.
+    func fill<Choice: SettingChoice>(with choices: Choice.AllCases, selected: Choice,
+                                   toolTips: Bool = false) {
+        for choice in choices {
+            addItem(withTitle: choice.title)
+            if toolTips { lastItem?.toolTip = choice.detail }
+        }
+        select(selected)
+    }
+
+    func select<Choice: SettingChoice>(_ choice: Choice) {
+        selectItem(at: Array(Choice.allCases).firstIndex(of: choice) ?? 0)
+    }
+
+    /// The choice whose item is selected, in a menu `fill` made.
+    func selectedChoice<Choice: SettingChoice>() -> Choice? {
+        let all = Array(Choice.allCases)
+        return all.indices.contains(indexOfSelectedItem) ? all[indexOfSelectedItem] : nil
     }
 }
 

@@ -217,15 +217,7 @@ final class QualityPill: DS.Box {
         // so they belong here on the window rather than only in Settings. What
         // the stream is doing with sound is the note under them rather than a
         // line of its own above, so the popover names it once.
-        let mute = NSButton(image: NSImage(), target: self, action: #selector(muteToggled(_:)))
-        mute.isBordered = false
-        mute.imagePosition = .imageOnly
-        mute.imageScaling = .scaleNone
-        mute.symbolConfiguration = .init(pointSize: 13, weight: .medium)
-        // Fixed, so the slider beside it does not shift as the icon changes
-        // between the slashed speaker and one with three waves.
-        mute.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        mute.setContentHuggingPriority(.required, for: .horizontal)
+        let mute = SettingsPane.makeMuteButton(target: self, action: #selector(muteToggled(_:)))
         let volume = NSSlider(value: Double(settings.volume) * 100, minValue: 0, maxValue: 100,
                               target: self, action: #selector(volumeMoved(_:)))
         volume.isContinuous = true
@@ -243,12 +235,8 @@ final class QualityPill: DS.Box {
         // volume's, so everything about the sound is one group. Named in full:
         // "Quality" in a popover that has the video's as well could be either.
         let soundQuality = NSPopUpButton(frame: .zero, pullsDown: false)
-        for choice in StreamSettings.SoundQuality.allCases {
-            soundQuality.addItem(withTitle: choice.title)
-            soundQuality.lastItem?.representedObject = choice.rawValue
-            soundQuality.lastItem?.toolTip = choice.detail
-        }
-        soundQuality.selectItem(withTitle: settings.soundQuality.title)
+        soundQuality.fill(with: StreamSettings.SoundQuality.allCases, selected: settings.soundQuality,
+                          toolTips: true)
         soundQuality.target = self
         soundQuality.action = #selector(soundQualityChosen(_:))
         soundQuality.setAccessibilityLabel("Sound quality")
@@ -274,12 +262,8 @@ final class QualityPill: DS.Box {
         // rather than offer a choice that would change nothing.
         let pinned = Self.commandLineOverrides.contains(.bitrate)
         let quality = NSPopUpButton(frame: .zero, pullsDown: false)
-        for choice in StreamSettings.VideoQuality.allCases {
-            quality.addItem(withTitle: choice.title)
-            quality.lastItem?.representedObject = choice.rawValue
-            quality.lastItem?.toolTip = choice.detail
-        }
-        quality.selectItem(withTitle: settings.videoQuality.title)
+        quality.fill(with: StreamSettings.VideoQuality.allCases, selected: settings.videoQuality,
+                     toolTips: true)
         quality.target = self
         quality.action = #selector(qualityChosen(_:))
         quality.isEnabled = !pinned
@@ -451,21 +435,13 @@ final class QualityPill: DS.Box {
     }
 
     @objc private func volumeMoved(_ sender: NSSlider) {
-        let settings = StreamSettings.shared
-        settings.volume = Float(sender.doubleValue / 100)
-        // Reaching for the volume means wanting to hear it; a slider that moved
-        // while nothing changed would look broken.
-        if settings.isMuted { settings.isMuted = false }
+        StreamSettings.shared.setVolume(fromSlider: sender.doubleValue)
         if showSound(movingSlider: false) { refitDetail() }
         showAccessibilityValue()
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
-        let settings = StreamSettings.shared
-        settings.isMuted.toggle()
-        // Unmuting into a volume of zero would change nothing you can hear, and
-        // look as if the button had not worked, so it brings back half.
-        if !settings.isMuted, settings.volume == 0 { settings.volume = 0.5 }
+        StreamSettings.shared.toggleMute()
         if showSound() { refitDetail() }
         showAccessibilityValue()
     }
@@ -493,10 +469,7 @@ final class QualityPill: DS.Box {
         // still reads as something to drag.
         let off = Self.soundOff(audioActive: stats.audioActive) != nil
         if let muteButton {
-            muteButton.image = muted
-                ? NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
-                : NSImage(systemSymbolName: "speaker.wave.3.fill",
-                          variableValue: Double(settings.volume), accessibilityDescription: nil)
+            muteButton.image = SettingsPane.speakerImage(muted: muted, volume: settings.volume)
             muteButton.contentTintColor = muted ? DS.accentInk : DS.textSecondary
             muteButton.setAccessibilityLabel(muted ? "Unmute" : "Mute")
             muteButton.isEnabled = !off
@@ -527,8 +500,7 @@ final class QualityPill: DS.Box {
     }
 
     @objc private func soundQualityChosen(_ sender: NSPopUpButton) {
-        guard let raw = sender.selectedItem?.representedObject as? String,
-              let choice = StreamSettings.SoundQuality(rawValue: raw) else { return }
+        guard let choice: StreamSettings.SoundQuality = sender.selectedChoice() else { return }
         // Choosing the one already chosen must not restart the picture.
         guard choice != StreamSettings.shared.soundQuality else { return }
         StreamSettings.shared.soundQuality = choice
@@ -536,8 +508,7 @@ final class QualityPill: DS.Box {
     }
 
     @objc private func qualityChosen(_ sender: NSPopUpButton) {
-        guard let raw = sender.selectedItem?.representedObject as? String,
-              let choice = StreamSettings.VideoQuality(rawValue: raw) else { return }
+        guard let choice: StreamSettings.VideoQuality = sender.selectedChoice() else { return }
         qualityNote?.stringValue = Self.qualityNote(choice, pinned: false)
         refitDetail()
         // Choosing the one already chosen must not restart the picture.

@@ -30,7 +30,7 @@ final class StreamSettings {
     // MARK: - Video
 
     /// How many bits a second the PC may spend on the picture.
-    enum VideoQuality: String, CaseIterable {
+    enum VideoQuality: String, SettingChoice {
         case automatic, dataSaver, balanced, high, maximum
 
         var title: String {
@@ -104,7 +104,7 @@ final class StreamSettings {
     /// delay than PCM at 10 ms a packet, and 17.5 ms at Data saver's 20.
     /// Lossless is the PCM every host sent before, and the only one a host
     /// that predates the choice can send.
-    enum SoundQuality: String, CaseIterable {
+    enum SoundQuality: String, SettingChoice {
         case dataSaver, standard, high, lossless
 
         var title: String {
@@ -159,7 +159,7 @@ final class StreamSettings {
 
     /// Whose sound the PC sends: the streamed apps' alone, so a notification
     /// or a song elsewhere on the PC stays there, or everything it plays.
-    enum SoundSource: String, CaseIterable {
+    enum SoundSource: String, SettingChoice {
         case streamedApps, wholePC
 
         /// On the segmented control, so short.
@@ -201,7 +201,22 @@ final class StreamSettings {
         set { set(newValue, Key.muted, restarts: false) }
     }
 
-    enum AudioBufferingChoice: String, CaseIterable {
+    /// The volume from a slider running 0 to 100. Reaching for the volume
+    /// means wanting to hear it; a slider that moved while nothing changed
+    /// would look broken, so it unmutes.
+    func setVolume(fromSlider position: Double) {
+        volume = Float(position / 100)
+        if isMuted { isMuted = false }
+    }
+
+    /// Unmuting into a volume of zero would change nothing you can hear, and
+    /// look as if the button had not worked, so it brings back half.
+    func toggleMute() {
+        isMuted.toggle()
+        if !isMuted, volume == 0 { volume = 0.5 }
+    }
+
+    enum AudioBufferingChoice: String, SettingChoice {
         case automatic, lowLatency, steady
 
         var title: String {
@@ -342,4 +357,11 @@ final class StreamSettings {
         NotificationCenter.default.post(name: Self.didChange, object: self,
                                         userInfo: [Self.restartsStreamKey: restarts])
     }
+}
+
+/// One of a setting's choices, as the menus and segments that offer it show it.
+protocol SettingChoice: CaseIterable, Equatable {
+    var title: String { get }
+    /// One line saying what it is for.
+    var detail: String { get }
 }
