@@ -172,6 +172,22 @@ bool RestoreInProgress(const std::vector<uint64_t>& restoring, uint64_t window) 
     return false;
 }
 
+bool WaitWhileBusy(const std::function<bool()>& busy,
+                   const std::function<uint64_t()>& now,
+                   const std::function<void(uint32_t)>& sleep,
+                   uint64_t limit_ms, uint32_t step_ms) {
+    const uint64_t start = now();
+    while (busy()) {
+        const uint64_t waited = now() - start;
+        if (waited >= limit_ms) {
+            return false;
+        }
+        const uint64_t left = limit_ms - waited;
+        sleep(static_cast<uint32_t>(left < step_ms ? left : step_ms));
+    }
+    return true;
+}
+
 bool BeginRestore(const std::vector<OwedWindow>& owed,
                   std::vector<uint64_t>& restoring, uint64_t window, uint64_t revision) {
     if (window == 0 || RestoreInProgress(restoring, window)) {

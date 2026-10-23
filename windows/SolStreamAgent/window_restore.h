@@ -141,6 +141,27 @@ void RememberOwed(std::vector<OwedWindow>& owed, const OwedWindow& entry);
 /// claim it until FinishRestore clears that ownership.
 bool RestoreInProgress(const std::vector<uint64_t>& restoring, uint64_t window);
 
+/// How long a `lock` or `topmost` waits for an older restore of the same window
+/// to finish, and how often it looks.
+///
+/// A Mac that comes back while its last session's windows are still being
+/// given back asks for them again at once, and does not ask a second time: a
+/// window refused then stays unlocked, and under whatever covers it, for the
+/// whole session. A restore of a window that answers takes a few tens of
+/// milliseconds, so a short wait turns that refusal into the answer it wanted.
+/// Bounded, because the command thread waits with it, and a window whose app
+/// has hung part-way through its restore is not worth holding every other
+/// command for.
+constexpr uint64_t kRestoreWaitMs = 1500;
+constexpr uint32_t kRestoreWaitStepMs = 25;
+
+/// Wait while `busy` says so, looking every `step_ms` through `sleep`, for no
+/// longer than `limit_ms` by `now`. True when it stopped being busy in time.
+bool WaitWhileBusy(const std::function<bool()>& busy,
+                   const std::function<uint64_t()>& now,
+                   const std::function<void(uint32_t)>& sleep,
+                   uint64_t limit_ms, uint32_t step_ms);
+
 /// Mark a still-owed snapshot as being restored. False when it was replaced,
 /// is already being restored, or has a zero handle.
 bool BeginRestore(const std::vector<OwedWindow>& owed,

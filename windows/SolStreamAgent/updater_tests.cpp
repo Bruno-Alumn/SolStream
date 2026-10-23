@@ -2862,6 +2862,35 @@ void TestPlacementForRestore() {
     }
 }
 
+void TestWaitForRestore() {
+    // A fake clock that moves only when slept on.
+    uint64_t clock = 1000;
+    int sleeps = 0;
+    auto now = [&clock] { return clock; };
+    auto sleep = [&clock, &sleeps](uint32_t ms) { clock += ms; ++sleeps; };
+
+    // Nothing in progress: no wait at all.
+    CHECK(WaitWhileBusy([] { return false; }, now, sleep, kRestoreWaitMs, kRestoreWaitStepMs));
+    CHECK(sleeps == 0 && clock == 1000);
+
+    // A restore that finishes within the bound is waited for, and no longer.
+    const uint64_t done_at = 1000 + 110;
+    CHECK(WaitWhileBusy([&clock, done_at] { return clock < done_at; }, now, sleep,
+                        kRestoreWaitMs, kRestoreWaitStepMs));
+    CHECK(clock >= done_at && clock < done_at + kRestoreWaitStepMs);
+
+    // One that does not is given up on at the bound exactly, not a step past.
+    clock = 5000;
+    sleeps = 0;
+    CHECK(!WaitWhileBusy([] { return true; }, now, sleep, 1010, 25));
+    CHECK(clock == 5000 + 1010);
+    CHECK(sleeps == 41);   // forty whole steps and the ten left over
+
+    // The real bound is short enough for a command thread to wait out.
+    static_assert(kRestoreWaitMs <= 2000 && kRestoreWaitStepMs > 0
+                  && kRestoreWaitStepMs < kRestoreWaitMs);
+}
+
 void TestOwedWindows(const std::wstring& scratch) {
     OwedWindow first;
     first.window = 0xFFFFFFFFull;
@@ -3212,6 +3241,7 @@ int wmain(int argc, wchar_t** argv) {
     TestReceiveFailures();
     TestCaptureDisplayIsStale();
     TestRestorePlacement();
+    TestWaitForRestore();
     TestPlacementForRestore();
     TestOwedWindows(scratch);
     TestLeftBehind();

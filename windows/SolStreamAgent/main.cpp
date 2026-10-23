@@ -3076,6 +3076,31 @@ void RecordOwedWindows() {
     LeaveCriticalSection(&g_owed_cs);
 }
 
+/// Wait, briefly, for an older session's restore of this window to finish; see
+/// kRestoreWaitMs. On the command thread, and holding no lock while it sleeps,
+/// so the restore it waits for can finish. True when no restore holds it now.
+bool WaitForRestoreToFinish(HWND window) {
+    const uint64_t id = IdFromWindow(window);
+    auto restoring = [id] {
+        EnterCriticalSection(&g_lock_cs);
+        const bool busy = solstream::RestoreInProgress(g_restoring_windows, id);
+        LeaveCriticalSection(&g_lock_cs);
+        return busy;
+    };
+    if (!restoring()) {
+        return true;
+    }
+    const ULONGLONG start = GetTickCount64();
+    const bool finished = solstream::WaitWhileBusy(
+        restoring, [] { return (uint64_t) GetTickCount64(); },
+        [](uint32_t ms) { Sleep(ms); },
+        solstream::kRestoreWaitMs, solstream::kRestoreWaitStepMs);
+    Log("[restore] window %llu was still being given back; %s after %llu ms",
+        (unsigned long long) id, finished ? "done" : "gave up waiting",
+        (unsigned long long) (GetTickCount64() - start));
+    return finished;
+}
+
 /// Take away a window's ability to be resized from the host side.
 bool LockWindow(HWND window) {
     if (Unresponsive(window)) {
@@ -4505,6 +4530,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         }
         bool ok = true;
         if (on) {
+            // A reconnecting Mac asks at once, while its last session's
+            // cleanup may still be giving this window back.
+            WaitForRestoreToFinish(window);
             ok = LockWindow(window);
         } else {
             UnlockWindow(window);
@@ -4538,6 +4566,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // application restarts. The slot is also what makes the watcher report
         // the window closing.
         if (on) {
+            WaitForRestoreToFinish(window);
             EnterCriticalSection(&g_lock_cs);
             const int slot = ClaimSlot(window);
             LeaveCriticalSection(&g_lock_cs);
