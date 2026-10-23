@@ -112,8 +112,8 @@ size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* pl
 /// Advance a 1024-slot window, where slot n means "highest minus n", by
 /// `shift`: a 1024-bit left shift, a word at a time with the carry between
 /// words. Runs for nearly every packet, so it does not walk the bits. The
-/// replay window here and the input dedupe in input.cpp both use it, and the
-/// Mac's SMTReplayWindow does the same.
+/// replay window below uses it, and through that the input dedupe in
+/// input.cpp; the Mac's SMTReplayWindow does the same.
 inline void SlideWindow(uint64_t (&bits)[16], uint64_t shift) {
     if (shift >= 1024) {
         for (uint64_t& word : bits) { word = 0; }
