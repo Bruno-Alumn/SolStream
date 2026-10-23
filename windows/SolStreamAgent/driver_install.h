@@ -92,6 +92,18 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                           bool& already, bool& restart, std::string& note,
                           std::string& error);
 
+/// The virtual display's line in the result the window waiting on an install
+/// reads (WriteInstallResult): "ready <note>", "ready-restart <note>" when
+/// Windows said the install needs a restart -- carried as its own word, not
+/// guessed from what the note says -- or "failed <error>". `ok`, `already`,
+/// `restart`, `note` and `error` are InstallDisplayDriver's.
+std::string DisplayDriverResult(bool ok, bool already, bool restart, const std::string& note,
+                                const std::string& error);
+
+/// InstallDisplayDriver, answered as that line.
+std::string InstallDisplayDriverResult(const std::function<void(DriverStep)>& progress,
+                                       HWND owner);
+
 /// Whether InstallDisplayDriver installed anything on this PC, and so whether
 /// uninstalling SolStream has anything of the driver's to take away.
 bool InstalledDriverHere();

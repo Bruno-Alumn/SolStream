@@ -2113,15 +2113,11 @@ void StartInstallJob(HWND window) {
             // Already elevated -- setup run as administrator -- so the work
             // happens here, in the order the elevated half does it.
             if (options.display_driver) {
-                bool already = false, restart = false;
-                std::string note, driver_error;
-                const bool ready = InstallDisplayDriver(
+                display = InstallDisplayDriverResult(
                     [window](DriverStep step) {
                         PostMessageW(window, g_progress_message, (WPARAM) step, 0);
                     },
-                    window, already, restart, note, driver_error);
-                display = ready ? (restart ? "ready-restart " : "ready ") + note
-                                : "failed " + driver_error;
+                    window);
                 PostMessageW(window, g_progress_message, (WPARAM) DriverStep::Done, 0);
             }
             ok = InstallSelf(options, error);
@@ -2203,14 +2199,11 @@ void StartDisplayJob(HWND window) {
         std::string error;
         std::string display;
         if (IsElevated()) {
-            bool already = false, restart = false;
-            std::string note;
-            const bool ready = InstallDisplayDriver(
+            display = InstallDisplayDriverResult(
                 [window](DriverStep step) {
                     PostMessageW(window, g_progress_message, (WPARAM) step, 0);
                 },
-                window, already, restart, note, error);
-            display = ready ? (restart ? "ready-restart " : "ready ") + note : "failed " + error;
+                window);
         } else {
             const std::wstring progress = L"--install-display-driver --progress-window "
                 + std::to_wstring((unsigned long long) (uintptr_t) window);

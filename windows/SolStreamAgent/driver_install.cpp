@@ -565,6 +565,26 @@ std::string ManualInstallAdvice() {
     return kManualInstall.substr(1);
 }
 
+std::string DisplayDriverResult(bool ok, bool already, bool restart, const std::string& note,
+                                const std::string& error) {
+    if (!ok) {
+        return "failed " + error;
+    }
+    return std::string(restart ? "ready-restart " : "ready ")
+         + (already ? "This PC already had the Virtual Display Driver, so SolStream set "
+                      "it up for streaming.\n"
+                    : "")
+         + note;
+}
+
+std::string InstallDisplayDriverResult(const std::function<void(DriverStep)>& progress,
+                                       HWND owner) {
+    bool already = false, restart = false;
+    std::string note, error;
+    const bool ok = InstallDisplayDriver(progress, owner, already, restart, note, error);
+    return DisplayDriverResult(ok, already, restart, note, error);
+}
+
 bool InstalledDriverHere() {
     return !ReadState(kInfValue).empty() || !ReadState(kDeviceValue).empty();
 }
