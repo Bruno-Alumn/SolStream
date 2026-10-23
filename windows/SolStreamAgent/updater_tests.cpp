@@ -2811,16 +2811,16 @@ void TestRestorePlacement() {
         CHECK(calls == kRestorePlacementAttempts);
         CHECK(!matched);
     }
-    // A refused set is no tries; a placement that cannot be read back is one.
+    // A refused Windows call is a failed restore, however many calls came first.
     {
         FakeWindow window;
         window.fail_set = true;
         bool matched = true;
-        CHECK(Restore(window, saved, &matched) == 0);
+        CHECK(Restore(window, saved, &matched) == kRestorePlacementFailed);
         CHECK(!matched);
         FakeWindow unread;
         unread.fail_get = true;
-        CHECK(Restore(unread, saved, &matched) == 1);
+        CHECK(Restore(unread, saved, &matched) == kRestorePlacementFailed);
         CHECK(!matched);
     }
     CHECK(PlacementDistance(RECT{0, 0, 10, 10}, RECT{1, -1, 12, 7}) == 1 + 1 + 2 + 3);
@@ -3019,13 +3019,67 @@ void TestLeftBehind() {
     list = left;
     CHECK(!TakeOwed(list, 2, 21, 200, &taken));
     CHECK(list.size() == 1 && list[0].window == 3);
-    // A process that cannot be identified is never the one.
+    // An unidentified process can be the same in-memory entry. Such entries
+    // never come back from disk, where identity has to be certain.
     list = {owed(4, 40, 0, 0)};
-    CHECK(!TakeOwed(list, 4, 40, 0, &taken));
+    taken = OwedWindow{};
+    CHECK(TakeOwed(list, 4, 40, 0, &taken));
+    CHECK(taken.window == 4);
+    CHECK(list.empty());
     // A window nothing is owed for leaves the list alone.
     list = left;
     CHECK(!TakeOwed(list, 9, 90, 900, nullptr));
     CHECK(list.size() == 2);
+
+    // Releasing a slot replaces its old debt rather than duplicating the handle.
+    RememberOwed(list, owed(2, 20, 200, -1000));
+    CHECK(list.size() == 2);
+    CHECK(list.size() == 2 && list[0].placement.rcNormalPosition.left == -1000);
+
+    // A claim cannot slip between the ownership check and the restore. A failed
+    // restore releases the claim but keeps the debt for another attempt.
+    std::vector<uint64_t> restoring;
+    CHECK(BeginRestore(list, restoring, 2, 0));
+    CHECK(RestoreInProgress(restoring, 2));
+    CHECK(!BeginRestore(list, restoring, 2, 0));
+    CHECK(restoring.size() == 1);
+    CHECK(!BeginRestore(list, restoring, 9, 0));
+    CHECK(!BeginRestore(list, restoring, 0, 0));
+    FinishRestore(list, restoring, 2, 0, RestoreOutcome::Retry);
+    CHECK(!RestoreInProgress(restoring, 2));
+    CHECK(list.size() == 2);
+
+    // Completion and a window known to be gone both clear the debt.
+    CHECK(BeginRestore(list, restoring, 2, 0));
+    FinishRestore(list, restoring, 2, 0, RestoreOutcome::Restored);
+    CHECK(!RestoreInProgress(restoring, 2));
+    CHECK(list.size() == 1 && list[0].window == 3);
+    CHECK(BeginRestore(list, restoring, 3, 0));
+    FinishRestore(list, restoring, 3, 0, RestoreOutcome::Gone);
+    CHECK(list.empty());
+    CHECK(restoring.empty());
+
+    // Startup can reject only the snapshot it checked, never a newer debt for
+    // the same recycled handle.
+    list = left;
+    list[0].revision = 7;
+    CHECK(!ForgetOwedRevision(list, 2, 6));
+    CHECK(list.size() == 2 && list[0].revision == 7);
+    CHECK(ForgetOwedRevision(list, 2, 7));
+    CHECK(list.size() == 1 && list[0].window == 3);
+    CHECK(!ForgetOwedRevision(list, 9, 0));
+    CHECK(list.size() == 1);
+
+    // Starting and finishing a restore both check the snapshot revision too.
+    list = left;
+    list[0].revision = 7;
+    CHECK(!BeginRestore(list, restoring, 2, 6));
+    CHECK(restoring.empty());
+    CHECK(BeginRestore(list, restoring, 2, 7));
+    list[0].revision = 8;
+    FinishRestore(list, restoring, 2, 7, RestoreOutcome::Restored);
+    CHECK(!RestoreInProgress(restoring, 2));
+    CHECK(list.size() == 2 && list[0].revision == 8);
 }
 
 }  // namespace

@@ -48,10 +48,12 @@ constexpr int kRestorePlacementAttempts = 3;
 /// one number.
 long long PlacementDistance(const RECT& wanted, const RECT& got);
 
+constexpr int kRestorePlacementFailed = -1;
+
 /// Apply `saved` through `set`, read it back through `get`, and apply it again
 /// while the window has landed somewhere else and is getting closer. Returns
-/// the number of times `set` was called, 0 when the first one failed;
-/// `matched` says whether the window ended where it was asked to be.
+/// the number of times `set` was called, or kRestorePlacementFailed when either
+/// Windows call failed. `matched` says whether it ended where it was asked to be.
 int RestorePlacement(const WINDOWPLACEMENT& saved,
                      const std::function<bool(const WINDOWPLACEMENT&)>& set,
                      const std::function<bool(WINDOWPLACEMENT&)>& get,
@@ -79,6 +81,9 @@ struct OwedWindow {
     uint64_t removed_style = 0;
     bool topmost = false;     // whether it was always-on-top before
     WINDOWPLACEMENT placement{};
+    /// Memory only, never written: distinguishes a newer debt from a stale
+    /// startup snapshot naming the same handle. Loaded records start at zero.
+    uint64_t revision = 0;
 };
 
 /// The whole record: the windows, and which run of Windows wrote it.
@@ -114,9 +119,33 @@ std::vector<OwedWindow> OwedToWrite(const std::vector<OwedWindow>& held,
 
 /// Take this window's entry out of `owed`. True, with it in `taken`, when the
 /// entry is for this same process; an entry for the handle under another
-/// process is out of date, and is dropped without being taken.
+/// process is out of date, and is dropped without being taken. Zero start times
+/// are safe here because they exist only in memory, never in a loaded record.
 bool TakeOwed(std::vector<OwedWindow>& owed, uint64_t window, uint32_t pid,
               uint64_t process_created, OwedWindow* taken);
+
+/// Forget a rejected startup entry only if a newer handoff has not replaced it.
+bool ForgetOwedRevision(std::vector<OwedWindow>& owed, uint64_t window, uint64_t revision);
+
+enum class RestoreOutcome { Restored, Gone, Retry };
+
+/// Add or replace a window's debt without duplicating its handle.
+void RememberOwed(std::vector<OwedWindow>& owed, const OwedWindow& entry);
+
+/// Whether an older restore still owns this window. A new session must not
+/// claim it until FinishRestore clears that ownership.
+bool RestoreInProgress(const std::vector<uint64_t>& restoring, uint64_t window);
+
+/// Mark a still-owed snapshot as being restored. False when it was replaced,
+/// is already being restored, or has a zero handle.
+bool BeginRestore(const std::vector<OwedWindow>& owed,
+                  std::vector<uint64_t>& restoring, uint64_t window, uint64_t revision);
+
+/// Clear the in-progress mark. Only a completed restore or a window known to be
+/// gone loses its debt; a failed or hung restore stays owed for another try.
+/// A newer revision of the same handle is never erased by an older completion.
+void FinishRestore(std::vector<OwedWindow>& owed, std::vector<uint64_t>& restoring,
+                   uint64_t window, uint64_t revision, RestoreOutcome outcome);
 
 /// The record as text: a header line, the line saying when it was written, then
 /// one line of numbers per window.

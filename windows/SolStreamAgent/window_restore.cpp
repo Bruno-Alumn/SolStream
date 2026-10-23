@@ -61,13 +61,13 @@ int RestorePlacement(const WINDOWPLACEMENT& saved,
     long long best = LLONG_MAX;
     for (int attempt = 0; attempt < kRestorePlacementAttempts; ++attempt) {
         if (!set(saved)) {
-            break;
+            return kRestorePlacementFailed;
         }
         ++calls;
         WINDOWPLACEMENT now{};
         now.length = sizeof(now);
         if (!get(now)) {
-            break;
+            return kRestorePlacementFailed;
         }
         const long long distance = PlacementDistance(saved.rcNormalPosition,
                                                      now.rcNormalPosition);
@@ -129,8 +129,7 @@ bool TakeOwed(std::vector<OwedWindow>& owed, uint64_t window, uint32_t pid,
         if (owed[i].window != window) {
             continue;
         }
-        const bool same = owed[i].pid == pid && owed[i].process_created == process_created
-                       && process_created != 0;
+        const bool same = owed[i].pid == pid && owed[i].process_created == process_created;
         if (same && taken) {
             *taken = owed[i];
         }
@@ -138,6 +137,77 @@ bool TakeOwed(std::vector<OwedWindow>& owed, uint64_t window, uint32_t pid,
         return same;
     }
     return false;
+}
+
+bool ForgetOwedRevision(std::vector<OwedWindow>& owed, uint64_t window, uint64_t revision) {
+    for (auto it = owed.begin(); it != owed.end(); ++it) {
+        if (it->window != window) {
+            continue;
+        }
+        if (it->revision != revision) {
+            return false;
+        }
+        owed.erase(it);
+        return true;
+    }
+    return false;
+}
+
+void RememberOwed(std::vector<OwedWindow>& owed, const OwedWindow& entry) {
+    for (OwedWindow& current : owed) {
+        if (current.window == entry.window) {
+            current = entry;
+            return;
+        }
+    }
+    owed.push_back(entry);
+}
+
+bool RestoreInProgress(const std::vector<uint64_t>& restoring, uint64_t window) {
+    for (const uint64_t current : restoring) {
+        if (current == window) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BeginRestore(const std::vector<OwedWindow>& owed,
+                  std::vector<uint64_t>& restoring, uint64_t window, uint64_t revision) {
+    if (window == 0 || RestoreInProgress(restoring, window)) {
+        return false;
+    }
+    for (const OwedWindow& entry : owed) {
+        if (entry.window == window) {
+            if (entry.revision != revision) {
+                return false;
+            }
+            restoring.push_back(window);
+            return true;
+        }
+    }
+    return false;
+}
+
+void FinishRestore(std::vector<OwedWindow>& owed, std::vector<uint64_t>& restoring,
+                   uint64_t window, uint64_t revision, RestoreOutcome outcome) {
+    for (auto it = restoring.begin(); it != restoring.end(); ++it) {
+        if (*it == window) {
+            restoring.erase(it);
+            break;
+        }
+    }
+    if (outcome == RestoreOutcome::Retry) {
+        return;
+    }
+    for (auto it = owed.begin(); it != owed.end(); ++it) {
+        if (it->window == window) {
+            if (it->revision == revision) {
+                owed.erase(it);
+            }
+            return;
+        }
+    }
 }
 
 std::string FormatOwedWindows(const OwedRecord& record) {

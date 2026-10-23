@@ -1804,11 +1804,14 @@ CRITICAL_SECTION g_lock_cs;
 WindowLock g_locks[kMaxLocks];
 /// Serialises writing down what is owed; see RecordOwedWindows.
 CRITICAL_SECTION g_owed_cs;
-/// What a host stopped by force owed and this one has not yet given back:
-/// windows not answering when it started, or still being given back. Written
-/// down with the slots until then, so skipping one does not lose it. Guarded
-/// by g_lock_cs.
+/// Windows owed a restore outside the active slots: left by a stopped host or
+/// a failed cleanup, or still being restored. Written down with the slots so a
+/// skipped or failed restore does not lose the debt. Guarded by g_lock_cs.
 std::vector<solstream::OwedWindow> g_left_behind;
+/// Windows an older cleanup is still touching. Claims wait until that cleanup
+/// finishes, so it cannot move a window belonging to a new session. Same lock.
+std::vector<uint64_t> g_restoring_windows;
+constexpr int kClaimRestoreInProgress = -2;
 uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 
 /// Is this window's thread too busy to answer messages?
@@ -2962,6 +2965,9 @@ void StartWatcher() {
 /// `topmost` both change a window and both owe it a restore, and a window that
 /// was only ever made topmost still has to come back down.
 int ClaimSlot(HWND window) {
+    if (solstream::RestoreInProgress(g_restoring_windows, IdFromWindow(window))) {
+        return kClaimRestoreInProgress;
+    }
     for (int i = 0; i < kMaxLocks; ++i) {
         if (g_locks[i].active && g_locks[i].window == window) {
             return i;
@@ -3044,7 +3050,8 @@ void RecordOwedWindows() {
         entry.placement = g_locks[i].saved_placement;
         held.push_back(entry);
     }
-    // A window left behind that has closed since is owed nothing.
+    // A closed window is owed nothing. One whose process cannot be identified
+    // stays owed in this host's memory, but is not safe to persist for another.
     g_left_behind.erase(
         std::remove_if(g_left_behind.begin(), g_left_behind.end(),
                        [](const solstream::OwedWindow& entry) {
@@ -3052,7 +3059,13 @@ void RecordOwedWindows() {
                                static_cast<uintptr_t>(entry.window)));
                        }),
         g_left_behind.end());
-    owed.windows = solstream::OwedToWrite(held, g_left_behind);
+    std::vector<solstream::OwedWindow> persistent;
+    for (const solstream::OwedWindow& entry : g_left_behind) {
+        if (entry.process_created != 0) {
+            persistent.push_back(entry);
+        }
+    }
+    owed.windows = solstream::OwedToWrite(held, persistent);
     LeaveCriticalSection(&g_lock_cs);
     static bool complained = false;
     if (!solstream::SaveOwedWindows(OwedWindowsPath(), owed) && !complained) {
@@ -3074,6 +3087,7 @@ bool LockWindow(HWND window) {
     if (slot < 0) {
         return false;
     }
+    RecordOwedWindows();
 
     // Un-maximise only now that the placement is recorded, or the restore would
     // believe the window had always been this size. Synchronous, because the
@@ -3111,22 +3125,29 @@ bool LockWindow(HWND window) {
     return true;
 }
 
-/// Give one window back what the agent took: its frame bits, its z-order band
-/// and its placement. `saved` is a slot already removed from g_locks.
-void RestoreWindow(const WindowLock& saved) {
+/// Give one window back what the agent took. The outcome says whether its
+/// recovery record can be forgotten or needs another attempt later.
+solstream::RestoreOutcome RestoreWindow(const WindowLock& saved) {
     HWND window = saved.window;
     if (!window || !IsWindow(window)) {
-        return;
+        return solstream::RestoreOutcome::Gone;
     }
-    // WindowLock carries a pid because IsWindow can come back true for a handle
-    // Windows has since recycled onto somebody else's window, and restoring a
-    // dead application's state onto an unrelated one is worse than doing
-    // nothing.
+    // IsWindow can come back true for a recycled handle. The pid and process
+    // start keep a dead application's state off an unrelated window.
     if (saved.pid != 0) {
         DWORD owner = 0;
         GetWindowThreadProcessId(window, &owner);
         if (owner != saved.pid) {
-            return;
+            return solstream::RestoreOutcome::Gone;
+        }
+    }
+    if (saved.process_created != 0) {
+        const uint64_t created = ProcessCreationTime(saved.pid);
+        if (created == 0) {
+            return solstream::RestoreOutcome::Retry;
+        }
+        if (created != saved.process_created) {
+            return solstream::RestoreOutcome::Gone;
         }
     }
     // A hung application would hang this thread -- which on disconnect is the
@@ -3135,7 +3156,7 @@ void RestoreWindow(const WindowLock& saved) {
     if (Unresponsive(window)) {
         Log("[agent] window %llu is not responding; left as it is rather than "
             "restored", (unsigned long long) IdFromWindow(window));
-        return;
+        return solstream::RestoreOutcome::Retry;
     }
 
     if (saved.removed_style != 0) {
@@ -3145,14 +3166,15 @@ void RestoreWindow(const WindowLock& saved) {
     // Drop back out of the always-on-top band unless the window was already in
     // it: left set, the window floats above everything the user does next with
     // no visible cause. Asynchronous, because nothing measures it.
-    SetWindowPos(window, saved.saved_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
-                 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
-                 | SWP_ASYNCWINDOWPOS);
+    const bool z_order_failed =
+        SetWindowPos(window, saved.saved_topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                     0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                     | SWP_ASYNCWINDOWPOS) == FALSE;
     // And put it back where it was. Managed windows are parked on the virtual
     // display, whose origin sits off the side of the real desktop, so a window
-    // left at those coordinates is not merely misplaced — it is invisible, on a
-    // monitor that stops existing when the session ends.
+    // left at those coordinates is not merely misplaced -- it is invisible, on
+    // a monitor that stops existing when the session ends.
     //
     // Asked again when it does not land there: see window_restore.h. The move
     // off the 200% capture display makes a DPI-aware window rescale itself by
@@ -3177,6 +3199,11 @@ void RestoreWindow(const WindowLock& saved) {
                 return GetWindowPlacement(window, &placement) != FALSE;
             },
             &matched);
+        if (tries == solstream::kRestorePlacementFailed) {
+            Log("[restore] window %llu could not be put back; still owed its place",
+                (unsigned long long) IdFromWindow(window));
+            return solstream::RestoreOutcome::Retry;
+        }
         const RECT& wanted = saved.saved_placement.rcNormalPosition;
         WINDOWPLACEMENT now{};
         now.length = sizeof(now);
@@ -3199,48 +3226,83 @@ void RestoreWindow(const WindowLock& saved) {
                 tries, tries == 1 ? "try" : "tries", visible ? "" : ", left hidden");
         }
     }
+    return z_order_failed ? solstream::RestoreOutcome::Retry
+                          : solstream::RestoreOutcome::Restored;
 }
 
-void UnlockWindow(HWND window) {
-    WindowLock saved{};
+/// The slot's tenancy also versions its recovery debt, so stale startup work
+/// cannot delete a newer session's entry for the same handle.
+solstream::OwedWindow OwedForRestore(const WindowLock& saved) {
+    solstream::OwedWindow entry;
+    entry.window = IdFromWindow(saved.window);
+    entry.pid = saved.pid;
+    entry.process_created = saved.process_created;
+    entry.removed_style = (uint64_t) saved.removed_style;
+    entry.topmost = saved.saved_topmost;
+    entry.placement = saved.saved_placement;
+    entry.revision = saved.generation;
+    return entry;
+}
+
+/// Finish a restore marked by BeginRestore. The queue and its in-progress mark
+/// change under the same lock that ClaimSlot uses.
+void RestoreMarkedWindow(const WindowLock& saved) {
+    const uint64_t id = IdFromWindow(saved.window);
+    const solstream::RestoreOutcome outcome = RestoreWindow(saved);
     EnterCriticalSection(&g_lock_cs);
-    for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active && g_locks[i].window == window) {
-            saved = g_locks[i];
-            g_locks[i] = WindowLock{};
-            break;
-        }
-    }
+    solstream::FinishRestore(g_left_behind, g_restoring_windows, id,
+                             saved.generation, outcome);
     LeaveCriticalSection(&g_lock_cs);
-    RestoreWindow(saved);
     RecordOwedWindows();
 }
 
-/// Release every slot at once, handing back what each window is owed.
-///
-/// Separate from restoring them so the disconnect path can free the client slot
-/// in between: a new Mac then claims fresh slots of its own rather than ones a
-/// previous session's cleanup is still unwinding.
-std::vector<WindowLock> TakeAllSlots() {
-    std::vector<WindowLock> owed;
+/// Release one window's slot, or every slot for a null window. Removing the slot,
+/// adding its recovery entry and marking it are one critical section: a claim or
+/// a persistence snapshot can never see the handoff half done.
+std::vector<WindowLock> TakeSlotsForRestore(HWND window = nullptr) {
+    std::vector<WindowLock> released;
     EnterCriticalSection(&g_lock_cs);
     for (int i = 0; i < kMaxLocks; ++i) {
-        if (g_locks[i].active) {
-            owed.push_back(g_locks[i]);
-            g_locks[i] = WindowLock{};
+        if (!g_locks[i].active || (window && g_locks[i].window != window)) {
+            continue;
         }
+        const uint64_t id = IdFromWindow(g_locks[i].window);
+        if (solstream::RestoreInProgress(g_restoring_windows, id)) {
+            continue;
+        }
+        const solstream::OwedWindow entry = OwedForRestore(g_locks[i]);
+        solstream::RememberOwed(g_left_behind, entry);
+        if (!solstream::BeginRestore(g_left_behind, g_restoring_windows, id,
+                                     entry.revision)) {
+            continue;
+        }
+        released.push_back(g_locks[i]);
+        g_locks[i] = WindowLock{};
     }
     LeaveCriticalSection(&g_lock_cs);
-    return owed;
+    return released;
+}
+
+/// Persist the handoff before touching a window. A crash or failed call then
+/// leaves its debt in the recovery queue instead of dropping it with the slot.
+void RestoreReleasedSlots(const std::vector<WindowLock>& released) {
+    if (released.empty()) {
+        return;
+    }
+    RecordOwedWindows();
+    for (const WindowLock& saved : released) {
+        RestoreMarkedWindow(saved);
+    }
+}
+
+void UnlockWindow(HWND window) {
+    RestoreReleasedSlots(TakeSlotsForRestore(window));
 }
 
 /// Give every locked window its resize border back, so a Mac that goes away
 /// does not leave applications permanently unresizable.
 void UnlockAll() {
-    for (const WindowLock& saved : TakeAllSlots()) {
-        RestoreWindow(saved);
-    }
-    RecordOwedWindows();
+    RestoreReleasedSlots(TakeSlotsForRestore());
 }
 
 /// Whether a window's thread answers a message within half a second.
@@ -3269,12 +3331,9 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
     EnterCriticalSection(&g_lock_cs);
     const std::vector<solstream::OwedWindow> owed = g_left_behind;
     LeaveCriticalSection(&g_lock_cs);
-    auto forget = [](uint64_t id) {
+    auto forget = [](const solstream::OwedWindow& expected) {
         EnterCriticalSection(&g_lock_cs);
-        g_left_behind.erase(
-            std::remove_if(g_left_behind.begin(), g_left_behind.end(),
-                           [id](const solstream::OwedWindow& entry) { return entry.window == id; }),
-            g_left_behind.end());
+        solstream::ForgetOwedRevision(g_left_behind, expected.window, expected.revision);
         LeaveCriticalSection(&g_lock_cs);
     };
     for (const solstream::OwedWindow& entry : owed) {
@@ -3282,6 +3341,7 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
         saved.window = reinterpret_cast<HWND>(static_cast<uintptr_t>(entry.window));
         saved.pid = entry.pid;
         saved.process_created = entry.process_created;
+        saved.generation = entry.revision;
         // Only ever the two bits a lock takes, whatever the file says.
         saved.removed_style = (LONG_PTR) entry.removed_style & kLockedStyleBits;
         saved.saved_topmost = entry.topmost;
@@ -3291,8 +3351,18 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
         DWORD owner = 0;
         if (!IsWindow(saved.window)
             || (GetWindowThreadProcessId(saved.window, &owner), owner == GetCurrentProcessId())
-            || owner != entry.pid || ProcessCreationTime(owner) != entry.process_created) {
-            forget(entry.window);
+            || owner != entry.pid) {
+            forget(entry);
+            continue;
+        }
+        const uint64_t created = ProcessCreationTime(owner);
+        if (created != 0 && created != entry.process_created) {
+            forget(entry);
+            continue;
+        }
+        if (created == 0) {
+            Log("[restore] window %llu's process cannot be identified; still owed "
+                "its place", (unsigned long long) entry.window);
             continue;
         }
         if (!AnswersPromptly(saved.window)) {
@@ -3300,18 +3370,18 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
                 "owed its place", (unsigned long long) entry.window);
             continue;
         }
-        // Taken by a session in the meantime: the slot owes it now.
+        // A session may have taken the debt while Windows answered our checks.
+        // If not, mark the restore before releasing the lock; ClaimSlot refuses
+        // this window until RestoreMarkedWindow clears that mark.
         EnterCriticalSection(&g_lock_cs);
-        bool still_ours = false;
-        for (const solstream::OwedWindow& left : g_left_behind) {
-            still_ours = still_ours || left.window == entry.window;
-        }
+        const bool marked =
+            solstream::BeginRestore(g_left_behind, g_restoring_windows,
+                                    entry.window, entry.revision);
         LeaveCriticalSection(&g_lock_cs);
-        if (!still_ours) {
+        if (!marked) {
             continue;
         }
-        RestoreWindow(saved);
-        forget(entry.window);
+        RestoreMarkedWindow(saved);
     }
     RecordOwedWindows();
     return 0;
@@ -4432,6 +4502,10 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             EnterCriticalSection(&g_lock_cs);
             const int slot = ClaimSlot(window);
             LeaveCriticalSection(&g_lock_cs);
+            if (slot == kClaimRestoreInProgress) {
+                return "{\"type\":\"error\",\"message\":\"this window is still being "
+                       "restored; try again shortly\"}";
+            }
             if (slot < 0) {
                 Log("[agent] refused topmost: all %d window slots are taken", kMaxLocks);
                 return "{\"type\":\"error\",\"message\":\"too many windows are being "
@@ -5223,17 +5297,14 @@ void ServeAndRetire(SOCKET client) {
     // before the windows are touched: restoring crosses into other
     // processes, and if one of those is hung, a cleanup stuck there
     // must not keep every later Mac turned away.
-    const std::vector<WindowLock> owed = TakeAllSlots();
+    const std::vector<WindowLock> released = TakeSlotsForRestore();
     // Counted before the slot is freed, so nobody who claims the slot and
     // then reads this count can find it zero while the windows are being
     // moved. That holds only for a reader that claims first: see
     // ListenForTakeover.
     g_windows_restoring.fetch_add(1);
     g_clients_connected.fetch_sub(1);
-    for (const WindowLock& saved : owed) {
-        RestoreWindow(saved);
-    }
-    RecordOwedWindows();
+    RestoreReleasedSlots(released);
     g_windows_restoring.fetch_sub(1);
     Log("[agent] client disconnected");
 }
