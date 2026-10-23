@@ -419,11 +419,8 @@ bool Capture::Acquire(Frame& out, uint64_t sinceSerial, int timeoutMs) {
     // texture out cannot get between reading the pointer and referencing it.
     // The reference travels with the frame: see Frame::hold for what happened
     // when the caller was handed the bare pointer instead.
-    ID3D11Texture2D* const texture = impl_->retained.get();
-    texture->AddRef();
-    out.hold = std::shared_ptr<ID3D11Texture2D>(
-        texture, [](ID3D11Texture2D* released) { released->Release(); });
-    out.texture = texture;
+    out.hold.copy_from(impl_->retained.get());
+    out.texture = out.hold.get();
     out.width = impl_->width;
     out.height = impl_->height;
     out.serial = impl_->serial;
