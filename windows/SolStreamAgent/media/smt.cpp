@@ -49,7 +49,6 @@ size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* pl
     datagram[0] = (1 << 4) | 0;   // version 1, epoch 0
     datagram[1] = sessTag;
     PutBE(datagram + 2, counter, 6);
-    std::memcpy(datagram + kHeaderBytes, plaintext, plaintextLen);
 
     unsigned char nonce[12];
     std::memcpy(nonce, direction.fixed, 6);
@@ -64,8 +63,10 @@ size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* pl
     info.pbTag = datagram + kHeaderBytes + plaintextLen;
     info.cbTag = kTagBytes;
 
+    // Straight from the caller's plaintext into the datagram, rather than
+    // copied in first and encrypted in place.
     ULONG done = 0;
-    if (!NT_SUCCESS(BCryptEncrypt(direction.key, datagram + kHeaderBytes,
+    if (!NT_SUCCESS(BCryptEncrypt(direction.key, (PUCHAR) plaintext,
                                   (ULONG) plaintextLen, &info, nullptr, 0,
                                   datagram + kHeaderBytes, (ULONG) plaintextLen,
                                   &done, 0))) {

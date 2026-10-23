@@ -105,7 +105,8 @@ BCRYPT_ALG_HANDLE GcmProvider();
 BCRYPT_KEY_HANDLE MakeKey(const unsigned char* key32);
 
 /// Seal `plaintext` into `datagram`, which must have room for
-/// `plaintextLen + kOverhead`. Returns the datagram length, or 0.
+/// `plaintextLen + kOverhead` and must not overlap `plaintext`. Returns the
+/// datagram length, or 0.
 size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* plaintext,
             size_t plaintextLen, unsigned char* datagram, size_t datagramCapacity);
 
