@@ -71,6 +71,14 @@ bool StartsWithSps(const unsigned char* data, size_t length) {
     return false;
 }
 
+/// Set one of the encoder's VT_UI4 properties.
+void SetUi4(ICodecAPI* codec, const GUID& key, ULONG value) {
+    VARIANT v{};
+    v.vt = VT_UI4;
+    v.ulVal = value;
+    codec->SetValue(&key, &v);
+}
+
 }  // namespace
 
 // ── The event pump ───────────────────────────────────────────────────────────
@@ -199,6 +207,9 @@ struct Encoder::Impl {
     bool FeedLocked();
     void Drain();
     void Emit(LONGLONG pictureTime, bool isIdr);
+    /// Read MF_MT_MPEG_SEQUENCE_HEADER from the output type into
+    /// `sequenceHeader`, if the transform has one to give.
+    void ReadSequenceHeader();
 };
 
 HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
@@ -536,11 +547,8 @@ bool Encoder::Impl::FeedLocked() {
     sample->SetSampleDuration(ticksPerFrame);
 
     const bool idr = ledger.TakeIdr(pendingIdr);
-    if (idr) {
-        VARIANT on{};
-        on.vt = VT_UI4;
-        on.ulVal = 1;
-        if (codec) { codec->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &on); }
+    if (idr && codec) {
+        SetUi4(codec, CODECAPI_AVEncVideoForceKeyFrame, 1);
     }
 
     // ProcessInput can refuse -- MF_E_NOTACCEPTING when the credit was stale,
@@ -712,6 +720,20 @@ void Encoder::Impl::Drain() {
     Emit(pictureTime, isIdr);
 }
 
+void Encoder::Impl::ReadSequenceHeader() {
+    IMFMediaType* current = nullptr;
+    if (SUCCEEDED(mft->GetOutputCurrentType(0, &current)) && current) {
+        UINT32 length = 0;
+        if (SUCCEEDED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &length))
+            && length > 0) {
+            sequenceHeader.resize(length);
+            current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, sequenceHeader.data(), length,
+                             &length);
+        }
+        current->Release();
+    }
+}
+
 void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
     if (picture.empty() || pictureTime < 0) {
         return;
@@ -731,17 +753,7 @@ void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
             // the parameter sets into, so this is a handful of calls in a
             // session rather than one per frame, and it stops asking the moment
             // an answer arrives.
-            IMFMediaType* current = nullptr;
-            if (SUCCEEDED(mft->GetOutputCurrentType(0, &current)) && current) {
-                UINT32 length = 0;
-                if (SUCCEEDED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &length))
-                    && length > 0) {
-                    sequenceHeader.resize(length);
-                    current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, sequenceHeader.data(),
-                                     length, &length);
-                }
-                current->Release();
-            }
+            ReadSequenceHeader();
         }
         if (!sequenceHeader.empty()) {
             picture.insert(picture.begin(), sequenceHeader.begin(), sequenceHeader.end());
@@ -795,18 +807,9 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     v.vt = VT_BOOL;
     v.boolVal = VARIANT_TRUE;
     s.codec->SetValue(&CODECAPI_AVLowLatencyMode, &v);
-    VARIANT mode{};
-    mode.vt = VT_UI4;
-    mode.ulVal = eAVEncCommonRateControlMode_CBR;
-    s.codec->SetValue(&CODECAPI_AVEncCommonRateControlMode, &mode);
-    VARIANT rate{};
-    rate.vt = VT_UI4;
-    rate.ulVal = s.bitrate;
-    s.codec->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &rate);
-    VARIANT gop{};
-    gop.vt = VT_UI4;
-    gop.ulVal = (s.fps ? s.fps : 60) * 3600;
-    s.codec->SetValue(&CODECAPI_AVEncMPVGOPSize, &gop);
+    SetUi4(s.codec, CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
+    SetUi4(s.codec, CODECAPI_AVEncCommonMeanBitRate, s.bitrate);
+    SetUi4(s.codec, CODECAPI_AVEncMPVGOPSize, (s.fps ? s.fps : 60) * 3600);
     // No B-frames, said rather than left to low latency mode to imply. A
     // picture's frame id comes back from its sample time, and output arrives in
     // decoding order, so a B-frame reaches the Mac after the picture that
@@ -816,10 +819,7 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     // The dev box's encoder happens not to; an encoder that ignores low
     // latency mode, as the NVIDIA one ignored everything set at the wrong time,
     // might.
-    VARIANT bFrames{};
-    bFrames.vt = VT_UI4;
-    bFrames.ulVal = 0;
-    s.codec->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &bFrames);
+    SetUi4(s.codec, CODECAPI_AVEncMPVDefaultBPictureCount, 0);
 }
 
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
@@ -1040,19 +1040,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     // some drivers only after streaming starts -- so it is read here, and Emit
     // reads it again on the first IDR that arrives without one if this comes
     // back empty.
-    {
-        IMFMediaType* current = nullptr;
-        if (SUCCEEDED(s.mft->GetOutputCurrentType(0, &current)) && current) {
-            UINT32 length = 0;
-            if (SUCCEEDED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &length))
-                && length > 0) {
-                s.sequenceHeader.resize(length);
-                current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, s.sequenceHeader.data(),
-                                 length, &length);
-            }
-            current->Release();
-        }
-    }
+    s.ReadSequenceHeader();
 
     s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
