@@ -543,10 +543,6 @@ DriverState CurrentDriverState() {
     return off ? DriverState::Off : DriverState::Failing;
 }
 
-bool HasSolStreamDriver() {
-    return CurrentDriverState() == DriverState::Ready;
-}
-
 bool CanInstallDisplayDriver() {
     // The package is the amd64 build. On an ARM PC SolStream itself runs
     // under emulation, but a driver cannot, and the project's ARM64 build

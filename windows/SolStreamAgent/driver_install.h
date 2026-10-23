@@ -54,9 +54,6 @@ enum class DriverState {
 };
 DriverState CurrentDriverState();
 
-/// CurrentDriverState() == Ready.
-bool HasSolStreamDriver();
-
 /// False on an ARM PC: the driver SolStream fetches is the amd64 build.
 bool CanInstallDisplayDriver();
 

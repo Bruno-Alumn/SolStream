@@ -69,17 +69,4 @@ bool IsReparsePoint(const std::wstring& path);
 /// the display that was set up is the display that gets captured.
 std::wstring VirtualDisplayDevice();
 
-/// Is Windows composing this display in HDR? `gdi_name` is a device name of the
-/// form \\.\DISPLAY1. Answers false for a display that cannot do HDR at all.
-bool IsHdrEnabled(const std::wstring& gdi_name);
-
-/// Turn "Use HDR" on or off for one display.
-///
-/// Needs no elevation, but does need the interactive session. This is the
-/// setting that actually decides: clearing HDRPlus in the driver's own settings
-/// file stops it ADVERTISING HDR, but Windows remembers the per-display toggle
-/// and re-applies it, so the display keeps composing in PQ and only the bit
-/// depth changes.
-bool SetHdrEnabled(const std::wstring& gdi_name, bool enabled, std::string& error);
-
 }  // namespace solstream

@@ -612,48 +612,26 @@ bool GetAdvancedColour(const DISPLAYCONFIG_PATH_INFO& path, AdvancedColorInfo& o
            == ERROR_SUCCESS;
 }
 
-}  // namespace
-
-std::wstring VirtualDisplayDevice() {
-    Adapter adapter;
-    return FindVirtualAdapter(adapter) && adapter.attached ? adapter.gdi_name
-                                                           : std::wstring{};
-}
-
-bool IsHdrEnabled(const std::wstring& gdi_name) {
-    DISPLAYCONFIG_PATH_INFO path{};
-    if (!FindPathFor(gdi_name, path)) {
-        return false;
-    }
-    AdvancedColorInfo info{};
-    return GetAdvancedColour(path, info) && (info.flags & 0x2) != 0;
-}
-
-bool SetHdrEnabled(const std::wstring& gdi_name, bool enabled, std::string& error) {
-    DISPLAYCONFIG_PATH_INFO path{};
-    if (!FindPathFor(gdi_name, path)) {
-        error = "Could not find that display.";
-        return false;
-    }
-    AdvancedColorInfo info{};
-    if (!GetAdvancedColour(path, info)) {
-        error = "Could not read the display's colour settings.";
-        return false;
-    }
+/// Turn "Use HDR" off on a path's display, whose advanced-colour state `info`
+/// says is on.
+///
+/// Needs no elevation, but does need the interactive session. This is the
+/// setting that actually decides: clearing HDRPlus in the driver's own settings
+/// file stops it ADVERTISING HDR, but Windows remembers the per-display toggle
+/// and re-applies it, so the display keeps composing in PQ and only the bit
+/// depth changes.
+bool TurnHdrOff(const DISPLAYCONFIG_PATH_INFO& path, const AdvancedColorInfo& info,
+                std::string& error) {
     if ((info.flags & 0x1) == 0) {
-        // Cannot do HDR at all, so it is already in the state being asked for.
-        return !enabled;
-    }
-    if (((info.flags & 0x2) != 0) == enabled) {
+        // Cannot do HDR at all, so it is already off.
         return true;
     }
-
     AdvancedColorState state{};
     state.header.type = kSetAdvancedColorState;
     state.header.size = sizeof(state);
     state.header.adapter = path.targetInfo.adapterId;
     state.header.id = path.targetInfo.id;
-    state.enable = enabled ? 1u : 0u;
+    state.enable = 0u;
     if (DisplayConfigSetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*) &state)
         != ERROR_SUCCESS) {
         error = "Could not change the display's HDR setting. Turn it off under "
@@ -661,6 +639,14 @@ bool SetHdrEnabled(const std::wstring& gdi_name, bool enabled, std::string& erro
         return false;
     }
     return true;
+}
+
+}  // namespace
+
+std::wstring VirtualDisplayDevice() {
+    Adapter adapter;
+    return FindVirtualAdapter(adapter) && adapter.attached ? adapter.gdi_name
+                                                           : std::wstring{};
 }
 
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
@@ -814,7 +800,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     AdvancedColorInfo colour{};
     if (GetAdvancedColour(path, colour) && (colour.flags & 0x2) != 0) {
         std::string hdr_error;
-        Add(note, SetHdrEnabled(adapter.gdi_name, false, hdr_error)
+        Add(note, TurnHdrOff(path, colour, hdr_error)
                       ? "Turned HDR off on the virtual display, so colours arrive "
                         "on your Mac the way Windows drew them."
                       : hdr_error);
