@@ -3080,6 +3080,34 @@ void TestLeftBehind() {
     FinishRestore(list, restoring, 2, 7, RestoreOutcome::Restored);
     CHECK(!RestoreInProgress(restoring, 2));
     CHECK(list.size() == 2 && list[0].revision == 8);
+
+    // Released slots are handed over unmarked and marked one at a time. While
+    // the first is being restored -- perhaps stuck on an app that has hung --
+    // the second is not in progress, so a new session takes its debt, and the
+    // cleanup, reaching it later, finds nothing left to restore.
+    list.clear();
+    restoring.clear();
+    OwedWindow first = owed(2, 20, 200, 0);
+    first.revision = 11;
+    OwedWindow second = owed(3, 30, 300, 0);
+    second.revision = 12;
+    RememberOwed(list, first);
+    RememberOwed(list, second);
+    CHECK(BeginRestore(list, restoring, 2, 11));
+    CHECK(!RestoreInProgress(restoring, 3));
+    OwedWindow claimed;
+    CHECK(TakeOwed(list, 3, 30, 300, &claimed));
+    CHECK(claimed.revision == 12);
+    CHECK(!BeginRestore(list, restoring, 3, 12));
+    CHECK(!RestoreInProgress(restoring, 3));
+    FinishRestore(list, restoring, 2, 11, RestoreOutcome::Restored);
+    CHECK(list.empty());
+    CHECK(restoring.empty());
+    // Not claimed meanwhile, it is marked in its turn.
+    RememberOwed(list, second);
+    CHECK(BeginRestore(list, restoring, 3, 12));
+    FinishRestore(list, restoring, 3, 12, RestoreOutcome::Retry);
+    CHECK(list.size() == 1 && restoring.empty());
 }
 
 }  // namespace

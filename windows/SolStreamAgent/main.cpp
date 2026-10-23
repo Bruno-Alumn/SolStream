@@ -3256,9 +3256,25 @@ void RestoreMarkedWindow(const WindowLock& saved) {
     RecordOwedWindows();
 }
 
-/// Release one window's slot, or every slot for a null window. Removing the slot,
-/// adding its recovery entry and marking it are one critical section: a claim or
-/// a persistence snapshot can never see the handoff half done.
+/// Whether a window's thread answers a message within half a second.
+///
+/// IsHungAppWindow only says so after five seconds of silence, so a window
+/// that has just stopped answering passes it -- and the calls that follow
+/// would wait on it without limit. This asks, and gives up.
+bool AnswersPromptly(HWND window) {
+    DWORD_PTR result = 0;
+    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 500, &result) != 0;
+}
+
+/// Release one window's slot, or every slot for a null window. Removing the slot
+/// and adding its recovery entry are one critical section: a claim or a
+/// persistence snapshot can never see the handoff half done.
+///
+/// Not marked as being restored here: RestoreReleasedSlots marks each window
+/// only as it gets to it. Marked all at once, a window queued behind one whose
+/// app has hung stayed marked for as long as that app took to answer, and every
+/// session that asked for it meanwhile was told it was still being restored.
+/// Unmarked, a session that streams it again takes what it is owed instead.
 std::vector<WindowLock> TakeSlotsForRestore(HWND window = nullptr) {
     std::vector<WindowLock> released;
     EnterCriticalSection(&g_lock_cs);
@@ -3270,12 +3286,7 @@ std::vector<WindowLock> TakeSlotsForRestore(HWND window = nullptr) {
         if (solstream::RestoreInProgress(g_restoring_windows, id)) {
             continue;
         }
-        const solstream::OwedWindow entry = OwedForRestore(g_locks[i]);
-        solstream::RememberOwed(g_left_behind, entry);
-        if (!solstream::BeginRestore(g_left_behind, g_restoring_windows, id,
-                                     entry.revision)) {
-            continue;
-        }
+        solstream::RememberOwed(g_left_behind, OwedForRestore(g_locks[i]));
         released.push_back(g_locks[i]);
         g_locks[i] = WindowLock{};
     }
@@ -3285,12 +3296,34 @@ std::vector<WindowLock> TakeSlotsForRestore(HWND window = nullptr) {
 
 /// Persist the handoff before touching a window. A crash or failed call then
 /// leaves its debt in the recovery queue instead of dropping it with the slot.
+///
+/// One window at a time, each marked just before it is touched. A window that
+/// does not answer within half a second is passed over and stays owed: the
+/// calls that restore it wait on its app without limit, and IsHungAppWindow
+/// takes five seconds to call it hung.
 void RestoreReleasedSlots(const std::vector<WindowLock>& released) {
     if (released.empty()) {
         return;
     }
     RecordOwedWindows();
     for (const WindowLock& saved : released) {
+        const uint64_t id = IdFromWindow(saved.window);
+        // A window that has gone is still worth the call: RestoreWindow finds
+        // it gone, and the debt is dropped.
+        if (IsWindow(saved.window) && !AnswersPromptly(saved.window)) {
+            Log("[restore] window %llu is not answering; left where it is, and still "
+                "owed its place", (unsigned long long) id);
+            continue;
+        }
+        // A session may have taken the debt back meanwhile; then it is that
+        // session's to give back.
+        EnterCriticalSection(&g_lock_cs);
+        const bool marked = solstream::BeginRestore(g_left_behind, g_restoring_windows,
+                                                    id, saved.generation);
+        LeaveCriticalSection(&g_lock_cs);
+        if (!marked) {
+            continue;
+        }
         RestoreMarkedWindow(saved);
     }
 }
@@ -3303,16 +3336,6 @@ void UnlockWindow(HWND window) {
 /// does not leave applications permanently unresizable.
 void UnlockAll() {
     RestoreReleasedSlots(TakeSlotsForRestore());
-}
-
-/// Whether a window's thread answers a message within half a second.
-///
-/// IsHungAppWindow only says so after five seconds of silence, so a window
-/// that has just stopped answering passes it -- and the calls that follow
-/// would wait on it without limit. This asks, and gives up.
-bool AnswersPromptly(HWND window) {
-    DWORD_PTR result = 0;
-    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 500, &result) != 0;
 }
 
 /// Give back what a host killed mid-session owed, one window at a time.
