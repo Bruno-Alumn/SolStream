@@ -59,6 +59,7 @@
 #include <thread>
 #include <vector>
 
+#include "agent_crypto.h"
 #include "capture_display.h"
 #include "clipboard.h"
 #include "display_setup.h"
@@ -93,11 +94,14 @@ void RechooseCaptureDisplayIfStale();
 
 namespace {
 
+using solstream::DeriveMediaKeys;
+using solstream::EcdhSecret;
 using solstream::FoldCase;
 using solstream::FromHex;
-using solstream::HmacSha256;
 using solstream::JsonEscape;
 using solstream::LocalDataPath;
+using solstream::NewEcdhKeyPair;
+using solstream::RandomHex;
 using solstream::ToHex;
 using solstream::ToUtf8;
 using solstream::ToWide;
@@ -1378,9 +1382,10 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
 // able to read it and give it to their Mac.
 //
 // The token itself never crosses the wire: the client proves it holds it with
-// an HMAC over a per-connection challenge (ProofMatches), and the same exchange
-// agrees the forward-secret keys the channel is encrypted with from then on.
-// docs/architecture.md has the whole handshake.
+// an HMAC over a per-connection challenge, and the same exchange agrees the
+// forward-secret keys the channel is encrypted with from then on. The
+// cryptography is in agent_crypto.cpp; docs/architecture.md has the whole
+// handshake.
 
 std::string g_token;
 bool g_require_auth = true;
@@ -1391,16 +1396,6 @@ bool g_require_auth = true;
 /// image restore restarts the process too: a counter kept only in memory would
 /// start from zero again, with the same RNG stream, and repeat the keys.
 unsigned long long g_media_count = 0;
-
-/// `count` random bytes as lowercase hex, or empty if the RNG refuses.
-std::string RandomHex(size_t count) {
-    std::vector<unsigned char> bytes(count);
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        return {};
-    }
-    return ToHex(bytes);
-}
 
 std::string LoadOrCreateToken() {
     const std::wstring path = LocalDataPath(L"agent.token");
@@ -1454,195 +1449,6 @@ void SaveMediaCount(unsigned long long count) {
         return;
     }
     solstream::WriteWholeFile(path, std::to_string(count));
-}
-
-/// Auth v2: the Mac proves it holds the token instead of sending it.
-///
-/// proof = HMAC-SHA256(tokenBytes, "SolStream agent auth v2" || challenge || cnonce)
-///
-/// The challenge is fresh per connection, so a recorded proof is worth nothing
-/// on the next one; the client's own nonce is in there because the same values
-/// seed the media key schedule later and neither side should be able to fix all
-/// of that input by itself.
-bool ProofMatches(const std::string& challengeHex, const std::string& cnonceHex,
-                  const std::string& proofHex) {
-    const std::vector<unsigned char> challenge = FromHex(challengeHex);
-    const std::vector<unsigned char> cnonce = FromHex(cnonceHex);
-    const std::vector<unsigned char> proof = FromHex(proofHex);
-    const std::vector<unsigned char> key = FromHex(g_token);
-    if (challenge.size() != 32 || cnonce.size() != 32 || proof.size() != 32
-        || key.empty()) {
-        return false;
-    }
-    static const char kLabel[] = "SolStream agent auth v2";
-    std::vector<unsigned char> message(kLabel, kLabel + sizeof(kLabel) - 1);
-    message.insert(message.end(), challenge.begin(), challenge.end());
-    message.insert(message.end(), cnonce.begin(), cnonce.end());
-
-    return solstream::ProofMatchesHmac(key, message, proof);
-}
-
-// ── SMT/1 key schedule ───────────────────────────────────────────────────────
-//
-// Pinned by the frozen cross-language vector in spike/smt-vectors: if any of
-// this drifts, that vector stops matching and says so before a socket is
-// involved. See docs/transport-smt1.md for why each input is there.
-
-std::vector<unsigned char> Sha256(const std::vector<unsigned char>& data) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
-                                                    nullptr, 0))) {
-        return {};
-    }
-    std::vector<unsigned char> out(32);
-    const bool ok = BCRYPT_SUCCESS(BCryptHash(algorithm, nullptr, 0, (PUCHAR) data.data(),
-                                              (ULONG) data.size(), out.data(), 32));
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    return ok ? out : std::vector<unsigned char>{};
-}
-
-/// RFC 5869. Extract is one HMAC; expand is the T(n) chain. Written out rather
-/// than using BCRYPT_HKDF_ALGORITHM because when two languages disagree, an
-/// extract and an expand you can read are far easier to bisect than one opaque
-/// call -- and they did have to be bisected once already.
-std::vector<unsigned char> HkdfExpand(const std::vector<unsigned char>& prk,
-                                      const std::vector<unsigned char>& info,
-                                      size_t length) {
-    std::vector<unsigned char> out, previous;
-    unsigned char counter = 1;
-    while (out.size() < length) {
-        std::vector<unsigned char> input = previous;
-        input.insert(input.end(), info.begin(), info.end());
-        input.push_back(counter++);
-        previous = HmacSha256(prk, input);
-        if (previous.empty()) {
-            return {};
-        }
-        out.insert(out.end(), previous.begin(), previous.end());
-    }
-    out.resize(length);
-    return out;
-}
-
-/// A fresh P-256 key pair. `publicPoint` comes back as 0x04||X||Y, 65 bytes --
-/// the uncompressed form the wire carries, which is BCrypt's blob with its
-/// 8-byte header swapped for the 0x04 tag.
-BCRYPT_KEY_HANDLE NewEcdhKeyPair(std::vector<unsigned char>& publicPoint) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDH_P256_ALGORITHM,
-                                                    nullptr, 0))) {
-        return nullptr;
-    }
-    BCRYPT_KEY_HANDLE key = nullptr;
-    bool ok = BCRYPT_SUCCESS(BCryptGenerateKeyPair(algorithm, &key, 256, 0))
-              && BCRYPT_SUCCESS(BCryptFinalizeKeyPair(key, 0));
-    if (ok) {
-        ULONG size = 0;
-        ok = BCRYPT_SUCCESS(BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB, nullptr,
-                                            0, &size, 0));
-        std::vector<unsigned char> blob(size);
-        ok = ok && BCRYPT_SUCCESS(BCryptExportKey(key, nullptr, BCRYPT_ECCPUBLIC_BLOB,
-                                                  blob.data(), size, &size, 0));
-        if (ok && size >= sizeof(BCRYPT_ECCKEY_BLOB) + 64) {
-            publicPoint.assign(1, 0x04);
-            publicPoint.insert(publicPoint.end(),
-                               blob.begin() + sizeof(BCRYPT_ECCKEY_BLOB),
-                               blob.begin() + sizeof(BCRYPT_ECCKEY_BLOB) + 64);
-        } else {
-            ok = false;
-        }
-    }
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    if (!ok && key) {
-        BCryptDestroyKey(key);
-        return nullptr;
-    }
-    return key;
-}
-
-/// The ECDH shared secret as the x-coordinate, BIG-endian.
-///
-/// *** BCRYPT_KDF_RAW_SECRET RETURNS IT LITTLE-ENDIAN. *** CryptoKit, and every
-/// specification, means big-endian, and the same BCrypt API is inconsistent with
-/// itself -- BCRYPT_ECCKEY_BLOB's X, Y and d are all big-endian. Without this
-/// reverse the two ends derive different keys, every packet fails its tag, and
-/// nothing says why. Measured, not assumed: spike/smt-vectors prints both.
-std::vector<unsigned char> EcdhSecret(BCRYPT_KEY_HANDLE mine,
-                                      const std::vector<unsigned char>& peerPoint) {
-    if (peerPoint.size() != 65 || peerPoint[0] != 0x04) {
-        return {};
-    }
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDH_P256_ALGORITHM,
-                                                    nullptr, 0))) {
-        return {};
-    }
-    std::vector<unsigned char> blob(sizeof(BCRYPT_ECCKEY_BLOB) + 64);
-    auto* header = (BCRYPT_ECCKEY_BLOB*) blob.data();
-    header->dwMagic = BCRYPT_ECDH_PUBLIC_P256_MAGIC;
-    header->cbKey = 32;
-    memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB), peerPoint.data() + 1, 64);
-
-    BCRYPT_KEY_HANDLE peer = nullptr;
-    std::vector<unsigned char> secret;
-    if (BCRYPT_SUCCESS(BCryptImportKeyPair(algorithm, nullptr, BCRYPT_ECCPUBLIC_BLOB,
-                                           &peer, blob.data(), (ULONG) blob.size(), 0))) {
-        BCRYPT_SECRET_HANDLE agreed = nullptr;
-        if (BCRYPT_SUCCESS(BCryptSecretAgreement(mine, peer, &agreed, 0))) {
-            ULONG size = 0;
-            if (BCRYPT_SUCCESS(BCryptDeriveKey(agreed, BCRYPT_KDF_RAW_SECRET, nullptr,
-                                               nullptr, 0, &size, 0))) {
-                secret.resize(size);
-                if (!BCRYPT_SUCCESS(BCryptDeriveKey(agreed, BCRYPT_KDF_RAW_SECRET,
-                                                    nullptr, secret.data(), size,
-                                                    &size, 0))) {
-                    secret.clear();
-                }
-            }
-            BCryptDestroySecret(agreed);
-        }
-        BCryptDestroyKey(peer);
-    }
-    BCryptCloseAlgorithmProvider(algorithm, 0);
-    std::reverse(secret.begin(), secret.end());   // <- the whole comment above
-    return secret;
-}
-
-/// 108 bytes: two directional keys, two nonce fixed fields, a session id and the
-/// two authentication tags each side uses to prove it derived the same thing.
-std::vector<unsigned char> DeriveMediaKeys(const std::vector<unsigned char>& cpub,
-                                           const std::vector<unsigned char>& hpub,
-                                           const std::vector<unsigned char>& cnonce,
-                                           const std::vector<unsigned char>& hnonce,
-                                           unsigned long long hcount,
-                                           const std::vector<unsigned char>& secret,
-                                           unsigned short epoch) {
-    std::vector<unsigned char> transcript;
-    static const char kLabel[] = "SMT/1";
-    transcript.insert(transcript.end(), kLabel, kLabel + 5);
-    transcript.insert(transcript.end(), cpub.begin(), cpub.end());
-    transcript.insert(transcript.end(), hpub.begin(), hpub.end());
-    transcript.insert(transcript.end(), cnonce.begin(), cnonce.end());
-    transcript.insert(transcript.end(), hnonce.begin(), hnonce.end());
-    for (int i = 7; i >= 0; --i) {
-        transcript.push_back((unsigned char) ((hcount >> (8 * i)) & 0xFF));
-    }
-    const std::vector<unsigned char> hash = Sha256(transcript);
-
-    // The token joins the INPUT KEY MATERIAL, not just the transcript: that is
-    // what makes a token stolen later useless against a session already gone.
-    std::vector<unsigned char> ikm = secret;
-    const std::vector<unsigned char> tokenBytes = FromHex(g_token);
-    ikm.insert(ikm.end(), tokenBytes.begin(), tokenBytes.end());
-    const std::vector<unsigned char> prk = HmacSha256(hash, ikm);
-
-    std::vector<unsigned char> info;
-    static const char kKeyLabel[] = "SMT/1 keys v1";
-    info.insert(info.end(), kKeyLabel, kKeyLabel + 13);
-    info.push_back((unsigned char) (epoch >> 8));
-    info.push_back((unsigned char) (epoch & 0xFF));
-    info.insert(info.end(), hash.begin(), hash.end());
-    return HkdfExpand(prk, info, 108);
 }
 
 // ── Geometry lock ────────────────────────────────────────────────────────────
@@ -3939,7 +3745,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // it holds one against a challenge this connection just invented.
         std::string proof, cnonce;
         if (FieldString(line, "proof", proof) && FieldString(line, "cnonce", cnonce)) {
-            if (ProofMatches(challenge, cnonce, proof)) {
+            if (solstream::ProofMatches(g_token, challenge, cnonce, proof)) {
                 if (!authenticated) {
                     g_clients_authenticated.fetch_add(1);
                 }
@@ -4085,7 +3891,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         const unsigned long long hcount = ++g_media_count;
         SaveMediaCount(hcount);
         const std::vector<unsigned char> okm =
-            DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0);
+            DeriveMediaKeys(cpub, hpub, cnonce, hnonce, hcount, secret, 0, g_token);
         if (okm.size() != 108) {
             return "{\"type\":\"media\",\"ok\":false,\"message\":\"derivation failed\"}";
         }
