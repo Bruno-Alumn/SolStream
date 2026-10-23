@@ -512,9 +512,14 @@ public final class InputCapture {
                 return false
             }
             // A key already down on the host is let go of as it was pressed.
-            // Anything else is first asked whether a key typed it at all.
+            // Anything else is first asked whether a key typed it at all --
+            // except the key after a dead key, see `followsDeadKey`.
+            let afterDeadKey = followsDeadKey
+            if event.type == .keyDown {
+                followsDeadKey = (event.characters ?? "").isEmpty
+            }
             var keyCode = event.keyCode
-            if held == nil {
+            if held == nil, !(afterDeadKey && event.type == .keyDown) {
                 switch keyOrigin(of: event) {
                 case .key:
                     break
@@ -589,6 +594,17 @@ public final class InputCapture {
     }
 
     // MARK: - Text that no key typed
+
+    /// The last key pressed typed nothing: a dead key, waiting for the next
+    /// key to say what it makes -- ´ then e making é.
+    ///
+    /// That next key is always sent as a key, whatever its text. The dead key
+    /// itself went to the PC by position, and the PC's layout is composing
+    /// with it; the next key's text may be the Mac's composed é, which no
+    /// single key types, and sent as text it would land beside the PC's own
+    /// ´ instead of finishing it. By position, the PC composes it the way
+    /// its layout does.
+    private var followsDeadKey = false
 
     /// Where a key event's character came from.
     enum KeyOrigin: Equatable {

@@ -119,12 +119,12 @@ final class TextInputTests: XCTestCase {
         /// A key event as a program posts one, or as a keyboard sends it.
         @discardableResult
         func send(_ type: NSEvent.EventType, keyCode: UInt16, text: String,
-                  flags: UInt = 0) -> Bool {
+                  ignoringModifiers: String? = nil, flags: UInt = 0) -> Bool {
             guard let event = NSEvent.keyEvent(
                 with: type, location: .zero,
                 modifierFlags: NSEvent.ModifierFlags(rawValue: flags),
                 timestamp: 0, windowNumber: 0, context: nil,
-                characters: text, charactersIgnoringModifiers: text,
+                characters: text, charactersIgnoringModifiers: ignoringModifiers ?? text,
                 isARepeat: false, keyCode: keyCode) else {
                 XCTFail("could not build a \(type) event")
                 return false
@@ -222,6 +222,26 @@ final class TextInputTests: XCTestCase {
         wire.send(.flagsChanged, keyCode: 0x37, text: "", flags: 0)
         XCTAssertEqual(wire.packets, [.scan(0x1D, true), .scan(0x2F, true),
                                       .scan(0x2F, false), .scan(0x1D, false)])
+    }
+
+    /// A dead key and the key it composes with both go by position, even if
+    /// the second carries the composed é: sent as text, it would land beside
+    /// the PC's own ´ rather than finish it. A posted character after them is
+    /// text again.
+    func testTheKeyAfterADeadKeyIsAKey() {
+        let wire = Wire()
+        wire.clear()
+        // German ´, at the US = key's place: it types nothing yet.
+        wire.send(.keyDown, keyCode: 0x18, text: "", ignoringModifiers: "´")
+        wire.send(.keyUp, keyCode: 0x18, text: "", ignoringModifiers: "´")
+        // Then e, carrying what the Mac composed.
+        wire.send(.keyDown, keyCode: 0x0E, text: "é", ignoringModifiers: "é")
+        wire.send(.keyUp, keyCode: 0x0E, text: "é", ignoringModifiers: "é")
+        XCTAssertEqual(wire.packets, [.scan(0x0D, true), .scan(0x0D, false),
+                                      .scan(0x12, true), .scan(0x12, false)])
+        wire.clear()
+        wire.type("x")
+        XCTAssertEqual(wire.packets, [.text("x")])
     }
 
     /// A text-only event is consumed, so it cannot also act on this Mac, and
