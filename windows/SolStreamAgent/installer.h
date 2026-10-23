@@ -23,9 +23,9 @@
 namespace solstream {
 
 // The version, set by CMake so the number compiled into the code and the one in
-// the executable's resource block come from the same place. The fallback is for
-// build-cross.sh, which compiles straight from the shell to catch errors early
-// and produces nothing anybody ships.
+// the executable's resource block come from the same place. The fallback only
+// matters to a compile that bypasses CMakeLists.txt; build-cross.sh goes
+// through it too.
 #ifndef SOLSTREAM_VERSION_STRING
 #define SOLSTREAM_VERSION_STRING "1.0.0"
 #endif

@@ -72,8 +72,11 @@ else()
     set(SOLSTREAM_MEDIA_SOURCES "")
 endif()
 
-add_executable(SolStreamAgent
-    main.cpp
+# What the host and its tests share, compiled once for both. Everything that
+# is the same for the two programs -- the language level, the version, the
+# warnings, the runtime, the system libraries -- is set here and reaches both
+# through the link.
+add_library(SolStreamCore OBJECT
     util.cpp
     # What the clipboard's text needs between the Mac and Windows.
     clipboard.cpp
@@ -90,8 +93,74 @@ add_executable(SolStreamAgent
     session_takeover.cpp
     # Putting a streamed window back as it was, and remembering what is owed.
     window_restore.cpp
-    host_window.cpp
     installer.cpp
+)
+
+set_target_properties(SolStreamCore PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+
+target_link_libraries(SolStreamCore PUBLIC
+    user32 advapi32 ws2_32 shell32 winhttp crypt32 bcrypt
+    setupapi cfgmgr32
+    # UpdateDriverForPlugAndPlayDevices, which binds the virtual display's
+    # driver to the device driver_install.cpp creates; and the adapter list,
+    # for whether this PC is on Tailscale.
+    newdev iphlpapi
+    # Shortcuts are IShellLink, which is COM (ole32) and needs its class and
+    # interface ids (uuid) -- mingw's import libraries do not carry those unless
+    # the library is named.
+    ole32 uuid
+    # The logon task is registered through ITaskService, whose strings are BSTRs.
+    oleaut32
+    # WTSQuerySessionInformationW: who is signed in at this desktop, which the
+    # install asks when it was elevated to somebody else's account.
+    wtsapi32
+)
+
+# UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
+# of the API, on both toolchains.
+target_compile_definitions(SolStreamCore PUBLIC UNICODE _UNICODE
+    # One version number for the code and for the resource block, so what
+    # Add/Remove Programs lists and what the file's Properties dialog says
+    # cannot disagree.
+    SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
+
+if(MSVC)
+    # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
+    # Without it MSVC reads them in the system code page and "token — the" is
+    # rendered as "token a€" in the window.
+    target_compile_options(SolStreamCore PUBLIC /W4 /permissive- /utf-8)
+
+    # Static runtime, so the executable is genuinely self-contained.
+    #
+    # The default /MD build imports MSVCP140.dll and VCRUNTIME140.dll, which are
+    # NOT part of Windows -- they arrive with the Visual C++ Redistributable, or
+    # with Visual Studio. On a clean Windows 11 none of them exist, so the
+    # program cannot start at all: it dies at load with 0xC0000135,
+    # STATUS_DLL_NOT_FOUND, before main and therefore before any message it could
+    # have shown. Every development machine has them, which is exactly why this
+    # survived until the first install onto a machine that was not one.
+    #
+    # Shipping the redistributable instead would mean a second installer to chain
+    # and a reboot prompt to explain, for an application whose whole selling
+    # point is that there is one thing to run.
+    #
+    # A property of each target rather than a usage requirement, so it is set
+    # on the shared objects and on both programs that link them: objects built
+    # for one runtime and linked into a program of the other carry two C
+    # runtimes, each with its own heap.
+    set(SOLSTREAM_RUNTIME "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET SolStreamCore PROPERTY MSVC_RUNTIME_LIBRARY "${SOLSTREAM_RUNTIME}")
+else()
+    target_compile_options(SolStreamCore PUBLIC -Wall -Wextra -municode)
+    target_link_options(SolStreamCore PUBLIC -municode -static)
+endif()
+
+add_executable(SolStreamAgent
+    main.cpp
+    host_window.cpp
     # Finds, verifies and installs updates from GitHub releases.
     updater.cpp
     ${SOLSTREAM_MEDIA_SOURCES}
@@ -107,35 +176,14 @@ set_target_properties(SolStreamAgent PROPERTIES
 )
 
 target_link_libraries(SolStreamAgent PRIVATE
-    user32 ws2_32 dwmapi shell32 winhttp crypt32 bcrypt gdi32
-    setupapi cfgmgr32 comctl32
-    # UpdateDriverForPlugAndPlayDevices, which binds the virtual display's
-    # driver to the device driver_install.cpp creates; and the adapter list,
-    # for whether this PC is on Tailscale.
-    newdev iphlpapi
+    SolStreamCore
+    dwmapi gdi32 comctl32
     # GetDpiForMonitor, for the size a window will be on the capture display.
     shcore
     # The host window draws with Direct2D and lays out text with DirectWrite.
     # Both are in-box, so this adds nothing to what has to be installed.
     d2d1 dwrite
-    # Shortcuts are IShellLink, which is COM (ole32) and needs its class and
-    # interface ids (uuid) -- mingw's import libraries do not carry those unless
-    # the library is named.
-    ole32 uuid
-    # The logon task is registered through ITaskService, whose strings are BSTRs.
-    oleaut32
-    # WTSQuerySessionInformationW: who is signed in at this desktop, which the
-    # install asks when it was elevated to somebody else's account.
-    wtsapi32
 )
-
-# UNICODE selects the wide-character Win32 entry point (wmain) and the W forms
-# of the API, on both toolchains.
-target_compile_definitions(SolStreamAgent PRIVATE UNICODE _UNICODE
-    # One version number for the code and for the resource block, so what
-    # Add/Remove Programs lists and what the file's Properties dialog says
-    # cannot disagree.
-    SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
 
 if(MSVC)
     target_compile_definitions(SolStreamAgent PRIVATE SOLSTREAM_MEDIA)
@@ -168,33 +216,13 @@ if(MSVC)
     set(BUILD_TESTING OFF)
     add_subdirectory("${SOLSTREAM_OPUS_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/opus")
     set(BUILD_TESTING "${SOLSTREAM_BUILD_TESTING}")
-    # The agent's static runtime, below, for the library too. libopus's own
+    # The agent's static runtime, above, for the library too. libopus's own
     # default is the DLL one, and a /MD library in a /MT program links with
     # LNK4098 and then carries two C runtimes, each with its own heap.
-    set_property(TARGET opus PROPERTY
-                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET opus PROPERTY MSVC_RUNTIME_LIBRARY "${SOLSTREAM_RUNTIME}")
     target_link_libraries(SolStreamAgent PRIVATE opus)
 
-    # /utf-8 because the sources are UTF-8 and the UI strings contain em dashes.
-    # Without it MSVC reads them in the system code page and "token — the" is
-    # rendered as "token a€" in the window.
-    target_compile_options(SolStreamAgent PRIVATE /W4 /permissive- /utf-8)
-
-    # Static runtime, so the executable is genuinely self-contained.
-    #
-    # The default /MD build imports MSVCP140.dll and VCRUNTIME140.dll, which are
-    # NOT part of Windows -- they arrive with the Visual C++ Redistributable, or
-    # with Visual Studio. On a clean Windows 11 none of them exist, so the
-    # program cannot start at all: it dies at load with 0xC0000135,
-    # STATUS_DLL_NOT_FOUND, before main and therefore before any message it could
-    # have shown. Every development machine has them, which is exactly why this
-    # survived until the first install onto a machine that was not one.
-    #
-    # Shipping the redistributable instead would mean a second installer to chain
-    # and a reboot prompt to explain, for an application whose whole selling
-    # point is that there is one thing to run.
-    set_property(TARGET SolStreamAgent PROPERTY
-                 MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET SolStreamAgent PROPERTY MSVC_RUNTIME_LIBRARY "${SOLSTREAM_RUNTIME}")
 
     # Every DLL this program imports comes from System32, never from beside the
     # executable. The updater runs it elevated from %LOCALAPPDATA%\SolStream\
@@ -210,9 +238,6 @@ if(MSVC)
     # look on the first one rather than remove it. The mingw build cannot set
     # it: its linker has no such option, and it is not what ships.
     target_link_options(SolStreamAgent PRIVATE /DEPENDENTLOADFLAG:0x800)
-else()
-    target_compile_options(SolStreamAgent PRIVATE -Wall -Wextra -municode)
-    target_link_options(SolStreamAgent PRIVATE -municode -static)
 endif()
 
 # The updater's own tests: version, JSON, SHA256SUMS and base64 parsing, the
@@ -230,23 +255,15 @@ endif()
 # internals, so that is not listed again here. Not built by
 # package-windows.ps1, which configures with BUILD_TESTING off.
 if(BUILD_TESTING)
-    add_executable(SolStreamUpdaterTests updater_tests.cpp util.cpp clipboard.cpp
-        installer.cpp media/log.cpp driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp
-        session_takeover.cpp media/keys.cpp window_restore.cpp)
+    add_executable(SolStreamUpdaterTests updater_tests.cpp media/keys.cpp)
     set_target_properties(SolStreamUpdaterTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON
     )
-    target_compile_definitions(SolStreamUpdaterTests PRIVATE UNICODE _UNICODE
-        SOLSTREAM_VERSION_STRING="${SOLSTREAM_VERSION}")
-    target_link_libraries(SolStreamUpdaterTests PRIVATE
-        user32 advapi32 shell32 winhttp crypt32 bcrypt ole32 oleaut32 uuid
-        setupapi cfgmgr32 newdev iphlpapi ws2_32 wtsapi32)
+    target_link_libraries(SolStreamUpdaterTests PRIVATE SolStreamCore)
     if(MSVC)
-        target_compile_options(SolStreamUpdaterTests PRIVATE /W4 /permissive- /utf-8)
-    else()
-        target_compile_options(SolStreamUpdaterTests PRIVATE -Wall -Wextra -municode)
-        target_link_options(SolStreamUpdaterTests PRIVATE -municode -static)
+        set_property(TARGET SolStreamUpdaterTests PROPERTY
+                     MSVC_RUNTIME_LIBRARY "${SOLSTREAM_RUNTIME}")
     endif()
     add_test(NAME updater
              COMMAND SolStreamUpdaterTests

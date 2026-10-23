@@ -27,7 +27,7 @@ That leaves `build\bin\release\SolStreamAgent.exe`. On macOS/Linux, to catch
 compile and link errors early:
 
 ```
-brew install mingw-w64
+brew install mingw-w64 cmake
 ./build-cross.sh
 ```
 

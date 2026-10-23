@@ -1,40 +1,38 @@
 #!/bin/sh
 # Cross-compile the agent to a Windows .exe from macOS/Linux.
-#   brew install mingw-w64
+#   brew install mingw-w64 cmake
 # Produces SolStreamAgent.exe next to this script. Building here does not
 # replace building on Windows — it catches compile and link errors early,
 # which matters because the agent is developed on a Mac.
-set -e
-CXX=${CXX:-x86_64-w64-mingw32-g++}
-cd "$(dirname "$0")"
-# The version from the repository's VERSION file, as CMakeLists.txt reads it,
-# so this build compares against the same number the real one does.
-VERSION=$(tr -d ' \t\r\n' < ../../VERSION)
-if ! printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-    echo "VERSION must hold X.Y.Z and nothing else, not '$VERSION'" >&2
-    exit 1
-fi
-"$CXX" -std=c++20 -municode -O2 -Wall -Wextra -static \
-    "-DSOLSTREAM_VERSION_STRING=\"$VERSION\"" \
-    -o SolStreamAgent.exe \
-    main.cpp util.cpp clipboard.cpp vdd.cpp display_setup.cpp driver_install.cpp tailscale.cpp \
-    session_takeover.cpp window_restore.cpp host_window.cpp \
-    installer.cpp updater.cpp media/log.cpp \
-    -luser32 -lws2_32 -ldwmapi -lshcore -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lgdi32 \
-    -lsetupapi -lcfgmgr32 -lcomctl32 -lnewdev -liphlpapi -lole32 -loleaut32 -luuid \
-    -ld2d1 -ldwrite -lwtsapi32
-echo "built: $(pwd)/SolStreamAgent.exe ($VERSION)"
+#
+# CMakeLists.txt is the one list of sources, flags and libraries, and the one
+# check of VERSION; this only points it at mingw. The build tree is
+# build/cross at the repository root (BUILD_DIR to change it), so a second run
+# compiles only what changed.
+#
 # The updater's tests, with the clipboard's and the sound capture's reopening
-# (media/audio_reopen.h) beside them since it is the one C++ test program,
-# compiled so this check covers them too. Run them on Windows (or under Wine)
+# (media/audio_reopen.h) beside them since it is the one C++ test program, are
+# built too, so this check covers them. Run them on Windows (or under Wine)
 # with the test vector:
 #   SolStreamUpdaterTests.exe ..\..\tests\update-vector
-"$CXX" -std=c++20 -municode -O2 -Wall -Wextra -static \
-    "-DSOLSTREAM_VERSION_STRING=\"$VERSION\"" \
-    -o SolStreamUpdaterTests.exe \
-    updater_tests.cpp util.cpp clipboard.cpp installer.cpp media/log.cpp \
-    driver_install.cpp display_setup.cpp vdd.cpp tailscale.cpp session_takeover.cpp \
-    media/keys.cpp window_restore.cpp \
-    -luser32 -ladvapi32 -lshell32 -lwinhttp -lcrypt32 -lbcrypt -lole32 -loleaut32 -luuid \
-    -lsetupapi -lcfgmgr32 -lnewdev -liphlpapi -lws2_32 -lwtsapi32
-echo "built: $(pwd)/SolStreamUpdaterTests.exe"
+set -e
+CXX=${CXX:-x86_64-w64-mingw32-g++}
+RC=${RC:-x86_64-w64-mingw32-windres}
+cd "$(dirname "$0")"
+BUILD_DIR=${BUILD_DIR:-../../build/cross}
+# -O2 and no NDEBUG, as this script compiled before it went through CMake.
+# ~/.local/bin/cc can be a wrapper rather than a compiler, so nothing here is
+# left for CMake to find on its own.
+cmake -S ../.. -B "$BUILD_DIR" \
+    -DCMAKE_SYSTEM_NAME=Windows \
+    -DCMAKE_CXX_COMPILER="$CXX" \
+    -DCMAKE_RC_COMPILER="$RC" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS_RELEASE=-O2 \
+    -DBUILD_TESTING=ON > /dev/null
+cmake --build "$BUILD_DIR" --target SolStreamAgent SolStreamUpdaterTests \
+    --parallel "${JOBS:-4}"
+for exe in SolStreamAgent SolStreamUpdaterTests; do
+    cp "$BUILD_DIR/bin/release/$exe.exe" .
+    echo "built: $(pwd)/$exe.exe"
+done
