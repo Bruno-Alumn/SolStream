@@ -340,98 +340,105 @@ final class GamingCursorTests: XCTestCase {
 
     // MARK: - Presses that belong to the window
 
-    /// The band a resize starts from: the frame's outer few points, and more
-    /// around the corners.
-    func testTheResizeBorder() {
-        let size = CGSize(width: 400, height: 328)
-        XCTAssertTrue(InputCapture.isOnResizeBorder(CGPoint(x: 398, y: 2), windowSize: size))
-        XCTAssertTrue(InputCapture.isOnResizeBorder(CGPoint(x: 2, y: 150), windowSize: size))
-        XCTAssertTrue(InputCapture.isOnResizeBorder(CGPoint(x: 200, y: 1), windowSize: size))
-        XCTAssertTrue(InputCapture.isOnResizeBorder(CGPoint(x: 392, y: 8), windowSize: size))
-        XCTAssertFalse(InputCapture.isOnResizeBorder(CGPoint(x: 392, y: 150), windowSize: size))
-        XCTAssertFalse(InputCapture.isOnResizeBorder(CGPoint(x: 200, y: 8), windowSize: size))
-        XCTAssertFalse(InputCapture.isOnResizeBorder(CGPoint(x: 200, y: 150), windowSize: size))
-    }
-
-    /// Resizing from the bottom-right corner sends nothing at all: not the
-    /// press that began a console's QuickEdit selection, not the drag along
-    /// the edge, not a release on its own.
-    func testAResizeFromTheCornerSendsNothing() {
+    /// A grab of the window's corner -- a left press AppKit makes a resize of,
+    /// and so never hands the view -- sends nothing at all: not the press that
+    /// began a console's QuickEdit selection, not the drag along the edge, not
+    /// a release on its own. Wherever it is: the corner 6 points in and 14 up
+    /// that a guessed border missed.
+    func testAGrabOfTheWindowSendsNothing() {
         InputCapture.pointerMode = .desktop
-        let mouse = Mouse(resizable: true)
-        mouse.press(at: NSPoint(x: 398, y: 2))
-        mouse.drag(at: NSPoint(x: 396, y: 4))
-        mouse.drag(at: NSPoint(x: 390, y: 10))
-        mouse.lift(at: NSPoint(x: 390, y: 10))
-        XCTAssertEqual(mouse.packets, [])
-        // And the next ordinary click is a click.
-        mouse.click()
-        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1), .abs(400, 300), .release(1)])
+        for corner in [NSPoint(x: 398, y: 2), NSPoint(x: 394, y: 14)] {
+            let mouse = Mouse(resizable: true)
+            mouse.grab(at: corner)
+            mouse.drag(at: NSPoint(x: corner.x - 2, y: corner.y + 2))
+            mouse.drag(at: NSPoint(x: corner.x - 8, y: corner.y + 8))
+            mouse.lift(at: NSPoint(x: corner.x - 8, y: corner.y + 8))
+            XCTAssertEqual(mouse.packets, [])
+            // And the next ordinary click is a click.
+            mouse.viewPress(at: NSPoint(x: 200, y: 150), time: 5)
+            mouse.lift(at: NSPoint(x: 200, y: 150))
+            XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1), .abs(400, 300), .release(1)])
+        }
     }
 
-    /// A press on the edge whose release AppKit's resize swallowed is
-    /// forgotten at the next move, so hovering is not withheld for ever.
-    func testAWithheldPressIsForgottenAtTheNextMove() {
-        InputCapture.pointerMode = .desktop
-        let mouse = Mouse(resizable: true)
-        mouse.press(at: NSPoint(x: 2, y: 150))
-        mouse.drag(at: NSPoint(x: 100, y: 150))
-        XCTAssertEqual(mouse.packets, [])
-        mouse.hover(at: NSPoint(x: 100, y: 150))
-        XCTAssertEqual(mouse.packets, [.abs(200, 300)])
-    }
-
-    /// Just inside the band is the picture, and a click there is a click.
-    func testAClickNearTheEdgeIsStillAClick() {
-        InputCapture.pointerMode = .desktop
-        let mouse = Mouse(resizable: true)
-        mouse.press(at: NSPoint(x: 200, y: 8))
-        mouse.lift(at: NSPoint(x: 200, y: 8))
-        XCTAssertEqual(mouse.packets.filter { if case .abs = $0 { return false }; return true },
-                       [.press(1), .release(1)])
-    }
-
-    /// A window that cannot be resized has no border to keep clear.
-    func testAFixedWindowHasNoBorder() {
-        InputCapture.pointerMode = .desktop
-        let mouse = Mouse()
-        mouse.press(at: NSPoint(x: 398, y: 2))
-        XCTAssertTrue(mouse.packets.contains(.press(1)))
-    }
-
-    /// A press outside the picture -- dragged into it, as a window moved by
-    /// its title bar can be -- sends neither the drag nor the release.
+    /// A press in the title bar, dragged over the picture as a window being
+    /// moved can be, sends neither the drag nor the release.
     func testAPressOutsideThePictureSendsNothingAfterIt() {
         InputCapture.pointerMode = .desktop
         let mouse = Mouse(resizable: true)
-        mouse.press(at: NSPoint(x: 200, y: 314))
+        mouse.grab(at: NSPoint(x: 200, y: 314))
         mouse.drag(at: NSPoint(x: 200, y: 150))
         mouse.lift(at: NSPoint(x: 200, y: 150))
         XCTAssertEqual(mouse.packets, [])
     }
 
+    /// A left press the view is handed is a click, right up to the edge of
+    /// the picture: AppKit decides where the window's border is.
+    func testAClickTheViewIsHandedIsAClickAnywhere() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse(resizable: true)
+        mouse.viewPress(at: NSPoint(x: 200, y: 8), time: 1)
+        mouse.drag(at: NSPoint(x: 210, y: 8))
+        mouse.lift(at: NSPoint(x: 210, y: 8))
+        XCTAssertEqual(mouse.packets.filter { if case .abs = $0 { return false }; return true },
+                       [.press(1), .release(1)])
+        XCTAssertEqual(mouse.packets.count, 5, "the drag between did not move the PC's pointer")
+    }
+
+    /// The right button is the monitor's, and is sent once even though the
+    /// view is handed it too.
+    func testARightClickIsSentOnce() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse(resizable: true)
+        mouse.viewPress(at: NSPoint(x: 200, y: 150), time: 1, type: .rightMouseDown)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(3)])
+    }
+
+    /// A button the PC holds whose release never came -- AppKit's resize
+    /// took it -- is let go of when the resize ends, and at the first move
+    /// with no button down on this Mac.
+    func testAStrandedButtonIsLetGo() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse(resizable: true)
+        mouse.viewPress(at: NSPoint(x: 200, y: 150), time: 1)
+        mouse.packets.removeAll()
+        mouse.capture.releaseStrandedButtons("the window was resized")
+        XCTAssertEqual(mouse.packets, [.release(1)])
+        mouse.capture.releaseStrandedButtons("again")
+        XCTAssertEqual(mouse.packets, [.release(1)], "let go of twice")
+
+        mouse.viewPress(at: NSPoint(x: 200, y: 150), time: 2)
+        mouse.packets.removeAll()
+        mouse.hover(at: NSPoint(x: 200, y: 150))
+        XCTAssertEqual(mouse.packets, [.abs(400, 300)], "let go of while the Mac says held")
+        mouse.packets.removeAll()
+        mouse.macButtons = 0
+        mouse.hover(at: NSPoint(x: 200, y: 150))
+        XCTAssertEqual(mouse.packets, [.release(1), .abs(400, 300)])
+    }
+
     /// A first click on the resize border, the click that makes the window
-    /// key, is not sent either.
+    /// key, is AppKit's too: the view is not handed it, and nothing is sent.
     func testAFirstClickOnTheBorderIsNotSent() {
         InputCapture.pointerMode = .desktop
         let mouse = Mouse(resizable: true)
-        mouse.viewPress(at: NSPoint(x: 398, y: 2), time: 1)
         mouse.lift(at: NSPoint(x: 398, y: 2))
         XCTAssertEqual(mouse.packets, [])
     }
 
-    /// Gaming mode: a press on the border does not take the mouse, which
-    /// would stop the frame following the hand; one in the picture still
-    /// does, and the click still reaches the game.
-    func testGamingCaptureIgnoresTheBorderOnly() {
+    /// Gaming mode: a grab of the window does not take the mouse, which
+    /// would stop the frame following the hand; a click in the picture still
+    /// does, and still reaches the game.
+    func testGamingCaptureIgnoresAGrabOfTheWindow() {
         InputCapture.pointerMode = .gaming
         InputCapture.followsHostCursor = false
         let mouse = Mouse(resizable: true)
-        mouse.press(at: NSPoint(x: 398, y: 2))
+        mouse.grab(at: NSPoint(x: 398, y: 2))
+        mouse.drag(at: NSPoint(x: 390, y: 10))
         XCTAssertFalse(mouse.locked)
         XCTAssertEqual(mouse.packets, [])
-        mouse.lift(at: NSPoint(x: 398, y: 2))
-        mouse.press()
+        mouse.lift(at: NSPoint(x: 390, y: 10))
+        mouse.viewPress(at: NSPoint(x: 200, y: 150), time: 3)
         XCTAssertTrue(mouse.locked)
         XCTAssertTrue(mouse.packets.contains(.press(1)))
     }
@@ -639,6 +646,10 @@ private final class Mouse {
     /// is synced as capture starts, so the keys are kept out of `packets`.
     var withKeys: [Packet] = []
     private(set) var locked = false
+    /// The Mac's buttons held, as `NSEvent.pressedMouseButtons` would say.
+    /// Held by default, so a move in a test is not taken as the hand having
+    /// let go.
+    var macButtons = 1
     /// Where the pointer is, as a unit point in the picture; nil for not over
     /// it, or under something else.
     var pointer: CGPoint? = CGPoint(x: 0.5, y: 0.5)
@@ -655,6 +666,7 @@ private final class Mouse {
         let view = NSView(frame: NSRect(origin: .zero, size: size))
         window.contentView = view
         capture.lockSystemPointer = { [weak self] in self?.locked = $0 }
+        capture.buttonsPressedNow = { [weak self] in self?.macButtons ?? 0 }
         capture.pointerStandIn = { [weak self] in self?.pointer }
         capture.attach(to: view)
         capture.sourceRect = CGRect(x: 0, y: 0, width: 800, height: 600)
@@ -676,34 +688,37 @@ private final class Mouse {
     func press(flags: UInt = 0) { capture.handleMouseEvent(event(.leftMouseDown, flags: flags)) }
     func lift() { capture.handleMouseEvent(event(.leftMouseUp)) }
 
-    /// A press, a drag and a release at `point`, in window coordinates.
-    func press(at point: NSPoint) {
-        capture.handleMouseEvent(event(.leftMouseDown, location: point))
+    /// A left press AppKit makes a resize or a move of the window, at
+    /// `point` in window coordinates: the monitor sees it, the view is never
+    /// handed it.
+    func grab(at point: NSPoint) {
+        capture.handleMonitoredEvent(event(.leftMouseDown, location: point))
     }
+    /// A drag, a release and a move with no button, as the monitor sees them.
     func drag(at point: NSPoint) {
-        capture.handleMouseEvent(event(.leftMouseDragged, location: point))
+        capture.handleMonitoredEvent(event(.leftMouseDragged, location: point))
     }
     func lift(at point: NSPoint) {
-        capture.handleMouseEvent(event(.leftMouseUp, location: point))
+        capture.handleMonitoredEvent(event(.leftMouseUp, location: point))
     }
-    /// A move with no button down, at `point`.
     func hover(at point: NSPoint) {
-        capture.handleMouseEvent(event(.mouseMoved, location: point))
+        capture.handleMonitoredEvent(event(.mouseMoved, location: point))
     }
-    /// The first click on the window, made at `point`.
-    func viewPress(at point: NSPoint, time: TimeInterval) {
-        capture.handleFirstMouse(event(.leftMouseDown, timestamp: time, location: point))
+    /// A click in the picture of a key window, at `point`: the monitor sees
+    /// the press, then the view is handed it.
+    func viewPress(at point: NSPoint, time: TimeInterval,
+                   type: NSEvent.EventType = .leftMouseDown) {
+        let press = event(type, timestamp: time, location: point)
+        capture.handleMonitoredEvent(press)
+        capture.handleViewPress(press)
     }
 
     /// A press the stream view is handed, at `time`: the click that made the
     /// window key, unless the monitor saw it first.
     func viewPress(at time: TimeInterval, monitored: Bool = false) {
         let press = event(.leftMouseDown, timestamp: time)
-        if monitored {
-            capture.noteMonitored(press)
-            capture.handleMouseEvent(press)
-        }
-        capture.handleFirstMouse(press)
+        if monitored { capture.handleMonitoredEvent(press) }
+        capture.handleViewPress(press)
     }
 
     /// A move to the middle of the picture, carrying `delta` in points.

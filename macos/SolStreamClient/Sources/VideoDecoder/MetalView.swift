@@ -110,9 +110,12 @@ public final class MetalView: NSView {
 
     // MARK: - Clicks
 
-    /// Told of every button press the view is handed, so the click that
-    /// brings the window forward can still reach the PC: see
-    /// `InputCapture.handleFirstMouse`.
+    /// Told of every button press the view is handed. AppKit hands it a left
+    /// press only when the press does not start a resize or a move of the
+    /// window, which is what makes it the one place that knows a click in
+    /// the picture from a grab of the window's edge; and it hands it the
+    /// click that brings the window forward. See
+    /// `InputCapture.handleViewPress`.
     public var onMouseDown: ((NSEvent) -> Void)?
 
     /// A click on a stream window that is not the key one goes through to the
