@@ -44,6 +44,10 @@ enum class DriverStep {
     Done,         ///< the display's part is over; SolStream's own install follows
 };
 
+/// `count` random bytes as lowercase hex, or empty if the RNG refuses. Here
+/// rather than in util.h only because installer.cpp needs it too.
+std::string RandomHex(size_t count);
+
 /// Where SolStream's driver stands on this PC.
 enum class DriverState {
     Missing,         ///< no device of it at all: setup may install one

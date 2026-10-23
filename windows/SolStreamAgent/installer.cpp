@@ -6,7 +6,6 @@
 #include <objbase.h>
 #include <sddl.h>
 #include <aclapi.h>
-#include <bcrypt.h>
 #include <oleauto.h>
 #include <taskschd.h>
 #include <wtsapi32.h>
@@ -1185,22 +1184,10 @@ std::wstring NewResultToken() {
         FindClose(search);
     }
 
-    unsigned char bytes[16] = {0};
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        // Nothing unguessable to be had, so the fixed name it is — see
-        // ResultPath. Better a predictable postbox than no postbox and a setup
-        // window told the install never ran.
-        return {};
-    }
-    static const wchar_t* hex = L"0123456789abcdef";
-    std::wstring out;
-    out.reserve(sizeof(bytes) * 2);
-    for (unsigned char byte : bytes) {
-        out.push_back(hex[byte >> 4]);
-        out.push_back(hex[byte & 0x0F]);
-    }
-    return out;
+    // Empty when there is nothing unguessable to be had, so the fixed name it
+    // is — see ResultPath. Better a predictable postbox than no postbox and a
+    // setup window told the install never ran.
+    return ToWide(RandomHex(16));
 }
 
 }  // namespace

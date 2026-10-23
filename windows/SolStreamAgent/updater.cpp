@@ -2111,12 +2111,7 @@ bool FetchPinned(const std::string& url, const std::string& sha256_hex,
         error = "could not hash what was downloaded";
         return false;
     }
-    static const char* hex = "0123456789abcdef";
-    std::string got;
-    for (unsigned char byte : digest) {
-        got.push_back(hex[byte >> 4]);
-        got.push_back(hex[byte & 0x0F]);
-    }
+    const std::string got = ToHex(digest, sizeof(digest));
     if (got != sha256_hex) {
         // Not trusted, so not kept: nothing downstream may see these bytes.
         body.clear();

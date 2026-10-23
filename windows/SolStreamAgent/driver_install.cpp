@@ -144,14 +144,12 @@ std::wstring PrivateDirectory(std::string& error) {
     }
     const std::wstring base = program_data;
 
-    unsigned char bytes[8] = {0};
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+    const std::string name = RandomHex(8);
+    if (name.empty()) {
         error = "could not pick a private folder name";
         return {};
     }
-    const std::wstring path = base + L"\\SolStream-display-driver-"
-                            + ToWide(ToHex(bytes, sizeof(bytes)));
+    const std::wstring path = base + L"\\SolStream-display-driver-" + ToWide(name);
 
     SECURITY_ATTRIBUTES attributes{};
     attributes.nLength = sizeof(attributes);
@@ -307,12 +305,7 @@ constexpr DEVPROPKEY kDeviceMarkKey = {
 
 /// A new mark, or empty when there is no randomness to make one from.
 std::wstring NewDeviceMark() {
-    unsigned char bytes[16] = {0};
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes, sizeof(bytes),
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        return {};
-    }
-    return ToWide(ToHex(bytes, sizeof(bytes)));
+    return ToWide(RandomHex(16));
 }
 
 bool MarkDevice(HDEVINFO set, SP_DEVINFO_DATA& device, const std::wstring& mark) {
@@ -504,6 +497,15 @@ std::string InstallProblem(const char* what, DWORD code) {
 }
 
 }  // namespace
+
+std::string RandomHex(size_t count) {
+    std::vector<unsigned char> bytes(count);
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        return {};
+    }
+    return ToHex(bytes);
+}
 
 DriverState CurrentDriverState() {
     bool found = false;
