@@ -21,6 +21,17 @@ app keeps running on your PC. With any luck you stop noticing that.
 Above, two apps on the PC are streamed to the Mac at the same time. The
 clicks and typing come from the Mac's own mouse and keyboard.
 
+### Resize it like a Mac window
+
+<p align="center">
+  <img src="docs/media/resize.gif" width="760" alt="PhotoCraft, an image editor running on the PC, in a Mac window. Dragging the window's corner resizes it, and the editor's panels and toolbars re-lay themselves out at each size.">
+</p>
+
+Drag the corner and the app on the PC is resized with it, so it lays itself
+out again for the new size. PhotoCraft's panels and toolbars rearrange the way
+they would on a PC monitor. The picture is never scaled: each size is the app's
+own layout, drawn at the Mac's resolution.
+
 ## What it does
 
 - **One window per app.** Each app you stream gets its own Mac window. Resize
