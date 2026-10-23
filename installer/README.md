@@ -137,7 +137,7 @@ Tailscale address beside the local one when there is one.
 ## Known gaps
 
 - **Nothing is signed with a certificate.** `scripts/package-windows.ps1` builds
-  and copies with no `signtool` step; CI (`.github/workflows/ci.yml`) and the
+  and copies with no `signtool` step; CI (`.github/workflows/ci-windows.yml`) and the
   release workflow (`release.yml`) run it on GitHub's Windows runners. What makes
   a release trustworthy to the updater is the signed SHA256SUMS
   (docs/updates.md), which does nothing for SmartScreen. Unsigned, the user meets

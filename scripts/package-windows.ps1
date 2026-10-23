@@ -64,7 +64,8 @@ Write-Host "=== SolStream Windows package $version ==="
 
 # BUILD_TESTING=OFF because this is a packaging run: left to its default,
 # include(CTest) turns it ON and the updater's test executable would be built
-# into the package's build tree too. CI builds and runs it separately.
+# into the package's build tree too. CI turns it on in this same tree afterwards,
+# so the tests reuse what this build compiled.
 cmake -S "$PSScriptRoot\.." -B $BuildDir -DBUILD_TESTING=OFF | Out-Null
 # Checked for the same reason the build below is, and it is the easier of the two
 # to miss: `| Out-Null` swallows the configure's output, so a configure that

@@ -1,0 +1,81 @@
+name: CI Windows
+
+# The Windows host, whenever anything it is built from changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'windows/**'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'scripts/package-windows.ps1'
+      - 'scripts/check-update-signature.ps1'
+      - 'VERSION'
+      - '.github/workflows/ci-windows.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - 'third_party/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'scripts/package-windows.ps1'
+      - 'scripts/check-update-signature.ps1'
+      - 'VERSION'
+      - '.github/workflows/ci-windows.yml'
+  workflow_dispatch:
+
+# One run per branch at a time; a newer push supersedes an older one.
+concurrency:
+  group: ci-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows host (MSVC)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package
+        # What release.yml runs: the MSVC build, then the setup under its
+        # release name, refused if its version block disagrees with VERSION.
+        run: ./scripts/package-windows.ps1
+      - name: Check update signatures with the built setup
+        # The host is its own updater; this is the contract's CLI
+        # (docs/updates.md) run against the test vector, on the setup under its
+        # release name, as release.yml runs it before publishing.
+        run: |
+          $version = Get-Content VERSION -TotalCount 1
+          ./scripts/check-update-signature.ps1 -Setup "dist\SolStreamSetup-$version.exe"
+      # The updater's unit tests (version order, SHA256SUMS parsing, the
+      # redirect allow-list, anti-rollback). package-windows.ps1 configures with
+      # BUILD_TESTING off and windows-cross cannot run what it compiles, so this
+      # is the only place they run under MSVC. The packaging build's own tree
+      # with the tests turned on, so they reuse the objects it compiled; one
+      # command per step because pwsh only looks at $LASTEXITCODE when a step
+      # ends.
+      - name: Configure updater tests
+        run: cmake -S . -B build -DBUILD_TESTING=ON
+      - name: Build updater tests
+        run: cmake --build build --target SolStreamUpdaterTests --config Release
+      - name: Run updater tests
+        run: ctest --test-dir build -C Release -R '^updater$' --output-on-failure --no-tests=error
+
+  windows-cross:
+    name: Windows host (mingw syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix
+      - name: Cross-compile
+        # The agent and its tests, through CMakeLists.txt; the runner's own
+        # cmake drives it, and windres comes with the mingw package.
+        env:
+          CXX: x86_64-w64-mingw32-g++-posix
+        run: sh windows/SolStreamAgent/build-cross.sh
