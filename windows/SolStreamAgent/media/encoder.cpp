@@ -764,7 +764,6 @@ void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
         coded.frameId = frameId;
         coded.isIdr = isIdr;
         coded.capturedAt = m.capturedAt;
-        coded.encodedAt = Now();
         sink(coded);
     }
 }
@@ -1132,7 +1131,6 @@ void Encoder::Close() {
     Release(s.pendingBgra);
 }
 
-bool Encoder::Running() const { return impl_->running.load(); }
 UINT Encoder::Width() const { return impl_->width; }
 UINT Encoder::Height() const { return impl_->height; }
 
@@ -1193,17 +1191,6 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
 void Encoder::RequestIdr() { impl_->ledger.RequestIdr(); }
 
 bool Encoder::IdrPending() const { return impl_->ledger.IdrPending(); }
-
-void Encoder::SetBitrate(UINT bitrateBps) {
-    Impl& s = *impl_;
-    s.bitrate = bitrateBps;
-    if (s.codec) {
-        VARIANT rate{};
-        rate.vt = VT_UI4;
-        rate.ulVal = bitrateBps;
-        s.codec->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &rate);
-    }
-}
 
 uint64_t Encoder::Submitted() const { return impl_->submitted.load(); }
 uint64_t Encoder::Pictures() const { return impl_->pictures.load(); }
