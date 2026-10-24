@@ -654,7 +654,7 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertFalse(statusFitsItsTwoLines(pane))
         let reasons: [UpdateError] = [
             .transport(.offline), .transport(.timedOut), .transport(.refusedAddress("x")),
-            .transport(.cannotWrite), .tooLarge, .http(503), .tokenRefused, .rateLimited,
+            .transport(.cannotWrite), .tooLarge, .http(503), .rateLimited,
             .malformedRelease, .missingAsset("x"), .badSignature, .malformedSums, .notInSums("x"),
             .checksumMismatch, .install(.wrongIdentifier(nil)), .install(.wrongVersion(nil)),
             .install(.signatureRejected("")), .install(.notAnApp), .install(.moveFailed("")),

@@ -59,9 +59,8 @@ the same files under the production key, must not.
    with `Accept: application/vnd.github+json`, `X-GitHub-Api-Version:
    2022-11-28` and `User-Agent: SolStream/<version> (<macOS|Windows>)`. The
    owner and repository are one constant in each program.
-2. **404 means "nothing published that this client can see"** -- which is what
-   a private repository answers without credentials. Not an error: no update,
-   nothing shown, check again later.
+2. **404 means "nothing published yet".** Not an error: no update, nothing
+   shown, check again later.
 3. Ignore drafts and prereleases. Take `tag_name`, strip the `v`, compare.
 4. If newer: fetch `SHA256SUMS` and `SHA256SUMS.sig`, verify the signature
    with the compiled-in key, find this platform's asset in the verified sums,
@@ -70,17 +69,6 @@ the same files under the production key, must not.
 5. HTTPS only, redirects only to `github.com`, `api.github.com`,
    `objects.githubusercontent.com` and `release-assets.githubusercontent.com`.
    Asset size capped at 200 MB.
-
-### When the repository is private
-
-`SOLSTREAM_GITHUB_TOKEN`, if set in the environment, is sent as
-`Authorization: Bearer …` to api.github.com only -- never to the hosts a
-download redirects to, whose pre-signed URLs reject a second credential and
-must not see the token. Assets are then fetched through their API `url` with
-`Accept: application/octet-stream`, because `browser_download_url` does not
-take a token. It is read from the environment
-only: never stored, never logged, never shown. Unset, the updaters behave as
-the public repository will.
 
 ### For testing
 

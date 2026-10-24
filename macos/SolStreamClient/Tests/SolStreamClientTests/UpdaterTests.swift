@@ -207,8 +207,6 @@ final class UpdaterTests: XCTestCase {
         XCTAssertEqual(release.tag, "v1.2.0")
         XCTAssertEqual(release.version.text, "1.2.0")
         let zip = try XCTUnwrap(release.asset(named: "SolStream-1.2.0-macOS.zip"))
-        XCTAssertEqual(zip.apiURL.absoluteString,
-                       "https://api.github.com/repos/Bruno-Alumn/SolStream/releases/assets/1")
         XCTAssertEqual(zip.downloadURL.absoluteString,
                        "https://github.com/Bruno-Alumn/SolStream/releases/download/v1.2.0/SolStream-1.2.0-macOS.zip")
         XCTAssertEqual(zip.size, 1234)
@@ -235,8 +233,8 @@ final class UpdaterTests: XCTestCase {
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.releaseJSON(tag: "v1.2.0"))
             as? [String: Any])
         var assets = try XCTUnwrap(object["assets"] as? [[String: Any]])
-        // The .dmg without its API address, the .exe with no name at all.
-        assets[3]["url"] = nil
+        // The .dmg without its address, the .exe with no name at all.
+        assets[3]["browser_download_url"] = nil
         assets[4]["name"] = NSNull()
         object["assets"] = assets
         let release = try XCTUnwrap(Release.parse(JSONSerialization.data(withJSONObject: object)))
@@ -267,28 +265,21 @@ final class UpdaterTests: XCTestCase {
         XCTAssertFalse(UpdateHosts.isAllowed(nil))
     }
 
-    /// Followed only onto the allow-list; the token only ever to the API; the
-    /// headers the updater chose carried along.
-    func testRedirectsKeepTheirHeadersAndDropTheTokenOffTheAPI() throws {
-        var original = URLRequest(url: URL(string: "https://api.github.com/repos/x/releases/assets/1")!)
-        original.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
+    /// Followed only onto the allow-list, with the headers the updater chose
+    /// carried along.
+    func testRedirectsKeepTheirHeaders() throws {
+        var original = URLRequest(url: URL(string: "https://github.com/x/releases/download/v1/a.zip")!)
         original.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
 
         let storage = try XCTUnwrap(UpdateHosts.redirect(
             URLRequest(url: URL(string: "https://objects.githubusercontent.com/blob?sig=1")!),
             from: original))
-        XCTAssertNil(storage.value(forHTTPHeaderField: "Authorization"))
         XCTAssertEqual(storage.value(forHTTPHeaderField: "Accept"), "application/octet-stream")
 
         var proposed = URLRequest(url: URL(string: "https://release-assets.githubusercontent.com/b")!)
-        proposed.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
-        XCTAssertNil(try XCTUnwrap(UpdateHosts.redirect(proposed, from: original))
-            .value(forHTTPHeaderField: "Authorization"), "a token URLSession copied is removed")
-
-        let moved = try XCTUnwrap(UpdateHosts.redirect(
-            URLRequest(url: URL(string: "https://api.github.com/repositories/9/releases/assets/1")!),
-            from: original))
-        XCTAssertEqual(moved.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        proposed.setValue("text/plain", forHTTPHeaderField: "Accept")
+        XCTAssertEqual(try XCTUnwrap(UpdateHosts.redirect(proposed, from: original))
+            .value(forHTTPHeaderField: "Accept"), "text/plain", "a header the redirect set is kept")
 
         XCTAssertNil(UpdateHosts.redirect(URLRequest(url: URL(string: "https://evil.example/x")!),
                                           from: original))
@@ -390,7 +381,6 @@ final class UpdaterTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/vnd.github+json")
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-GitHub-Api-Version"), "2022-11-28")
         XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "SolStream/1.0.0 (macOS)")
-        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"), "no token, no header")
     }
 
     @MainActor
@@ -538,12 +528,11 @@ final class UpdaterTests: XCTestCase {
         XCTAssertEqual(ChecksumList.hex(SHA256.hash(data: try Data(contentsOf: zip))), release.digest)
         XCTAssertTrue(zip.path.hasPrefix(scratch.path), "downloaded outside the test's folder")
 
-        // Without a token, the public addresses, asking for the file itself.
+        // The public addresses, asking for the file itself.
         let assets = StubProtocol.requests.filter { $0.url?.host == "github.com" }
         XCTAssertEqual(assets.count, 3)
         for request in assets {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/octet-stream")
-            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
         }
 
         // A second check finds the same release and keeps the download.
@@ -554,27 +543,18 @@ final class UpdaterTests: XCTestCase {
     }
 
     @MainActor
-    func testATokenGoesToTheAPIAndOnlyThere() async throws {
+    func testDownloadsFollowGitHubsRedirectToStorage() async throws {
         let target = try makeInstalledApp(version: "1.0.0")
-        let release = try publish(version: "1.1.0", viaAPI: true)
-        let updater = makeUpdater(version: "1.0.0", target: target, key: release.publicKey,
-                                  token: "test-token-not-a-secret")
+        let release = try publish(version: "1.1.0", redirected: true)
+        let updater = makeUpdater(version: "1.0.0", target: target, key: release.publicKey)
         await updater.check()
         XCTAssertEqual(updater.state, .ready("1.1.0"))
 
-        let api = StubProtocol.requests.filter { $0.url?.host == "api.github.com" }
-        XCTAssertEqual(api.count, 4, "the release and its three assets, by their API addresses")
-        for request in api {
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token-not-a-secret")
-        }
-        XCTAssertEqual(api.dropFirst().compactMap { $0.value(forHTTPHeaderField: "Accept") },
-                       Array(repeating: "application/octet-stream", count: 3))
         let storage = StubProtocol.requests.filter { $0.url?.host == "objects.githubusercontent.com" }
         XCTAssertEqual(storage.count, 3, "each asset redirected to storage")
         for request in storage {
-            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"), "the token left GitHub's API")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/octet-stream")
         }
-        XCTAssertFalse(StubProtocol.requests.contains { $0.url?.host == "github.com" })
     }
 
     @MainActor
@@ -900,10 +880,10 @@ final class UpdaterTests: XCTestCase {
     }
 
     /// ditto, codesign and the relaunch shell are started with a fixed PATH
-    /// and never handed the token, which none of them needs.
-    func testTheToolsTheInstallerStartsAreNotHandedTheToken() {
+    /// and only the names that say who the user is.
+    func testTheToolsTheInstallerStartsGetAFixedEnvironment() {
         let environment = UpdateInstaller.toolEnvironment(from: [
-            "SOLSTREAM_GITHUB_TOKEN": "placeholder-not-a-token", "HOME": "/Users/someone",
+            "SOLSTREAM_PRETEND_VERSION": "9.9.9", "HOME": "/Users/someone",
             "PATH": "/tmp/elsewhere:/usr/bin", "DYLD_INSERT_LIBRARIES": "/tmp/x.dylib",
         ])
         XCTAssertEqual(environment, ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/someone"])
@@ -996,11 +976,9 @@ final class UpdaterTests: XCTestCase {
 
     @MainActor
     private func makeUpdater(version: String?, target: URL? = nil,
-                             key: String = UpdateSignature.productionKey,
-                             token: String? = nil) -> Updater {
+                             key: String = UpdateSignature.productionKey) -> Updater {
         var environment: [String: String] = [:]
         environment["SOLSTREAM_PRETEND_VERSION"] = version
-        environment["SOLSTREAM_GITHUB_TOKEN"] = token
         let updater = Updater(defaults: UserDefaults(suiteName: suiteName)!,
                               configuration: Self.stubbed(), environment: environment,
                               bundle: Bundle(for: UpdaterTests.self), installTarget: target,
@@ -1029,7 +1007,7 @@ final class UpdaterTests: XCTestCase {
         let archive: Data
     }
 
-    private func publish(version: String, viaAPI: Bool = false, corruptArchive: Bool = false,
+    private func publish(version: String, redirected: Bool = false, corruptArchive: Bool = false,
                          listedName: String? = nil, zipDelay: TimeInterval = 0) throws -> Published {
         let zip = try makeZip(version: version)
         var archive = try Data(contentsOf: zip)
@@ -1046,13 +1024,12 @@ final class UpdaterTests: XCTestCase {
         let files: [(String, Data)] = [(zipName, archive), ("SHA256SUMS", sums), ("SHA256SUMS.sig", signature)]
         var zipAddress = ""
         for (index, (name, data)) in files.enumerated() {
-            let api = "https://api.github.com/repos/Bruno-Alumn/SolStream/releases/assets/\(index + 1)"
             let download = "https://github.com/Bruno-Alumn/SolStream/releases/download/\(tag)/\(name)"
             let storage = "https://objects.githubusercontent.com/github-production-release-asset/\(index + 1)?sig=x"
             let delay = name == zipName ? zipDelay : 0
-            if viaAPI {
-                // As GitHub does: the API answers with a redirect to storage.
-                StubProtocol.redirect(api, to: storage)
+            if redirected {
+                // As GitHub does: the download address redirects to storage.
+                StubProtocol.redirect(download, to: storage)
                 StubProtocol.serve(storage, body: data, delay: delay)
                 if name == zipName { zipAddress = storage }
             } else {
@@ -1090,7 +1067,6 @@ final class UpdaterTests: XCTestCase {
                                "SolStream-\(version)-macOS.dmg", "SolStreamSetup-\(version).exe"]
         let list = names.enumerated().map { index, name -> [String: Any] in
             ["name": name, "size": name.hasSuffix(".zip") ? size : 100,
-             "url": "https://api.github.com/repos/Bruno-Alumn/SolStream/releases/assets/\(index + 1)",
              "browser_download_url": "https://github.com/Bruno-Alumn/SolStream/releases/download/\(tag)/\(name)"]
         }
         let release: [String: Any] = ["tag_name": tag, "draft": draft, "prerelease": prerelease,

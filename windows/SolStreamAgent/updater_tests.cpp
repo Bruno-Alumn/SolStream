@@ -10,8 +10,7 @@
 // at one before anything runs, so the real Updates folder is never touched. The
 // one exception is a volatile registry key of its own under HKCU, for the
 // virtual display's records, deleted again at the end. The fetching
-// itself (Get, the redirects, the token's scoping) needs a server and is not
-// covered here.
+// itself (Get and the redirects) needs a server and is not covered here.
 //
 // It also carries the tests of a few pieces outside the updater that need no
 // hardware: how commands are started, the install options, what uninstall
@@ -61,7 +60,6 @@ using namespace solstream::update;
 
 int g_checks = 0;
 int g_failures = 0;
-std::string g_log;
 
 #define CHECK(condition)                                                    \
     do {                                                                    \
@@ -305,8 +303,6 @@ void TestRelease() {
         CHECK(info.assets[0].download_url
               == "https://github.com/Bruno-Alumn/SolStream/releases/download/v1.2.3/"
                  "SolStreamSetup-1.2.3.exe");
-        CHECK(info.assets[0].api_url
-              == "https://api.github.com/repos/Bruno-Alumn/SolStream/releases/assets/10");
         CHECK(info.assets[1].size == 183);
     }
     // A key inside a string is only text. These literals stay outside CHECK:
@@ -824,38 +820,13 @@ void TestEnvironment() {
     CHECK(CurrentVersion() == SOLSTREAM_VERSION_STRING);
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", nullptr);
     CHECK(CurrentVersion() == SOLSTREAM_VERSION_STRING);
-
-    // Not a real token: the shape of one, to see it is carried and wiped.
-    SetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", L"ghp_TESTONLYnotarealtoken0");
-    {
-        Token token;
-        CHECK(token.present());
-        std::wstring header;
-        token.Header(header);
-        CHECK(header == L"Authorization: Bearer ghp_TESTONLYnotarealtoken0\r\n");
-        WipeText(header);
-        CHECK(header.empty());
-    }
-    // Anything that would add a header line of its own is refused.
-    SetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", L"ghp_TESTONLY\r\nX-Evil: 1");
-    {
-        Token token;
-        CHECK(!token.present());
-    }
-    SetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", L"");
-    {
-        Token token;
-        CHECK(!token.present());
-    }
-    SetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", nullptr);
-    CHECK(g_log.find("TESTONLY") == std::string::npos);
 }
 
 // ── The download ─────────────────────────────────────────────────────────────
 
 /// A release whose "installer" is `bytes`, already in Updates, so
-/// PrepareInstaller reuses it and never reaches for the network: neither URL is
-/// set, and with no token that fails before anything is sent.
+/// PrepareInstaller reuses it and never reaches for the network: its download
+/// URL is not set, and that fails before anything is sent.
 Release LocalRelease(const std::string& bytes) {
     unsigned char digest[32] = {0};
     Sha256((const unsigned char*) bytes.data(), bytes.size(), digest);
@@ -3531,13 +3502,11 @@ int wmain(int argc, wchar_t** argv) {
         std::fputs("usage: SolStreamUpdaterTests <path to tests/update-vector>\n", stderr);
         return 2;
     }
-    media::SetLogger([](const char* line) {
-        g_log += line;
-        g_log += "\n";
-    });
+    // The [update] lines the code under test writes are not the test's output,
+    // so they are dropped rather than mixed into the checks' report.
+    media::SetLogger([](const char*) {});
     // Whatever the machine running this has set, these tests decide.
     SetEnvironmentVariableW(L"SOLSTREAM_PRETEND_VERSION", nullptr);
-    SetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", nullptr);
 
     // A %LOCALAPPDATA% of its own, so the real Updates folder is never touched.
     wchar_t temp[MAX_PATH] = {0};

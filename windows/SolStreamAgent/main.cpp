@@ -5745,8 +5745,8 @@ int wmain(int argc, wchar_t** argv) {
         return PrintLicenses();
     }
     // One update check, said on the console: how the updater is tested by hand.
-    // Honours SOLSTREAM_PRETEND_VERSION and SOLSTREAM_GITHUB_TOKEN; --download
-    // also fetches and verifies the installer, and never runs it.
+    // Honours SOLSTREAM_PRETEND_VERSION; --download also fetches and verifies
+    // the installer, and never runs it.
     if (check_updates) {
         return solstream::update::CheckCommand(download_update);
     }

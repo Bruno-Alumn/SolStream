@@ -1,13 +1,10 @@
 // updater.cpp — see updater.h, and docs/updates.md for the contract.
 //
-// Three things here are load-bearing and easy to "simplify" away:
+// Two things here are load-bearing and easy to "simplify" away:
 //
 //  - Redirects are followed by hand. WinHTTP's own policy follows any HTTPS
 //    redirect anywhere; the contract allows four GitHub hosts and nothing else,
 //    so every hop -- the first one included -- is checked against that list.
-//  - The token goes to api.github.com and nowhere else. An asset fetched with
-//    it is answered by a redirect to a pre-signed storage URL, which rejects a
-//    second credential and has no business seeing the first.
 //  - The installer is hashed through a handle that shares read access only, and
 //    that handle stays open until the elevated installer has started and taken
 //    the same hold on itself. Without write or delete sharing nothing can
@@ -509,73 +506,6 @@ class Internet {
     HINTERNET handle_;
 };
 
-/// SOLSTREAM_GITHUB_TOKEN, for one check, and wiped when it is done with.
-///
-/// Read from the environment and nowhere else -- never stored, never logged,
-/// never shown (docs/updates.md). The most any log line says is whether there
-/// was one. Characters a token cannot contain are refused rather than sent,
-/// because whatever is here is pasted into a request header.
-class Token {
-  public:
-    Token() {
-        const DWORD needed = GetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", nullptr, 0);
-        if (needed <= 1) {
-            return;
-        }
-        if (needed > 4096) {
-            Log("[update] SOLSTREAM_GITHUB_TOKEN is too long to be a token; ignoring it");
-            return;
-        }
-        value_.assign(needed, L'\0');
-        const DWORD got = GetEnvironmentVariableW(L"SOLSTREAM_GITHUB_TOKEN", value_.data(),
-                                                  needed);
-        if (got == 0 || got >= needed) {
-            Wipe();
-            return;
-        }
-        value_.resize(got);
-        for (const wchar_t c : value_) {
-            if (c < 0x21 || c > 0x7E) {
-                Log("[update] SOLSTREAM_GITHUB_TOKEN holds characters no token has; "
-                    "ignoring it");
-                Wipe();
-                return;
-            }
-        }
-    }
-    ~Token() { Wipe(); }
-    Token(const Token&) = delete;
-    Token& operator=(const Token&) = delete;
-
-    bool present() const { return !value_.empty(); }
-
-    /// The header line, written into `out`. The caller wipes it after use.
-    void Header(std::wstring& out) const {
-        out.clear();
-        out.reserve(32 + value_.size());
-        out += L"Authorization: Bearer ";
-        out += value_;
-        out += L"\r\n";
-    }
-
-  private:
-    void Wipe() {
-        if (!value_.empty()) {
-            SecureZeroMemory(value_.data(), value_.size() * sizeof(wchar_t));
-        }
-        value_.clear();
-    }
-
-    std::wstring value_;
-};
-
-void WipeText(std::wstring& text) {
-    if (!text.empty()) {
-        SecureZeroMemory(text.data(), text.size() * sizeof(wchar_t));
-    }
-    text.clear();
-}
-
 std::string WinHttpProblem(const char* what, DWORD code) {
     // The handful anyone will actually see, in words; the rest by number.
     const char* meaning = nullptr;
@@ -740,7 +670,7 @@ bool AnsweredBy(HINTERNET request, const Target& target, std::string& error) {
     return true;
 }
 
-enum class Accept { Api, Binary, Any };
+enum class Accept { Api, Any };
 
 using Sink = std::function<bool(const char* data, size_t size)>;
 
@@ -748,7 +678,7 @@ using Sink = std::function<bool(const char* data, size_t size)>;
 /// 200's body to `sink`, refusing more than `cap` bytes. Any other status is
 /// returned in `status` with the body unread -- the caller decides what a 404
 /// means. False means no usable answer at all, with `error` for the log.
-bool Get(HINTERNET session, const std::string& url_text, Accept accept, const Token& token,
+bool Get(HINTERNET session, const std::string& url_text, Accept accept,
          unsigned long long cap, const Sink& sink, DWORD& status, std::string& error) {
     std::wstring url = ToWide(url_text);
     status = 0;
@@ -772,8 +702,8 @@ bool Get(HINTERNET session, const std::string& url_text, Accept accept, const To
         }
         // Refused rather than sent when it does not take. WinHTTP's default
         // follows any HTTPS redirect by itself, to any host, carrying the
-        // headers added below -- the token among them -- while this loop goes on
-        // believing it is talking to target.host.
+        // headers added below, while this loop goes on believing it is talking
+        // to target.host.
         DWORD never = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         if (!WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &never,
                               sizeof(never))) {
@@ -781,28 +711,14 @@ bool Get(HINTERNET session, const std::string& url_text, Accept accept, const To
             return false;
         }
 
-        const bool api = FoldCase(target.host) == kApiHost;
-        std::wstring headers;
-        if (api) {
-            headers = accept == Accept::Binary ? L"Accept: application/octet-stream\r\n"
-                                               : L"Accept: application/vnd.github+json\r\n";
-            headers += L"X-GitHub-Api-Version: 2022-11-28\r\n";
-        }
-        std::wstring authorization;
-        if (api && token.present()) {
-            token.Header(authorization);
-        }
         bool added = true;
-        constexpr DWORD kAdd = WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE;
-        if (!headers.empty()) {
+        if (accept == Accept::Api && FoldCase(target.host) == kApiHost) {
+            const std::wstring headers = L"Accept: application/vnd.github+json\r\n"
+                                         L"X-GitHub-Api-Version: 2022-11-28\r\n";
             added = WinHttpAddRequestHeaders(request.get(), headers.c_str(), (DWORD) -1L,
-                                             kAdd) != FALSE;
+                                             WINHTTP_ADDREQ_FLAG_ADD
+                                                 | WINHTTP_ADDREQ_FLAG_REPLACE) != FALSE;
         }
-        if (added && !authorization.empty()) {
-            added = WinHttpAddRequestHeaders(request.get(), authorization.c_str(),
-                                             (DWORD) -1L, kAdd) != FALSE;
-        }
-        WipeText(authorization);
         if (!added) {
             error = WinHttpProblem("add headers", GetLastError());
             return false;
@@ -882,10 +798,10 @@ bool Get(HINTERNET session, const std::string& url_text, Accept accept, const To
     return false;
 }
 
-bool GetText(HINTERNET session, const std::string& url, Accept accept, const Token& token,
-             size_t cap, std::string& body, DWORD& status, std::string& error) {
+bool GetText(HINTERNET session, const std::string& url, Accept accept, size_t cap,
+             std::string& body, DWORD& status, std::string& error) {
     body.clear();
-    return Get(session, url, accept, token, cap,
+    return Get(session, url, accept, cap,
                [&body](const char* data, size_t size) {
                    body.append(data, size);
                    return true;
@@ -893,19 +809,16 @@ bool GetText(HINTERNET session, const std::string& url, Accept accept, const Tok
                status, error);
 }
 
-/// An asset, the way the contract says to fetch one: through the API with a
-/// token, because browser_download_url does not take one; directly without.
-bool GetAsset(HINTERNET session, const Asset& asset, const Token& token,
-              unsigned long long cap, const Sink& sink, std::string& error) {
-    const bool via_api = token.present();
-    const std::string& url = via_api ? asset.api_url : asset.download_url;
-    if (url.empty()) {
-        error = asset.name + " has no " + (via_api ? "API url" : "download url");
+/// An asset, fetched from its browser_download_url. GitHub answers that with a
+/// redirect to its release storage, which Get follows within the allowed hosts.
+bool GetAsset(HINTERNET session, const Asset& asset, unsigned long long cap,
+              const Sink& sink, std::string& error) {
+    if (asset.download_url.empty()) {
+        error = asset.name + " has no download url";
         return false;
     }
     DWORD status = 0;
-    if (!Get(session, url, via_api ? Accept::Binary : Accept::Any, token, cap, sink, status,
-             error)) {
+    if (!Get(session, asset.download_url, Accept::Any, cap, sink, status, error)) {
         error = asset.name + ": " + error;
         return false;
     }
@@ -916,10 +829,10 @@ bool GetAsset(HINTERNET session, const Asset& asset, const Token& token,
     return true;
 }
 
-bool GetAssetText(HINTERNET session, const Asset& asset, const Token& token, size_t cap,
-                  std::string& body, std::string& error) {
+bool GetAssetText(HINTERNET session, const Asset& asset, size_t cap, std::string& body,
+                  std::string& error) {
     body.clear();
-    return GetAsset(session, asset, token, cap,
+    return GetAsset(session, asset, cap,
                     [&body](const char* data, size_t size) {
                         body.append(data, size);
                         return true;
@@ -1146,10 +1059,9 @@ bool PrepareInstaller(const Release& release,
     unsigned long long written = 0;
     bool ok = false;
     {
-        Token token;
         Internet session = OpenSession(detail);
         if (session) {
-            ok = GetAsset(session.get(), release.installer, token, release.installer.size,
+            ok = GetAsset(session.get(), release.installer, release.installer.size,
                           [out, &written](const char* data, size_t size) {
                               DWORD put = 0;
                               if (!WriteFile(out, data, (DWORD) size, &put, nullptr)
@@ -1467,7 +1379,6 @@ bool ParseRelease(const std::string& json, ReleaseInfo& out, std::string& error)
             }
             Asset asset;
             if (!StringMember(item, "name", true, asset.name, error)
-                || !StringMember(item, "url", false, asset.api_url, error)
                 || !StringMember(item, "browser_download_url", false, asset.download_url,
                                  error)) {
                 return false;
@@ -1663,10 +1574,8 @@ CheckResult CheckForUpdate() {
                       "the compiled-in version " + result.current + " is not X.Y.Z");
     }
     const bool pretending = result.current != SOLSTREAM_VERSION_STRING;
-    Token token;
-    Log("[update] checking %s for a version newer than %s%s%s", kRepository,
-        result.current.c_str(), pretending ? " (SOLSTREAM_PRETEND_VERSION)" : "",
-        token.present() ? ", with a token" : "");
+    Log("[update] checking %s for a version newer than %s%s", kRepository,
+        result.current.c_str(), pretending ? " (SOLSTREAM_PRETEND_VERSION)" : "");
 
     std::string error;
     Internet session = OpenSession(error);
@@ -1678,23 +1587,16 @@ CheckResult CheckForUpdate() {
         std::string("https://api.github.com/repos/") + kRepository + "/releases/latest";
     std::string body;
     DWORD status = 0;
-    if (!GetText(session.get(), url, Accept::Api, token, kMaxReleaseJson, body, status,
-                 error)) {
+    if (!GetText(session.get(), url, Accept::Api, kMaxReleaseJson, body, status, error)) {
         return CheckFailed(result, "SolStream couldn't reach GitHub. It will try again later.",
                       error);
     }
     if (status == 404) {
-        // Not an error: it is what a private repository says to anybody
-        // without access, and what any repository says before its first
+        // Not an error: it is what a repository says before its first
         // release. Nothing to show; ask again tomorrow.
-        Log("[update] nothing published that this copy can see (HTTP 404)%s",
-            token.present() ? "" : "; a private repository answers this without "
-                                   "SOLSTREAM_GITHUB_TOKEN");
+        Log("[update] no release published yet (HTTP 404)");
         result.outcome = Outcome::NothingVisible;
         return result;
-    }
-    if (status == 401) {
-        return CheckFailed(result, "GitHub didn't accept SOLSTREAM_GITHUB_TOKEN.", "HTTP 401");
     }
     if (status == 403 || status == 429) {
         return CheckFailed(result,
@@ -1764,9 +1666,9 @@ CheckResult CheckForUpdate() {
     }
     std::string sums;
     std::string signature;
-    if (!GetAssetText(session.get(), *sums_asset, token, kMaxSumsBytes, sums, error)
-        || !GetAssetText(session.get(), *signature_asset, token, kMaxSignatureBytes,
-                         signature, error)) {
+    if (!GetAssetText(session.get(), *sums_asset, kMaxSumsBytes, sums, error)
+        || !GetAssetText(session.get(), *signature_asset, kMaxSignatureBytes, signature,
+                         error)) {
         return CheckFailed(result,
                       "SolStream couldn't download the update's checksums. It will try "
                       "again later.",
@@ -2047,9 +1949,8 @@ int CheckCommand(bool download) {
                         result.current.c_str(), result.latest.c_str());
             return 0;
         case Outcome::NothingVisible:
-            std::printf("Nothing published that this copy can see. GitHub answers that "
-                        "for a private repository without SOLSTREAM_GITHUB_TOKEN, and "
-                        "for one with no releases.\n");
+            std::printf("Nothing published yet: the repository has no release to "
+                        "compare against.\n");
             return 0;
         case Outcome::Failed:
             std::printf("The check failed: %s\n", result.error.c_str());
@@ -2090,11 +1991,8 @@ bool FetchPinned(const std::string& url, const std::string& sha256_hex,
     if (!session) {
         return false;
     }
-    // Get only ever sends a token to api.github.com, and these URLs are never
-    // that host, so the person's token cannot travel with this request.
-    const Token no_token;
     DWORD status = 0;
-    if (!Get(session.get(), url, Accept::Any, no_token, cap,
+    if (!Get(session.get(), url, Accept::Any, cap,
              [&body](const char* data, size_t size) {
                  body.insert(body.end(), data, data + size);
                  return true;

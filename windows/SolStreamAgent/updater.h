@@ -50,8 +50,7 @@ std::string CurrentVersion();
 /// One asset of a release, as the GitHub API lists it.
 struct Asset {
     std::string name;
-    std::string api_url;       ///< `url`: takes a token, with Accept: octet-stream
-    std::string download_url;  ///< `browser_download_url`: public repositories only
+    std::string download_url;  ///< `browser_download_url`
     unsigned long long size = 0;
 };
 
@@ -94,7 +93,7 @@ struct Release {
 
 enum class Outcome {
     UpToDate,        ///< the newest visible release is not newer than this
-    NothingVisible,  ///< 404: nothing published this copy can see (a private repo)
+    NothingVisible,  ///< 404, or only a draft or prerelease: nothing published yet
     Found,           ///< `release` is newer, and its sums verified
     Failed,          ///< `error` says why, in words for the window
 };
@@ -108,7 +107,7 @@ struct CheckResult {
 };
 
 /// One check, start to finish. Blocks on the network: never call it on the UI
-/// thread. Logs [update] lines; never logs the token.
+/// thread. Logs [update] lines.
 CheckResult CheckForUpdate();
 
 /// Download the installer (unless an earlier attempt already left a matching
@@ -162,8 +161,8 @@ InstallNote TakeInstallNote();
 int VerifySignatureCommand(int argc, wchar_t** argv);
 
 /// SolStream.exe --check-updates [--download]: one check, said out loud, for
-/// testing. Obeys SOLSTREAM_PRETEND_VERSION and SOLSTREAM_GITHUB_TOKEN. With
-/// --download it also fetches and verifies the installer, and never runs it.
+/// testing. Obeys SOLSTREAM_PRETEND_VERSION. With --download it also fetches
+/// and verifies the installer, and never runs it.
 /// Exits 0 when the check completed, whatever it found, and 1 when it failed.
 int CheckCommand(bool download);
 

@@ -11,11 +11,8 @@ import SolStreamLogging
 /// installed only when the person presses the button -- never in the middle of
 /// a stream, and never with a dialog that was not asked for.
 ///
-/// While the repository is private, GitHub answers 404 to anyone without a
-/// token, which this reads as "nothing published yet" and says nothing about.
-/// `SOLSTREAM_GITHUB_TOKEN` in the environment lets a developer test against
-/// the private releases; it is read from there on every request, sent only to
-/// api.github.com, and never stored or logged.
+/// GitHub answers 404 while nothing is published, which this reads as
+/// "nothing new" and says nothing about.
 @MainActor
 final class Updater {
     /// Nameable from anywhere, so the app delegate and the connect window --
@@ -199,11 +196,6 @@ final class Updater {
             .appendingPathComponent("Updates", isDirectory: true)
     }
 
-    private var token: String? {
-        let value = environment["SOLSTREAM_GITHUB_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value?.isEmpty == false ? value : nil
-    }
-
     private var userAgent: String { "SolStream/\(currentVersion) (macOS)" }
 
     // MARK: - Schedule
@@ -215,10 +207,6 @@ final class Updater {
         cleanUpAfterUpdate()
         if isPretending {
             Log.info("[update] pretending to be \(currentVersion) (SOLSTREAM_PRETEND_VERSION)")
-        }
-        if token != nil {
-            // That there is one, never what it is.
-            Log.info("[update] using the GitHub token in SOLSTREAM_GITHUB_TOKEN")
         }
         if !checksOnItsOwn {
             Log.info("[update] a build outside SolStream.app: automatic checks off, Check now still works")
@@ -368,7 +356,6 @@ final class Updater {
         switch response.status {
         case 200: break
         case 404: return .nothingVisible
-        case 401: throw UpdateError.tokenRefused
         case 403, 429: throw UpdateError.rateLimited
         default: throw UpdateError.http(response.status)
         }
@@ -392,18 +379,14 @@ final class Updater {
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        if url.host?.lowercased() == UpdateHosts.tokenHost {
+        if url.host?.lowercased() == UpdateHosts.apiHost {
             request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-            if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         }
         return request
     }
 
-    /// With a token, the API's address for the asset, which takes one; without,
-    /// the public one, which does not -- and which is all a public repository
-    /// needs.
     private func request(for asset: Release.Asset) -> URLRequest {
-        request(token == nil ? asset.downloadURL : asset.apiURL, accept: "application/octet-stream")
+        request(asset.downloadURL, accept: "application/octet-stream")
     }
 
     // MARK: - Downloading
@@ -726,7 +709,6 @@ final class Updater {
 enum UpdateError: Error, Equatable {
     case transport(UpdateTransport.Failure)
     case http(Int)
-    case tokenRefused
     case rateLimited
     case malformedRelease
     case missingAsset(String)
@@ -759,7 +741,6 @@ enum UpdateError: Error, Equatable {
         case .transport(.cancelled): return "The download was stopped."
         case .transport(.tooLarge), .tooLarge: return "The download was too large to be an update."
         case .http(let status): return "GitHub answered with error \(status)."
-        case .tokenRefused: return "GitHub didn't accept the token."
         case .rateLimited: return "GitHub is limiting requests for now."
         case .malformedRelease: return "GitHub's answer couldn't be read."
         case .missingAsset: return "The release is missing a file."
@@ -776,7 +757,7 @@ enum UpdateError: Error, Equatable {
         }
     }
 
-    /// For the log. Never contains the token: nothing here was built from it.
+    /// For the log.
     var detail: String {
         switch self {
         case .transport(.offline): return "GitHub could not be reached (offline?)"
@@ -788,7 +769,6 @@ enum UpdateError: Error, Equatable {
         case .transport(.tooLarge), .tooLarge:
             return "larger than \(UpdateSource.maximumAssetBytes / 1024 / 1024) MB"
         case .http(let status): return "HTTP \(status)"
-        case .tokenRefused: return "HTTP 401: SOLSTREAM_GITHUB_TOKEN was not accepted"
         case .rateLimited: return "HTTP 403/429: rate limited"
         case .malformedRelease: return "the release JSON could not be parsed"
         case .missingAsset(let name): return "the release has no \(name)"

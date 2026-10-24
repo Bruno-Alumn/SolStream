@@ -225,12 +225,10 @@ enum UpdateInstaller {
     }
 
     /// What the tools started here see of the environment: a fixed PATH and the
-    /// few names that say who and where the user is. Inherited whole, it would
-    /// hand SOLSTREAM_GITHUB_TOKEN to ditto, codesign and the relaunch shell,
-    /// where any program of this user's could read it -- and none of them
-    /// needs it. `open` hands its own environment to the app it starts
-    /// (man open), so the relaunched copy starts with this one too: no token
-    /// and no pretend version. A token given for one launch ends with the update.
+    /// few names that say who and where the user is, which is all ditto,
+    /// codesign and the relaunch shell need. `open` hands its own environment
+    /// to the app it starts (man open), so the relaunched copy starts with this
+    /// one too: no pretend version left over from the copy it replaced.
     static func toolEnvironment(from inherited: [String: String] = ProcessInfo.processInfo.environment)
         -> [String: String] {
         var environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]

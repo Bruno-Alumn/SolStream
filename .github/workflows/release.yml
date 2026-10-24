@@ -193,10 +193,9 @@ jobs:
     # no checkout, no package installed, nothing but the runner's own OpenSSL
     # and Python's standard library beside the key. Anything that ran in this
     # job could read the key, sudo being free on a hosted runner. It belongs in
-    # a `release` environment that hands its secret only to runs on a v* tag,
-    # but GitHub Free has no environments in a private repository, and naming
-    # one here could stop the job instead; until then the secret is the
-    # repository's (docs/releasing.md says when to add the line).
+    # a `release` environment that hands its secret only to runs on a v* tag;
+    # until that environment exists the secret is the repository's
+    # (docs/releasing.md says how to set it up and when to add the line).
     permissions: {}
     env:
       VERSION: ${{ needs.check.outputs.version }}
@@ -465,14 +464,6 @@ jobs:
             echo "- **Windows PC**, the host: \`SolStreamSetup-$VERSION.exe\`. Run it and it installs itself."
             echo
             echo "Neither is signed with a paid certificate yet, so both systems warn the first time; [Install](https://github.com/$GITHUB_REPOSITORY#install) says what to click. From 1.0.0 on, installed copies find new releases by themselves and ask before installing them, after checking \`SHA256SUMS.sig\` and \`SHA256SUMS\`."
-            # Without a token a private repository's releases answer 404, so
-            # the sentence above would promise updates that never arrive.
-            # Asked of the API rather than hard-coded, so the caveat drops out
-            # by itself on the first release after the repository goes public.
-            if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" != "false" ]; then
-              echo
-              echo "While the repository is private, installed copies see new releases only with \`SOLSTREAM_GITHUB_TOKEN\` set ([how](https://github.com/$GITHUB_REPOSITORY#while-this-repository-is-private))."
-            fi
           } > "$RUNNER_TEMP/notes.md"
 
           # With assets to attach, gh uploads them to a draft and publishes it

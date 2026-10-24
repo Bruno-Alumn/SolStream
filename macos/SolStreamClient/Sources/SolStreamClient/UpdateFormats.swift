@@ -73,10 +73,6 @@ struct ReleaseVersion: Comparable, CustomStringConvertible {
 struct Release: Equatable {
     struct Asset: Equatable {
         let name: String
-        /// The API's address for it, which takes a token: how a private
-        /// repository's asset is fetched.
-        let apiURL: URL
-        /// The public address, which does not.
         let downloadURL: URL
         let size: Int64
     }
@@ -108,14 +104,13 @@ struct Release: Equatable {
         guard let version = ReleaseVersion(payload.tagName) else {
             throw ParseError.unreadableTag(payload.tagName)
         }
-        // An asset without its name or both addresses cannot be fetched
-        // either way, so it is as good as missing -- which is how the caller
-        // will describe it, and only if it is one the caller needs.
+        // An asset without its name or address cannot be fetched, so it is
+        // as good as missing -- which is how the caller will describe it, and
+        // only if it is one the caller needs.
         let assets = (payload.assets ?? []).compactMap { asset -> Asset? in
             guard let name = asset.name,
-                  let api = asset.url.flatMap(URL.init(string:)),
                   let download = asset.browserDownloadURL.flatMap(URL.init(string:)) else { return nil }
-            return Asset(name: name, apiURL: api, downloadURL: download, size: asset.size ?? 0)
+            return Asset(name: name, downloadURL: download, size: asset.size ?? 0)
         }
         return Release(tag: payload.tagName, version: version, assets: assets)
     }
@@ -135,12 +130,11 @@ struct Release: Equatable {
     /// `compactMap` above rather than failing the whole release.
     private struct AssetPayload: Decodable {
         let name: String?
-        let url: String?
         let browserDownloadURL: String?
         let size: Int64?
 
         enum CodingKeys: String, CodingKey {
-            case name, url, size
+            case name, size
             case browserDownloadURL = "browser_download_url"
         }
     }
@@ -225,11 +219,8 @@ enum UpdateHosts {
         "github.com", "api.github.com",
         "objects.githubusercontent.com", "release-assets.githubusercontent.com",
     ]
-    /// The only host the token is ever sent to. The storage hosts are given a
-    /// pre-signed address instead, and refuse a request that also carries an
-    /// Authorization header -- so forwarding it would be a leak that also
-    /// broke every private download.
-    static let tokenHost = "api.github.com"
+    /// The API, the one host told which version of it the updater speaks.
+    static let apiHost = "api.github.com"
 
     static func isAllowed(_ url: URL?) -> Bool {
         guard let url, url.scheme?.lowercased() == "https",
@@ -244,16 +235,13 @@ enum UpdateHosts {
     /// Built from the request being redirected rather than trusted as
     /// proposed, so the headers the updater chose -- Accept above all, which
     /// decides whether GitHub sends the file or a description of it -- go
-    /// along, and the token goes only where it belongs.
+    /// along.
     static func redirect(_ proposed: URLRequest, from original: URLRequest?) -> URLRequest? {
         guard isAllowed(proposed.url) else { return nil }
         var next = proposed
         for (field, value) in original?.allHTTPHeaderFields ?? [:]
         where next.value(forHTTPHeaderField: field) == nil {
             next.setValue(value, forHTTPHeaderField: field)
-        }
-        if proposed.url?.host?.lowercased() != tokenHost {
-            next.setValue(nil, forHTTPHeaderField: "Authorization")
         }
         return next
     }
