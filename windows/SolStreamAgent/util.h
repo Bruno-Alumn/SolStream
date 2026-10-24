@@ -34,6 +34,9 @@ std::string ToHex(const unsigned char* bytes, size_t count);
 std::string ToHex(const std::vector<unsigned char>& bytes);
 std::vector<unsigned char> FromHex(const std::string& hex);
 
+/// `count` random bytes as lowercase hex, or empty if the RNG refuses.
+std::string RandomHex(size_t count);
+
 /// HMAC-SHA256 through BCrypt, or empty if BCrypt refuses.
 std::vector<unsigned char> HmacSha256(const std::vector<unsigned char>& key,
                                       const std::vector<unsigned char>& data);

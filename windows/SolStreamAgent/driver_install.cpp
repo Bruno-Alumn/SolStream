@@ -22,7 +22,6 @@ extern "C" WINSETUPAPI WINBOOL WINAPI SetupDiSetDevicePropertyW(
 #endif
 #include <sddl.h>
 #include <shlobj.h>
-#include <bcrypt.h>
 
 #include <vector>
 
@@ -463,15 +462,6 @@ std::string InstallProblem(const char* what, DWORD code) {
 }
 
 }  // namespace
-
-std::string RandomHex(size_t count) {
-    std::vector<unsigned char> bytes(count);
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        return {};
-    }
-    return ToHex(bytes);
-}
 
 void RemoveTree(const std::wstring& path) {
     WIN32_FIND_DATAW found{};

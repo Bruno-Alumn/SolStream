@@ -20,9 +20,6 @@
 
 namespace solstream {
 
-/// `count` random bytes as lowercase hex, or empty if the RNG refuses.
-std::string RandomHex(size_t count);
-
 /// Auth v2: whether `proof_hex` proves the client holds `token_hex`.
 ///
 /// proof = HMAC-SHA256(tokenBytes, "SolStream agent auth v2" || challenge || cnonce)

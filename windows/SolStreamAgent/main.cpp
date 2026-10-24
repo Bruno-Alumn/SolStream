@@ -5400,21 +5400,6 @@ void ReportDriverStep(solstream::DriverStep step) {
     PostMessageW(g_progress_window, message, (WPARAM) step, 0);
 }
 
-/// The virtual display's line in the result the waiting window reads; see
-/// WriteInstallResult. "ready-restart" when Windows said the install needs a
-/// restart: carried as its own word, not guessed from what the notes say.
-std::string DisplayResult(bool ok, bool already, bool restart, const std::string& note,
-                          const std::string& error) {
-    if (!ok) {
-        return "failed " + error;
-    }
-    return std::string(restart ? "ready-restart " : "ready ")
-         + (already ? "This PC already had the Virtual Display Driver, so SolStream set "
-                      "it up for streaming.\n"
-                    : "")
-         + note;
-}
-
 /// Normal priority, however this copy was started: for the CPU, for the disk
 /// and for memory.
 ///
@@ -5748,7 +5733,7 @@ int wmain(int argc, wchar_t** argv) {
             const bool ready = solstream::InstallDisplayDriver(
                 ReportDriverStep, g_progress_window, already, restart, note, driver_error);
             ReportDriverStep(solstream::DriverStep::Done);
-            display = DisplayResult(ready, already, restart, note, driver_error);
+            display = solstream::DisplayDriverResult(ready, already, restart, note, driver_error);
             for (const std::string& line : SplitLines(ready ? note : driver_error)) {
                 Log("[display] %s", line.c_str());
             }
@@ -5796,8 +5781,9 @@ int wmain(int argc, wchar_t** argv) {
         std::string note, error;
         const bool ready = solstream::InstallDisplayDriver(ReportDriverStep, g_progress_window,
                                                            already, restart, note, error);
-        solstream::WriteInstallResult(ready, ready ? std::string() : error,
-                                      DisplayResult(ready, already, restart, note, error));
+        solstream::WriteInstallResult(
+            ready, ready ? std::string() : error,
+            solstream::DisplayDriverResult(ready, already, restart, note, error));
         std::fprintf(ready ? stdout : stderr, "%s\n", (ready ? note : error).c_str());
         return ready ? 0 : 1;
     }
