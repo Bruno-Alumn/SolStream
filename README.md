@@ -79,28 +79,6 @@ Both programs check a minute after they start and then daily. You can also
 check from the Mac's SolStream menu or the PC's tray menu. Nothing installs
 until you say so, and never mid-stream.
 
-<details>
-<summary>While this repository is private</summary>
-
-GitHub hides a private repository's releases, so the updaters find nothing and
-the setup guides' *Get it* links show a 404 unless you're signed in. To test
-updates, make a fine-grained token for this repository with *Contents:
-Read-only* and an expiry date, and give it to the program as
-`SOLSTREAM_GITHUB_TOKEN`:
-
-- **Mac:** quit SolStream, then run this and paste the token:
-
-  ```bash
-  /bin/bash -c 'read -rsp "Token: " t && SOLSTREAM_GITHUB_TOKEN="$t" exec open -a SolStream'
-  ```
-
-- **PC:** add it as a *user* environment variable (not a system one), then
-  restart SolStream from the tray.
-
-Details are in [`docs/updates.md`](docs/updates.md).
-
-</details>
-
 ## How it works
 
 ```

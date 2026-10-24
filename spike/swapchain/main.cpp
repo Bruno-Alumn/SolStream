@@ -6,7 +6,7 @@
 //   1. WHAT IS THE PIPELINE'S REAL FRAME RATE? Every figure so far has been
 //      bounded by what the test content could be DRAWN at, not by what the path
 //      could carry: a still desktop gives ~17 fps because that is how much
-//      changed, and spike/animate gave 33.6 because a scalar 8 MB fill per frame
+//      changed, and an earlier animation spike gave 33.6 because a scalar 8 MB fill per frame
 //      is what GDI could manage. Neither has ever asked the chain for 60. A hard
 //      ceiling below 60 would be invisible in both.
 //

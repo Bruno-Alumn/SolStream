@@ -30,20 +30,19 @@ choice, not a rule GitHub enforces. A repository secret is handed to any
 workflow run in the repository that asks for it, so a workflow file pushed to
 any branch could print it. Anyone who can push here, or who holds a token
 allowed to change workflows, can take the key, and with it sign an update
-that every installed copy accepts. While the repository is private on GitHub
-Free, that is how it stays: give write access only to people you would give the
-key, and review every change under `.github/workflows/` as you would the key.
+that every installed copy accepts. Until the steps below are done, give write
+access only to people you would give the key, and review every change under
+`.github/workflows/` as you would the key.
 
-Once the repository is public, or on GitHub Pro, close that gap:
+A public repository can close that gap:
 
 1. **Settings → Environments → New environment** `release`. Under *Deployment
    branches and tags* choose *Selected branches and tags* and add one tag rule,
    `v*.*.*`. Then put the Sign job in it: in `.github/workflows/release.yml`,
    add `environment: release` to the `sign` job, beside its `permissions: {}`,
    and commit that to `main`. A run uses the workflow as it was tagged, so
-   only releases tagged after that commit read the environment. The line is
-   left out until now because GitHub Free has no environments in a private
-   repository, and a job naming one might not run at all.
+   only releases tagged after that commit read the environment. Add the line
+   only once the environment exists, or the job may not run at all.
 2. Move the secret into it, then delete the repository-wide one:
 
    ```bash
@@ -265,20 +264,3 @@ and checking against the new public key. From then on the
 latest release carries the new key and the workflow signs as usual. Every copy
 already installed refuses that release and everything after it: tell everybody
 to reinstall from the Releases page.
-
-## While the repository is private
-
-The workflow works the same, but the releases are visible only to people with
-access to the repository. The updaters, asking without credentials, get a 404,
-which they take to mean "nothing published", so they stay quiet. To try an
-update meanwhile, give one program a fine-grained personal access token limited
-to this repository, with *Contents: Read-only* and an expiry date, through
-`SOLSTREAM_GITHUB_TOKEN` (`docs/updates.md`). The updater sends it only to
-api.github.com, never to the download hosts a release asset redirects to, but
-it should still be able to do nothing else. *While this repository is private*
-in `README.md` says how to hand it to each program. The release notes carry a
-line saying the same for as long as the repository is private. Nothing needs changing on the
-day the repository goes public, except that the token can then be deleted.
-
-GitHub bills a private repository's macOS runner minutes at ten times the
-Linux rate and Windows at twice, and every CI run and release uses both.

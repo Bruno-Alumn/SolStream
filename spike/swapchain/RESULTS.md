@@ -16,7 +16,7 @@ Tailscale.
 
 Every earlier throughput figure was bounded by what the **test content** could be
 drawn at, not by the path: a still desktop gives ~17 fps because that is how much
-changed, and `spike/animate` gave 33.6 because a scalar 8 MB fill per frame is
+changed, and an earlier animation spike gave 33.6 because a scalar 8 MB fill per frame is
 what GDI could manage. This window presents 6,698 fps — 137 times what the
 pipeline took — so for the first time the limit measured is the pipeline's own.
 
@@ -40,8 +40,8 @@ drawn correctly around it, the classic symptom of a capture that composites a
 window's GDI surface and misses what DirectX presented into it. Terminals,
 browsers and games are the applications worth streaming.
 
-`spike/capture-probe` attaches to this window twice — once per-window, once
-per-display — and counts how many **distinct** centre pixels each sees. A capture
+An earlier capture probe attached to this window twice — once per-window, once
+per-display — and counted how many **distinct** centre pixels each saw. A capture
 that is blind still delivers frames; they are simply all the same, which is
 exactly how this failure looks like success until somebody looks at the picture.
 

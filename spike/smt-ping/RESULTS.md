@@ -20,7 +20,7 @@ Mac → dev box (`100.101.102.103`), 300 packets at 5 ms intervals, 2026-07-29.
 
 ## The path is not a bare LAN
 
-`tailscale status` reports **`direct 192.168.1.21:41641`** — a direct LAN path,
+`tailscale status` reports **`direct 192.168.x.x:41641`** — a direct LAN path,
 but wrapped in WireGuard at both ends. So these figures include userspace VPN
 encryption and decryption on the round trip. A plain LAN would be lower; this is
 the number for the setup that actually exists.

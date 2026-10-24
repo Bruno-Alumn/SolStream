@@ -1,8 +1,7 @@
 name: CI macOS
 
-# The Mac client, whenever anything it is built from changes. Mac minutes
-# are the scarce ones, so a pull request runs only the tests unless it
-# changes the packaging.
+# The Mac client, whenever anything it is built from changes. A pull request
+# runs only the tests unless it changes the packaging.
 on:
   push:
     branches: [main]
