@@ -503,6 +503,39 @@ void TestJsonEscape() {
     CHECK(JsonEscape("\xEF\xBF\xBD") == fffd);
 }
 
+/// The \u escape helpers the command parser decodes with.
+void TestJsonUnicode() {
+    unsigned code = 0;
+    CHECK(solstream::ParseHex4("\\u00e9", 2, code) && code == 0xE9);
+    CHECK(solstream::ParseHex4("D83D", 0, code) && code == 0xD83D);
+    CHECK(!solstream::ParseHex4("00e", 0, code));
+    CHECK(!solstream::ParseHex4("00g0", 0, code));
+    CHECK(!solstream::ParseHex4("0000", 1, code));
+    std::string out;
+    solstream::AppendUtf8(out, 0x41);
+    solstream::AppendUtf8(out, 0xE9);
+    solstream::AppendUtf8(out, 0x2014);
+    solstream::AppendUtf8(out, 0x1F600);
+    CHECK(out == ToUtf8(L"A\u00e9\u2014\U0001F600"));
+}
+
+/// The host's small files: written whole, and read back no further than asked.
+void TestSmallFiles(const std::wstring& scratch) {
+    const std::wstring path = scratch + L"\\small.txt";
+    CHECK(solstream::WriteWholeFile(path, "0123456789"));
+    std::string text;
+    CHECK(solstream::ReadSmallFile(path, 64, text) && text == "0123456789");
+    // A longer file is cut, as the token and the media counter always were.
+    CHECK(solstream::ReadSmallFile(path, 4, text) && text == "0123");
+    // Written again, it is replaced rather than added to.
+    CHECK(solstream::WriteWholeFile(path, "ab"));
+    CHECK(solstream::ReadSmallFile(path, 64, text) && text == "ab");
+    CHECK(solstream::WriteWholeFile(path, ""));
+    CHECK(solstream::ReadSmallFile(path, 64, text) && text.empty());
+    CHECK(!solstream::ReadSmallFile(scratch + L"\\no-such-file", 64, text));
+    DeleteFileW(path.c_str());
+}
+
 /// The display driver is the one install option named for what it turns ON:
 /// absent must mean "download nothing", for anybody typing --install by hand.
 void TestInstallOptions() {
@@ -3236,6 +3269,8 @@ int wmain(int argc, wchar_t** argv) {
     TestHostTaskStart();
     TestQualifyCommand();
     TestJsonEscape();
+    TestJsonUnicode();
+    TestSmallFiles(scratch);
     TestNoDowngrade();
     TestDownload();
     TestInstallNote();
