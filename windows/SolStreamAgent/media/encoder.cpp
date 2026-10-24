@@ -1177,6 +1177,16 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     return true;
 }
 
+void Encoder::StartFrameIdsAt(uint32_t next) {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    impl_->ledger.StartAt(next);
+}
+
+uint32_t Encoder::NextFrameId() const {
+    std::lock_guard<std::mutex> guard(impl_->lock);
+    return impl_->ledger.NextFrameId();
+}
+
 void Encoder::RequestIdr() { impl_->ledger.RequestIdr(); }
 
 bool Encoder::IdrPending() const { return impl_->ledger.IdrPending(); }

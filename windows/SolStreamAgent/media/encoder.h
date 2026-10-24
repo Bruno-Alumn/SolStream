@@ -68,6 +68,13 @@ public:
     bool Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
                 long long capturedAt, bool forceIdr);
 
+    /// The first id this encoder gives a picture, so that a session's ids run
+    /// on from one capture pass to the next. Before `Open`. See feed_ledger.h.
+    void StartFrameIdsAt(uint32_t next);
+    /// The id the next picture would have carried: where the next encoder of
+    /// the session starts. After `Close`.
+    uint32_t NextFrameId() const;
+
     void RequestIdr();
     /// A keyframe has been asked for and not yet produced.
     bool IdrPending() const;

@@ -2037,6 +2037,34 @@ void TestFeedLedger() {
     CHECK(!ledger.TakeIdr(false));
 }
 
+/// A retarget is a new encoder on the same session, and the Mac keeps the ids
+/// it has finished: the second pass's ids carry on from the first's, so its
+/// first picture is not taken for a straggler of the first pass.
+void TestFeedLedgerAcrossPasses() {
+    media::FeedLedger first;
+    for (int i = 0; i < 300; ++i) {
+        first.TakeIdr(i == 0);
+        first.Accepted();
+    }
+    // A feed refused as the pass ends does not spend an id.
+    first.TakeIdr(false);
+    first.Refused(false);
+    CHECK(first.NextFrameId() == 301);
+
+    media::FeedLedger second;
+    second.StartAt(first.NextFrameId());
+    CHECK(second.NextFrameId() == 301);
+    CHECK(!second.IdrPending());
+    second.TakeIdr(true);
+    second.Accepted();
+    CHECK(second.NextFrameId() == 302);
+
+    // And a third pass from the second, however short the second was.
+    media::FeedLedger third;
+    third.StartAt(second.NextFrameId());
+    CHECK(third.NextFrameId() == 302);
+}
+
 void TestOverflowGate() {
     using Gate = media::OverflowGate;
     {
@@ -3293,6 +3321,7 @@ int wmain(int argc, wchar_t** argv) {
     TestSoundReopener();
     TestSoundDefaultDevice();
     TestFeedLedger();
+    TestFeedLedgerAcrossPasses();
     TestOverflowGate();
     TestTakeoverProof();
     TestClientId();

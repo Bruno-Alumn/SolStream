@@ -136,8 +136,13 @@ struct MediaSession::Impl {
     std::mutex queueLock;
     std::condition_variable queueReady;
     std::deque<Picture> queue;
-    /// Under `queueLock`, and new for each pass, whose frame ids start again.
+    /// Under `queueLock`, and new for each pass.
     OverflowGate overflowGate;
+    /// The frame id the next pass's encoder starts at. The ids run on across a
+    /// retarget rather than starting again, because the Mac keeps the ids it
+    /// has finished and is not told that a pass ended: see feed_ledger.h. The
+    /// capture thread's alone; Start sets it before that thread exists.
+    uint32_t nextFrameId = 1;
 
     long long startedAt = 0;
     /// Written by the receive thread on every datagram that authenticates and
@@ -405,6 +410,7 @@ void MediaSession::Impl::RunCapture() {
         std::lock_guard<std::mutex> guard(mediaLock);
         capture = std::make_shared<Capture>();
         encoder = std::make_shared<Encoder>();
+        encoder->StartFrameIdsAt(nextFrameId);
     }
     struct Teardown {
         Impl* self;
@@ -420,7 +426,11 @@ void MediaSession::Impl::RunCapture() {
                 encoderPtr = std::move(self->encoder);
                 capturePtr = std::move(self->capture);
             }
-            if (encoderPtr) { encoderPtr->Close(); }
+            if (encoderPtr) {
+                encoderPtr->Close();
+                // Closed, so nothing more is fed and the id is final.
+                self->nextFrameId = encoderPtr->NextFrameId();
+            }
             if (capturePtr) { capturePtr->Stop(); }
         }
     } teardown{this};
@@ -945,6 +955,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     // session's best and its client's frame count are not this one's.
     s.lastGlassToWireMs = 0.0; s.minGlassToWireMs = 1e9; s.sumGlassToWireMs = 0.0;
     s.clientLastFrame = 0; s.clientDamaged = 0;
+    s.nextFrameId = 1;
 
     {
         std::lock_guard<std::mutex> guard(s.openLock);
