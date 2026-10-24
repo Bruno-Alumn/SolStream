@@ -479,6 +479,43 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [.release(1), .abs(400, 300)])
     }
 
+    // MARK: - A restart in the middle of a drag
+
+    /// A drag across a restart goes on: the button is pressed on the new
+    /// session, and the drag and its release reach it.
+    func testADragHeldAcrossARestartGoesOn() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let middle = NSPoint(x: 200, y: 150)
+        mouse.viewPress(at: middle, time: 1)
+        mouse.packets.removeAll()
+        mouse.capture.inputBecameLive()
+        XCTAssertEqual(mouse.packets, [.press(1)], "the button was not pressed on the new session")
+        mouse.drag(at: middle)
+        mouse.lift(at: middle)
+        XCTAssertEqual(mouse.packets, [.press(1), .abs(400, 300), .abs(400, 300), .release(1)])
+    }
+
+    /// Only the buttons the hand still holds are pressed again, each as itself.
+    func testOnlyButtonsStillHeldArePressedAgain() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let middle = NSPoint(x: 200, y: 150)
+        mouse.viewPress(at: middle, time: 1)
+        mouse.viewPress(at: middle, time: 2, type: .rightMouseDown)
+        mouse.packets.removeAll()
+        mouse.macButtons = 0b10  // the right button, alone
+        mouse.capture.inputBecameLive()
+        XCTAssertEqual(mouse.packets, [.press(3)])
+
+        mouse.packets.removeAll()
+        mouse.macButtons = 0
+        mouse.capture.inputBecameLive()
+        XCTAssertEqual(mouse.packets, [], "a button the hand let go of was pressed again")
+        mouse.lift(at: middle)
+        XCTAssertEqual(mouse.packets, [], "a release went with no press on the new session")
+    }
+
     /// A first click on the resize border, the click that makes the window
     /// key, is AppKit's too: the view is not handed it, and nothing is sent.
     func testAFirstClickOnTheBorderIsNotSent() {

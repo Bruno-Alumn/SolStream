@@ -409,6 +409,52 @@ final class KeyboardMappingTests: XCTestCase {
         XCTAssertEqual(restarted.packets.count, before)
     }
 
+    /// W held across a restart, as in a game: the new session holds nothing,
+    /// so W is pressed on it again, and its release follows as usual.
+    func testAKeyHeldAcrossARestartIsPressedAgain() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let wire = Wire()
+        wire.capture.modifierFlagsNow = { [] }
+        wire.capture.isKeyPhysicallyDown = { [wKey] in $0 == wKey }
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        wire.capture.inputBecameLive()
+        XCTAssertEqual(wire.packets.map(\.code), [0x57, 0x57])
+        XCTAssertEqual(wire.packets.map(\.pressed), [true, true], "W was not pressed on the new session")
+        wire.send(.keyUp, keyCode: wKey, deviceFlags: 0)
+        XCTAssertEqual(wire.packets.map(\.code), [0x57, 0x57, 0x57])
+        XCTAssertEqual(wire.packets.last?.pressed, false)
+    }
+
+    /// A key let go of while the stream was down is not pressed again.
+    func testAKeyLetGoOfDuringARestartIsNotPressedAgain() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let wire = Wire()
+        wire.capture.modifierFlagsNow = { [] }
+        var down = true
+        wire.capture.isKeyPhysicallyDown = { _ in down }
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        down = false
+        wire.capture.inputBecameLive()
+        XCTAssertEqual(wire.packets.map(\.pressed), [true], "a key the hand let go of was pressed again")
+    }
+
+    /// A keyboard that has never been seen to answer is not believed when it
+    /// says a key is down: a key pressed on that word could never be let go.
+    func testAKeyIsNotPressedAgainOnAKeyboardThatNeverAnswered() {
+        InputCapture.hostCapsLock = [:]
+        defer { InputCapture.hostCapsLock = [:] }
+        let wire = Wire()
+        wire.capture.modifierFlagsNow = { [] }
+        var down = false
+        wire.capture.isKeyPhysicallyDown = { _ in down }
+        wire.send(.keyDown, keyCode: wKey, deviceFlags: 0)
+        down = true
+        wire.capture.inputBecameLive()
+        XCTAssertEqual(wire.packets.map(\.pressed), [true])
+    }
+
     // MARK: - Caps Lock, to a host that predates scan codes
 
     /// Caps Lock is a toggle on Windows, so each change on the Mac is one

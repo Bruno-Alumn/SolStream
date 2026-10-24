@@ -866,12 +866,62 @@ public final class InputCapture {
     /// changed, and the PC typed lower case until Shift was pressed again.
     /// Forgotten, what is still held is pressed, and nothing else is sent: no
     /// release, and on a first start with nothing held, nothing at all.
+    ///
+    /// The same goes for keys and buttons. Forgotten and not pressed again, a
+    /// drag across a restart lost the rest of itself -- every later drag
+    /// event and the release were dropped as belonging to no press -- and a
+    /// key held in a game stopped on the PC while the hand still held it. So
+    /// each one the old session was given that is still physically down is
+    /// pressed again: a key only once the keyboard has been seen to answer
+    /// (`keyStateAnswers`), since a key it wrongly calls held would be
+    /// pressed on the PC with nothing ever to release it.
     public func inputBecameLive() {
         guard isCapturing else { return }
+        let keys = heldKeys
+        let buttons = heldButtons
         forgetHostState()
         let flags = modifierFlagsNow()
         syncCapsLock(to: flags.contains(.capsLock))
         syncModifiers(to: flags)
+        pressAgain(keys: keys, buttons: buttons, modifiers: Self.modifiers(from: flags))
+    }
+
+    /// Press on a new session what the old one was given and the hand still
+    /// holds. A button goes where the PC's pointer already is: the cursor is
+    /// the PC's own, and was left by the old session wherever the drag had
+    /// taken it.
+    private func pressAgain(keys: [UInt16: (key: HostKey, chord: Bool)],
+                            buttons: Set<SMTInput.MouseButton>,
+                            modifiers: SMTInput.Modifiers) {
+        if keyStateAnswers {
+            for code in keys.keys.sorted() where isKeyPhysicallyDown(code) {
+                guard let held = keys[code] else { continue }
+                heldKeys[code] = held
+                emit(keyPacket(held.key, pressed: true, modifiers: modifiers))
+            }
+        }
+        let down = buttonsPressedNow()
+        for button in buttons.sorted(by: { $0.rawValue < $1.rawValue })
+        where down & Self.pressedMask(of: button) != 0 {
+            heldButtons.insert(button)
+            emit(SMTInput.mouseButton(button, pressed: true))
+        }
+        let pressed = heldKeys.count + heldButtons.count
+        if pressed > 0 {
+            Log.info("[input] pressed \(pressed) key(s) and button(s) still held on the new session")
+        }
+    }
+
+    /// A button's bit in `NSEvent.pressedMouseButtons`: the left is 0, the
+    /// right 1, and the rest by AppKit's button number.
+    static func pressedMask(of button: SMTInput.MouseButton) -> Int {
+        switch button {
+        case .left: return 1 << 0
+        case .right: return 1 << 1
+        case .middle: return 1 << 2
+        case .extra1: return 1 << 3
+        case .extra2: return 1 << 4
+        }
     }
 
     /// Bring the host's modifier keys to what `flags` says is held, sending

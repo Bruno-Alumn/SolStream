@@ -821,8 +821,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Move to a new stream after the old one was lost, keeping the window, its
-    /// place on the host and its input exactly as they are.
+    /// Move to a new stream after the old one was lost, keeping the window and
+    /// its place on the host as they are.
+    ///
+    /// Input is not carried over here. The new host session holds nothing --
+    /// the old one let go of every key and button as it ended -- so
+    /// `inputBecameLive`, once the new session has started, presses on it
+    /// again whatever the hand is still holding.
     ///
     /// The counters restart with the session, and they are differenced with
     /// `&-` for the pill: left at the old session's totals, the first sample
