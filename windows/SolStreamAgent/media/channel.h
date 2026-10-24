@@ -45,7 +45,7 @@
 // FOUR bytes, not two. Two would cap a record at 65,535 bytes, and the clipboard
 // alone is allowed 256 KB -- so a large paste would have failed to seal and
 // dropped the connection, in the encrypted path only. The cap here matches
-// kMaxLineBytes in main.cpp deliberately: the encrypted channel must carry
+// kMaxLineBytes in clipboard.h deliberately: the encrypted channel must carry
 // exactly what the plaintext one carried, or a message size becomes a way to
 // tell the two apart.
 //
@@ -69,7 +69,7 @@
 namespace solstream::media {
 
 /// The largest JSON message the channel will carry. The same 4 MB as
-/// kMaxLineBytes, so encryption changes nothing about what fits.
+/// kMaxLineBytes (clipboard.h), so encryption changes nothing about what fits.
 constexpr size_t kMaxChannelMessage = 4 * 1024 * 1024;
 
 /// One connection's channel keys. There is one client at a time, so there is one
