@@ -2670,6 +2670,34 @@ void TestForegroundBound() {
     turns.Begin(first);
     CHECK(turns.Wanted(two, second) == first);
 
+    // One thread at a time joins a queue: a fresh worker never joins beside
+    // one given up on while it is joined. Free again once that one has left.
+    CHECK(turns.BeginJoin());
+    CHECK(!turns.BeginJoin());
+    turns.EndJoin();
+    CHECK(turns.BeginJoin());
+    turns.EndJoin();
+
+    // A worker is replaced only once its request has run past the bound, and
+    // only so many times; an idle one never.
+    CHECK(DecideStuckWorker(0, 0) == StuckWorker::Keep);
+    CHECK(DecideStuckWorker(kForegroundStuckMs - 1, 0) == StuckWorker::Keep);
+    CHECK(DecideStuckWorker(kForegroundStuckMs, 0) == StuckWorker::Replace);
+    CHECK(DecideStuckWorker(kForegroundStuckMs * 10, kForegroundMaxReplacements - 1)
+          == StuckWorker::Replace);
+    CHECK(DecideStuckWorker(kForegroundStuckMs, kForegroundMaxReplacements)
+          == StuckWorker::Exhausted);
+    CHECK(DecideStuckWorker(kForegroundStuckMs - 1, kForegroundMaxReplacements)
+          == StuckWorker::Keep);
+    CHECK(DecideStuckWorker(0, kForegroundMaxReplacements + 5) == StuckWorker::Keep);
+    CHECK(DecideStuckWorker(60, 1, 50, 2) == StuckWorker::Replace);
+    CHECK(DecideStuckWorker(60, 2, 50, 2) == StuckWorker::Exhausted);
+    // Past the command thread's own wait, so the bound it keeps is unchanged,
+    // and a few replacements at most over the host's life.
+    static_assert(kForegroundStuckMs > kForegroundWaitMs);
+    static_assert(kForegroundMaxReplacements >= 2 && kForegroundMaxReplacements <= 3);
+    static_assert(kForegroundProbeMs < kForegroundWaitMs);
+
     // Never destroyed, as in the host: its thread outlives this test.
     LatestJobWorker& worker = *new LatestJobWorker;
 
@@ -2718,6 +2746,53 @@ void TestForegroundBound() {
     CHECK(ran.load() == 2);
     CloseHandle(release);
     CloseHandle(started);
+
+    // A worker stuck past the bound is given up on, and a fresh one runs what
+    // waits behind it; the stuck one finishes later and leaves. Twice here, and
+    // then no more.
+    LatestJobWorker& stuck_worker = *new LatestJobWorker;
+    CHECK(stuck_worker.ReplaceIfStuck(50, 2) == StuckWorker::Keep);   // never started
+    HANDLE hold = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CHECK(hold != nullptr);
+    std::atomic<int> held_done{0};
+    std::atomic<int> after_ran{0};
+    auto held = [hold, &held_done] {
+        WaitForSingleObject(hold, 10000);
+        held_done.fetch_add(1);
+    };
+    uint64_t held_ticket = stuck_worker.Submit(held);
+    CHECK(held_ticket != 0);
+    CHECK(!stuck_worker.WaitFor(held_ticket, 20));
+    CHECK(stuck_worker.ReplaceIfStuck(5000, 2) == StuckWorker::Keep);   // not long enough
+    Sleep(80);
+    // Its replacement takes the next request, and gets stuck in turn.
+    held_ticket = stuck_worker.Submit(held);
+    CHECK(stuck_worker.ReplaceIfStuck(50, 2) == StuckWorker::Replace);
+    CHECK(!stuck_worker.WaitFor(held_ticket, 30));
+    Sleep(80);
+    CHECK(stuck_worker.ReplaceIfStuck(50, 2) == StuckWorker::Replace);
+    // The second replacement is free, and runs what is handed to it.
+    uint64_t after = stuck_worker.Submit([&after_ran] { after_ran.fetch_add(1); });
+    CHECK(stuck_worker.WaitFor(after, 5000));
+    CHECK(after_ran.load() == 1);
+    CHECK(held_done.load() == 0);
+    // Stuck once more, there are no replacements left.
+    held_ticket = stuck_worker.Submit(held);
+    CHECK(!stuck_worker.WaitFor(held_ticket, 30));
+    Sleep(80);
+    CHECK(stuck_worker.ReplaceIfStuck(50, 2) == StuckWorker::Exhausted);
+    // Let go, every stuck job finishes, and the last worker carries on.
+    SetEvent(hold);
+    CHECK(stuck_worker.WaitFor(held_ticket, 5000));
+    after = stuck_worker.Submit([&after_ran] { after_ran.fetch_add(1); });
+    CHECK(stuck_worker.WaitFor(after, 5000));
+    CHECK(after_ran.load() == 2);
+    for (int i = 0; i < 100 && held_done.load() < 3; ++i) {
+        Sleep(20);
+    }
+    CHECK(held_done.load() == 3);
+    CHECK(stuck_worker.ReplaceIfStuck(50, 2) == StuckWorker::Keep);   // idle
+    CloseHandle(hold);
 }
 
 void TestAudioSource() {

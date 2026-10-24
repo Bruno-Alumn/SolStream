@@ -921,17 +921,32 @@ bool ForceForeground(HWND window) {
     // on an earlier one replaces any other waiting. See foreground.h.
     const solstream::ForegroundTurns::Turn turn = g_foreground_turns.Begin(window);
     const uint64_t ticket = g_foreground_worker.Submit([window, turn] {
+        // Asked first, briefly: a window whose app has just hung passes
+        // IsHungAppWindow for five seconds, and the synchronous calls below
+        // would hold the one worker on it, and every later window with it.
+        const bool answers = solstream::AnswersWithin(window, solstream::kForegroundProbeMs);
         if (IsIconic(window)) {
-            ShowWindow(window, SW_RESTORE);
+            if (answers) {
+                ShowWindow(window, SW_RESTORE);
+            } else {
+                ShowWindowAsync(window, SW_RESTORE);
+            }
         }
         // Z-order first, and unconditionally: raising is not subject to the
         // foreground restriction, and it is what capture needs even in the
         // case where focus cannot be won. Synchronous: the foreground attempts
         // below depend on the window already being on top, and an asynchronous
         // raise lost the first of them in a live session -- "could not take
-        // the foreground" until a later attempt landed.
-        SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        BringWindowToTop(window);
+        // the foreground" until a later attempt landed. Asynchronous only for a
+        // window that did not answer, which is not joined to below either.
+        if (answers) {
+            SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            BringWindowToTop(window);
+        } else {
+            SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        }
 
         // Overtaken while stuck in the raise: the newer request's window goes
         // in front, not this one.
@@ -948,10 +963,23 @@ bool ForceForeground(HWND window) {
             const HWND holder = GetForegroundWindow();
             const DWORD holder_thread =
                 holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
+            // Not for a window that did not answer, and not while another
+            // thread is joined to a queue -- a worker given up on, perhaps
+            // stuck there.
+            const bool wanted_answers =
+                wanted == window
+                    ? answers
+                    : solstream::AnswersWithin(wanted, solstream::kForegroundProbeMs);
+            const bool joining =
+                wanted_answers
+                && solstream::JoinsHolderQueue(holder_thread, self_thread,
+                                               holder && IsHungAppWindow(holder))
+                && g_foreground_turns.BeginJoin();
             const bool attached =
-                solstream::JoinsHolderQueue(holder_thread, self_thread,
-                                            holder && IsHungAppWindow(holder))
-                && AttachThreadInput(self_thread, holder_thread, TRUE);
+                joining && AttachThreadInput(self_thread, holder_thread, TRUE);
+            if (joining && !attached) {
+                g_foreground_turns.EndJoin();
+            }
 
             SetForegroundWindow(wanted);
             // Both, because they answer different questions: which top-level
@@ -968,6 +996,7 @@ bool ForceForeground(HWND window) {
 
             if (attached) {
                 AttachThreadInput(self_thread, holder_thread, FALSE);
+                g_foreground_turns.EndJoin();
             }
         }
     });
@@ -976,6 +1005,25 @@ bool ForceForeground(HWND window) {
     } else if (!g_foreground_worker.WaitFor(ticket, solstream::kForegroundWaitMs)) {
         Log("[focus] the window in front on the PC did not answer within %lu ms; "
             "not waiting for it", static_cast<unsigned long>(solstream::kForegroundWaitMs));
+        // Stuck on an earlier request for a while: that thread is left to it,
+        // and a fresh one asks for this window -- a few times, then no more.
+        static std::atomic<bool> told_exhausted{false};
+        switch (g_foreground_worker.ReplaceIfStuck()) {
+        case solstream::StuckWorker::Replace:
+            Log("[focus] the thread asking for the foreground has been stuck for over "
+                "%llu ms; asking on a fresh one",
+                static_cast<unsigned long long>(solstream::kForegroundStuckMs));
+            break;
+        case solstream::StuckWorker::Exhausted:
+            if (!told_exhausted.exchange(true)) {
+                Log("[focus] the thread asking for the foreground is stuck, and %d "
+                    "fresh ones have been too; not starting another until the host "
+                    "restarts", solstream::kForegroundMaxReplacements);
+            }
+            break;
+        case solstream::StuckWorker::Keep:
+            break;
+        }
     }
     return GetForegroundWindow() == window;
 }
