@@ -192,10 +192,10 @@ jobs:
     # The one job that sees the signing key, so it does nothing else: no token,
     # no checkout, no package installed, nothing but the runner's own OpenSSL
     # and Python's standard library beside the key. Anything that ran in this
-    # job could read the key, sudo being free on a hosted runner. It belongs in
-    # a `release` environment that hands its secret only to runs on a v* tag;
-    # until that environment exists the secret is the repository's
-    # (docs/releasing.md says how to set it up and when to add the line).
+    # job could read the key, sudo being free on a hosted runner. The `release`
+    # environment hands its secret only to runs on a v* tag, and a ruleset lets
+    # only the owner push one (docs/releasing.md).
+    environment: release
     permissions: {}
     env:
       VERSION: ${{ needs.check.outputs.version }}

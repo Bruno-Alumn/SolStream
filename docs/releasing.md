@@ -25,25 +25,17 @@ that has been pushed has leaked whether or not anything noticed.
 
 ### Who can read it
 
-Only the workflow's *Sign* job uses the secret, but that is the workflow's
-choice, not a rule GitHub enforces. A repository secret is handed to any
-workflow run in the repository that asks for it, so a workflow file pushed to
-any branch could print it. Anyone who can push here, or who holds a token
-allowed to change workflows, can take the key, and with it sign an update
-that every installed copy accepts. Until the steps below are done, give write
-access only to people you would give the key, and review every change under
-`.github/workflows/` as you would the key.
+Only the workflow's *Sign* job uses the secret. A repository-wide secret is
+handed to any workflow run in the repository that asks for it, so a workflow
+file pushed to any branch could print it, and with the key anyone could sign
+an update that every installed copy accepts. Three settings close that gap:
 
-A public repository can close that gap:
-
-1. **Settings → Environments → New environment** `release`. Under *Deployment
-   branches and tags* choose *Selected branches and tags* and add one tag rule,
-   `v*.*.*`. Then put the Sign job in it: in `.github/workflows/release.yml`,
-   add `environment: release` to the `sign` job, beside its `permissions: {}`,
-   and commit that to `main`. A run uses the workflow as it was tagged, so
-   only releases tagged after that commit read the environment. Add the line
-   only once the environment exists, or the job may not run at all.
-2. Move the secret into it, then delete the repository-wide one:
+1. **The `release` environment** (*Settings → Environments*) admits only runs
+   on a tag matching `v*.*.*`, and the Sign job names it (`environment:
+   release` in `.github/workflows/release.yml`). A run uses the workflow as it
+   was tagged, so only releases tagged after that line went in read the
+   environment.
+2. **The secret lives in the environment**, not the repository:
 
    ```bash
    gh secret set SOLSTREAM_UPDATE_SIGNING_KEY --env release --repo Bruno-Alumn/SolStream \
@@ -51,11 +43,16 @@ A public repository can close that gap:
    gh secret delete SOLSTREAM_UPDATE_SIGNING_KEY --repo Bruno-Alumn/SolStream
    ```
 
-3. **Settings → Rules → Rulesets → New tag ruleset** targeting `refs/tags/v*`:
-   restrict creations, updates and deletions, with only yourself allowed to
-   bypass. Without it, anybody who can push could push a new `v` tag on a
-   commit carrying a workflow of their own, and the environment would hand that
-   workflow the key.
+   `gh secret list --repo Bruno-Alumn/SolStream` should then list nothing, and
+   `gh secret list --env release --repo Bruno-Alumn/SolStream` the key.
+3. **The *Release tags* ruleset** (*Settings → Rules → Rulesets*) refuses the
+   creation, update or deletion of any `refs/tags/v*` tag by anyone but a
+   repository admin. Without it, anybody who can push could push a `v` tag on
+   a commit carrying a workflow of their own, and the environment would hand
+   that workflow the key.
+
+Even so, give write access only to people you would give the key, and review
+every change under `.github/workflows/` as you would the key.
 
 Whatever the plan, turn on **immutable releases** in the repository settings,
 where GitHub offers them: a published release's files and tag can then never
