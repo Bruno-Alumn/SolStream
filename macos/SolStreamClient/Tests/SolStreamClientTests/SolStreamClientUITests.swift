@@ -8,18 +8,29 @@ import SolStreamLogging
 /// the app launches, shows a window, and can capture screenshots.
 final class SolStreamClientUITests: XCTestCase {
 
-    /// Path to the built app binary (relative to package directory).
-    let appPath = ".build/arm64-apple-macosx/debug/SolStreamClient"
+    /// The built app binary: next to this test bundle, in whichever build
+    /// directory -- arm64 or x86_64, debug or release -- it was built into.
+    var appURL: URL {
+        Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("SolStreamClient")
+    }
 
     var appProcess: Process?
+
+    /// Where this test's screenshot is written: its own, so runs side by side
+    /// and a file left by an earlier run cannot pass for this one's.
+    private var screenshotURL: URL!
 
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
+        screenshotURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-screenshot-\(UUID().uuidString).png")
     }
 
     override func tearDown() {
         killApp()
+        try? FileManager.default.removeItem(at: screenshotURL)
         super.tearDown()
     }
 
@@ -43,13 +54,13 @@ final class SolStreamClientUITests: XCTestCase {
     /// via the --test-screenshot command-line flag.
     func testInternalScreenshotCapture() throws {
         // Launch the app with the test flag which takes a screenshot internally and exits.
-        try launchApp(args: ["--test-screenshot"])
+        try launchApp(args: ["--test-screenshot", "--screenshot-path", screenshotURL.path])
 
         // Wait for the process to exit (it exits automatically after saving the screenshot).
         appProcess?.waitUntilExit()
 
         // Verify the screenshot file was created.
-        let screenshotPath = "/tmp/solstream_internal_screenshot.png"
+        let screenshotPath = screenshotURL.path
         let fileExists = FileManager.default.fileExists(atPath: screenshotPath)
         XCTAssertTrue(fileExists, "Screenshot file should exist after --test-screenshot mode")
 
@@ -80,15 +91,15 @@ final class SolStreamClientUITests: XCTestCase {
 
     private func launchApp(args: [String] = []) throws {
         let workDir = FileManager.default.currentDirectoryPath
-        let fullPath = (workDir as NSString).appendingPathComponent(appPath)
+        let app = appURL
 
-        guard FileManager.default.fileExists(atPath: fullPath) else {
-            XCTFail("App binary not found. Build the app first with 'swift build'")
+        guard FileManager.default.isExecutableFile(atPath: app.path) else {
+            XCTFail("App binary not found at \(app.path). Build the app first with 'swift build'")
             return
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: fullPath)
+        process.executableURL = app
         process.currentDirectoryURL = URL(fileURLWithPath: workDir)
         process.arguments = args
 

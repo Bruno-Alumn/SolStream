@@ -50,6 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `--host <ip>` connects immediately; `--test-screenshot` grabs the window
     /// and exits (used by the UI tests).
     private var testMode = false
+    /// Where that grab is written; `--screenshot-path <path>` moves it, so
+    /// runs side by side do not write over each other's.
+    private var screenshotPath = "/tmp/solstream_internal_screenshot.png"
     /// Set by --test-dropdown so the capture targets the list, not the window
     /// behind it.
     private var dropdownWindow: NSWindow?
@@ -71,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return arguments[index + 1]
         }
         testMode = arguments.contains("--test-screenshot")
+        if let path = value(after: "--screenshot-path") { screenshotPath = path }
 
         // --screenshot-after <seconds> waits long enough for real frames to
         // arrive before capturing, which is how a live stream gets verified.
@@ -1617,7 +1621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let rep = NSBitmapImageRep(cgImage: image)
         if let data = rep.representation(using: .png, properties: [:]) {
-            let path = "/tmp/solstream_internal_screenshot.png"
+            let path = screenshotPath
             try? data.write(to: URL(fileURLWithPath: path))
             Log.info("Test screenshot saved to \(path) (\(data.count) bytes)")
         }
