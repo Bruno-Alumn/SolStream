@@ -72,7 +72,11 @@ bool IsReparsePoint(const std::wstring& path);
 
 /// The attached virtual display SolStream streams from, as \\.\DISPLAYn, or
 /// empty when there is none. The same choice ConfigureVirtualDisplay makes, so
-/// the display that was set up is the display that gets captured.
+/// the display that was set up is the display that gets captured -- but only
+/// when it is SolStream's own driver (IsSolStreamDisplayDriver). With ours
+/// absent, the best adapter can be a phone-as-monitor or remote-desktop
+/// product's display, which SolStream neither sizes nor controls; capturing it
+/// or resizing it is not the host's to do, so that is empty too.
 std::wstring VirtualDisplayDevice();
 
 }  // namespace solstream

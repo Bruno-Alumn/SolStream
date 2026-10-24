@@ -321,6 +321,7 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
 struct Adapter {
     std::wstring gdi_name;   ///< \\.\DISPLAY1
     bool attached = false;
+    bool ours = false;       ///< IsSolStreamDisplayDriver
 };
 
 bool OffersMode(const std::wstring& gdi_name, int width, int height);
@@ -358,12 +359,13 @@ bool FindVirtualAdapter(Adapter& out) {
                     break;
                 }
             }
-            const int score = (IsSolStreamDisplayDriver(name) ? 4 : 0)
-                            + (streamable ? 2 : 0) + (attached ? 1 : 0);
+            const bool ours = IsSolStreamDisplayDriver(name);
+            const int score = (ours ? 4 : 0) + (streamable ? 2 : 0) + (attached ? 1 : 0);
             if (score > best_score) {
                 best_score = score;
                 out.gdi_name = device.DeviceName;
                 out.attached = attached;
+                out.ours = ours;
             }
         }
         device = DISPLAY_DEVICEW{};
@@ -653,8 +655,9 @@ bool TurnHdrOff(const DISPLAYCONFIG_PATH_INFO& path, const AdvancedColorInfo& in
 
 std::wstring VirtualDisplayDevice() {
     Adapter adapter;
-    return FindVirtualAdapter(adapter) && adapter.attached ? adapter.gdi_name
-                                                           : std::wstring{};
+    return FindVirtualAdapter(adapter) && adapter.attached && adapter.ours
+               ? adapter.gdi_name
+               : std::wstring{};
 }
 
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,

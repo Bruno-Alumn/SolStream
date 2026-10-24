@@ -403,7 +403,9 @@ void ChooseCaptureDisplay() {
     const std::vector<Display> displays = EnumerateDisplays();
     const std::string configured = ToUtf8(solstream::VirtualDisplayDevice());
     for (const Display& display : displays) {
-        if (!configured.empty() && display.device_name == configured) {
+        // Ours only, as below and as RechooseCaptureDisplayIfStale asks.
+        if (!configured.empty() && display.device_name == configured
+            && solstream::IsSolStreamDisplayDriver(ToWide(display.adapter))) {
             chosen = ToWide(display.device_name);
             Log("[agent] capturing %s [%s]", display.device_name.c_str(),
                 display.adapter.c_str());
