@@ -12,10 +12,11 @@ The updaters install only what is signed with the key whose public half is
 compiled into them (`docs/updates.md`). The private half lives in two places
 and never in the repository: the owner's
 `~/.config/solstream/update-signing-key.pem` (mode 0600), and the Actions
-secret `SOLSTREAM_UPDATE_SIGNING_KEY`. To put the one into the other:
+secret `SOLSTREAM_UPDATE_SIGNING_KEY` in the `release` environment (*Who can
+read it*, below). To put the one into the other:
 
 ```bash
-gh secret set SOLSTREAM_UPDATE_SIGNING_KEY --repo Bruno-Alumn/SolStream \
+gh secret set SOLSTREAM_UPDATE_SIGNING_KEY --env release --repo Bruno-Alumn/SolStream \
     < ~/.config/solstream/update-signing-key.pem
 ```
 
