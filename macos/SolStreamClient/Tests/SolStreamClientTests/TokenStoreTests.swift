@@ -54,6 +54,33 @@ final class TokenStoreTests: XCTestCase {
         XCTAssertEqual(TokenStore.token(for: host), "00112233445566778899aabbccddeeff")
     }
 
+    /// An older build's token is not deleted when the new store cannot be
+    /// written: it would be gone with the run, and the Mac unpaired.
+    func testATokenThatCouldNotBeMovedStaysWhereItWas() throws {
+        let readOnly = directory.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o500])
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700],
+                                                   ofItemAtPath: readOnly.path)
+        }
+        TokenStore.directoryOverride = readOnly
+        let key = "SolStream.agentToken.\(host)"
+        UserDefaults.standard.set("00112233445566778899aabbccddeeff", forKey: key)
+
+        XCTAssertEqual(TokenStore.token(for: host), "00112233445566778899aabbccddeeff",
+                       "this run lost the token")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: TokenStore.fileURL.path))
+        XCTAssertEqual(UserDefaults.standard.string(forKey: key), "00112233445566778899aabbccddeeff",
+                       "the only lasting copy was deleted")
+
+        // Writable again, the next run moves it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path)
+        TokenStore.directoryOverride = readOnly
+        XCTAssertEqual(TokenStore.token(for: host), "00112233445566778899aabbccddeeff")
+        XCTAssertNil(UserDefaults.standard.string(forKey: key))
+    }
+
     /// Whether this Mac has paired with anything at all, which decides the
     /// connect window's first-run guide. Measured against what is there
     /// before the test, rather than asserted false: a Mac that ran a keychain

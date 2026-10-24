@@ -41,8 +41,12 @@ public enum TokenStore {
         defer { lock.unlock() }
         if let known = loaded()[host] { return known }
         guard let moved = legacyDefault(host) ?? legacyKeychain(host) else { return nil }
-        store(moved, for: host)
-        Log.info("[agent] moved the pairing token for \(host) to SolStream's own store")
+        if store(moved, for: host) {
+            Log.info("[agent] moved the pairing token for \(host) to SolStream's own store")
+        } else {
+            Log.info("[agent] the pairing token for \(host) stays where an older build kept it,"
+                     + " since SolStream's own store could not be written")
+        }
         return moved
     }
 
@@ -161,19 +165,27 @@ public enum TokenStore {
     }
 
     /// Call with `lock` held.
-    private static func store(_ token: String, for host: String) {
+    ///
+    /// - Returns: whether the file was written.
+    @discardableResult
+    private static func store(_ token: String, for host: String) -> Bool {
         var current = loaded()
         current[host] = token
-        save(current)
         // Gone from the old places once the new one has it, so a token is never
-        // in two stores that could disagree.
+        // in two stores that could disagree -- and only then: a write that
+        // failed leaves the old copy the only one that outlives this run.
+        guard save(current) else { return false }
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
         SecItemDelete(keychainQuery(host) as CFDictionary)
+        return true
     }
 
     /// Call with `lock` held. Kept in memory for this run even if the write
     /// fails, so a session that just authenticated keeps working.
-    private static func save(_ next: [String: String]) {
+    ///
+    /// - Returns: whether the file was written, every step of it.
+    @discardableResult
+    private static func save(_ next: [String: String]) -> Bool {
         tokens = next
         let fm = FileManager.default
         let directory = fileURL.deletingLastPathComponent()
@@ -197,8 +209,10 @@ public enum TokenStore {
             excluded.isExcludedFromBackup = true
             var url = fileURL
             try url.setResourceValues(excluded)
+            return true
         } catch {
             Log.error("[agent] could not save the pairing tokens: \(error.localizedDescription)")
+            return false
         }
     }
 
