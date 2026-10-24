@@ -11,16 +11,18 @@
 //
 // So a holder Windows already reports as hung is never joined, and the asking
 // -- the window's restore and raise as well, which wait on the window's own
-// app -- is done on a thread of its own with a bound on the wait, which covers
-// the first seconds of a hang, before Windows reports it. A thread that is
-// still stuck when the bound runs out is left to finish on its own; it holds
-// nothing the command thread needs.
+// app -- is done on a worker thread, with a bound on the command thread's wait
+// for it, which covers the first seconds of a hang, before Windows reports it.
 //
-// Two rules keep those threads from doing harm later (ForegroundTurns). Only
-// one at a time joins a queue, so that a hang cannot gather a thread for every
-// click. And one that finishes after a newer request puts THAT request's
-// window in front, rather than its own, which the user has since moved on
-// from.
+// One worker, for the life of the host, and it only ever does the newest
+// request (LatestJobWorker). A thread per request piled up a stuck thread for
+// every click while an app hung, each able to put its own window in front
+// whenever that app let it go. Now a request made while the worker is stuck
+// replaces the one waiting, and only it runs once the worker is free; and a
+// request it is stuck on puts the newest request's window in front, rather
+// than its own, which the user has since moved on from (ForegroundTurns).
+// Without a worker thread the foreground is not asked for at all: done on the
+// command thread it would have no bound.
 //
 // Header-only, so the test program can check it.
 
@@ -35,7 +37,6 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <utility>
 
 namespace solstream {
@@ -51,23 +52,19 @@ inline bool JoinsHolderQueue(DWORD holder_thread, DWORD self_thread, bool holder
     return holder_thread != 0 && holder_thread != self_thread && !holder_hung;
 }
 
-/// The requests for the foreground, in order. Begun on the command thread,
-/// one at a time; read by the threads doing the asking.
+/// The requests for the foreground, in order. Begun on the command thread;
+/// read by the worker doing the asking.
 class ForegroundTurns {
 public:
     struct Turn {
         uint64_t generation = 0;
-        /// This turn may join the holder's queue, and gives that up in Finish.
-        bool mayJoin = false;
     };
 
-    /// A new request, for `window`. It may join a queue only when no earlier
-    /// one is still doing so.
+    /// A new request, for `window`.
     Turn Begin(HWND window) {
         target_.store(window);
         Turn turn;
         turn.generation = latest_.fetch_add(1) + 1;
-        turn.mayJoin = !joining_.exchange(true);
         return turn;
     }
 
@@ -80,39 +77,91 @@ public:
         return Overtaken(turn) ? target_.load() : own;
     }
 
-    /// `turn` has finished, joined queue and all.
-    void Finish(const Turn& turn) {
-        if (turn.mayJoin) {
-            joining_.store(false);
-        }
-    }
-
 private:
     std::atomic<uint64_t> latest_{0};
     std::atomic<HWND> target_{nullptr};
-    std::atomic<bool> joining_{false};
 };
 
-inline DWORD WINAPI RunBoundedJob(void* param) {
-    const std::unique_ptr<std::function<void()>> job(static_cast<std::function<void()>*>(param));
-    (*job)();
-    return 0;
-}
+/// One thread, started on first use and never stopped, that runs the newest job
+/// handed to it. A job handed over while another runs waits; a newer one
+/// replaces it, and the replaced one never runs. So however long a job is stuck,
+/// there is one thread, and one job waiting behind it.
+///
+/// Never destroyed: its thread runs for the life of the process, and reads it
+/// to the last. Make it with `new` and keep it.
+class LatestJobWorker {
+public:
+    LatestJobWorker() = default;
+    LatestJobWorker(const LatestJobWorker&) = delete;
+    LatestJobWorker& operator=(const LatestJobWorker&) = delete;
 
-/// Run `work` on a thread of its own and wait at most `timeout_ms` for it.
-/// True when it finished in time. When it did not it carries on regardless,
-/// so `work` must own everything it uses: capture by value. Without a thread
-/// to run it on, it runs here, unbounded, as it did before there was a bound.
-inline bool RunWithin(DWORD timeout_ms, std::function<void()> work) {
-    auto* job = new std::function<void()>(std::move(work));
-    HANDLE thread = CreateThread(nullptr, 0, RunBoundedJob, job, 0, nullptr);
-    if (!thread) {
-        RunBoundedJob(job);
-        return true;
+    /// Hand `job` over, replacing any job not yet started. Returns its ticket
+    /// for WaitFor, or 0 when there is no thread to run it -- it could not be
+    /// started -- and the job is dropped. `job` may run after its caller has
+    /// stopped waiting, so it must own everything it uses: capture by value.
+    uint64_t Submit(std::function<void()> job) {
+        AcquireSRWLockExclusive(&lock_);
+        if (!started_) {
+            HANDLE thread = CreateThread(nullptr, 0, Run, this, 0, nullptr);
+            if (!thread) {
+                ReleaseSRWLockExclusive(&lock_);
+                return 0;
+            }
+            CloseHandle(thread);
+            started_ = true;
+        }
+        pending_ = std::move(job);
+        const uint64_t ticket = ++submitted_;
+        ReleaseSRWLockExclusive(&lock_);
+        WakeConditionVariable(&wake_);
+        return ticket;
     }
-    const bool finished = WaitForSingleObject(thread, timeout_ms) == WAIT_OBJECT_0;
-    CloseHandle(thread);
-    return finished;
-}
+
+    /// Wait at most `timeout_ms` for the worker to have finished `ticket`, or a
+    /// job handed over after it, which replaced it. True when it has.
+    bool WaitFor(uint64_t ticket, DWORD timeout_ms) {
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        AcquireSRWLockExclusive(&lock_);
+        while (finished_ < ticket) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline
+                || (!SleepConditionVariableSRW(&done_, &lock_, (DWORD) (deadline - now), 0)
+                    && GetLastError() != ERROR_TIMEOUT)) {
+                break;
+            }
+        }
+        const bool finished = finished_ >= ticket;
+        ReleaseSRWLockExclusive(&lock_);
+        return finished;
+    }
+
+private:
+    static DWORD WINAPI Run(void* param) {
+        auto* self = static_cast<LatestJobWorker*>(param);
+        for (;;) {
+            AcquireSRWLockExclusive(&self->lock_);
+            while (!self->pending_) {
+                SleepConditionVariableSRW(&self->wake_, &self->lock_, INFINITE, 0);
+            }
+            std::function<void()> job = std::move(self->pending_);
+            self->pending_ = nullptr;
+            const uint64_t ticket = self->submitted_;
+            ReleaseSRWLockExclusive(&self->lock_);
+            job();
+            AcquireSRWLockExclusive(&self->lock_);
+            self->finished_ = ticket;
+            ReleaseSRWLockExclusive(&self->lock_);
+            WakeAllConditionVariable(&self->done_);
+        }
+    }
+
+    SRWLOCK lock_ = SRWLOCK_INIT;
+    CONDITION_VARIABLE wake_ = CONDITION_VARIABLE_INIT;   // a job is waiting
+    CONDITION_VARIABLE done_ = CONDITION_VARIABLE_INIT;   // a job has finished
+    std::function<void()> pending_;   // all guarded by lock_
+    uint64_t submitted_ = 0;
+    uint64_t finished_ = 0;
+    bool started_ = false;
+};
 
 }  // namespace solstream

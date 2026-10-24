@@ -874,9 +874,11 @@ HMONITOR MonitorFromDeviceName(const std::wstring& device_name) {
     return search.found;
 }
 
-/// ForceForeground's requests, so that the threads it leaves behind when an
-/// app hangs neither pile up nor put an old window in front; see foreground.h.
+/// ForceForeground's requests, and the one thread that asks for them, so that
+/// a hung app holds one thread rather than one per click, and a request it
+/// finishes late puts the newest window in front; see foreground.h.
 solstream::ForegroundTurns g_foreground_turns;
+solstream::LatestJobWorker& g_foreground_worker = *new solstream::LatestJobWorker;
 
 /// Actually give a window the keyboard focus, and say whether it worked.
 ///
@@ -911,13 +913,14 @@ bool ForceForeground(HWND window) {
         return false;
     }
 
-    // All of it on a thread of its own, with a bound. The restore and the raise
-    // wait on the window's app, which IsHungAppWindow calls hung only after
-    // some seconds, and joined to the holder's queue the foreground calls wait
-    // on the holder; either one hung would hold this thread and every command
-    // behind it. See foreground.h.
+    // All of it on the foreground worker, with a bound on the wait. The restore
+    // and the raise wait on the window's app, which IsHungAppWindow calls hung
+    // only after some seconds, and joined to the holder's queue the foreground
+    // calls wait on the holder; either one hung would hold this thread and
+    // every command behind it. A request made while the worker is still stuck
+    // on an earlier one replaces any other waiting. See foreground.h.
     const solstream::ForegroundTurns::Turn turn = g_foreground_turns.Begin(window);
-    const bool answered = solstream::RunWithin(solstream::kForegroundWaitMs, [window, turn] {
+    const uint64_t ticket = g_foreground_worker.Submit([window, turn] {
         if (IsIconic(window)) {
             ShowWindow(window, SW_RESTORE);
         }
@@ -945,12 +948,9 @@ bool ForceForeground(HWND window) {
             const HWND holder = GetForegroundWindow();
             const DWORD holder_thread =
                 holder ? GetWindowThreadProcessId(holder, nullptr) : 0;
-            // Not while an earlier request is still joined to a queue: a hang
-            // would otherwise gather a stuck thread for every click.
             const bool attached =
-                turn.mayJoin
-                && solstream::JoinsHolderQueue(holder_thread, self_thread,
-                                               holder && IsHungAppWindow(holder))
+                solstream::JoinsHolderQueue(holder_thread, self_thread,
+                                            holder && IsHungAppWindow(holder))
                 && AttachThreadInput(self_thread, holder_thread, TRUE);
 
             SetForegroundWindow(wanted);
@@ -970,9 +970,10 @@ bool ForceForeground(HWND window) {
                 AttachThreadInput(self_thread, holder_thread, FALSE);
             }
         }
-        g_foreground_turns.Finish(turn);
     });
-    if (!answered) {
+    if (ticket == 0) {
+        Log("[focus] no thread to ask for the foreground on; not asking");
+    } else if (!g_foreground_worker.WaitFor(ticket, solstream::kForegroundWaitMs)) {
         Log("[focus] the window in front on the PC did not answer within %lu ms; "
             "not waiting for it", static_cast<unsigned long>(solstream::kForegroundWaitMs));
     }

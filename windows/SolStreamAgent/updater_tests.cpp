@@ -31,6 +31,7 @@
 #include <cfgmgr32.h>
 #include <setupapi.h>
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <map>
@@ -2653,52 +2654,69 @@ void TestForegroundBound() {
     CHECK(!JoinsHolderQueue(0, 10, false));
     CHECK(!JoinsHolderQueue(10, 10, false));
 
-    // One request at a time joins a queue; the next may again once it is done.
+    // A request finishing late puts the newest request's window in front.
     const HWND first = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1000));
     const HWND second = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x2000));
     ForegroundTurns turns;
     const ForegroundTurns::Turn one = turns.Begin(first);
-    CHECK(one.mayJoin);
     CHECK(!turns.Overtaken(one));
     CHECK(turns.Wanted(one, first) == first);
     const ForegroundTurns::Turn two = turns.Begin(second);
-    CHECK(!two.mayJoin);   // the first is still joined, perhaps stuck
-    // The first, finishing late, puts the newer request's window in front.
     CHECK(turns.Overtaken(one));
     CHECK(turns.Wanted(one, first) == second);
     CHECK(!turns.Overtaken(two));
     CHECK(turns.Wanted(two, second) == second);
-    // Finishing a turn that never joined gives up nothing.
-    turns.Finish(two);
-    CHECK(!turns.Begin(second).mayJoin);
-    turns.Finish(one);
-    const ForegroundTurns::Turn three = turns.Begin(first);
-    CHECK(three.mayJoin);
+    turns.Begin(first);
     CHECK(turns.Wanted(two, second) == first);
-    turns.Finish(three);
+
+    // Never destroyed, as in the host: its thread outlives this test.
+    LatestJobWorker& worker = *new LatestJobWorker;
 
     // Quick work is waited for, and has happened by the time it returns.
-    bool ran = false;
-    CHECK(RunWithin(kForegroundWaitMs, [&ran] { ran = true; }));
-    CHECK(ran);
+    std::atomic<int> ran{0};
+    uint64_t ticket = worker.Submit([&ran] { ran.fetch_add(1); });
+    CHECK(ticket != 0);
+    CHECK(worker.WaitFor(ticket, kForegroundWaitMs));
+    CHECK(ran.load() == 1);
 
-    // Work that does not finish is not waited for past the bound, and goes on
-    // to finish by itself.
+    // Work that does not finish is not waited for past the bound. Requests
+    // made meanwhile do not start threads of their own: each replaces the one
+    // waiting, and only the newest runs once the worker is free.
     HANDLE release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    CHECK(release != nullptr && done != nullptr);
+    HANDLE started = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    CHECK(release != nullptr && started != nullptr);
+    std::atomic<int> stuck_done{0};
+    std::atomic<int> replaced_ran{0};
+    std::atomic<int> newest_ran{0};
     const ULONGLONG start = GetTickCount64();
-    CHECK(!RunWithin(100, [release, done] {
+    const uint64_t stuck = worker.Submit([release, started, &stuck_done] {
+        SetEvent(started);
         WaitForSingleObject(release, 10000);
-        SetEvent(done);
-    }));
+        stuck_done.fetch_add(1);
+    });
+    CHECK(!worker.WaitFor(stuck, 100));
     const ULONGLONG waited = GetTickCount64() - start;
     CHECK(waited >= 50 && waited < 2000);
-    CHECK(WaitForSingleObject(done, 0) == WAIT_TIMEOUT);
+    CHECK(WaitForSingleObject(started, 5000) == WAIT_OBJECT_0);
+    const uint64_t replaced = worker.Submit([&replaced_ran] { replaced_ran.fetch_add(1); });
+    const uint64_t newest = worker.Submit([&newest_ran] { newest_ran.fetch_add(1); });
+    CHECK(replaced != 0 && newest > replaced && replaced > stuck);
+    CHECK(!worker.WaitFor(newest, 50));
+    CHECK(stuck_done.load() == 0 && newest_ran.load() == 0);
     SetEvent(release);
-    CHECK(WaitForSingleObject(done, 5000) == WAIT_OBJECT_0);
+    CHECK(worker.WaitFor(newest, 5000));
+    CHECK(stuck_done.load() == 1);
+    CHECK(newest_ran.load() == 1);
+    CHECK(replaced_ran.load() == 0);
+    // A request replaced before it ran counts as done once a newer one is.
+    CHECK(worker.WaitFor(replaced, 0));
+    CHECK(worker.WaitFor(stuck, 0));
+    // And the same thread carries on.
+    ticket = worker.Submit([&ran] { ran.fetch_add(1); });
+    CHECK(worker.WaitFor(ticket, 5000));
+    CHECK(ran.load() == 2);
     CloseHandle(release);
-    CloseHandle(done);
+    CloseHandle(started);
 }
 
 void TestAudioSource() {
