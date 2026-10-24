@@ -10,6 +10,8 @@
 # Usage:
 #   .\check-update-signature.ps1 -Setup dist\SolStreamSetup-X.Y.Z.exe
 
+#Requires -Version 7
+
 param(
     [Parameter(Mandatory = $true)] [string] $Setup
 )
