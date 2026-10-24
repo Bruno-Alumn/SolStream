@@ -340,6 +340,8 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     // exactly once. A wrong one costs an event that both ends have
     // forgotten and neither applied, which for a key-up means a key held down
     // until the session ends.
+    //
+    // Not wrap-aware, nor needs to be: see `seen_` in input.h.
     uint32_t acked = acked_.load();
     while (seen_.started && acked < seen_.highest) {
         const uint64_t behind = seen_.highest - (acked + 1);

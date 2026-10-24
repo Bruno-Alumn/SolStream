@@ -130,6 +130,13 @@ private:
     /// window a layer below, for the same reason -- repeats must be free, and
     /// an event must never be applied twice. Only the receive thread touches
     /// it; Reset runs with that thread joined.
+    ///
+    /// The 32-bit sequence is compared as a plain number here, in the
+    /// acknowledgement and in keys.h, with no wrap handling, and that is a
+    /// bound rather than an oversight: the Mac spends one sequence per event and
+    /// starts again at 1 every session, so wrapping takes 2^32 events in one
+    /// unbroken session -- 49 days of a thousand events a second, and the Mac
+    /// sends far fewer. Past it, input would stop until the next session.
     smt::ReplayWindow seen_;
     /// Each key's and button's newest event applied, so an older one that
     /// arrives after it is passed over. See keys.h; cleared with the above.
