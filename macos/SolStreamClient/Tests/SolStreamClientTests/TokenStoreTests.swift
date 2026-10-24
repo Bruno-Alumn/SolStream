@@ -1,3 +1,4 @@
+import Security
 import XCTest
 @testable import AgentChannel
 
@@ -69,6 +70,28 @@ final class TokenStoreTests: XCTestCase {
         UserDefaults.standard.set("00112233445566778899aabbccddeeff",
                                   forKey: "SolStream.agentToken.\(host)")
         XCTAssertTrue(TokenStore.hasAnyToken)
+    }
+
+    /// A keychain that cannot answer now -- locked, its daemon busy -- is
+    /// asked again next time; only one that says "none" is taken at its word.
+    func testOnlyANoFromTheKeychainIsRemembered() {
+        var status = errSecInteractionNotAllowed
+        TokenStore.keychainLookup = { _ in status }
+        defer { TokenStore.keychainLookup = { SecItemCopyMatching($0 as CFDictionary, nil) } }
+
+        XCTAssertFalse(TokenStore.hasToken(for: host))
+        XCTAssertFalse(TokenStore.hasAnyToken)
+        status = errSecSuccess
+        XCTAssertTrue(TokenStore.hasToken(for: host), "a passing error was remembered as unpaired")
+        XCTAssertTrue(TokenStore.hasAnyToken, "a passing error was remembered as never paired")
+
+        TokenStore.directoryOverride = directory
+        status = errSecItemNotFound
+        XCTAssertFalse(TokenStore.hasToken(for: host))
+        XCTAssertFalse(TokenStore.hasAnyToken)
+        status = errSecSuccess
+        XCTAssertFalse(TokenStore.hasToken(for: host), "a definite no was asked again")
+        XCTAssertFalse(TokenStore.hasAnyToken, "a definite no was asked again")
     }
 
     func testRemovingForgetsIt() {

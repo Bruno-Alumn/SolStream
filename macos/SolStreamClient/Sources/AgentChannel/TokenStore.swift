@@ -57,8 +57,12 @@ public enum TokenStore {
         var query = keychainQuery(host)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess { return true }
-        legacyChecked.insert(host)
+        let status = keychainLookup(query)
+        if status == errSecSuccess { return true }
+        // Only a definite "none" is remembered. A locked keychain or a busy
+        // security daemon answers with an error that passes, and remembered,
+        // it would call a paired host unpaired for the rest of the run.
+        if status == errSecItemNotFound { legacyChecked.insert(host) }
         return false
     }
 
@@ -82,8 +86,10 @@ public enum TokenStore {
                                     kSecAttrService as String: service,
                                     kSecReturnAttributes as String: true,
                                     kSecMatchLimit as String: kSecMatchLimitOne]
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess { return true }
-        legacyAnyChecked = true
+        let status = keychainLookup(query)
+        if status == errSecSuccess { return true }
+        // As in `hasToken`: only a definite "none" is remembered.
+        if status == errSecItemNotFound { legacyAnyChecked = true }
         return false
     }
 
@@ -197,6 +203,13 @@ public enum TokenStore {
     }
 
     // MARK: - Where earlier builds kept them
+
+    /// Whether the keychain has an item matching an attributes-only query.
+    /// Replaceable so the tests can have it fail the way a locked keychain
+    /// does.
+    static var keychainLookup: ([String: Any]) -> OSStatus = { query in
+        SecItemCopyMatching(query as CFDictionary, nil)
+    }
 
     private static func legacyDefault(_ host: String) -> String? {
         UserDefaults.standard.string(forKey: legacyPrefix + host)
