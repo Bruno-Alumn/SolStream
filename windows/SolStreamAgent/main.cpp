@@ -987,6 +987,21 @@ bool ForceForeground(HWND window) {
             SetActiveWindow(wanted);
             SetFocus(wanted);
 
+            // Still refused: a Store app is in front or being asked for. Its
+            // frame host refuses to be joined (access denied), and even joined,
+            // Windows would not hand one the foreground when the lock timeout
+            // is at its maximum, as it was on the dev PC. The process that sent
+            // the last input may take the foreground, so send some -- a
+            // movement of nothing -- and ask again. Measured there: refused
+            // both ways before, granted both ways after.
+            if (GetForegroundWindow() != wanted) {
+                INPUT nudge{};
+                nudge.type = INPUT_MOUSE;
+                nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
+                SendInput(1, &nudge, sizeof(nudge));
+                SetForegroundWindow(wanted);
+            }
+
             // Overtaken while asking: put the newest request's window back in
             // front, which this thread may still do while it is joined.
             const HWND newest = g_foreground_turns.Wanted(turn, window);
@@ -4431,8 +4446,12 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             // Worth a log line of its own: the window still streams, so nothing
             // looks wrong, but the user's keystrokes are going somewhere else.
             const std::string title = WindowTitleForLog(window);
+            const HWND holder = GetForegroundWindow();
+            const std::string holder_title =
+                holder ? WindowTitleForLog(holder) : std::string("nothing");
             Log("[focus] could not take the foreground for \"%s\";"
-                " keystrokes will go to whatever holds it", title.c_str());
+                " keystrokes will go to \"%s\", which holds it",
+                title.c_str(), holder_title.c_str());
         }
 
         char buffer[128];
