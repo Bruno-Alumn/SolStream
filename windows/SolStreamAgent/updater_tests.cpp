@@ -3245,6 +3245,22 @@ void TestLeftBehind() {
     CHECK(BeginRestore(list, restoring, 3, 12));
     FinishRestore(list, restoring, 3, 12, RestoreOutcome::Retry);
     CHECK(list.size() == 1 && restoring.empty());
+
+    // What is still owed is tried again a few times, further apart each time,
+    // and then left until the window is streamed again.
+    uint64_t waited = 0;
+    for (int attempt = 0; attempt < kOwedRetryAttempts; ++attempt) {
+        const uint64_t delay = OwedRetryDelayMs(attempt);
+        CHECK(delay > 0);
+        CHECK(attempt == 0 || delay > OwedRetryDelayMs(attempt - 1));
+        waited += delay;
+    }
+    // The first soon after a window busy for a moment; all of them within a
+    // couple of minutes.
+    CHECK(OwedRetryDelayMs(0) >= 1000 && OwedRetryDelayMs(0) <= 5000);
+    CHECK(waited <= 120000);
+    CHECK(OwedRetryDelayMs(kOwedRetryAttempts) == 0);
+    CHECK(OwedRetryDelayMs(-1) == 0);
 }
 
 }  // namespace

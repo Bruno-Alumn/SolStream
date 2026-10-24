@@ -190,6 +190,11 @@ bool WaitWhileBusy(const std::function<bool()>& busy,
     return true;
 }
 
+uint64_t OwedRetryDelayMs(int attempt) {
+    static constexpr uint64_t kDelaysMs[kOwedRetryAttempts] = {2000, 5000, 15000, 60000};
+    return attempt >= 0 && attempt < kOwedRetryAttempts ? kDelaysMs[attempt] : 0;
+}
+
 bool BeginRestore(const std::vector<OwedWindow>& owed,
                   std::vector<uint64_t>& restoring, uint64_t window, uint64_t revision) {
     if (window == 0 || RestoreInProgress(restoring, window)) {

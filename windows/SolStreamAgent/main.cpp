@@ -1567,6 +1567,13 @@ std::vector<solstream::OwedWindow> g_left_behind;
 /// Windows an older cleanup is still touching. Claims wait until that cleanup
 /// finishes, so it cannot move a window belonging to a new session. Same lock.
 std::vector<uint64_t> g_restoring_windows;
+/// The next try at what g_left_behind still owes (GetTickCount64, 0 for none),
+/// and how many tries since the debt last grew; see ScheduleOwedRetry. Same lock.
+ULONGLONG g_owed_retry_at = 0;
+int g_owed_retries = 0;
+/// A pass over g_left_behind is under way, at startup or on a retry; one at a
+/// time.
+std::atomic<bool> g_owed_pass_running{false};
 constexpr int kClaimRestoreInProgress = -2;
 uint64_t g_lock_generation = 0;   // guarded by g_lock_cs
 
@@ -2581,6 +2588,8 @@ constexpr DWORD kWatchIdleMs = 1000;
 /// interval, so tick jitter cannot make it skip every other idle wake.
 constexpr ULONGLONG kRescueIntervalMs = 900;
 
+void RetryOwedRestoresIfDue();
+
 /// Put a locked window back if anything moved or resized it, and everything
 /// else that has to notice the desktop changing. Runs for the life of the host.
 DWORD WINAPI WatcherProc(LPVOID) {
@@ -2685,6 +2694,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             }
             RescueStrandedWindows();
         }
+        RetryOwedRestoresIfDue();
         NotifyWindowsChangedIfSettled();
         interval = holding || g_window_set_dirty.load() ? kWatchActiveMs : kWatchIdleMs;
     }
@@ -3071,13 +3081,36 @@ std::vector<WindowLock> TakeSlotsForRestore(HWND window = nullptr) {
     return released;
 }
 
+/// After a pass that may have left windows owed: when g_left_behind is not
+/// empty, have the watcher start another pass later (RetryOwedRestoresIfDue),
+/// a few times and further apart each time; see OwedRetryDelayMs. `fresh` when
+/// windows have just been released, which starts the count again.
+void ScheduleOwedRetry(bool fresh) {
+    EnterCriticalSection(&g_lock_cs);
+    if (fresh) {
+        g_owed_retries = 0;
+    }
+    const size_t owed = g_left_behind.size();
+    const uint64_t delay = owed == 0 ? 0 : solstream::OwedRetryDelayMs(g_owed_retries);
+    g_owed_retry_at = delay == 0 ? 0 : GetTickCount64() + delay;
+    if (delay != 0) {
+        ++g_owed_retries;
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (owed != 0 && delay == 0) {
+        Log("[restore] %zu window%s still owed a restore after %d more tries; given "
+            "back when streamed again, or by the next host", owed, owed == 1 ? "" : "s",
+            solstream::kOwedRetryAttempts);
+    }
+}
+
 /// Persist the handoff before touching a window. A crash or failed call then
 /// leaves its debt in the recovery queue instead of dropping it with the slot.
 ///
 /// One window at a time, each marked just before it is touched. A window that
 /// does not answer within half a second is passed over and stays owed: the
 /// calls that restore it wait on its app without limit, and IsHungAppWindow
-/// takes five seconds to call it hung.
+/// takes five seconds to call it hung. The watcher tries it again shortly.
 void RestoreReleasedSlots(const std::vector<WindowLock>& released) {
     if (released.empty()) {
         return;
@@ -3103,6 +3136,7 @@ void RestoreReleasedSlots(const std::vector<WindowLock>& released) {
         }
         RestoreMarkedWindow(saved);
     }
+    ScheduleOwedRetry(true);
 }
 
 void UnlockWindow(HWND window) {
@@ -3127,7 +3161,12 @@ void UnlockAll() {
 /// is still written down, and a session that streams it again takes what it is
 /// owed from there (ClaimSlot). Each window leaves the list only once it has
 /// been given back, or is found to be gone or someone else's.
-DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
+///
+/// The same pass gives back what a disconnect here had to pass over, when the
+/// watcher tries again (RetryOwedRestoresIfDue). One of those can carry a zero
+/// process start, which only memory holds: it was never written down, and the
+/// pid and RestoreWindow's own checks are all there is to go on.
+void RestoreOwedPass() {
     EnterCriticalSection(&g_lock_cs);
     const std::vector<solstream::OwedWindow> owed = g_left_behind;
     LeaveCriticalSection(&g_lock_cs);
@@ -3155,15 +3194,17 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
             forget(entry);
             continue;
         }
-        const uint64_t created = ProcessCreationTime(owner);
-        if (created != 0 && created != entry.process_created) {
-            forget(entry);
-            continue;
-        }
-        if (created == 0) {
-            Log("[restore] window %llu's process cannot be identified; still owed "
-                "its place", (unsigned long long) entry.window);
-            continue;
+        if (entry.process_created != 0) {
+            const uint64_t created = ProcessCreationTime(owner);
+            if (created != 0 && created != entry.process_created) {
+                forget(entry);
+                continue;
+            }
+            if (created == 0) {
+                Log("[restore] window %llu's process cannot be identified; still owed "
+                    "its place", (unsigned long long) entry.window);
+                continue;
+            }
         }
         if (!AnswersPromptly(saved.window)) {
             Log("[restore] window %llu is not answering; left where it is, and still "
@@ -3184,7 +3225,38 @@ DWORD WINAPI RestoreLeftBehindProc(LPVOID) {
         RestoreMarkedWindow(saved);
     }
     RecordOwedWindows();
+}
+
+/// One pass, then the next try at whatever it could not give back.
+DWORD WINAPI RestoreOwedProc(LPVOID) {
+    RestoreOwedPass();
+    g_owed_pass_running = false;
+    ScheduleOwedRetry(false);
     return 0;
+}
+
+/// On the watcher's tick: start the next pass when one is due and none is
+/// under way. On a thread of its own, because each window it asks can take
+/// half a second to say it is busy, and the watcher keeps locked windows in
+/// place meanwhile. A pass already running schedules the next one itself.
+void RetryOwedRestoresIfDue() {
+    EnterCriticalSection(&g_lock_cs);
+    const bool due = g_owed_retry_at != 0 && GetTickCount64() >= g_owed_retry_at;
+    if (due) {
+        g_owed_retry_at = 0;
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (!due || g_owed_pass_running.exchange(true)) {
+        return;
+    }
+    Log("[restore] trying again to give back the windows still owed a restore");
+    HANDLE thread = CreateThread(nullptr, 0, RestoreOwedProc, nullptr, 0, nullptr);
+    if (!thread) {
+        g_owed_pass_running = false;
+        ScheduleOwedRetry(false);
+        return;
+    }
+    CloseHandle(thread);
 }
 
 /// Read what a host stopped by force owed, and give it back before serving.
@@ -3215,9 +3287,14 @@ void RestoreWindowsLeftBehind() {
     EnterCriticalSection(&g_lock_cs);
     g_left_behind = record.windows;
     LeaveCriticalSection(&g_lock_cs);
-    HANDLE thread = CreateThread(nullptr, 0, RestoreLeftBehindProc, nullptr, 0, nullptr);
+    g_owed_pass_running = true;
+    HANDLE thread = CreateThread(nullptr, 0, RestoreOwedProc, nullptr, 0, nullptr);
     if (!thread) {
-        return;   // still written down, and taken by a session that streams it
+        // Still written down, and taken by a session that streams it, or by
+        // the watcher's next try.
+        g_owed_pass_running = false;
+        ScheduleOwedRetry(false);
+        return;
     }
     if (WaitForSingleObject(thread, 5000) == WAIT_TIMEOUT) {
         Log("[restore] giving the windows back is taking more than 5 s; starting "

@@ -162,6 +162,19 @@ bool WaitWhileBusy(const std::function<bool()>& busy,
                    const std::function<void(uint32_t)>& sleep,
                    uint64_t limit_ms, uint32_t step_ms);
 
+/// How long to wait before trying again, the `attempt`th time (from 0), for the
+/// windows a restore had to pass over; 0 when it has tried enough.
+///
+/// A restore passes over a window that does not answer within half a second,
+/// and it stays owed. Only startup used to go through what is owed, so a window
+/// busy for a moment at disconnect kept the capture display's place and its
+/// missing frame until it was streamed again or the host restarted. Each try
+/// waits for half a second on every window still not answering, so they are
+/// few, and further apart each time: a window busy for a few seconds is caught
+/// by the first ones, and one hung for minutes is not worth asking forever.
+constexpr int kOwedRetryAttempts = 4;
+uint64_t OwedRetryDelayMs(int attempt);
+
 /// Mark a still-owed snapshot as being restored. False when it was replaced,
 /// is already being restored, or has a zero handle.
 bool BeginRestore(const std::vector<OwedWindow>& owed,
