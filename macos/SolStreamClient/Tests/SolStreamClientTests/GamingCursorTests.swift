@@ -496,6 +496,26 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [.press(1), .abs(400, 300), .abs(400, 300), .release(1)])
     }
 
+    /// A restart while the first click waits for the PC's focus: what was
+    /// kept back was for the old session and is dropped, and the button
+    /// still held is pressed on the new one once -- not twice, which the PC
+    /// could read as a double-click.
+    func testARestartDuringTheFocusWaitPressesTheButtonOnce() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let middle = NSPoint(x: 200, y: 150)
+        let focus = mouse.capture.focusRequested()
+        mouse.viewPress(at: 1)
+        XCTAssertEqual(mouse.packets, [])
+        mouse.capture.inputBecameLive()
+        XCTAssertEqual(mouse.packets, [.press(1)])
+        mouse.lift(at: middle)
+        XCTAssertEqual(mouse.packets, [.press(1), .abs(400, 300), .release(1)])
+        mouse.capture.focusSettled(focus)
+        XCTAssertEqual(mouse.packets, [.press(1), .abs(400, 300), .release(1)],
+                       "the old session's click went after all")
+    }
+
     /// Only the buttons the hand still holds are pressed again, each as itself.
     func testOnlyButtonsStillHeldArePressedAgain() {
         InputCapture.pointerMode = .desktop

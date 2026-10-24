@@ -877,6 +877,15 @@ public final class InputCapture {
     /// pressed on the PC with nothing ever to release it.
     public func inputBecameLive() {
         guard isCapturing else { return }
+        // Anything still kept back for the PC's focus is dropped, not sent.
+        // It was made for the session that has gone: the owner has already
+        // pointed `onInput` at the new one, so sending it now would hand the
+        // new session the click's press, and the press below would follow it
+        // -- down, down, up, which the PC can read as a double-click. What
+        // that click still holds is pressed below, once, like anything else
+        // held across the restart.
+        focusAwaited = nil
+        heldForFocus = nil
         let keys = heldKeys
         let buttons = heldButtons
         forgetHostState()
