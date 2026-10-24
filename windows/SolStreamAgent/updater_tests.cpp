@@ -37,6 +37,7 @@
 #include <map>
 #include <cstring>
 
+#include "agent_crypto.h"
 #include "capture_display.h"
 #include "clipboard.h"
 #include "driver_install.h"
@@ -3281,6 +3282,173 @@ void TestLeftBehind() {
     CHECK(OwedRetryDelayMs(-1) == 0);
 }
 
+
+/// A P-256 private key from its scalar and public point, for the vector's
+/// fixed client key.
+BCRYPT_KEY_HANDLE ImportEcdhPrivate(const std::vector<unsigned char>& point,
+                                    const std::vector<unsigned char>& d) {
+    if (point.size() != 65 || d.size() != 32) {
+        return nullptr;
+    }
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_ECDH_P256_ALGORITHM,
+                                                    nullptr, 0))) {
+        return nullptr;
+    }
+    std::vector<unsigned char> blob(sizeof(BCRYPT_ECCKEY_BLOB) + 96);
+    auto* header = reinterpret_cast<BCRYPT_ECCKEY_BLOB*>(blob.data());
+    header->dwMagic = BCRYPT_ECDH_PRIVATE_P256_MAGIC;
+    header->cbKey = 32;
+    std::memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB), point.data() + 1, 64);
+    std::memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB) + 64, d.data(), 32);
+    BCRYPT_KEY_HANDLE key = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptImportKeyPair(algorithm, nullptr, BCRYPT_ECCPRIVATE_BLOB, &key,
+                                            blob.data(), (ULONG) blob.size(), 0))) {
+        key = nullptr;
+    }
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return key;
+}
+
+/// AES-256-GCM, ciphertext then tag, for the vector's sealed datagram.
+std::vector<unsigned char> SealGcm(const std::vector<unsigned char>& key,
+                                   const std::vector<unsigned char>& nonce,
+                                   const std::vector<unsigned char>& aad,
+                                   const std::vector<unsigned char>& plaintext) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_AES_ALGORITHM,
+                                                    nullptr, 0))) {
+        return {};
+    }
+    std::vector<unsigned char> out;
+    BCRYPT_KEY_HANDLE handle = nullptr;
+    if (BCRYPT_SUCCESS(BCryptSetProperty(algorithm, BCRYPT_CHAINING_MODE,
+                                         (PUCHAR) BCRYPT_CHAIN_MODE_GCM,
+                                         sizeof(BCRYPT_CHAIN_MODE_GCM), 0))
+        && BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(algorithm, &handle, nullptr, 0,
+                                                     (PUCHAR) key.data(),
+                                                     (ULONG) key.size(), 0))) {
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+        BCRYPT_INIT_AUTH_MODE_INFO(info);
+        info.pbNonce = (PUCHAR) nonce.data();
+        info.cbNonce = (ULONG) nonce.size();
+        info.pbAuthData = (PUCHAR) aad.data();
+        info.cbAuthData = (ULONG) aad.size();
+        unsigned char tag[16] = {};
+        info.pbTag = tag;
+        info.cbTag = sizeof(tag);
+        std::vector<unsigned char> sealed(plaintext.size());
+        ULONG done = 0;
+        if (BCRYPT_SUCCESS(BCryptEncrypt(handle, (PUCHAR) plaintext.data(),
+                                         (ULONG) plaintext.size(), &info, nullptr, 0,
+                                         sealed.data(), (ULONG) sealed.size(), &done, 0))) {
+            out = sealed;
+            out.insert(out.end(), tag, tag + sizeof(tag));
+        }
+        BCryptDestroyKey(handle);
+    }
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return out;
+}
+
+void TestAgentCrypto() {
+    // SHA-256, FIPS 180-2's "abc".
+    const std::string abc = "abc";
+    CHECK(ToHex(solstream::Sha256(std::vector<unsigned char>(abc.begin(), abc.end())))
+          == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    // HKDF, RFC 5869 test case 1: the extract is one HMAC, then the expand.
+    const std::vector<unsigned char> ikm(22, 0x0b);
+    const std::vector<unsigned char> salt = FromHex("000102030405060708090a0b0c");
+    const std::vector<unsigned char> prk = HmacSha256(salt, ikm);
+    CHECK(ToHex(prk) == "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5");
+    CHECK(ToHex(HkdfExpand(prk, FromHex("f0f1f2f3f4f5f6f7f8f9"), 42))
+          == "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf"
+             "34007208d5b887185865");
+    CHECK(HkdfExpand(prk, {}, 0).empty());
+
+    // The auth v2 proof, worked out with Python's hmac:
+    // HMAC-SHA256(token, "SolStream agent auth v2" || challenge || cnonce).
+    const std::string token = "00112233445566778899aabbccddeeff";
+    const std::string challenge =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const std::string cnonce =
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+    const std::string proof =
+        "8088d61292cfe919910042d796548189e271424c40025e35719b0e6369c3eacc";
+    CHECK(ProofMatches(token, challenge, cnonce, proof));
+    std::string wrong = proof;
+    wrong[0] = '9';
+    CHECK(!ProofMatches(token, challenge, cnonce, wrong));
+    CHECK(!ProofMatches(token, cnonce, challenge, proof));     // the order counts
+    CHECK(!ProofMatches("00112233445566778899aabbccddeefe", challenge, cnonce, proof));
+    CHECK(!ProofMatches("", challenge, cnonce, proof));
+    CHECK(!ProofMatches(token, challenge.substr(2), cnonce, proof));
+    CHECK(!ProofMatches(token, challenge, cnonce, proof.substr(2)));
+
+    // The SMT/1 key schedule against the frozen cross-language vector in
+    // spike/smt-vectors: fixed keys and nonces, from the shared secret through
+    // the expand to one sealed datagram. The keys were also worked out with
+    // Python's hashlib and hmac.
+    const std::vector<unsigned char> cpub = FromHex(
+        "040217e617f0b6443928278f96999e69a23a4f2c152bdf6d6cdf66e5b80282d4ed"
+        "194a7debcb97712d2dda3ca85aa8765a56f45fc758599652f2897c65306e5794");
+    const std::vector<unsigned char> hpub = FromHex(
+        "04d65a93977caa3d1b081852ff57a79e465f1660577304baead505dd3a48589cf3"
+        "50185e895372df6221ea3a137557e473fddb6755f05bd507c3c533fce9c91285");
+    const std::string z_hex =
+        "ccfc261f58193c98ca4ad4a53bbac6f0ee29bc4d48438090446908622ca79af6";
+    const std::vector<unsigned char> client_nonce(32, 0xAA);
+    const std::vector<unsigned char> host_nonce(32, 0xBB);
+
+    // The secret big-endian, which BCrypt does not hand over by itself.
+    BCRYPT_KEY_HANDLE client = ImportEcdhPrivate(cpub, std::vector<unsigned char>(32, 0x11));
+    CHECK(client != nullptr);
+    if (client) {
+        CHECK(ToHex(EcdhSecret(client, hpub)) == z_hex);
+        CHECK(EcdhSecret(client, std::vector<unsigned char>(hpub.begin(), hpub.end() - 1))
+                  .empty());
+        BCryptDestroyKey(client);
+    }
+    std::vector<unsigned char> point;
+    BCRYPT_KEY_HANDLE fresh = NewEcdhKeyPair(point);
+    CHECK(fresh != nullptr);
+    CHECK(point.size() == 65 && point[0] == 0x04);
+    if (fresh) {
+        BCryptDestroyKey(fresh);
+    }
+
+    const std::vector<unsigned char> okm = DeriveMediaKeys(
+        cpub, hpub, client_nonce, host_nonce, 42, FromHex(z_hex), 0, token);
+    CHECK(ToHex(okm)
+          == "8c83fc537b9b19d56753962eacc673097a76510c95b60f41fdb5056a5062aaea"
+             "4aa5aaf36c0cb3dacd26251c0c0e84b96c6910d1d87bcd803f0df616e7dd3b87"
+             "4a20dd1ecfc0593154045ebd2fb2d362565a89105e66743d3c28b07f94dd9d05"
+             "59a66830e9b371ce8fede99c");
+    // The epoch is in the expand's info, high byte first.
+    CHECK(ToHex(DeriveMediaKeys(cpub, hpub, client_nonce, host_nonce, 42, FromHex(z_hex),
+                                0x0102, token))
+          == "f3b92482b2c9a6e42c8643bd7ef33cc0c9741e45054ca044d087eea06c7955a3"
+             "6e7a8301f2e90afda2bd8d78b3436e527dfd952f3191dd08570981e785662d40"
+             "fabfbafd8782386e1232a3b9b77703fc4c6b578fdce9cad289cefbe583a8e98e"
+             "e8c0f91393242f96a6d04fc5");
+    CHECK(okm.size() == 108);
+    if (okm.size() == 108) {
+        // kH2C, then the host-to-client nonce's fixed field and the session id.
+        const std::vector<unsigned char> key(okm.begin(), okm.begin() + 32);
+        std::vector<unsigned char> nonce(okm.begin() + 64, okm.begin() + 70);
+        const std::vector<unsigned char> header = {0x10, okm[79], 0, 0, 0, 0, 0, 1};
+        nonce.insert(nonce.end(), {0, 0, 0, 0, 0, 1});
+        const std::string ping = "\x01SMT/1 ping";
+        std::vector<unsigned char> datagram = header;
+        const std::vector<unsigned char> sealed =
+            SealGcm(key, nonce, header, std::vector<unsigned char>(ping.begin(), ping.end()));
+        datagram.insert(datagram.end(), sealed.begin(), sealed.end());
+        CHECK(ToHex(datagram)
+              == "106200000000000197a994e89c72a402aad58804a5822a0168d97fe393aefa275679b3");
+    }
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -3375,6 +3543,7 @@ int wmain(int argc, wchar_t** argv) {
     TestPlacementForRestore();
     TestOwedWindows(scratch);
     TestLeftBehind();
+    TestAgentCrypto();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

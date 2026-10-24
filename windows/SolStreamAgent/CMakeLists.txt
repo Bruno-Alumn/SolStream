@@ -250,14 +250,16 @@ endif()
 # the clipboard's line endings and privacy markers, when the sound capture
 # opens its device again (media/audio_reopen.h, a header of its own because
 # audio.cpp builds only with MSVC), and when a Mac may take back the session
-# it left behind, this being the one C++ test program. No
+# it left behind, and the auth proof and the SMT/1 key schedule against
+# their frozen vector (agent_crypto.cpp), this being the one C++ test
+# program. No
 # network, and nothing outside a temporary folder and a volatile registry key
 # of its own under HKCU: it never sees the real %LOCALAPPDATA%, nor SolStream's
 # records in HKLM. updater_tests.cpp includes updater.cpp to reach its
 # internals, so that is not listed again here. Not built by
 # package-windows.ps1, which configures with BUILD_TESTING off.
 if(BUILD_TESTING)
-    add_executable(SolStreamUpdaterTests updater_tests.cpp media/keys.cpp)
+    add_executable(SolStreamUpdaterTests updater_tests.cpp media/keys.cpp agent_crypto.cpp)
     set_target_properties(SolStreamUpdaterTests PROPERTIES
         CXX_STANDARD 20
         CXX_STANDARD_REQUIRED ON
