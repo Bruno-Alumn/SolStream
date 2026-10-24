@@ -9,15 +9,6 @@
 
 namespace solstream {
 
-std::string RandomHex(size_t count) {
-    std::vector<unsigned char> bytes(count);
-    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
-                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-        return {};
-    }
-    return ToHex(bytes);
-}
-
 bool ProofMatches(const std::string& token_hex, const std::string& challenge_hex,
                   const std::string& cnonce_hex, const std::string& proof_hex) {
     const std::vector<unsigned char> challenge = FromHex(challenge_hex);

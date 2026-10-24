@@ -166,6 +166,15 @@ std::vector<unsigned char> FromHex(const std::string& hex) {
     return out;
 }
 
+std::string RandomHex(size_t count) {
+    std::vector<unsigned char> bytes(count);
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, bytes.data(), (ULONG) count,
+                                        BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+        return {};
+    }
+    return ToHex(bytes);
+}
+
 bool ParseHex4(std::string_view text, size_t at, unsigned& out) {
     if (at + 3 >= text.size()) {
         return false;

@@ -44,10 +44,6 @@ enum class DriverStep {
     Done,         ///< the display's part is over; SolStream's own install follows
 };
 
-/// `count` random bytes as lowercase hex, or empty if the RNG refuses. Here
-/// rather than in util.h only because installer.cpp needs it too.
-std::string RandomHex(size_t count);
-
 /// Delete a folder and everything in it. A junction or link inside it is
 /// removed as itself and never followed: what it points at is somewhere else,
 /// and this runs elevated over folders a user could have put one in. Here
