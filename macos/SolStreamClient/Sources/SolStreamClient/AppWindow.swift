@@ -798,7 +798,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
         inputCapture?.enableCapture()
         installPointerStats()
         // Give the host window focus too, so keystrokes land in the right app.
-        agent.focus(windowID: remoteWindowID)
+        // The click that made this window key waits for the answer: it goes
+        // by another channel, and could otherwise land in the app before.
+        let request = inputCapture?.focusRequested()
+        agent.focus(windowID: remoteWindowID) { [weak self] in
+            guard let request else { return }
+            self?.inputCapture?.focusSettled(request)
+        }
         onKeyboardChange?()
     }
 

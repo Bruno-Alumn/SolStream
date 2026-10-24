@@ -286,6 +286,68 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1)])
     }
 
+    // MARK: - The first click and the PC's focus
+
+    /// The click that made the window key waits for the PC to focus its
+    /// window -- the focus goes by the agent channel, the click by the media
+    /// channel -- and then goes, with everything made after it, in order.
+    func testTheFirstClickWaitsForThePCsFocus() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let focus = mouse.capture.focusRequested()
+        mouse.viewPress(at: 1)
+        mouse.lift()
+        XCTAssertEqual(mouse.packets, [], "the click went before the PC had focused its window")
+        mouse.capture.focusSettled(focus)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1), .abs(400, 300), .release(1)])
+        mouse.click()
+        XCTAssertEqual(mouse.packets.count, 8, "a click after the answer was kept back")
+    }
+
+    /// Only the answer to the latest request lets the click go.
+    func testAnAnswerToAnOlderFocusKeepsTheClickBack() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let older = mouse.capture.focusRequested()
+        let latest = mouse.capture.focusRequested()
+        mouse.viewPress(at: 1)
+        mouse.capture.focusSettled(older)
+        XCTAssertEqual(mouse.packets, [])
+        mouse.capture.focusSettled(latest)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1)])
+    }
+
+    /// An answer that never comes holds the click no longer than `focusWait`.
+    func testAFocusThatIsNeverAnsweredLetsTheClickGo() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        mouse.capture.focusWait = 0.05
+        _ = mouse.capture.focusRequested()
+        mouse.viewPress(at: 1)
+        XCTAssertEqual(mouse.packets, [])
+        let waited = expectation(description: "past the wait")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { waited.fulfill() }
+        wait(for: [waited], timeout: 5)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1)])
+    }
+
+    /// A click in a window that was already key, the PC's answer in, is sent
+    /// at once; and the window losing the keyboard sends what was kept back
+    /// before letting go of it.
+    func testNothingIsKeptBackOnceAnsweredOrAfterTheWindowLetsGo() {
+        InputCapture.pointerMode = .desktop
+        let answered = Mouse()
+        answered.capture.focusSettled(answered.capture.focusRequested())
+        answered.viewPress(at: 1)
+        XCTAssertEqual(answered.packets, [.abs(400, 300), .press(1)])
+
+        let resigned = Mouse()
+        _ = resigned.capture.focusRequested()
+        resigned.viewPress(at: 1)
+        resigned.capture.disableCapture()
+        XCTAssertEqual(resigned.packets, [.abs(400, 300), .press(1), .release(1)])
+    }
+
     /// In gaming mode the click that brings the window forward takes the
     /// mouse and fires nothing.
     func testInGamingTheFirstClickOnlyTakesTheMouse() {

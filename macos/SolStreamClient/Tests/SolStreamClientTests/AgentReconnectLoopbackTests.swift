@@ -387,6 +387,43 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(agent.displays, [], "a PC with no display says so")
     }
 
+    // MARK: - Focus
+
+    /// A focus is over when the host has answered it, and not before: the
+    /// click that made the window key waits for exactly this.
+    func testAFocusCompletesOnlyOnceTheHostHasAnswered() throws {
+        let seen = Observations()
+        let answer = DispatchSemaphore(value: 0)
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            seen.set("request", ScriptedHost.json(connection.readLine(timeout: 5)))
+            _ = answer.wait(timeout: .now() + 5)
+            connection.send(#"{"type":"focused","ok":true,"foreground":true}"#)
+            Thread.sleep(forTimeInterval: 2)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+
+        var completed = false
+        let done = expectation(description: "focus answered")
+        agent.focus(windowID: 42) {
+            completed = true
+            done.fulfill()
+        }
+        let early = expectation(description: "before the answer")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { early.fulfill() }
+        wait(for: [early], timeout: 5)
+        XCTAssertFalse(completed, "the focus completed before the host answered")
+        answer.signal()
+        wait(for: [done], timeout: 5)
+        let request = try XCTUnwrap(seen.get("request") as? [String: Any])
+        XCTAssertEqual(request["cmd"] as? String, "focus")
+        XCTAssertEqual(request["id"] as? Int, 42)
+    }
+
     // MARK: - Helpers
 
     /// Connect, and wait for the host's first display list.

@@ -444,6 +444,10 @@ public final class InputCapture {
     public func disableCapture() {
         guard isCapturing else { return }
         isCapturing = false
+        // Anything kept back for the PC's focus goes first, so the releases
+        // below follow the presses they let go of.
+        focusAwaited = nil
+        sendHeldForFocus()
         releasePointer("the window stopped being key")
         releaseHeldInput()
         removeMonitors()
@@ -558,7 +562,7 @@ public final class InputCapture {
             } else {
                 heldKeys[event.keyCode] = nil
             }
-            onInput?(keyPacket(key, pressed: pressed,
+            emit(keyPacket(key, pressed: pressed,
                                modifiers: Self.modifiers(from: event.modifierFlags)))
             // Everything that reached the host is consumed. The window is a
             // Windows application as far as the keyboard is concerned, so ⇥ must
@@ -749,7 +753,8 @@ public final class InputCapture {
     /// character comes complete, and Alt held under one could make a menu of
     /// it.
     public func sendText(_ text: String) {
-        guard isCapturing, let send = onInput else { return }
+        guard isCapturing, onInput != nil else { return }
+        let send = emit
         var run = String.UnicodeScalarView()
         func flush() {
             guard !run.isEmpty else { return }
@@ -832,7 +837,8 @@ public final class InputCapture {
     /// went nowhere -- left the PC typing lower case, and every later press
     /// flipped both sides and kept them inverted.
     func syncCapsLock(to on: Bool) {
-        guard let send = onInput else { return }
+        guard onInput != nil else { return }
+        let send = emit
         if sendsScanCodes {
             let state: SMTInput.Modifiers = on ? [.capsLock] : []
             send(SMTInput.scanKey(code: Self.scanCapsLock, pressed: true, modifiers: state))
@@ -886,7 +892,7 @@ public final class InputCapture {
             let modifiers = Self.modifiers(from: flags)
             for change in Self.modifierChanges(from: lastDeviceFlags, to: held,
                                                among: Self.modifierKeys) {
-                onInput?(keyPacket(change.key.hostKey, pressed: change.pressed,
+                emit(keyPacket(change.key.hostKey, pressed: change.pressed,
                                    modifiers: modifiers))
             }
         }
@@ -921,12 +927,12 @@ public final class InputCapture {
                 continue
             }
             guard let held = heldKeys.removeValue(forKey: code) else { continue }
-            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
+            emit(keyPacket(held.key, pressed: false, modifiers: []))
         }
         guard keyStateAnswers else { return }
         for code in heldKeys.keys.sorted() where !isKeyPhysicallyDown(code) {
             guard let held = heldKeys.removeValue(forKey: code) else { continue }
-            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
+            emit(keyPacket(held.key, pressed: false, modifiers: []))
         }
     }
 
@@ -935,17 +941,17 @@ public final class InputCapture {
     /// released, so a single missed key-up types forever.
     private func releaseHeldInput() {
         for held in heldKeys.values {
-            onInput?(keyPacket(held.key, pressed: false, modifiers: []))
+            emit(keyPacket(held.key, pressed: false, modifiers: []))
         }
         for button in heldButtons {
-            onInput?(SMTInput.mouseButton(button, pressed: false))
+            emit(SMTInput.mouseButton(button, pressed: false))
         }
         // Deduplicated: Control and Command share a Windows key code, so a hand
         // holding both would otherwise send two ups for it.
         var released: Set<UInt16> = []
         for key in Self.modifierKeys where (lastDeviceFlags & key.deviceMask) != 0 {
             guard released.insert(key.windowsKeyCode).inserted else { continue }
-            onInput?(keyPacket(key.hostKey, pressed: false, modifiers: []))
+            emit(keyPacket(key.hostKey, pressed: false, modifiers: []))
         }
         forgetHostState()
     }
@@ -1069,7 +1075,76 @@ public final class InputCapture {
         let monitored = press == lastMonitoredPress
         // The monitor has already sent the other buttons' presses.
         guard event.type == .leftMouseDown || !monitored else { return }
+        // The PC is still bringing this window forward: the click, and all
+        // after it, wait for that. See `focusRequested`.
+        if !monitored, focusAwaited != nil, heldForFocus == nil {
+            heldForFocus = []
+        }
         handleMouseEvent(event, firstMouse: !monitored)
+    }
+
+    // MARK: - The click that brings the window forward, and the PC's focus
+
+    /// How long the click that made the window key waits for the PC to focus
+    /// its window before it is sent anyway, so input never stalls on a slow
+    /// or lost answer. Not private so the tests can shorten it.
+    var focusWait: TimeInterval = 0.3
+
+    /// The focus request the PC has not answered yet, by number; nil once it
+    /// has, or the wait for it is over.
+    private var focusAwaited: UInt64?
+    private var focusRequests: UInt64 = 0
+
+    /// What was kept back behind the click that made the window key, in the
+    /// order it was made; nil while nothing is.
+    private var heldForFocus: [Data]?
+
+    /// The owner has just asked the PC to focus this window. Returns the
+    /// number to hand to `focusSettled` when the PC answers.
+    ///
+    /// The focus goes down the agent channel and the click down the media
+    /// channel, and nothing orders the two: the click that brought the window
+    /// forward could reach the PC first, and land in whatever Windows
+    /// application had the foreground before -- the same coordinates, the
+    /// wrong application. So that click, and everything after it, is kept
+    /// back until the PC has answered, or `focusWait` has passed.
+    public func focusRequested() -> UInt64 {
+        focusRequests &+= 1
+        let request = focusRequests
+        focusAwaited = request
+        DispatchQueue.main.asyncAfter(deadline: .now() + focusWait) { [weak self] in
+            guard let self, self.focusAwaited == request else { return }
+            if self.heldForFocus != nil {
+                Log.info("[input] the PC had not focused its window after"
+                         + " \(Int(self.focusWait * 1000)) ms; the click went anyway")
+            }
+            self.focusSettled(request)
+        }
+        return request
+    }
+
+    /// The PC has answered focus request `request`, or the wait for it is
+    /// over: what was kept back goes, in order. An answer to an older request
+    /// changes nothing.
+    public func focusSettled(_ request: UInt64) {
+        guard focusAwaited == request else { return }
+        focusAwaited = nil
+        sendHeldForFocus()
+    }
+
+    private func sendHeldForFocus() {
+        guard let held = heldForFocus else { return }
+        heldForFocus = nil
+        held.forEach { onInput?($0) }
+    }
+
+    /// Every packet leaves through here, so one kept back is never overtaken.
+    private func emit(_ packet: Data) {
+        if heldForFocus != nil {
+            heldForFocus?.append(packet)
+        } else {
+            onInput?(packet)
+        }
     }
 
     /// Let go on the PC of every button it still holds: AppKit's resize
@@ -1082,7 +1157,7 @@ public final class InputCapture {
     public func releaseStrandedButtons(_ reason: String) {
         guard !heldButtons.isEmpty else { return }
         for button in heldButtons.sorted(by: { $0.rawValue < $1.rawValue }) {
-            onInput?(SMTInput.mouseButton(button, pressed: false))
+            emit(SMTInput.mouseButton(button, pressed: false))
         }
         Log.info("[input] let go of \(heldButtons.count) button(s) on the PC (\(reason))")
         heldButtons.removeAll()
@@ -1182,7 +1257,7 @@ public final class InputCapture {
         guard let button = button(for: event) else { return }
         syncModifiers(to: event.modifierFlags)
         heldButtons.insert(button)
-        onInput?(SMTInput.mouseButton(button, pressed: true))
+        emit(SMTInput.mouseButton(button, pressed: true))
     }
 
     /// Release a button on the host -- only one it was told is down, since a
@@ -1191,7 +1266,7 @@ public final class InputCapture {
     private func releaseButton(_ event: NSEvent, positionIn view: NSView? = nil) {
         guard let button = button(for: event), heldButtons.remove(button) != nil else { return }
         if let view { sendPosition(for: event, in: view) }
-        onInput?(SMTInput.mouseButton(button, pressed: false))
+        emit(SMTInput.mouseButton(button, pressed: false))
     }
 
     private func sendWheel(_ event: NSEvent) {
@@ -1200,8 +1275,8 @@ public final class InputCapture {
                                     precise: event.hasPreciseScrollingDeltas,
                                     residual: scrollResidual)
         scrollResidual = wheel.residual
-        if wheel.vertical != 0 { onInput?(SMTInput.scroll(amount: wheel.vertical)) }
-        if wheel.horizontal != 0 { onInput?(SMTInput.horizontalScroll(amount: wheel.horizontal)) }
+        if wheel.vertical != 0 { emit(SMTInput.scroll(amount: wheel.vertical)) }
+        if wheel.horizontal != 0 { emit(SMTInput.horizontalScroll(amount: wheel.horizontal)) }
     }
 
     // MARK: - Following the host's cursor
@@ -1511,7 +1586,7 @@ public final class InputCapture {
             relativeResidual = motion.residual
             if motion.dx != 0 || motion.dy != 0 {
                 positionsSent += 1
-                onInput?(SMTInput.mouseMoveRelative(deltaX: motion.dx, deltaY: motion.dy))
+                emit(SMTInput.mouseMoveRelative(deltaX: motion.dx, deltaY: motion.dy))
             }
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -1620,7 +1695,7 @@ public final class InputCapture {
     private func sendCanvasPoint(unit: CGPoint, source: CGRect, canvas: CGSize) {
         let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
         positionsSent += 1
-        onInput?(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
+        emit(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
                                             y: Int(target.y.rounded()),
                                             referenceWidth: Int(canvas.width),
                                             referenceHeight: Int(canvas.height)))

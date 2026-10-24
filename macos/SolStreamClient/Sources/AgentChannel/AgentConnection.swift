@@ -1620,13 +1620,18 @@ public final class AgentConnection {
     /// looking perfect while everything typed goes into another application.
     /// There is nothing the Mac can do about it from here, but a log line turns
     /// "my typing disappears" into something diagnosable.
-    public func focus(windowID: UInt64) {
+    ///
+    /// - Parameter completion: called on the main queue once the request is
+    ///   over -- answered, refused or lost. The host answers only after it has
+    ///   tried to bring the window forward, so this is the moment a click sent
+    ///   down the media channel lands in this window rather than the last one.
+    public func focus(windowID: UInt64, completion: (() -> Void)? = nil) {
         send(["cmd": "focus", "id": windowID]) { result in
-            guard case .success(let reply) = result else { return }
-            if reply["foreground"] as? Bool == false {
+            if case .success(let reply) = result, reply["foreground"] as? Bool == false {
                 Log.info("[agent] the host could not focus window \(windowID);"
                          + " keystrokes will go to whatever is focused there")
             }
+            if let completion { DispatchQueue.main.async(execute: completion) }
         }
     }
 
