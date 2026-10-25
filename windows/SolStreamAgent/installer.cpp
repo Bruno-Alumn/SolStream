@@ -22,6 +22,9 @@
 namespace solstream {
 namespace {
 
+// Forward declarations for helpers used before they are defined.
+std::wstring PowerShellEscape(const std::wstring& text);
+
 constexpr wchar_t kTaskName[] = L"SolStream Host";
 constexpr wchar_t kUninstallKey[] =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\SolStream";
@@ -504,11 +507,12 @@ void ForceStopInstalled(const std::wstring& destination) {
     // belongs to this install without touching a program somebody else set up
     // themselves — which is none of our business and would be a rude surprise.
     const std::wstring mine = std::to_wstring(GetCurrentProcessId());
+    const std::wstring safe = PowerShellEscape(destination);
     const DWORD code =
         RunHidden(L"powershell.exe -NoProfile -Command \""
                   L"Get-CimInstance Win32_Process | Where-Object { "
                   L"$_.ProcessId -ne " + mine + L" -and $_.ExecutablePath -and "
-                  L"$_.ExecutablePath.StartsWith('" + destination + L"\\', "
+                  L"$_.ExecutablePath.StartsWith('" + safe + L"\\', "
                   L"[System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { "
                   L"Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\"");
     if (code != 0) {
@@ -772,6 +776,24 @@ std::wstring XmlEscape(const std::wstring& text) {
     return out;
 }
 
+/// Text safe to put inside a PowerShell single-quoted string. The only
+/// character that ends such a string is a single quote, which is escaped by
+/// doubling it. The install directory comes from the environment, and a path
+/// like "C:\Users\O'Brien\..." would otherwise break out of the quoted path
+/// and let the rest of the string be interpreted as commands.
+std::wstring PowerShellEscape(const std::wstring& text) {
+    std::wstring out;
+    out.reserve(text.size());
+    for (const wchar_t c : text) {
+        if (c == L'\'') {
+            out += L"''";
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 /// Who the logon task belongs to: whoever is sitting at this PC.
@@ -869,8 +891,9 @@ std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& p
 /// are not ours. Compared without wildcards, as StopInstalled compares paths,
 /// so nothing in a folder's name is read as a pattern.
 std::wstring FirewallSweepCommand(const std::wstring& directory) {
+    const std::wstring safe = PowerShellEscape(directory);
     return L"powershell.exe -NoProfile -WindowStyle Hidden -Command \""
-           L"$dir = '" + directory + L"\\'; "
+           L"$dir = '" + safe + L"\\'; "
            L"Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | "
            L"Where-Object { $_.Program -and $_.Program.StartsWith($dir, "
            L"[System.StringComparison]::OrdinalIgnoreCase) } | "
@@ -881,7 +904,8 @@ std::wstring FirewallSweepCommand(const std::wstring& directory) {
 std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& destination,
                           bool at_logon) {
     const std::wstring user = XmlEscape(account);
-    const std::wstring directory = XmlEscape(destination);
+    const std::wstring workingDirectory = XmlEscape(destination);
+    const std::wstring command = XmlEscape(InstalledExe(destination));
     return
         L"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
         L"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
@@ -920,12 +944,12 @@ std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& desti
         L"  </Settings>\r\n"
         L"  <Actions Context=\"Author\">\r\n"
         L"    <Exec>\r\n"
-        L"      <Command>" + InstalledExe(directory) + L"</Command>\r\n"
+        L"      <Command>" + command + L"</Command>\r\n"
         // --listen-all because an installed host that only answers on loopback is
         // one no Mac can reach. The socket still requires the pairing token off
         // loopback; the window shows that token. That is the lock, not the address.
         L"      <Arguments>--listen-all --background</Arguments>\r\n"
-        L"      <WorkingDirectory>" + directory + L"</WorkingDirectory>\r\n"
+        L"      <WorkingDirectory>" + workingDirectory + L"</WorkingDirectory>\r\n"
         L"    </Exec>\r\n"
         L"  </Actions>\r\n"
         L"</Task>\r\n";

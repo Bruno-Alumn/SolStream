@@ -3690,14 +3690,25 @@ std::string WindowStatusJson(uint64_t id) {
 bool FieldString(const std::string& json, const char* key, std::string& out) {
     const std::string needle = std::string("\"") + key + "\"";
     size_t at = json.find(needle);
+    while (at != std::string::npos) {
+        // A key is "key": ... ; a value that happens to contain the same
+        // bytes is followed by a comma, a closing brace, or more string, not
+        // by a colon. This keeps "cmd" from matching inside "cmd2" or a
+        // window title.
+        size_t colon = at + needle.size();
+        while (colon < json.size()
+               && (json[colon] == ' ' || json[colon] == '\t')) {
+            ++colon;
+        }
+        if (colon < json.size() && json[colon] == ':') {
+            break;
+        }
+        at = json.find(needle, at + 1);
+    }
     if (at == std::string::npos) {
         return false;
     }
-    at = json.find(':', at + needle.size());
-    if (at == std::string::npos) {
-        return false;
-    }
-    at = json.find('"', at);
+    at = json.find('"', at + needle.size());
     if (at == std::string::npos) {
         return false;
     }
@@ -3763,6 +3774,17 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
 bool FieldNumber(const std::string& json, const char* key, long long& out) {
     const std::string needle = std::string("\"") + key + "\"";
     size_t at = json.find(needle);
+    while (at != std::string::npos) {
+        size_t colon = at + needle.size();
+        while (colon < json.size()
+               && (json[colon] == ' ' || json[colon] == '\t')) {
+            ++colon;
+        }
+        if (colon < json.size() && json[colon] == ':') {
+            break;
+        }
+        at = json.find(needle, at + 1);
+    }
     if (at == std::string::npos) {
         return false;
     }
