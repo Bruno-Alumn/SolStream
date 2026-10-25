@@ -4,6 +4,7 @@
 
 #include <dwmapi.h>
 
+#include <algorithm>
 #include <optional>
 
 namespace solstream::media {
