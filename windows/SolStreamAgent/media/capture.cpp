@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "log.h"
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Capture.h>
@@ -190,66 +191,77 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
         return;
     }
     const long long at = Now();
-    // The frame pool's textures stay the size the pool was created at; WGC does
-    // not grow or shrink them because the source changed. ContentSize is where
-    // the real picture ends, and the pool has to be recreated to make the two
-    // agree again -- which is NOT done here. See RecreatePoolIfNeeded: doing it
-    // on this thread is what crashed the agent, with an access violation inside
-    // ntdll and four "the encoder would not produce output (0x8000FFFF)" lines
-    // in front of it, because Recreate frees the very surfaces this callback is
-    // being dispatched over. So this arrival is served from the part of the
-    // surface both sizes have in common -- on a shrink that is the content, and
-    // the stale band the source used to occupy is left out rather than streamed
-    // as a border -- and the consumer thread rebuilds the pool between frames.
-    const auto content = frame.ContentSize();
-    auto access = frame.Surface().as<
-        ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-    com_ptr<ID3D11Texture2D> texture;
-    if (content.Width > 0 && content.Height > 0
-        && SUCCEEDED(access->GetInterface(guid_of<ID3D11Texture2D>(),
-                                          texture.put_void()))) {
-        D3D11_TEXTURE2D_DESC desc{};
-        texture->GetDesc(&desc);
-        const UINT usableWidth =
-            (UINT) content.Width < desc.Width ? (UINT) content.Width : desc.Width;
-        const UINT usableHeight =
-            (UINT) content.Height < desc.Height ? (UINT) content.Height : desc.Height;
-        std::lock_guard<std::mutex> guard(lock);
-        if (!retained || usableWidth != width || usableHeight != height) {
-            retained = nullptr;
-            D3D11_TEXTURE2D_DESC mine{};
-            mine.Width = usableWidth;
-            mine.Height = usableHeight;
-            mine.MipLevels = 1;
-            mine.ArraySize = 1;
-            mine.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            mine.SampleDesc.Count = 1;
-            mine.Usage = D3D11_USAGE_DEFAULT;
-            mine.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-            if (FAILED(device->CreateTexture2D(&mine, nullptr, retained.put()))) {
-                frame.Close();
-                return;
+    try {
+        // The frame pool's textures stay the size the pool was created at; WGC
+        // does not grow or shrink them because the source changed. ContentSize
+        // is where the real picture ends, and the pool has to be recreated to
+        // make the two agree again -- which is NOT done here. See
+        // RecreatePoolIfNeeded: doing it on this thread is what crashed the
+        // agent, with an access violation inside ntdll and four "the encoder
+        // would not produce output (0x8000FFFF)" lines in front of it, because
+        // Recreate frees the very surfaces this callback is being dispatched
+        // over. So this arrival is served from the part of the surface both
+        // sizes have in common -- on a shrink that is the content, and the
+        // stale band the source used to occupy is left out rather than streamed
+        // as a border -- and the consumer thread rebuilds the pool between
+        // frames.
+        const auto content = frame.ContentSize();
+        auto access = frame.Surface().as<
+            ::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+        com_ptr<ID3D11Texture2D> texture;
+        if (content.Width > 0 && content.Height > 0
+            && SUCCEEDED(access->GetInterface(guid_of<ID3D11Texture2D>(),
+                                              texture.put_void()))) {
+            D3D11_TEXTURE2D_DESC desc{};
+            texture->GetDesc(&desc);
+            const UINT usableWidth =
+                (UINT) content.Width < desc.Width ? (UINT) content.Width : desc.Width;
+            const UINT usableHeight =
+                (UINT) content.Height < desc.Height ? (UINT) content.Height : desc.Height;
+            std::lock_guard<std::mutex> guard(lock);
+            if (!retained || usableWidth != width || usableHeight != height) {
+                retained = nullptr;
+                D3D11_TEXTURE2D_DESC mine{};
+                mine.Width = usableWidth;
+                mine.Height = usableHeight;
+                mine.MipLevels = 1;
+                mine.ArraySize = 1;
+                mine.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                mine.SampleDesc.Count = 1;
+                mine.Usage = D3D11_USAGE_DEFAULT;
+                mine.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+                if (FAILED(device->CreateTexture2D(&mine, nullptr, retained.put()))) {
+                    frame.Close();
+                    return;
+                }
+                width = usableWidth;
+                height = usableHeight;
             }
-            width = usableWidth;
-            height = usableHeight;
+            // A region rather than the whole resource, because the surface is
+            // only the same size as the retained texture while nothing is
+            // resizing.
+            const D3D11_BOX box{0, 0, 0, usableWidth, usableHeight, 1};
+            context->CopySubresourceRegion(retained.get(), 0, 0, 0, 0, texture.get(), 0,
+                                           &box);
+            // Flush, or the copy sits in the deferred queue and the encoder is
+            // handed a texture whose contents have not been written yet -- which
+            // shows up as one frame of lag that no timestamp explains.
+            context->Flush();
+            ++serial;
+            ++delivered;
+            capturedAt = at;
+            if ((UINT) content.Width != poolWidth
+                || (UINT) content.Height != poolHeight) {
+                pendingWidth = (UINT) content.Width;
+                pendingHeight = (UINT) content.Height;
+                poolStale = true;
+            }
         }
-        // A region rather than the whole resource, because the surface is only
-        // the same size as the retained texture while nothing is resizing.
-        const D3D11_BOX box{0, 0, 0, usableWidth, usableHeight, 1};
-        context->CopySubresourceRegion(retained.get(), 0, 0, 0, 0, texture.get(), 0,
-                                       &box);
-        // Flush, or the copy sits in the deferred queue and the encoder is
-        // handed a texture whose contents have not been written yet -- which
-        // shows up as one frame of lag that no timestamp explains.
-        context->Flush();
-        ++serial;
-        ++delivered;
-        capturedAt = at;
-        if ((UINT) content.Width != poolWidth || (UINT) content.Height != poolHeight) {
-            pendingWidth = (UINT) content.Width;
-            pendingHeight = (UINT) content.Height;
-            poolStale = true;
-        }
+    } catch (winrt::hresult_error const& e) {
+        Log("[media] frame callback failed: 0x%08X",
+            static_cast<unsigned>(static_cast<int32_t>(e.code())));
+    } catch (...) {
+        Log("[media] frame callback failed: unknown exception");
     }
     frame.Close();
     arrived.notify_all();

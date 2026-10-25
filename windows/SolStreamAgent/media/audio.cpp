@@ -606,7 +606,11 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
             Sleep(kPacketMs);
             continue;
         }
-        WaitForMultipleObjects((DWORD) events.size(), events.data(), FALSE, 20);
+        // WaitForMultipleObjects refuses more than MAXIMUM_WAIT_OBJECTS handles
+        // and returns at once, which would spin this loop. Waiting on the first
+        // 64 is enough: every tap is read below however the wait ends.
+        WaitForMultipleObjects((DWORD) std::min<size_t>(events.size(), MAXIMUM_WAIT_OBJECTS),
+                               events.data(), FALSE, 20);
         const ULONGLONG readAt = GetTickCount64();
         for (ProcessTap& tap : taps) {
             if (!tap.client) { continue; }

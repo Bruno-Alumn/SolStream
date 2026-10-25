@@ -266,7 +266,10 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     if (length < 4 || plaintext[0] != 0x30) {
         return acked_.load();
     }
-    const int count = plaintext[1];
+    // Each event needs at least a 4-byte sequence, kind, and body-length byte,
+    // so the count cannot honestly exceed this; ignore an implausible one.
+    const int count =
+        std::min<int>(plaintext[1], static_cast<int>((length - 4) / 6));
     size_t at = 4;
     for (int i = 0; i < count && at + 6 <= length; ++i) {
         const uint32_t seq = (uint32_t) smt::ReadBE(plaintext + at, 4);
