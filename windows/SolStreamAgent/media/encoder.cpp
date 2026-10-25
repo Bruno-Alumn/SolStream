@@ -71,12 +71,15 @@ bool StartsWithSps(const unsigned char* data, size_t length) {
     return false;
 }
 
-/// Set one of the encoder's VT_UI4 properties.
-void SetUi4(ICodecAPI* codec, const GUID& key, ULONG value) {
+/// Set one of the encoder's VT_UI4 properties. Returns the HRESULT so callers
+/// can decide whether the failure matters; many drivers silently ignore
+/// unsupported values, but a refusal of low-latency or B-frame settings is
+/// worth logging.
+HRESULT SetUi4(ICodecAPI* codec, const GUID& key, ULONG value) {
     VARIANT v{};
     v.vt = VT_UI4;
     v.ulVal = value;
-    codec->SetValue(&key, &v);
+    return codec->SetValue(&key, &v);
 }
 
 }  // namespace
@@ -548,7 +551,9 @@ bool Encoder::Impl::FeedLocked() {
 
     const bool idr = ledger.TakeIdr(pendingIdr);
     if (idr && codec) {
-        SetUi4(codec, CODECAPI_AVEncVideoForceKeyFrame, 1);
+        if (FAILED(SetUi4(codec, CODECAPI_AVEncVideoForceKeyFrame, 1))) {
+            Log("[media] could not force a keyframe");
+        }
     }
 
     // ProcessInput can refuse -- MF_E_NOTACCEPTING when the credit was stale,
@@ -727,8 +732,11 @@ void Encoder::Impl::ReadSequenceHeader() {
         if (SUCCEEDED(current->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &length))
             && length > 0) {
             sequenceHeader.resize(length);
-            current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, sequenceHeader.data(), length,
-                             &length);
+            if (FAILED(current->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER,
+                                        sequenceHeader.data(), length, &length))) {
+                Log("[media] could not read the MPEG sequence header");
+                sequenceHeader.clear();
+            }
         }
         current->Release();
     }
@@ -806,10 +814,20 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     VARIANT v{};
     v.vt = VT_BOOL;
     v.boolVal = VARIANT_TRUE;
-    s.codec->SetValue(&CODECAPI_AVLowLatencyMode, &v);
-    SetUi4(s.codec, CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
-    SetUi4(s.codec, CODECAPI_AVEncCommonMeanBitRate, s.bitrate);
-    SetUi4(s.codec, CODECAPI_AVEncMPVGOPSize, (s.fps ? s.fps : 60) * 3600);
+    if (FAILED(s.codec->SetValue(&CODECAPI_AVLowLatencyMode, &v))) {
+        Log("[media] could not set low-latency mode");
+    }
+    if (FAILED(SetUi4(s.codec, CODECAPI_AVEncCommonRateControlMode,
+                      eAVEncCommonRateControlMode_CBR))) {
+        Log("[media] could not set CBR rate control");
+    }
+    if (FAILED(SetUi4(s.codec, CODECAPI_AVEncCommonMeanBitRate, s.bitrate))) {
+        Log("[media] could not set bitrate");
+    }
+    if (FAILED(SetUi4(s.codec, CODECAPI_AVEncMPVGOPSize,
+                      (s.fps ? s.fps : 60) * 3600))) {
+        Log("[media] could not set GOP size");
+    }
     // No B-frames, said rather than left to low latency mode to imply. A
     // picture's frame id comes back from its sample time, and output arrives in
     // decoding order, so a B-frame reaches the Mac after the picture that
@@ -819,7 +837,9 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     // The dev box's encoder happens not to; an encoder that ignores low
     // latency mode, as the NVIDIA one ignored everything set at the wrong time,
     // might.
-    SetUi4(s.codec, CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+    if (FAILED(SetUi4(s.codec, CODECAPI_AVEncMPVDefaultBPictureCount, 0))) {
+        Log("[media] could not disable B-frames");
+    }
 }
 
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
@@ -930,11 +950,13 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
     if (hardware) {
         UINT token = 0;
-        if (SUCCEEDED(MFCreateDXGIDeviceManager(&token, &s.manager))) {
-            if (SUCCEEDED(s.manager->ResetDevice(s.device, token))) {
-                s.mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
-                                      (ULONG_PTR) s.manager);
-            }
+        if (FAILED(MFCreateDXGIDeviceManager(&token, &s.manager))) {
+            Log("[media] could not create the DXGI device manager");
+        } else if (FAILED(s.manager->ResetDevice(s.device, token))) {
+            Log("[media] could not reset the DXGI device manager");
+        } else {
+            s.mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                                  (ULONG_PTR) s.manager);
         }
     }
 

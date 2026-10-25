@@ -265,7 +265,12 @@ size_t MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t len
         total = smt::Seal(toClient, sessTag, plaintext, length, datagram, sizeof(datagram));
     }
     if (total == 0) { return 0; }
-    sendto(socket, (const char*) datagram, (int) total, 0, (sockaddr*) &to, sizeof(to));
+    const int sent = sendto(socket, (const char*) datagram, (int) total, 0,
+                            (sockaddr*) &to, sizeof(to));
+    if (sent == SOCKET_ERROR) {
+        Log("[media] sendto failed: %d", WSAGetLastError());
+        return 0;
+    }
     datagramsSent.fetch_add(1);
     bytesSent.fetch_add(total);
     return total;
