@@ -348,6 +348,20 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(resigned.packets, [.abs(400, 300), .press(1), .release(1)])
     }
 
+    /// A key event that arrives while the PC is still being asked to focus is
+    /// held back just like the click, so it lands in the focused window.
+    func testAKeyEventDuringFocusWaitIsHeldToo() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        let focus = mouse.capture.focusRequested()
+        mouse.keyDown(code: 0x00)  // 'a', encoded as scan code 0x41
+        XCTAssertTrue(mouse.withKeys.isEmpty,
+                      "the key went before the PC had focused its window")
+        mouse.capture.focusSettled(focus)
+        XCTAssertEqual(mouse.withKeys, [.key(0x41, true)],
+                       "the key should have been released once focus settled")
+    }
+
     /// In gaming mode the click that brings the window forward takes the
     /// mouse and fires nothing.
     func testInGamingTheFirstClickOnlyTakesTheMouse() {
@@ -860,6 +874,15 @@ private final class Mouse {
             modifierFlags: NSEvent.ModifierFlags(rawValue: flags), timestamp: 0,
             windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
             isARepeat: false, keyCode: 0x3A) else { return XCTFail("could not build ⌃⌥") }
+        capture.handleKeyEvent(event)
+    }
+
+    /// A plain key-down by virtual key code.
+    func keyDown(code: UInt16) {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "a", charactersIgnoringModifiers: "a",
+            isARepeat: false, keyCode: code) else { return XCTFail("could not build a key") }
         capture.handleKeyEvent(event)
     }
 

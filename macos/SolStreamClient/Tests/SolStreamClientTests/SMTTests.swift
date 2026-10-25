@@ -270,6 +270,25 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertEqual(damaged, [])
     }
 
+    /// Frame IDs are 32-bit and monotonic within a session. A wrap from the
+    /// maximum value back to zero must not be misread as a gap of four billion
+    /// missing pictures.
+    func testAWrapAroundFrameIdIsNotDamage() {
+        let reassembler = VideoReassembler()
+        var damaged: [UInt32] = []
+        reassembler.onDamaged = { damaged.append($0) }
+        let payload = Data(repeating: 7, count: 100)
+
+        reassembler.ingest(fragment(frameId: UInt32.max, offset: 0, payload: payload,
+                                    start: true, end: true, idr: true))
+        reassembler.ingest(fragment(frameId: 0, offset: 0, payload: payload,
+                                    start: true, end: true))
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: payload,
+                                    start: true, end: true))
+        XCTAssertEqual(damaged, [],
+                       "a frame-id wrap must not look like a gap")
+    }
+
     func testFragmentsReassembleByByteOffset() {
         let reassembler = VideoReassembler()
         var pictures: [VideoReassembler.Picture] = []

@@ -165,9 +165,12 @@ public final class VideoReassembler {
         // against a reference that was not there. Ids are consecutive per
         // encoder pass, and a single paced path barely reorders, so a jump is
         // damage. Not when the jump lands on an IDR: that is the host starting
-        // over after dropping pictures itself, and the IDR is the repair.
-        if highestSeen > 0, frameId > highestSeen &+ 1, flags & SMT.flagIdr == 0 {
-            let missing = min(frameId - highestSeen - 1, 64)
+        // over after dropping pictures itself, and the IDR is the repair. They
+        // are also monotonic within a session, so a lower id is a wrap or a
+        // restart and must not be reported as a gap.
+        if highestSeen > 0, frameId > highestSeen,
+           frameId &- highestSeen > 1, flags & SMT.flagIdr == 0 {
+            let missing = min(frameId &- highestSeen &- 1, 64)
             for gap in 1...missing {
                 let lost = highestSeen &+ gap
                 if building[lost] == nil, finished.insert(lost).inserted {

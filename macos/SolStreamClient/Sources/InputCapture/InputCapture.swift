@@ -1134,11 +1134,6 @@ public final class InputCapture {
         let monitored = press == lastMonitoredPress
         // The monitor has already sent the other buttons' presses.
         guard event.type == .leftMouseDown || !monitored else { return }
-        // The PC is still bringing this window forward: the click, and all
-        // after it, wait for that. See `focusRequested`.
-        if !monitored, focusAwaited != nil, heldForFocus == nil {
-            heldForFocus = []
-        }
         handleMouseEvent(event, firstMouse: !monitored)
     }
 
@@ -1198,8 +1193,14 @@ public final class InputCapture {
     }
 
     /// Every packet leaves through here, so one kept back is never overtaken.
+    /// Anything emitted while the PC is still being asked to focus is held
+    /// until the answer arrives, not only mouse clicks: a Caps-Lock sync or a
+    /// key typed before the first click must land in the focused window too.
     private func emit(_ packet: Data) {
-        if heldForFocus != nil {
+        if focusAwaited != nil {
+            if heldForFocus == nil {
+                heldForFocus = []
+            }
             heldForFocus?.append(packet)
         } else {
             onInput?(packet)
