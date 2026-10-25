@@ -258,15 +258,16 @@ public final class VideoReassembler {
     public func tick() {
         guard !building.isEmpty else { return }
         let stamp = Self.now()
-        for (frameId, assembly) in building {
+        let timedOut = building.compactMap { (frameId, assembly) -> UInt32? in
             let idleMs = Double(stamp - assembly.lastSeen) / 1e6
-            if idleMs > idleTimeoutMs {
-                building.removeValue(forKey: frameId)
-                spare = assembly.bytes
-                finished.insert(frameId)
-                damaged &+= 1
-                onDamaged?(frameId)
-            }
+            return idleMs > idleTimeoutMs ? frameId : nil
+        }
+        for frameId in timedOut {
+            guard let assembly = building.removeValue(forKey: frameId) else { continue }
+            spare = assembly.bytes
+            finished.insert(frameId)
+            damaged &+= 1
+            onDamaged?(frameId)
         }
         pruneFinished()
     }

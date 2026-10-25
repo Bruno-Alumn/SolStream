@@ -289,6 +289,26 @@ final class VideoReassemblyTests: XCTestCase {
                        "a frame-id wrap must not look like a gap")
     }
 
+    /// Assemblies that go quiet are retired by `tick()`. With more than one
+    /// pending, the loop must not mutate the dictionary it is iterating over.
+    func testTickRetiresSeveralQuietAssemblies() {
+        let reassembler = VideoReassembler()
+        var damaged: [UInt32] = []
+        reassembler.onDamaged = { damaged.append($0) }
+        let payload = Data(repeating: 7, count: 100)
+
+        // Two incomplete pictures that will never finish.
+        reassembler.ingest(fragment(frameId: 2, offset: 0, payload: payload,
+                                    start: true, end: false))
+        reassembler.ingest(fragment(frameId: 3, offset: 0, payload: payload,
+                                    start: true, end: false))
+        Thread.sleep(forTimeInterval: 0.05)
+        reassembler.tick()
+        XCTAssertEqual(Set(damaged), [2, 3],
+                       "both quiet assemblies should be reported damaged")
+        XCTAssertEqual(reassembler.damaged, 2)
+    }
+
     func testFragmentsReassembleByByteOffset() {
         let reassembler = VideoReassembler()
         var pictures: [VideoReassembler.Picture] = []
