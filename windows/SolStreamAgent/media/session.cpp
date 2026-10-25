@@ -211,6 +211,11 @@ struct MediaSession::Impl {
     void ReceiveLoop();
     void SendPicture(const Picture& picture);
     size_t SendSealed(const unsigned char* plaintext, size_t length);
+    /// sendto failures, said at most every ComplaintLimiter::kQuietMs: with the
+    /// network gone every datagram fails, thousands a second. Locked because
+    /// the video, audio and receive threads all send; taken only on a failure.
+    std::mutex sendComplaintsLock;
+    ComplaintLimiter sendComplaints;
     void WaitUntil(long long deadline);
     void HandlePlaintext(const unsigned char* plaintext, size_t length);
 
@@ -268,7 +273,13 @@ size_t MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t len
     const int sent = sendto(socket, (const char*) datagram, (int) total, 0,
                             (sockaddr*) &to, sizeof(to));
     if (sent == SOCKET_ERROR) {
-        Log("[media] sendto failed: %d", WSAGetLastError());
+        const int error = WSAGetLastError();
+        uint64_t unsaid = 0;
+        std::lock_guard<std::mutex> guard(sendComplaintsLock);
+        if (sendComplaints.Allow(GetTickCount64(), unsaid)) {
+            Log("[media] sendto failed with %d (%llu more since the last report)",
+                error, (unsigned long long) unsaid);
+        }
         return 0;
     }
     datagramsSent.fetch_add(1);
