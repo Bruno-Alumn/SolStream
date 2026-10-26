@@ -117,6 +117,14 @@ final class KeyframeHoldTests: XCTestCase {
         XCTAssertEqual(hold.picture(frameId: 7, isIdr: false, now: ms(32)), .decode)
     }
 
+    func testPicturesContinueAcrossAFrameIdWrap() {
+        var hold = KeyframeHold()
+        _ = hold.picture(frameId: UInt32.max, isIdr: true, now: ms(0))
+        XCTAssertEqual(hold.picture(frameId: 0, isIdr: false, now: ms(16)), .decode)
+        XCTAssertEqual(hold.picture(frameId: 1, isIdr: false, now: ms(32)), .decode)
+        XCTAssertFalse(hold.holding)
+    }
+
     /// Over a relayed path the IDR is still landing when a quarter-second is
     /// up. Its fragments count as the answer, so the request is not repeated
     /// into the middle of it.

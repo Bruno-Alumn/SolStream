@@ -98,18 +98,19 @@ struct KeyframeHold {
             arrivingIdr = nil
             return .decode
         }
-        // Older than a picture already decoded: nothing can use it.
-        if let lastDecoded, frameId <= lastDecoded { return .ignore }
-        if holding { return .hold }
         // Only the picture straight after the last one decoded. Every way a
         // picture can fail to arrive is reported as damage before the next one
         // gets here, and the hold is already on by then; this is what keeps a
         // P-frame from being decoded against a missing reference if one of them
-        // ever is not.
-        if let lastDecoded, frameId == lastDecoded &+ 1 {
+        // ever is not. Check the wrapping successor before numerical age: zero
+        // follows UInt32.max, but is not an old picture.
+        if !holding, let lastDecoded, frameId == lastDecoded &+ 1 {
             self.lastDecoded = frameId
             return .decode
         }
+        // Older than a picture already decoded: nothing can use it.
+        if let lastDecoded, frameId <= lastDecoded { return .ignore }
+        if holding { return .hold }
         holding = true
         return ask(now) ? .holdAndAsk : .hold
     }
