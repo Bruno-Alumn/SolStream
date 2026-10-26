@@ -424,6 +424,46 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(request["id"] as? Int, 42)
     }
 
+    func testARecoverableWaitKeepsRepliesWithTheirRequests() throws {
+        let requested = DispatchSemaphore(value: 0)
+        let answer = DispatchSemaphore(value: 0)
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            _ = connection.readLine(timeout: 5)
+            requested.signal()
+            _ = answer.wait(timeout: .now() + 5)
+            connection.send(ScriptedHost.windows)
+            _ = connection.readLine(timeout: 5)
+            connection.send(#"{"type":"apps","apps":[{"name":"Calculator","path":"calculator"}]}"#)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+
+        let windowsAnswered = expectation(description: "windows answered")
+        var titles: [String]?
+        agent.windows { windows in
+            titles = windows.map(\.title)
+            windowsAnswered.fulfill()
+        }
+        XCTAssertEqual(requested.wait(timeout: .now() + 5), .success)
+        agent.queue.sync { agent.connectionDidWait(.posix(.ENETDOWN)) }
+        XCTAssertNil(titles, "a socket that can recover still owes this request a reply")
+
+        let appsAnswered = expectation(description: "apps answered")
+        var names: [String]?
+        agent.apps { apps in
+            names = apps.map(\.name)
+            appsAnswered.fulfill()
+        }
+        answer.signal()
+        wait(for: [windowsAnswered, appsAnswered], timeout: 5)
+        XCTAssertEqual(titles, ["Notepad"])
+        XCTAssertEqual(names, ["Calculator"], "the next request must not consume the older reply")
+    }
+
     // MARK: - Helpers
 
     /// Connect, and wait for the host's first display list.

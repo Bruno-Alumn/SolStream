@@ -135,7 +135,7 @@ public final class AgentConnection {
 
     private let host: String
     private let port: UInt16
-    private let queue = DispatchQueue(label: "com.solstream.agent")
+    let queue = DispatchQueue(label: "com.solstream.agent")
 
     /// Guards the few things below that the rest of the app reads from wherever
     /// it happens to be standing — the display list, and
@@ -797,27 +797,7 @@ public final class AgentConnection {
                 self.stopHeartbeat()
                 self.scheduleReconnect()
             case .waiting(let error):
-                // NWConnection does NOT fail on an unreachable or filtered port —
-                // it sits in .waiting and retries forever. Left unhandled that is
-                // a spinner with no error and no end, which is exactly what a
-                // loopback-bound agent looked like from another machine.
-                // The log keeps the whole story: which port, and the fact that
-                // an agent bound to one address answers on that address only.
-                Log.error("[agent] cannot reach \(self.host):\(self.port): \(error). "
-                          + "If SolStream is running there, it may be bound to one "
-                          + "address only, or a firewall may be blocking the port.")
-                self.report(.failed(Self.explain(error, host: self.host, port: self.port)))
-                self.failPending(error)
-                // While reconnecting, .waiting is a dead end: it retries only on
-                // a network path change, so a PC that refused the connection
-                // because it was mid-reboot would never be tried again once it
-                // came back. Treat it as the failure it is and back off.
-                if self.reconnectAttempt > 0 {
-                    self.connection?.cancel()
-                    self.connection = nil
-                    self.stopHeartbeat()
-                    self.scheduleReconnect()
-                }
+                self.connectionDidWait(error)
             case .cancelled:
                 self.report(.disconnected)
             default:
@@ -825,6 +805,33 @@ public final class AgentConnection {
             }
         }
         connection.start(queue: queue)
+    }
+
+    func connectionDidWait(_ error: NWError) {
+        // NWConnection does NOT fail on an unreachable or filtered port —
+        // it sits in .waiting and retries forever. Left unhandled that is
+        // a spinner with no error and no end, which is exactly what a
+        // loopback-bound agent looked like from another machine.
+        // The log keeps the whole story: which port, and the fact that
+        // an agent bound to one address answers on that address only.
+        Log.error("[agent] cannot reach \(host):\(port): \(error). "
+                  + "If SolStream is running there, it may be bound to one "
+                  + "address only, or a firewall may be blocking the port.")
+        report(.failed(Self.explain(error, host: host, port: port)))
+        // This socket can become ready again, and waiting does not retract
+        // commands already sent. Keep its reply FIFO until it is replaced;
+        // the head request's timeout still bounds a wait that never recovers.
+        // While reconnecting, .waiting is a dead end: it retries only on
+        // a network path change, so a PC that refused the connection
+        // because it was mid-reboot would never be tried again once it
+        // came back. Treat it as the failure it is and back off.
+        if reconnectAttempt > 0 {
+            failPending(error)
+            connection?.cancel()
+            connection = nil
+            stopHeartbeat()
+            scheduleReconnect()
+        }
     }
 
     /// Say something often enough that the host never thinks we have gone away.
