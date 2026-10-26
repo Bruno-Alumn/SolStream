@@ -925,6 +925,17 @@ void TestDownload() {
     CHECK(!PrepareInstaller(release, step, held, path, error));
     CHECK(!Exists(installer));
 
+    // A scheduler that sampled false just before preparation began must not
+    // delete the file that preparation is about to rename or open.
+    const std::wstring interrupted = updates + L"\\interrupted.partial";
+    CHECK(WriteAll(interrupted, "complete"));
+    g_preparing = true;
+    CleanDownloads(L"");
+    CHECK(Exists(interrupted));
+    g_preparing = false;
+    CleanDownloads(L"");
+    CHECK(!Exists(interrupted));
+
     DeleteFileW(InstallNotePath().c_str());
 }
 

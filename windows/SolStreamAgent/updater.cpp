@@ -880,6 +880,10 @@ std::wstring InstallNotePath() {
 /// that would delete a file the install is about to use. So it skips its
 /// clean-up then; the next check does it.
 std::atomic<bool> g_preparing{false};
+/// Serializes cleanup with the start of preparation. Checking g_preparing at
+/// the scheduler's call site is not enough: preparation can begin between that
+/// check and DeleteFileW.
+std::mutex g_downloads_mutex;
 
 /// From just before the elevation prompt until the installer exits (or fails to
 /// start). The prompt can stay up for minutes, and a Mac that connected in that
@@ -890,6 +894,10 @@ std::atomic<bool> g_install_starting{false};
 /// have already been installed, and anything an interrupted download left. Best
 /// effort -- a file still in use is simply tried again after the next check.
 void CleanDownloads(const std::wstring& keep) {
+    std::lock_guard<std::mutex> lock(g_downloads_mutex);
+    if (g_preparing) {
+        return;
+    }
     const std::wstring directory = UpdatesDirectory(false);
     if (directory.empty()) {
         return;
@@ -1014,10 +1022,6 @@ bool PrepareInstaller(const Release& release,
                       const std::function<void(const std::wstring&)>& step, HANDLE& held,
                       std::wstring& path, std::string& error) {
     held = INVALID_HANDLE_VALUE;
-    g_preparing = true;
-    struct Prepared {
-        ~Prepared() { g_preparing = false; }
-    } prepared;
     const std::wstring directory = UpdatesDirectory(true);
     if (directory.empty()) {
         Log("[update] could not create %%LOCALAPPDATA%%\\SolStream\\Updates");
@@ -1026,6 +1030,13 @@ bool PrepareInstaller(const Release& release,
     }
     const std::wstring name = ToWide(release.installer.name);
     CleanDownloads(name);
+    {
+        std::lock_guard<std::mutex> lock(g_downloads_mutex);
+        g_preparing = true;
+    }
+    struct Prepared {
+        ~Prepared() { g_preparing = false; }
+    } prepared;
     path = directory + L"\\" + name;
 
     // Downloaded already, by an attempt whose permission prompt was dismissed
@@ -1264,11 +1275,9 @@ void Schedule(SchedulerHooks hooks) {
             g_asked = false;
         }
         // A failure keeps what is there: it may be the update a moment ago's
-        // check found, half-way to being installed.
-        // Nor while an Install press is preparing its download (g_preparing).
-        if (g_preparing) {
-            // Left for the next check.
-        } else if (result.outcome == Outcome::Found) {
+        // check found, half-way to being installed. CleanDownloads itself skips
+        // an Install press that is preparing its download.
+        if (result.outcome == Outcome::Found) {
             CleanDownloads(ToWide(result.release.installer.name));
         } else if (result.outcome != Outcome::Failed) {
             CleanDownloads(std::wstring());
