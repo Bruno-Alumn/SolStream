@@ -1236,7 +1236,13 @@ public final class InputCapture {
         // view's coordinates it lands somewhere arbitrary on the host. A button
         // already held is the exception: its release must always get through,
         // or the host is left with a button stuck down.
-        if let window = event.window, window !== view.window, heldButtons.isEmpty {
+        if let window = event.window, window !== view.window {
+            switch event.type {
+            case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+                releaseButton(event)
+            default:
+                break
+            }
             return
         }
         if view.inLiveResize || (view.window?.inLiveResize ?? false) {

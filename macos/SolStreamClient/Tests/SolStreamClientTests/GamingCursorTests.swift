@@ -504,6 +504,17 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [.release(1), .abs(400, 300)])
     }
 
+    func testAnotherWindowTakesNoInputExceptAHeldRelease() {
+        InputCapture.pointerMode = .desktop
+        let mouse = Mouse()
+        mouse.viewPress(at: 1)
+        mouse.packets.removeAll()
+        mouse.eventInOtherWindow(.rightMouseDown)
+        XCTAssertEqual(mouse.packets, [], "another window's right-click went to the host")
+        mouse.eventInOtherWindow(.leftMouseUp)
+        XCTAssertEqual(mouse.packets, [.release(1)], "the held drag was not released")
+    }
+
     // MARK: - A restart in the middle of a drag
 
     /// A drag across a restart goes on: the button is pressed on the new
@@ -847,6 +858,14 @@ private final class Mouse {
     }
     func hover(at point: NSPoint) {
         capture.handleMonitoredEvent(event(.mouseMoved, location: point))
+    }
+    func eventInOtherWindow(_ type: NSEvent.EventType) {
+        let other = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        let event = NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [],
+                                       timestamp: 2, windowNumber: other.windowNumber,
+                                       context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        capture.handleMonitoredEvent(event)
     }
     /// A click in the picture of a key window, at `point`: the monitor sees
     /// the press, then the view is handed it.
