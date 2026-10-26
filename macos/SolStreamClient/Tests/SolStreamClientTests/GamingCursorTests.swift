@@ -395,6 +395,17 @@ final class GamingCursorTests: XCTestCase {
         XCTAssertEqual(mouse.packets, [])
     }
 
+    func testTheFirstClickOnAVisibleCursorMenuStillClicks() {
+        InputCapture.pointerMode = .gaming
+        InputCapture.followsHostCursor = true
+        let mouse = Mouse()
+        mouse.capture.hostReportsCursorVisibility = true
+        mouse.capture.hostCursorVisibilityChanged(hidden: false)
+        mouse.viewPress(at: 1)
+        XCTAssertFalse(mouse.locked)
+        XCTAssertEqual(mouse.packets, [.abs(400, 300), .press(1)])
+    }
+
     /// The stream view takes the first click, and hands every press on.
     func testTheStreamViewTakesTheFirstClick() throws {
         let view = MetalView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))

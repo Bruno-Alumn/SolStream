@@ -1253,18 +1253,13 @@ public final class InputCapture {
         if !isPointerCaptured, heldButtons.isEmpty, Self.drags.contains(event.type) {
             return
         }
-        if firstMouse, mode == .gaming {
-            if !isPointerCaptured {
-                _ = takesPointer(on: event, in: view, deliversClick: false)
-            }
-            return
-        }
+        if firstMouse, mode == .gaming, isPointerCaptured { return }
         if isPointerCaptured {
             handleCapturedPointer(event, in: view)
             return
         }
         if mode == .gaming {
-            if takesPointer(on: event, in: view) { return }
+            if takesPointer(on: event, in: view, deliversClick: !firstMouse) { return }
             if gameReadsMotion {
                 handleUncapturedOverGame(event)
                 return
