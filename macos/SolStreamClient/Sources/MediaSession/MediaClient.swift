@@ -462,11 +462,12 @@ public final class MediaClient {
         guard fd >= 0 else { return }
         guard let datagram = SMTPacket.seal(plaintext, direction: toHost,
                                             sessionTag: sessionTag) else { return }
-        let sent = datagram.withUnsafeBytes { raw in
-            Darwin.send(fd, raw.baseAddress, raw.count, 0)
+        // errno read inside the closure, straight after the call: once the
+        // closure has returned the runtime is free to overwrite it.
+        let (sent, error) = datagram.withUnsafeBytes { raw in
+            (Darwin.send(fd, raw.baseAddress, raw.count, 0), errno)
         }
         if sent < 0 {
-            let error = errno
             let now = Date()
             if error != lastSendError || now.timeIntervalSince(lastSendErrorLog) > 10 {
                 Log.error("[media] send failed: \(String(cString: strerror(error))) (\(error))")
