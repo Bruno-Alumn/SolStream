@@ -133,6 +133,11 @@ bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) cons
 bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                              size_t length) {
     INPUT input{};
+    // Update the held state only after Windows takes the event. A refused
+    // release must remain owed to ReleaseAll, and a refused press is not held.
+    uint32_t trackedKey = 0;
+    unsigned char trackedButton = 0;
+    bool trackedDown = false;
     switch (kind) {
         case kInputMouseAbs: {
             if (length < 4) { return false; }
@@ -181,28 +186,25 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                     break;
                 default: return false;
             }
-            if (button >= 1 && button <= 5) {
-                if (down) {
-                    buttonsDown_ |= (unsigned char) (1u << (button - 1));
-                    // A click has to reach the window that is being streamed,
-                    // and keyboard input goes to whatever has the foreground on
-                    // the HOST -- which may be something the user walked away
-                    // from. Raising it on a press is the least surprising place
-                    // to do it.
-                    //
-                    // Through a copy, as everywhere else the target is read: the
-                    // command thread can be retargeting this session while the
-                    // receive thread is in here.
-                    HWND raise = nullptr;
-                    {
-                        std::lock_guard<std::mutex> guard(targetLock_);
-                        raise = target_.window;
-                    }
-                    if (raise && IsWindow(raise) && GetForegroundWindow() != raise) {
-                        SetForegroundWindow(raise);
-                    }
-                } else {
-                    buttonsDown_ &= (unsigned char) ~(1u << (button - 1));
+            trackedButton = button;
+            trackedDown = down;
+            if (down) {
+                // A click has to reach the window that is being streamed,
+                // and keyboard input goes to whatever has the foreground on
+                // the HOST -- which may be something the user walked away
+                // from. Raising it on a press is the least surprising place
+                // to do it.
+                //
+                // Through a copy, as everywhere else the target is read: the
+                // command thread can be retargeting this session while the
+                // receive thread is in here.
+                HWND raise = nullptr;
+                {
+                    std::lock_guard<std::mutex> guard(targetLock_);
+                    raise = target_.window;
+                }
+                if (raise && IsWindow(raise) && GetForegroundWindow() != raise) {
+                    SetForegroundWindow(raise);
                 }
             }
             break;
@@ -221,7 +223,8 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             const WORD vk = (WORD) smt::ReadBE(body, 2);
             const bool down = body[2] != 0;
             input = VirtualKeyInput(vk, down);
-            TrackKey(vk, down);
+            trackedKey = vk;
+            trackedDown = down;
             break;
         }
         case kInputKeyScan: {
@@ -236,7 +239,8 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             // Caps Lock's own event has done all it came to do above.
             if (code == kScanCapsLock) { return true; }
             if (!BuildScanKeyInput(code, down, &input)) { return false; }
-            TrackKey(kHeldByScan | code, down);
+            trackedKey = kHeldByScan | code;
+            trackedDown = down;
             break;
         }
         case kInputText: {
@@ -259,7 +263,16 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
         default:
             return false;
     }
-    return SendInput(1, &input, sizeof(INPUT)) == 1;
+    const bool sent = SendInput(1, &input, sizeof(INPUT)) == 1;
+    if (sent) {
+        if (trackedKey != 0) { TrackKey(trackedKey, trackedDown); }
+        if (trackedButton != 0) {
+            const unsigned char bit = (unsigned char) (1u << (trackedButton - 1));
+            buttonsDown_ = trackedDown ? (unsigned char) (buttonsDown_ | bit)
+                                       : (unsigned char) (buttonsDown_ & ~bit);
+        }
+    }
+    return sent;
 }
 
 uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
