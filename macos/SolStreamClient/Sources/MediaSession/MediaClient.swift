@@ -62,6 +62,10 @@ public final class MediaClient {
     /// that as "somebody else has cleaned up" when nobody had.
     private var tornDown = false
     private let sendLock = NSLock()
+    /// Send error throttling, guarded by `sendLock`. A network failure can make
+    /// every input datagram fail; log the first and then at most one per 10 s.
+    private var lastSendError: Int32 = 0
+    private var lastSendErrorLog = Date.distantPast
     private let stateLock = NSLock()
     /// Held for the whole of `stop()`, so a caller that arrives while the
     /// session is tearing itself down waits for it rather than being told the
@@ -458,8 +462,17 @@ public final class MediaClient {
         guard fd >= 0 else { return }
         guard let datagram = SMTPacket.seal(plaintext, direction: toHost,
                                             sessionTag: sessionTag) else { return }
-        _ = datagram.withUnsafeBytes { raw in
+        let sent = datagram.withUnsafeBytes { raw in
             Darwin.send(fd, raw.baseAddress, raw.count, 0)
+        }
+        if sent < 0 {
+            let error = errno
+            let now = Date()
+            if error != lastSendError || now.timeIntervalSince(lastSendErrorLog) > 10 {
+                Log.error("[media] send failed: \(String(cString: strerror(error))) (\(error))")
+                lastSendError = error
+                lastSendErrorLog = now
+            }
         }
     }
 
