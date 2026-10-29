@@ -21,6 +21,7 @@ macos/SolStreamClient/.build/
 
 # Local tool and editor state -- never part of the project
 .claude/
+events/
 .pytest_cache/
 .vscode/
 .idea/
