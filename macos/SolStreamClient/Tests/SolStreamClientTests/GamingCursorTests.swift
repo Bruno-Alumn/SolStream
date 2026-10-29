@@ -935,7 +935,13 @@ private final class Mouse {
         cg.setIntegerValueField(.mouseEventDeltaY, value: Int64(delta.y))
         cg.setDoubleValueField(.mouseEventDeltaX, value: Double(delta.x))
         cg.setDoubleValueField(.mouseEventDeltaY, value: Double(delta.y))
-        let landed = NSEvent(cgEvent: cg)!.locationInWindow
+        // Older macOS moved the event on the way through CoreGraphics, and it
+        // was put back by the difference. macOS 27 keeps it in place -- and
+        // setting the location at all, even to the same point, then lands it
+        // outside the window. So it is corrected only when it moved.
+        let moved = NSEvent(cgEvent: cg)!
+        let landed = moved.locationInWindow
+        guard landed != wanted else { return moved }
         cg.location = CGPoint(x: cg.location.x + (wanted.x - landed.x),
                               y: cg.location.y - (wanted.y - landed.y))
         return NSEvent(cgEvent: cg)!
