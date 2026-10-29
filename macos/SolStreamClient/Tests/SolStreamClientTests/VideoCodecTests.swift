@@ -89,7 +89,9 @@ final class VideoCodecTests: XCTestCase {
         }
         let settings = StreamSettings.shared
         UserDefaults.standard.removeObject(forKey: key)
-        XCTAssertEqual(settings.videoCodec, .automatic, "Automatic until something is chosen")
+        XCTAssertEqual(settings.videoCodec, .h264, "H.264 until something is chosen")
+        let unchosen = settings.apply(to: StreamConfig(), host: "192.168.1.20", hardwareHEVC: true)
+        XCTAssertEqual(unchosen.videoCodecs, [.h264], "an update must not move anyone to HEVC")
 
         settings.videoCodec = .hevc
         var config = settings.apply(to: StreamConfig(), host: "192.168.1.20", hardwareHEVC: false)

@@ -128,8 +128,12 @@ final class StreamSettings {
         }
     }
 
+    /// H.264 until chosen otherwise: every stream before HEVC was H.264, and
+    /// an update should not change what someone already has. HEVC's encode
+    /// also took longer in its first measurements, which a longer run should
+    /// settle before it becomes anyone's default.
     var videoCodec: VideoCodecChoice {
-        get { defaults.string(forKey: Key.videoCodec).flatMap(VideoCodecChoice.init(rawValue:)) ?? .automatic }
+        get { defaults.string(forKey: Key.videoCodec).flatMap(VideoCodecChoice.init(rawValue:)) ?? .h264 }
         set { set(newValue.rawValue, Key.videoCodec, restarts: true) }
     }
 
