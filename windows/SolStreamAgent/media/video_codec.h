@@ -37,7 +37,7 @@ inline std::vector<VideoCodec> ParseVideoCodecs(const std::string& field) {
         std::string name = field.substr(start, end - start);
         while (!name.empty() && name.front() == ' ') { name.erase(name.begin()); }
         while (!name.empty() && name.back() == ' ') { name.pop_back(); }
-        VideoCodec codec;
+        VideoCodec codec = VideoCodec::H264;
         bool known = true;
         if (name == "hevc" || name == "h265") {
             codec = VideoCodec::Hevc;
