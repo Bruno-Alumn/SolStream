@@ -22,10 +22,14 @@ public struct StreamConfig: Sendable {
     public var audioEncoding: AudioEncoding
     /// And whose sound it is.
     public var audioSource: AudioSource
+    /// The video codecs to offer the host, most wanted first. Like the sound's
+    /// encoding, a request: a host that predates the choice sends H.264.
+    public var videoCodecs: [VideoCodec]
 
     public init(width: Int = 1920, height: Int = 1080, frameRate: Int = 60,
                 bitrateKbps: Int = 20000, audio: Bool = true,
-                audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system) {
+                audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system,
+                videoCodecs: [VideoCodec] = [.h264]) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
@@ -33,6 +37,7 @@ public struct StreamConfig: Sendable {
         self.audio = audio
         self.audioEncoding = audioEncoding
         self.audioSource = audioSource
+        self.videoCodecs = videoCodecs
     }
 }
 

@@ -165,6 +165,10 @@ final class SettingsPane: NSView {
     let qualityDetail = SettingsPane.caption("")
     let frameRateControl = SolarSegments(labels: StreamSettings.frameRates.map { "\($0) fps" },
                                          accessibilityLabel: "Frame rate")
+    /// No caption under it: the left column is the taller, and a caption
+    /// line would push the window past a 13-inch MacBook's screen. What each
+    /// choice means is in the tooltip.
+    let codecPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     // Sound
     let soundSwitch = SolarSwitch(label: "Play the PC's sound")
     let soundSourceControl = SolarSegments(labels: StreamSettings.SoundSource.allCases.map(\.title),
@@ -248,6 +252,9 @@ final class SettingsPane: NSView {
         qualityDetail.stringValue = quality.detail
         frameRateControl.selectedSegment = StreamSettings.frameRates.firstIndex(of: settings.frameRate)
             ?? StreamSettings.frameRates.count - 1
+        let codec = settings.videoCodec
+        codecPopUp.select(codec)
+        codecPopUp.toolTip = codec.detail
 
         let streamsAudio = settings.streamsAudio
         soundSwitch.isOn = streamsAudio
@@ -385,6 +392,15 @@ final class SettingsPane: NSView {
         guard rate != settings.frameRate else { return }
         Log.info("[settings] frame rate: \(rate)")
         write { settings.frameRate = rate }
+    }
+
+    @objc private func codecChosen(_ sender: NSPopUpButton) {
+        guard let codec: StreamSettings.VideoCodecChoice = sender.selectedChoice() else { return }
+        sender.toolTip = codec.detail
+        // Choosing the one already chosen must not restart the picture.
+        guard codec != settings.videoCodec else { return }
+        Log.info("[settings] video codec: \(codec.title)")
+        write { settings.videoCodec = codec }
     }
 
     @objc private func soundToggled(_ sender: SolarSwitch) {
@@ -537,11 +553,17 @@ final class SettingsPane: NSView {
         frameRateControl.target = self
         frameRateControl.action = #selector(frameRateChosen(_:))
 
+        codecPopUp.fill(with: StreamSettings.VideoCodecChoice.allCases, selected: settings.videoCodec)
+        Self.configure(popUp: codecPopUp, label: "Video codec")
+        codecPopUp.target = self
+        codecPopUp.action = #selector(codecChosen(_:))
+
         let video = section("Video", rows: [
             row("Quality", trailing: qualityPopUp, below: [qualityDetail]),
             row("Frame rate", trailing: frameRateControl, below: [
                 Self.caption("60 is smoother. 30 can look sharper on a slow network, and is easier on the PC."),
             ]),
+            row("Codec", trailing: codecPopUp),
         ])
 
         // ── Sound ────────────────────────────────────────────────────────────

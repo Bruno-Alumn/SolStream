@@ -54,6 +54,35 @@ Big-endian throughout, no exceptions. (`InputProtocol.swift:15` documents a
 little-endian keycode inside an otherwise big-endian packet and calls the
 asymmetry deliberate. It is not carried over.)
 
+## Video codec
+
+The picture is H.264 or HEVC, agreed once per session in `media open` on the
+agent channel. Nothing on the wire says which: the inner video header is the
+same for both, and the Mac reads every picture as the codec it was told.
+
+- **The Mac offers** `"videoCodecs":"hevc,h264"`: a comma-separated string,
+  most wanted first, because the host reads flat fields only. It is sent only
+  when the list is not H.264 alone, so a Mac that wants H.264 sends the command
+  every host already knew. Automatic (the default setting) offers HEVC only
+  where this Mac decodes it in hardware; H.264 is always last.
+- **The host answers** `"videoCodec":"hevc"` or `"h264"`: its first choice
+  from the list that it has a hardware encoder for, H.264 otherwise (Windows
+  has a software H.264 encoder and no HEVC one). Said only when it is
+  streaming. If the HEVC encoder will not open on the first pass, the host
+  falls back to H.264 *before* it replies; once the reply has gone, later
+  passes (a retarget) keep the codec it named or fail.
+- **Either end older.** A Mac that sends no `videoCodecs` gets H.264. A reply
+  without `videoCodec` is from a host that predates it, and the Mac takes it to
+  be H.264.
+
+Keyframes: the `0x08` IDR flag means "decoding can start here" for both
+codecs. For HEVC that is any IRAP picture (NAL types 16-21: BLA, IDR_W_RADL,
+IDR_N_LP, CRA); with no B-frames a CRA has no leading pictures, so it is as
+good as an IDR. The host sets the flag from the encoder's clean-point mark or,
+failing that, the picture's first slice; the Mac's reassembler checks the first
+slice too. An IDR carries its parameter sets in front: SPS and PPS for H.264,
+VPS, SPS and PPS for HEVC.
+
 ## The nonce, which is the part that must not be wrong
 
 ```

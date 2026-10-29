@@ -203,6 +203,17 @@ struct MediaSession::Impl {
     std::condition_variable openReported;
     bool opened = false;
     std::string openError;   ///< empty means the capture and the encoder are up
+    /// The video codec every pass of this session encodes with, and whether
+    /// Start has stopped waiting for the first pass. Both under `openLock`.
+    ///
+    /// Chosen in Start, and changed once at most: from HEVC to H.264, when the
+    /// first pass's HEVC encoder will not open. Only while Start is still
+    /// waiting, because Start puts this in the reply and the Mac sets its
+    /// decoder up from that; once the reply is gone, a pass that cannot open
+    /// the codec the Mac was told about fails like any other open, rather
+    /// than sending a stream the Mac cannot read.
+    VideoCodec codec = VideoCodec::H264;
+    bool startGaveUp = false;
 
     void ReportOpened(std::string error);
     void CaptureLoop();
@@ -477,18 +488,45 @@ void MediaSession::Impl::RunCapture() {
 
     const UINT encodeWidth = active.width ? active.width : frame.width;
     const UINT encodeHeight = active.height ? active.height : frame.height;
-    if (!encoder->Open(capture->Device(), encodeWidth, encodeHeight, active.fps,
-                      active.bitrate)) {
-        Log("[media] the hardware encoder would not open at %ux%u",
-            encodeWidth, encodeHeight);
-        ReportOpened("the hardware encoder would not open at "
+    VideoCodec passCodec;
+    {
+        std::lock_guard<std::mutex> guard(openLock);
+        passCodec = codec;
+    }
+    bool encoding = encoder->Open(capture->Device(), encodeWidth, encodeHeight,
+                                  active.fps, active.bitrate, passCodec);
+    if (!encoding && passCodec == VideoCodec::Hevc) {
+        // The registry said there was a hardware HEVC encoder and it would
+        // not open at this size or rate. H.264 instead, if the Mac has not yet
+        // been told which it is getting; see `codec`.
+        bool fallBack = false;
+        {
+            std::lock_guard<std::mutex> guard(openLock);
+            if (!opened && !startGaveUp) {
+                codec = VideoCodec::H264;
+                fallBack = true;
+            }
+        }
+        if (fallBack) {
+            Log("[media] the HEVC encoder would not open at %ux%u; using H.264",
+                encodeWidth, encodeHeight);
+            passCodec = VideoCodec::H264;
+            encoding = encoder->Open(capture->Device(), encodeWidth, encodeHeight,
+                                     active.fps, active.bitrate, passCodec);
+        }
+    }
+    if (!encoding) {
+        Log("[media] the hardware %s encoder would not open at %ux%u",
+            VideoCodecName(passCodec), encodeWidth, encodeHeight);
+        ReportOpened(std::string("the hardware ") + VideoCodecName(passCodec)
+                     + " encoder would not open at "
                      + std::to_string(encodeWidth) + "x"
                      + std::to_string(encodeHeight));
         return;
     }
-    Log("[media] capturing %ux%u, encoding %ux%u at %u fps, %u kbit/s",
-        frame.width, frame.height, encoder->Width(), encoder->Height(),
-        active.fps, active.bitrate / 1000);
+    Log("[media] capturing %ux%u, encoding %s %ux%u at %u fps, %u kbit/s",
+        frame.width, frame.height, VideoCodecName(passCodec), encoder->Width(),
+        encoder->Height(), active.fps, active.bitrate / 1000);
     // The source and the encoder are up, which is the point Start has been
     // waiting for. Everything above this line can fail, and until this call
     // existed all of it failed into the log and nowhere else: Start had already
@@ -638,11 +676,14 @@ void MediaSession::Impl::SenderLoop() {
             std::shared_ptr<Capture> capturePtr;
             std::shared_ptr<Encoder> encoderPtr;
             CopyMedia(capturePtr, encoderPtr);
-            Log("[media] %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
+            Log("[media] %s %.1f fps, %.1f Mbit/s | capture %llu, encoder %llu/%llu"
                 " (dropped %llu, extra samples %llu) | glass->wire last %.1f min %.1f"
                 " mean %.1f ms | client frame %u, damaged %u, idr asks %llu"
                 " | audio %s %s, %llu sent, %llu silent, %.0f kbit/s | input %llu applied, %llu dup,"
                 " %llu failed, ack %u | rx %llu, rejected %llu | idr %llu, mean %llu KB",
+                // The codec first: it is what the line's bitrate and keyframe
+                // sizes are to be read against.
+                encoderPtr ? VideoCodecName(encoderPtr->Codec()) : "-",
                 elapsed > 0 ? (double) (pictures - lastReportPictures) / elapsed : 0.0,
                 elapsed > 0
                     ? (double) (bytesSent.load() - lastReportBytes) * 8.0 / elapsed / 1e6
@@ -973,10 +1014,25 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.clientLastFrame = 0; s.clientDamaged = 0;
     s.nextFrameId = 1;
 
+    // The Mac's first choice this PC has a hardware encoder for, settled
+    // before any pass runs so every pass agrees with the reply. Asking the
+    // registry costs a few milliseconds; trying to open an encoder that is
+    // not there would cost a pass.
+    const bool hardwareHevc = Encoder::HardwareSupports(VideoCodec::Hevc);
+    const VideoCodec chosen = ChooseVideoCodec(config.videoCodecs, hardwareHevc);
+    bool offeredHevc = false;
+    for (VideoCodec offered : config.videoCodecs) {
+        offeredHevc = offeredHevc || offered == VideoCodec::Hevc;
+    }
+    if (offeredHevc && !hardwareHevc) {
+        Log("[media] the Mac offered HEVC; this PC has no hardware HEVC encoder");
+    }
     {
         std::lock_guard<std::mutex> guard(s.openLock);
         s.opened = false;
         s.openError.clear();
+        s.codec = chosen;
+        s.startGaveUp = false;
     }
 
     s.running.store(true);
@@ -1026,6 +1082,9 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
         answered = s.openReported.wait_for(guard, std::chrono::milliseconds(kOpenWaitMs),
                                            [&s] { return s.opened; });
         if (answered) { failure = s.openError; }
+        // From here the codec is what the reply will say, so the first pass
+        // may no longer change it.
+        s.startGaveUp = true;
     }
     if (answered && !failure.empty()) {
         // Tear the whole session down rather than leave a socket bound and four
@@ -1085,6 +1144,11 @@ void MediaSession::Stop() {
 
 bool MediaSession::Running() const { return impl_->running.load(); }
 
+VideoCodec MediaSession::Codec() const {
+    std::lock_guard<std::mutex> guard(impl_->openLock);
+    return impl_->codec;
+}
+
 bool MediaSession::Retarget(HWND window, HMONITOR monitor) {
     Impl& s = *impl_;
     if (!s.running.load() || (!window && !monitor)) {
@@ -1118,7 +1182,7 @@ bool MediaSession::Retarget(HWND window, HMONITOR monitor) {
 
 std::string MediaSession::StatsJson() const {
     const Impl& s = *impl_;
-    char buffer[768];
+    char buffer[1024];
     // This runs on the agent's command thread, so the same rule applies as in
     // the sender's report: copy the two pointers under the lock and ask the
     // copies, or the capture thread can destroy an encoder between the null
@@ -1135,7 +1199,7 @@ std::string MediaSession::StatsJson() const {
                 ",\"encoderDropped\":%llu,\"encoderExtraSamples\":%llu"
                 ",\"captureDelivered\":%llu,\"glassToWireMs\":%.2f"
                 ",\"audioPackets\":%llu,\"audioBytes\":%llu,\"audioCodec\":\"%s\""
-                ",\"audioApps\":%d}",
+                ",\"audioApps\":%d,\"videoCodec\":\"%s\"}",
                 s.running.load() ? "true" : "false",
                 (unsigned long long) s.picturesSent.load(),
                 (unsigned long long) s.picturesDropped.load(),
@@ -1154,7 +1218,8 @@ std::string MediaSession::StatsJson() const {
                 (unsigned long long) s.audio.Packets(),
                 (unsigned long long) s.audioBytesSent.load(),
                 s.config.audioEncoding.codec == AudioEncoding::Codec::Opus ? "opus" : "pcm",
-                s.audio.AppSources());
+                s.audio.AppSources(),
+                encoderPtr ? VideoCodecName(encoderPtr->Codec()) : "");
     return buffer;
 }
 

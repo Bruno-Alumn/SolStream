@@ -1101,11 +1101,15 @@ public final class AgentConnection {
         /// Whose sound: the whole PC's, which every host sends unasked, or
         /// the streamed apps' alone.
         public var audioSource: AudioSource
+        /// The video codecs this Mac will decode, most wanted first. H.264
+        /// alone is what every host sends unasked, and is not said.
+        public var videoCodecs: [VideoCodec]
 
         public init(display: String? = nil,
                     fps: Int = 60, bitrate: Int = 20_000_000, audio: Bool = true,
                     width: Int? = nil, height: Int? = nil,
-                    audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system) {
+                    audioEncoding: AudioEncoding = .pcm, audioSource: AudioSource = .system,
+                    videoCodecs: [VideoCodec] = [.h264]) {
             self.display = display
             self.fps = fps
             self.bitrate = bitrate
@@ -1114,6 +1118,7 @@ public final class AgentConnection {
             self.height = height
             self.audioEncoding = audioEncoding
             self.audioSource = audioSource
+            self.videoCodecs = videoCodecs
         }
     }
 
@@ -1136,6 +1141,10 @@ public final class AgentConnection {
         /// The host takes keys by position, as scan codes. False for a host
         /// that said nothing, which takes them only by virtual key.
         public var takesScanCodes = false
+        /// What the host said its picture is coded in. H.264 from a host that
+        /// said nothing, because that is all one that predates the choice
+        /// sends.
+        public var videoCodec: VideoCodec = .h264
     }
 
     /// The `media open` command's fields beyond the key material.
@@ -1161,7 +1170,22 @@ public final class AgentConnection {
         if request.audio, request.audioSource != .system {
             fields["audioSource"] = request.audioSource.rawValue
         }
+        // A list in one string, most wanted first: "hevc,h264". The host
+        // reads its fields one flat value at a time, and a list it has to
+        // parse as a string is one an older host simply never looks for.
+        if request.videoCodecs != [.h264], !request.videoCodecs.isEmpty {
+            fields["videoCodecs"] = request.videoCodecs.map(\.rawValue).joined(separator: ",")
+        }
         return fields
+    }
+
+    /// What a `media open` reply says the picture is coded in. A host that
+    /// predates the choice says nothing and sends H.264. One that names a
+    /// codec this build does not know has answered something it was not
+    /// offered; H.264 is the one every host can send, and the decoder will
+    /// say soon enough if it is wrong.
+    static func videoCodec(inReply reply: [String: Any]) -> VideoCodec {
+        (reply["videoCodec"] as? String).flatMap(VideoCodec.init(rawValue:)) ?? .h264
     }
 
     /// Whose sound a `media open` reply says it will be: the whole PC's, from a
@@ -1271,6 +1295,7 @@ public final class AgentConnection {
         }
         let audioCodec = Self.audioCodec(inReply: reply)
         let audioSource = Self.audioSource(inReply: reply)
+        let videoCodec = Self.videoCodec(inReply: reply)
         Log.info("[media] session \(hcount) open, keys agree (sid \(keys.sessionTag)), "
                  + "host \(streaming ? "is streaming" : "is NOT streaming: \(message2 ?? "?")")")
         if request.audio, request.audioEncoding.codec != audioCodec {
@@ -1280,6 +1305,14 @@ public final class AgentConnection {
                      + (reply["audioCodec"] == nil ? "predates the choice and sends PCM"
                                                    : "sends \(audioCodec.rawValue)"))
         }
+        if streaming {
+            Log.info("[media] the picture is \(videoCodec.title)"
+                     + (request.videoCodecs.first == videoCodec ? ""
+                        : reply["videoCodec"] == nil
+                            ? " (asked for \(request.videoCodecs.map(\.title).joined(separator: " or ")); "
+                              + "the host predates the choice)"
+                            : " (asked for \(request.videoCodecs.map(\.title).joined(separator: " or ")))"))
+        }
         if request.audio, request.audioSource != audioSource {
             Log.info("[media] asked for the streamed apps' sound alone; the host sends "
                      + "the whole PC's" + (reply["audioSource"] == nil ? " (it predates the choice)" : ""))
@@ -1287,7 +1320,8 @@ public final class AgentConnection {
         return MediaSession(keys: keys, port: port, streaming: streaming, message: message2,
                             audioCodec: audioCodec, audioSource: audioSource,
                             audioSourceStated: reply["audioSource"] != nil,
-                            takesScanCodes: Self.takesScanCodes(inReply: reply))
+                            takesScanCodes: Self.takesScanCodes(inReply: reply),
+                            videoCodec: videoCodec)
     }
 
     /// Ask for the host's displays.

@@ -25,6 +25,10 @@ public final class VideoReassembler {
         public let isIdr: Bool
     }
 
+    /// What the pictures are coded in, which decides how a keyframe is
+    /// recognised in one the host did not flag. Set before the first packet.
+    public let codec: VideoCodec
+
     public var onPicture: ((Picture) -> Void)?
     /// A picture that will never be complete. The caller decides whether that is
     /// worth a keyframe request.
@@ -131,7 +135,9 @@ public final class VideoReassembler {
     /// `covered` records only what this picture's own fragments wrote.
     private var spare: [UInt8]?
 
-    public init() {}
+    public init(codec: VideoCodec = .h264) {
+        self.codec = codec
+    }
 
     private func takeBuffer() -> [UInt8] {
         if let buffer = spare {
@@ -220,6 +226,17 @@ public final class VideoReassembler {
         if flags & SMT.flagFrameEnd != 0 { assembly.total = end }
 
         if assembly.isComplete {
+            // The host's flag, or the picture's own first slice. The flag
+            // follows the encoder's clean-point mark, which is a per-driver
+            // courtesy; an HEVC IRAP picture it missed would otherwise reach
+            // the hold as a P-frame, be kept from the decoder for following a
+            // loss, and leave the hold asking for the keyframe it had just
+            // been sent. The first kilobyte holds the parameter sets and the
+            // first slice header of any picture this stream carries.
+            if !assembly.isIdr {
+                assembly.isIdr = VideoNAL.isKeyframe(
+                    codec, annexB: Data(assembly.bytes[0..<min(assembly.total, 1024)]))
+            }
             // Every older picture still being built is given up on FIRST, and
             // reported before this one is handed on. The host sends pictures one
             // after another, so an older one that is still open when a newer one

@@ -46,6 +46,7 @@
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
+#include "media/video_codec.h"
 #include "session_takeover.h"
 #include "stranded.h"
 #include "media/keys.h"
@@ -2793,6 +2794,79 @@ void TestAudioSource() {
     CHECK(std::strcmp(AudioSourceReply(false, false), "system") == 0);
 }
 
+void TestVideoCodecs() {
+    using namespace media;
+    using Codecs = std::vector<VideoCodec>;
+    // A Mac that predates the field sends nothing, and gets H.264.
+    CHECK(ParseVideoCodecs("") == Codecs{VideoCodec::H264});
+    CHECK(ParseVideoCodecs("hevc,h264") == (Codecs{VideoCodec::Hevc, VideoCodec::H264}));
+    CHECK(ParseVideoCodecs("h264,hevc") == (Codecs{VideoCodec::H264, VideoCodec::Hevc}));
+    CHECK(ParseVideoCodecs(" hevc , h264 ") == (Codecs{VideoCodec::Hevc, VideoCodec::H264}));
+    // Names this host has never heard of are passed over, and so are repeats.
+    CHECK(ParseVideoCodecs("av1,hevc,hevc") == Codecs{VideoCodec::Hevc});
+    CHECK(ParseVideoCodecs("av1") == Codecs{VideoCodec::H264});
+    CHECK(ParseVideoCodecs(",,") == Codecs{VideoCodec::H264});
+
+    // The Mac's first choice this PC can encode.
+    CHECK(ChooseVideoCodec({VideoCodec::Hevc, VideoCodec::H264}, true) == VideoCodec::Hevc);
+    CHECK(ChooseVideoCodec({VideoCodec::Hevc, VideoCodec::H264}, false) == VideoCodec::H264);
+    CHECK(ChooseVideoCodec({VideoCodec::H264, VideoCodec::Hevc}, true) == VideoCodec::H264);
+    CHECK(ChooseVideoCodec({VideoCodec::H264}, true) == VideoCodec::H264);
+    // HEVC alone on a PC without it: H.264, which every Mac decodes.
+    CHECK(ChooseVideoCodec({VideoCodec::Hevc}, false) == VideoCodec::H264);
+    CHECK(std::strcmp(VideoCodecName(VideoCodec::Hevc), "hevc") == 0);
+    CHECK(std::strcmp(VideoCodecName(VideoCodec::H264), "h264") == 0);
+
+    // HEVC NAL headers are two bytes, the type in bits 1-6 of the first.
+    const unsigned char vps[] = {0x40, 0x01};
+    const unsigned char idrWRadl[] = {0x26, 0x01};   // 19
+    const unsigned char idrNLp[] = {0x28, 0x01};     // 20
+    const unsigned char cra[] = {0x2A, 0x01};        // 21
+    const unsigned char trailR[] = {0x02, 0x01};     // 1
+    CHECK(NalType(VideoCodec::Hevc, vps) == 32);
+    CHECK(NalType(VideoCodec::Hevc, idrWRadl) == 19);
+    CHECK(NalType(VideoCodec::Hevc, idrNLp) == 20);
+    CHECK(NalType(VideoCodec::Hevc, cra) == 21);
+    CHECK(NalType(VideoCodec::Hevc, trailR) == 1);
+    // The same byte read as H.264 is a different unit altogether.
+    const unsigned char sps264[] = {0x67};
+    CHECK(NalType(VideoCodec::H264, sps264) == 7);
+    CHECK(NalType(VideoCodec::Hevc, sps264) == 51);
+
+    // A keyframe as the encoder emits it: parameter sets, then the slice.
+    const unsigned char hevcIdr[] = {
+        0, 0, 0, 1, 0x40, 0x01, 0x0C,    // VPS
+        0, 0, 0, 1, 0x42, 0x01, 0x01,    // SPS
+        0, 0, 0, 1, 0x44, 0x01, 0xC1,    // PPS
+        0, 0, 1, 0x26, 0x01, 0xAF, 0x00  // IDR_W_RADL
+    };
+    CHECK(StartsWithParameterSets(VideoCodec::Hevc, hevcIdr, sizeof(hevcIdr)));
+    CHECK(ContainsKeyframe(VideoCodec::Hevc, hevcIdr, sizeof(hevcIdr)));
+    // Without them in front, the host has to prefix its own.
+    const unsigned char hevcBareCra[] = {0, 0, 0, 1, 0x2A, 0x01, 0xAF};
+    CHECK(!StartsWithParameterSets(VideoCodec::Hevc, hevcBareCra, sizeof(hevcBareCra)));
+    CHECK(ContainsKeyframe(VideoCodec::Hevc, hevcBareCra, sizeof(hevcBareCra)));
+    // A P-frame behind an access unit delimiter (35) is not a keyframe.
+    const unsigned char hevcP[] = {0, 0, 0, 1, 0x46, 0x01, 0x10,
+                                   0, 0, 0, 1, 0x02, 0x01, 0xD0};
+    CHECK(!ContainsKeyframe(VideoCodec::Hevc, hevcP, sizeof(hevcP)));
+    CHECK(!StartsWithParameterSets(VideoCodec::Hevc, hevcP, sizeof(hevcP)));
+    // Too short for a two-byte header: nothing to read.
+    const unsigned char truncated[] = {0, 0, 1, 0x26};
+    CHECK(!ContainsKeyframe(VideoCodec::Hevc, truncated, sizeof(truncated)));
+
+    // H.264 as before: SPS first on an IDR, type 5 the keyframe.
+    const unsigned char h264Idr[] = {0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68, 0xEE,
+                                     0, 0, 1, 0x65, 0x88};
+    CHECK(StartsWithParameterSets(VideoCodec::H264, h264Idr, sizeof(h264Idr)));
+    CHECK(ContainsKeyframe(VideoCodec::H264, h264Idr, sizeof(h264Idr)));
+    const unsigned char h264P[] = {0, 0, 0, 1, 0x41, 0x9A};
+    CHECK(!ContainsKeyframe(VideoCodec::H264, h264P, sizeof(h264P)));
+    // An HEVC VPS is not an H.264 SPS, and the other way round.
+    CHECK(!StartsWithParameterSets(VideoCodec::H264, hevcIdr, sizeof(hevcIdr)));
+    CHECK(!StartsWithParameterSets(VideoCodec::Hevc, h264Idr, sizeof(h264Idr)));
+}
+
 void TestReceiveFailures() {
     using namespace media;
     static_assert(kWsaMessageTooBig == WSAEMSGSIZE);
@@ -3591,6 +3665,7 @@ int wmain(int argc, wchar_t** argv) {
     TestStrandedWindows();
     TestForegroundBound();
     TestAudioSource();
+    TestVideoCodecs();
     TestReceiveFailures();
     TestCaptureDisplayIsStale();
     TestRestorePlacement();

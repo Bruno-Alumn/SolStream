@@ -3,9 +3,10 @@ import VideoToolbox
 import CoreVideo
 import CoreMedia
 import QuartzCore
+import MediaSession
 import SolStreamLogging
 
-/// Decodes H.264 frames with VideoToolbox's hardware decoder.
+/// Decodes H.264 or HEVC frames with VideoToolbox's hardware decoder.
 ///
 /// Frames arrive from the reassembler in Annex-B form (start-code delimited).
 /// VideoToolbox does not accept Annex-B: a `CMSampleBuffer` must hold AVCC —
@@ -14,16 +15,24 @@ import SolStreamLogging
 /// raw Annex-B makes the decoder read `00 00 00 01` as a 1-byte NAL and produce
 /// nothing, so the conversion below is what actually gets pictures on screen.
 ///
-/// SPS/PPS come in-band: the host prefixes them to every IDR that the encoder
-/// did not inline them into — see `Encoder::Emit` — so the format description is
-/// built from the stream itself and there is nothing to parse out of band.
+/// The parameter sets come in-band: the host prefixes them to every IDR that
+/// the encoder did not inline them into — see `Encoder::Emit` — so the format
+/// description is built from the stream itself and there is nothing to parse
+/// out of band. SPS and PPS for H.264; VPS, SPS and PPS for HEVC, whose NAL
+/// headers are two bytes and whose keyframes are any IRAP picture rather than
+/// an IDR alone. See `VideoNAL`.
 public final class VideoDecoder {
     private var session: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private let frameCallback: (CVPixelBuffer) -> Void
 
-    private var sps: Data?
-    private var pps: Data?
+    /// What the host said it is sending. Fixed for the decoder's life: a
+    /// session's codec is agreed once, in `media open`.
+    public let codec: VideoCodec
+
+    /// The latest of each parameter set, by NAL type: 7 and 8 for H.264, 32,
+    /// 33 and 34 for HEVC.
+    private var parameterSets: [Int: Data] = [:]
     private var lastKeyframeRequest = Date.distantPast
     private var loggedFirstFrame = false
     /// Last decode error and when it was logged, so a decoder failing on every
@@ -60,8 +69,23 @@ public final class VideoDecoder {
 
     public typealias FrameCallback = (CVPixelBuffer) -> Void
 
-    public init(frameCallback: @escaping FrameCallback) {
+    public init(codec: VideoCodec = .h264, frameCallback: @escaping FrameCallback) {
+        self.codec = codec
         self.frameCallback = frameCallback
+    }
+
+    /// Whether this Mac decodes `codec` in hardware. Every Apple silicon Mac
+    /// does HEVC; an Intel one may not, and decoding it in software at 60 fps
+    /// is not something to choose for anyone by default.
+    public static func decodesInHardware(_ codec: VideoCodec) -> Bool {
+        VTIsHardwareDecodeSupported(codec == .hevc ? kCMVideoCodecType_HEVC
+                                                   : kCMVideoCodecType_H264)
+    }
+
+    /// The parameter-set NAL types a format description is built from, in the
+    /// order VideoToolbox wants them.
+    private var parameterSetTypes: [Int] {
+        codec == .hevc ? [32, 33, 34] : [7, 8]
     }
 
     deinit {
@@ -97,20 +121,21 @@ public final class VideoDecoder {
         // The host's flag, or an IDR slice in the picture itself.
         var startsOver = isIDR
 
-        for nal in nalUnits {
-            switch annexB[nal.lowerBound] & 0x1F {
-            case 7:  // SPS
+        for nal in nalUnits where nal.count >= VideoNAL.headerLength(codec) {
+            let type = VideoNAL.type(codec, first: annexB[nal.lowerBound])
+            switch VideoNAL.role(codec, type: type) {
+            case .parameterSet:
                 let unit = annexB[nal]
-                if sps != unit { sps = Data(unit); parameterSetsChanged = true }
-            case 8:  // PPS
-                let unit = annexB[nal]
-                if pps != unit { pps = Data(unit); parameterSetsChanged = true }
-            case 6, 9, 12:  // SEI, access unit delimiter, filler — not needed
+                if parameterSets[type] != unit {
+                    parameterSets[type] = Data(unit)
+                    parameterSetsChanged = true
+                }
+            case .other:  // SEI, delimiters, filler — not needed
                 continue
-            case 5:  // a slice of an IDR picture
+            case .keyframeSlice:  // IDR, or for HEVC any IRAP picture
                 startsOver = true
                 pictureNALs.append(nal)
-            default:
+            case .slice:
                 pictureNALs.append(nal)
             }
         }
@@ -140,8 +165,9 @@ public final class VideoDecoder {
         // was lost: VideoToolbox can invalidate a session (GPU reset, display
         // change) and the host will keep sending the *same* SPS/PPS, so waiting
         // for a parameter-set change would blackscreen the stream for good.
-        if let sps, let pps, parameterSetsChanged || session == nil {
-            rebuildSession(sps: sps, pps: pps)
+        let sets = parameterSetTypes.compactMap { parameterSets[$0] }
+        if sets.count == parameterSetTypes.count, parameterSetsChanged || session == nil {
+            rebuildSession(parameterSets: sets)
         }
 
         guard let formatDescription, let session else {
@@ -188,39 +214,54 @@ public final class VideoDecoder {
     /// Split an Annex-B byte stream into NAL units, dropping the start codes.
     /// The ranges are indices into `data` itself, so nothing is copied.
     static func splitAnnexB(_ data: Data) -> [Range<Int>] {
-        let base = data.startIndex
-        return data.withUnsafeBytes { bytes -> [Range<Int>] in
-            var units: [Range<Int>] = []
-            let count = bytes.count
-            guard count > 4 else { return units }
+        VideoNAL.splitAnnexB(data)
+    }
 
-            /// Returns the length of the start code at `index`, or 0.
-            func startCodeLength(at index: Int) -> Int {
-                guard index + 3 <= count else { return 0 }
-                if bytes[index] == 0 && bytes[index + 1] == 0 {
-                    if bytes[index + 2] == 1 { return 3 }
-                    if index + 4 <= count && bytes[index + 2] == 0 && bytes[index + 3] == 1 { return 4 }
-                }
-                return 0
+    // MARK: - Format description
+
+    /// A format description from parameter sets in the order
+    /// `parameterSetTypes` lists them, with four-byte NAL lengths.
+    static func makeFormatDescription(codec: VideoCodec, parameterSets: [Data])
+        -> (CMVideoFormatDescription?, OSStatus) {
+        let bytes = parameterSets.map { [UInt8]($0) }
+        var sizes = bytes.map(\.count)
+        var newFormat: CMVideoFormatDescription?
+        // Each array's storage pinned for the length of the call, however many
+        // there are: two for H.264, three for HEVC.
+        func withPointers(_ index: Int, _ pointers: [UnsafePointer<UInt8>],
+                          _ body: ([UnsafePointer<UInt8>]) -> OSStatus) -> OSStatus {
+            guard index < bytes.count else { return body(pointers) }
+            return bytes[index].withUnsafeBufferPointer { buffer in
+                withPointers(index + 1, pointers + [buffer.baseAddress!], body)
             }
-
-            var index = 0
-            // Skip to the first start code.
-            while index < count, startCodeLength(at: index) == 0 { index += 1 }
-
-            while index < count {
-                let prefix = startCodeLength(at: index)
-                guard prefix > 0 else { break }
-                let nalStart = index + prefix
-                var nalEnd = nalStart
-                while nalEnd < count, startCodeLength(at: nalEnd) == 0 { nalEnd += 1 }
-                if nalEnd > nalStart {
-                    units.append((base + nalStart)..<(base + nalEnd))
-                }
-                index = nalEnd
-            }
-            return units
         }
+        let status = withPointers(0, []) { pointers in
+            var pointers = pointers
+            return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
+                sizes.withUnsafeMutableBufferPointer { sizeBuffer in
+                    switch codec {
+                    case .h264:
+                        return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: bytes.count,
+                            parameterSetPointers: pointerBuffer.baseAddress!,
+                            parameterSetSizes: sizeBuffer.baseAddress!,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &newFormat)
+                    case .hevc:
+                        return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: bytes.count,
+                            parameterSetPointers: pointerBuffer.baseAddress!,
+                            parameterSetSizes: sizeBuffer.baseAddress!,
+                            nalUnitHeaderLength: 4,
+                            extensions: nil,
+                            formatDescriptionOut: &newFormat)
+                    }
+                }
+            }
+        }
+        return (newFormat, status)
     }
 
     /// Put a failure the output callback saw where the next `decode()` will
@@ -301,40 +342,19 @@ public final class VideoDecoder {
 
     // MARK: - Session
 
-    private func rebuildSession(sps: Data, pps: Data) {
+    private func rebuildSession(parameterSets: [Data]) {
         invalidateSession()
 
-        var newFormat: CMVideoFormatDescription?
-        let spsBytes = [UInt8](sps)
-        let ppsBytes = [UInt8](pps)
-        var sizes = [spsBytes.count, ppsBytes.count]
-
-        let status: OSStatus = spsBytes.withUnsafeBufferPointer { spsBuffer in
-            ppsBytes.withUnsafeBufferPointer { ppsBuffer in
-                var pointers: [UnsafePointer<UInt8>] = [spsBuffer.baseAddress!, ppsBuffer.baseAddress!]
-                return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
-                    sizes.withUnsafeMutableBufferPointer { sizeBuffer in
-                        CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                            allocator: kCFAllocatorDefault,
-                            parameterSetCount: 2,
-                            parameterSetPointers: pointerBuffer.baseAddress!,
-                            parameterSetSizes: sizeBuffer.baseAddress!,
-                            nalUnitHeaderLength: 4,
-                            formatDescriptionOut: &newFormat
-                        )
-                    }
-                }
-            }
-        }
-
-        guard status == noErr, let newFormat else {
+        let (made, status) = Self.makeFormatDescription(codec: codec,
+                                                        parameterSets: parameterSets)
+        guard status == noErr, let newFormat = made else {
             Log.error("[decode] could not build a format description: \(status)")
             return
         }
         formatDescription = newFormat
 
         let dimensions = CMVideoFormatDescriptionGetDimensions(newFormat)
-        Log.info("[decode] stream is \(dimensions.width)x\(dimensions.height)")
+        Log.info("[decode] stream is \(codec.title) \(dimensions.width)x\(dimensions.height)")
 
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
@@ -377,7 +397,8 @@ public final class VideoDecoder {
             return
         }
         session = newSession
-        Log.info("[decode] hardware decoder ready")
+        Log.info("[decode] \(codec.title) decoder ready"
+                 + (Self.decodesInHardware(codec) ? "" : " (in software: this Mac has no hardware decoder for it)"))
     }
 
     private func invalidateSession() {

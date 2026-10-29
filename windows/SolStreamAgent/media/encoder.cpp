@@ -49,28 +49,6 @@ long long QpcFrequency() {
     return ticks;
 }
 
-/// Does this Annex B buffer already start with a sequence parameter set?
-///
-/// An IDR without SPS and PPS in front of it is undecodable by a receiver that
-/// has just joined, and whether the encoder inlines them is a per-driver choice
-/// rather than a guarantee. Checking is three lines; assuming is a black picture
-/// on somebody else's machine.
-bool StartsWithSps(const unsigned char* data, size_t length) {
-    size_t i = 0;
-    while (i + 4 <= length) {
-        if (data[i] == 0 && data[i + 1] == 0) {
-            if (data[i + 2] == 1) {
-                return (data[i + 3] & 0x1F) == 7;
-            }
-            if (data[i + 2] == 0 && i + 5 <= length && data[i + 3] == 1) {
-                return (data[i + 4] & 0x1F) == 7;
-            }
-        }
-        ++i;
-    }
-    return false;
-}
-
 /// Set one of the encoder's VT_UI4 properties. Returns the HRESULT so callers
 /// can decide whether the failure matters; many drivers silently ignore
 /// unsupported values, but a refusal of low-latency or B-frame settings is
@@ -161,6 +139,7 @@ struct Encoder::Impl {
     EncoderCallback* callback = nullptr;
 
     UINT width = 0, height = 0, fps = 60, bitrate = 20000000;
+    VideoCodec videoCodec = VideoCodec::H264;
     LONGLONG ticksPerFrame = 166666;
     /// An asynchronous MFT says when it wants input and when it has output. A
     /// software one does neither: it is fed and drained inline.
@@ -749,7 +728,14 @@ void Encoder::Impl::Emit(LONGLONG pictureTime, bool isIdr) {
     const uint32_t frameId = (uint32_t) (pictureTime / ticksPerFrame);
     Meta& m = meta[frameId % kMetaRing];
 
-    if (isIdr && !StartsWithSps(picture.data(), picture.size())) {
+    // The transform's clean-point flag, or the picture's own first slice. The
+    // flag is a per-driver courtesy, and a keyframe the Mac is not told about
+    // is one its hold keeps waiting past -- for HEVC above all, whose IRAP
+    // pictures come in more types than H.264's one IDR.
+    if (!isIdr) {
+        isIdr = ContainsKeyframe(videoCodec, picture.data(), picture.size());
+    }
+    if (isIdr && !StartsWithParameterSets(videoCodec, picture.data(), picture.size())) {
         if (sequenceHeader.empty() && mft) {
             // Open read MF_MT_MPEG_SEQUENCE_HEADER before NOTIFY_BEGIN_STREAMING,
             // and some drivers do not fill it in until they have encoded
@@ -842,12 +828,31 @@ void ApplyCodecSettings(Encoder::Impl& s) {
     }
 }
 
+bool Encoder::HardwareSupports(VideoCodec codec) {
+    MFT_REGISTER_TYPE_INFO outInfo{
+        MFMediaType_Video,
+        codec == VideoCodec::Hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264};
+    IMFActivate** activates = nullptr;
+    UINT32 count = 0;
+    const HRESULT enumerated =
+        MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                  MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                  nullptr, &outInfo, &activates, &count);
+    for (UINT32 i = 0; i < count; ++i) { activates[i]->Release(); }
+    if (activates) { CoTaskMemFree(activates); }
+    return SUCCEEDED(enumerated) && count > 0;
+}
+
 bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
-                   UINT bitrateBps) {
+                   UINT bitrateBps, VideoCodec codec) {
     Impl& s = *impl_;
     Close();
 
-    // H.264 wants even dimensions; a window can be any odd size at all.
+    s.videoCodec = codec;
+    const bool hevc = codec == VideoCodec::Hevc;
+    const char* codecName = hevc ? "HEVC" : "H.264";
+    // Both codecs want even dimensions in 4:2:0; a window can be any odd size
+    // at all.
     s.width = width & ~1u;
     s.height = height & ~1u;
     s.fps = fps ? fps : 60;
@@ -891,14 +896,20 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     }
 
     // ── The transform ────────────────────────────────────────────────────────
-    // HARDWARE FIRST, THEN ANYTHING.
+    // HARDWARE FIRST, THEN ANYTHING -- for H.264.
     //
     // Asking only for hardware means SolStream cannot stream at all on a machine
     // without an H.264 encoder in its GPU -- a virtual machine, a thin client, an
     // old laptop. Windows ships a software H.264 MFT for exactly that case. It is
     // far slower and it is synchronous rather than event-driven, so the pump
     // below has two shapes; degrading to it beats refusing to run.
-    MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video, MFVideoFormat_H264};
+    //
+    // HEVC is hardware or nothing. There is no software HEVC encoder in
+    // Windows, and a store extension that adds one would be slower still than
+    // the H.264 one; the session chooses HEVC only where HardwareSupports
+    // says yes, and falls back to H.264 when this refuses.
+    MFT_REGISTER_TYPE_INFO outInfo{MFMediaType_Video,
+                                   hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264};
     IMFActivate** activates = nullptr;
     UINT32 count = 0;
     HRESULT enumerated = S_OK;
@@ -909,6 +920,12 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                                nullptr, &outInfo, &activates, &count);
         hardware = SUCCEEDED(enumerated) && count > 0;
     }
+    if (!hardware && hevc) {
+        if (activates) { CoTaskMemFree(activates); }
+        Log("[media] this PC has no hardware HEVC encoder");
+        Close();
+        return false;
+    }
     if (!hardware) {
         if (activates) { CoTaskMemFree(activates); activates = nullptr; }
         count = 0;
@@ -918,6 +935,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                                nullptr, &outInfo, &activates, &count);
     }
     if (FAILED(enumerated) || count == 0) {
+        if (activates) { CoTaskMemFree(activates); }
         Log("[media] this PC has no H.264 encoder at all, hardware or software");
         Close();
         return false;
@@ -977,23 +995,27 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     // and unchecked that was a null dereference one line later rather than the
     // log line below.
     if (FAILED(MFCreateMediaType(&outType)) || !outType) {
-        Log("[media] could not create the H.264 output media type");
+        Log("[media] could not create the %s output media type", codecName);
         Close();
         return false;
     }
     outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    outType->SetGUID(MF_MT_SUBTYPE, hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264);
     outType->SetUINT32(MF_MT_AVG_BITRATE, s.bitrate);
     MFSetAttributeSize(outType, MF_MT_FRAME_SIZE, s.width, s.height);
     MFSetAttributeRatio(outType, MF_MT_FRAME_RATE, s.fps, 1);
     MFSetAttributeRatio(outType, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    // Main for HEVC: 8-bit 4:2:0, which is what the NV12 below is, and what
+    // every Apple silicon decoder takes in hardware.
+    outType->SetUINT32(MF_MT_MPEG2_PROFILE,
+                       hevc ? (UINT32) eAVEncH265VProfile_Main_420_8
+                            : (UINT32) eAVEncH264VProfile_High);
     HRESULT hr = s.mft->SetOutputType(0, outType, 0);
     Release(outType);
     if (FAILED(hr)) {
-        Log("[media] the encoder refused H.264 %ux%u at %u kbit/s (0x%08lX)",
-            s.width, s.height, s.bitrate / 1000, hr);
+        Log("[media] the encoder refused %s %ux%u at %u kbit/s (0x%08lX)",
+            codecName, s.width, s.height, s.bitrate / 1000, hr);
         Close();
         return false;
     }
@@ -1039,8 +1061,9 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
             }
         };
         const long long bFrames = setting(CODECAPI_AVEncMPVDefaultBPictureCount);
-        Log("[media] encoder settings: low latency %lld, rate mode %lld, gop %lld,"
+        Log("[media] %s encoder settings: low latency %lld, rate mode %lld, gop %lld,"
             " b-frames %lld, vbv %lld bits",
+            codecName,
             setting(CODECAPI_AVLowLatencyMode),
             setting(CODECAPI_AVEncCommonRateControlMode),
             setting(CODECAPI_AVEncMPVGOPSize),
@@ -1143,6 +1166,7 @@ void Encoder::Close() {
 
 UINT Encoder::Width() const { return impl_->width; }
 UINT Encoder::Height() const { return impl_->height; }
+VideoCodec Encoder::Codec() const { return impl_->videoCodec; }
 
 void Encoder::OnPicture(PictureSink sink) { impl_->sink = std::move(sink); }
 

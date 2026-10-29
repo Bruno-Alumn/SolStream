@@ -13,7 +13,8 @@ import AgentChannel
 /// ordered front.
 final class SettingsWindowTests: XCTestCase {
     private static let keys = [
-        "SolStream.videoQuality", "SolStream.frameRate", "SolStream.streamsAudio",
+        "SolStream.videoQuality", "SolStream.frameRate", "SolStream.videoCodec",
+        "SolStream.streamsAudio",
         "SolStream.soundQuality", "SolStream.soundSource",
         "SolStream.volume", "SolStream.muted", "SolStream.audioBuffering",
         "SolStream.syncsClipboard", "SolStream.pointerMode",
@@ -77,6 +78,7 @@ final class SettingsWindowTests: XCTestCase {
     func testEveryControlShowsTheSettingsAsTheyAre() {
         settings.videoQuality = .high
         settings.frameRate = 30
+        settings.videoCodec = .h264
         settings.streamsAudio = true
         settings.soundSource = .wholePC
         settings.soundQuality = .standard
@@ -94,6 +96,9 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(pane.frameRateControl.segmentCount, 2)
         XCTAssertEqual(pane.frameRateControl.label(forSegment: pane.frameRateControl.selectedSegment),
                        "30 fps")
+        XCTAssertEqual(pane.codecPopUp.itemTitles, ["Automatic", "H.264", "HEVC"])
+        XCTAssertEqual(pane.codecPopUp.titleOfSelectedItem, "H.264")
+        XCTAssertEqual(pane.codecPopUp.toolTip, StreamSettings.VideoCodecChoice.h264.detail)
         XCTAssertTrue(pane.soundSwitch.isOn)
         XCTAssertEqual(pane.soundSourceControl.segmentCount, 2)
         XCTAssertEqual(pane.soundSourceControl.label(forSegment: pane.soundSourceControl.selectedSegment),
@@ -178,6 +183,7 @@ final class SettingsWindowTests: XCTestCase {
     func testEachControlWritesItsSettingAndSaysWhetherTheStreamRestarts() {
         settings.videoQuality = .automatic
         settings.frameRate = 60
+        settings.videoCodec = .automatic
         settings.streamsAudio = true
         settings.soundSource = .streamedApps
         settings.soundQuality = .high
@@ -215,6 +221,14 @@ final class SettingsWindowTests: XCTestCase {
         send(pane.frameRateControl)
         XCTAssertEqual(settings.frameRate, 30)
         expect(restart: true, "frame rate")
+
+        // The host's encoder is chosen when the session opens.
+        choose(pane.codecPopUp, StreamSettings.VideoCodecChoice.allCases.firstIndex(of: .hevc)!)
+        XCTAssertEqual(settings.videoCodec, .hevc)
+        XCTAssertEqual(pane.codecPopUp.toolTip, StreamSettings.VideoCodecChoice.hevc.detail)
+        expect(restart: true, "video codec")
+        choose(pane.codecPopUp, StreamSettings.VideoCodecChoice.allCases.firstIndex(of: .hevc)!)
+        XCTAssertTrue(restarts.isEmpty, "re-choosing the codec restarted the stream")
 
         pane.soundSourceControl.selectedSegment = 1
         send(pane.soundSourceControl)
@@ -360,6 +374,8 @@ final class SettingsWindowTests: XCTestCase {
     func testOnlyAChangeTheStreamDoesNotHaveYetRestartsIt() {
         settings.videoQuality = .balanced
         settings.frameRate = 60
+        // H.264 alone: what a config made without a codec already has.
+        settings.videoCodec = .h264
         settings.streamsAudio = true
         settings.soundQuality = .high
         settings.soundSource = .streamedApps
@@ -416,6 +432,8 @@ final class SettingsWindowTests: XCTestCase {
     func testSoundQualityRestartsTheStreamOnlyWhileThereIsSound() {
         settings.videoQuality = .balanced
         settings.frameRate = 60
+        // H.264 alone: what a config made without a codec already has.
+        settings.videoCodec = .h264
         settings.streamsAudio = true
         settings.soundQuality = .high
         settings.soundSource = .streamedApps
@@ -468,6 +486,8 @@ final class SettingsWindowTests: XCTestCase {
     func testTheSoundSourceRestartsTheStreamOnlyWhileThereIsSound() {
         settings.videoQuality = .balanced
         settings.frameRate = 60
+        // H.264 alone: what a config made without a codec already has.
+        settings.videoCodec = .h264
         settings.streamsAudio = true
         settings.soundQuality = .high
         settings.soundSource = .streamedApps
@@ -727,7 +747,8 @@ final class SettingsWindowTests: XCTestCase {
         backdrop.layoutSubtreeIfNeeded()
 
         let controls: [NSView] = [
-            pane.qualityPopUp, pane.qualityDetail, pane.frameRateControl, pane.soundSwitch,
+            pane.qualityPopUp, pane.qualityDetail, pane.frameRateControl,
+            pane.codecPopUp, pane.soundSwitch,
             pane.soundSourceControl, pane.soundSourceDetail,
             pane.soundQualityPopUp, pane.soundQualityDetail,
             pane.muteButton, pane.volumeSlider, pane.volumeValue, pane.bufferingPopUp,

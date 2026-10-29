@@ -3998,6 +3998,10 @@ std::string HandleMedia(const std::string& line) {
     // What the sound will be sent as, said in the reply so the Mac knows
     // without waiting for a packet. Empty -- and so not said -- without sound.
     std::string audioCodecReply, audioSourceReply;
+    // The video codec this host chose from the Mac's list, said only when it
+    // is streaming. A Mac that predates the choice ignores it; one that does
+    // not reads a reply without it -- an older host's -- as H.264.
+    std::string videoCodecReply;
     // What this host's input takes beyond what every host does. A Mac
     // sends keys by position only when this says "scancodes", and by
     // virtual key otherwise -- which every host, this one included, still
@@ -4024,6 +4028,10 @@ std::string HandleMedia(const std::string& line) {
     FieldString(line, "audioCodec", audioCodec);
     FieldNumber(line, "audioBitrate", audioBitrate);
     FieldNumber(line, "audioFrameMs", audioFrameMs);
+    // "hevc,h264", most wanted first. Absent from every Mac that predates it,
+    // which therefore gets H.264, the only codec it can decode.
+    std::string videoCodecs;
+    FieldString(line, "videoCodecs", videoCodecs);
     HWND targetWindow =
         targetId ? WindowFromId(static_cast<uint64_t>(targetId)) : nullptr;
     HMONITOR targetMonitor =
@@ -4052,6 +4060,7 @@ std::string HandleMedia(const std::string& line) {
         config.width = (UINT) (width > 0 ? (width > 4096 ? 4096 : width) : 0);
         config.height = (UINT) (height > 0 ? (height > 4096 ? 4096 : height) : 0);
         config.audio = audio != 0;
+        config.videoCodecs = solstream::media::ParseVideoCodecs(videoCodecs);
         // Opus only when named. A bitrate outside what libopus does well with
         // stereo falls back to Standard's, and a packet length other than the
         // three the Mac offers to 10 ms, rather than either being clamped: as
@@ -4093,14 +4102,19 @@ std::string HandleMedia(const std::string& line) {
         started = solstream::media::MediaSession::Instance().Start(
                       okm.data(), config, &startError)
                       ? "true" : "false";
+        if (started == "true") {
+            videoCodecReply = solstream::media::VideoCodecName(
+                solstream::media::MediaSession::Instance().Codec());
+        }
     } else {
         startError = "no window or display named";
     }
 #else
     startError = "this build has no media path";
 #endif
-    Log("[media] session %llu opened; keys derived; streaming %s%s%s; sound %s%s%s",
-        hcount, started.c_str(), startError.empty() ? "" : " -- ",
+    Log("[media] session %llu opened; keys derived; streaming %s%s%s%s%s; sound %s%s%s",
+        hcount, started.c_str(), videoCodecReply.empty() ? "" : " ",
+        videoCodecReply.c_str(), startError.empty() ? "" : " -- ",
         startError.c_str(), audioCodecReply.empty() ? "off" : audioCodecReply.c_str(),
         audioSourceReply.empty() ? "" : " from ", audioSourceReply.c_str());
     return "{\"type\":\"media\",\"ok\":true,\"ver\":1"
@@ -4115,6 +4129,8 @@ std::string HandleMedia(const std::string& line) {
                                       : ",\"audioCodec\":\"" + audioCodecReply + "\"")
            + (audioSourceReply.empty() ? std::string()
                                        : ",\"audioSource\":\"" + audioSourceReply + "\"")
+           + (videoCodecReply.empty() ? std::string()
+                                      : ",\"videoCodec\":\"" + videoCodecReply + "\"")
            + inputReply
            + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
 }

@@ -173,12 +173,13 @@ final class StreamSession {
         Log.info("[input] keys go to \(host) "
                  + (session.takesScanCodes ? "by position, so the PC's layout decides what they type"
                                            : "by US-layout name; it predates sending them by position"))
-        self.media = MediaClient(keys: session.keys, host: host, port: session.port)
+        self.media = MediaClient(keys: session.keys, host: host, port: session.port,
+                                 videoCodec: session.videoCodec)
 
         // One decoder, fanned out to every attached window. Each window carries
         // its own sourceRect, so they all read the same CVPixelBuffer and blit
         // different regions of it.
-        let decoder = VideoDecoder { [weak self] pixelBuffer in
+        let decoder = VideoDecoder(codec: session.videoCodec) { [weak self] pixelBuffer in
             guard let self else { return }
             self.frameCountLock.lock()
             self.framesDelivered &+= 1

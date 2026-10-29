@@ -48,7 +48,9 @@ public final class MediaClient {
     private let sessionTag: UInt8
 
     private var window = SMTReplayWindow()
-    private let reassembler = VideoReassembler()
+    private let reassembler: VideoReassembler
+    /// What the host said it is sending, from the `media open` reply.
+    public let videoCodec: VideoCodec
 
     private var fd: Int32 = -1
     private var receiveThread: Thread?
@@ -108,9 +110,11 @@ public final class MediaClient {
     private var timer: DispatchSourceTimer?
     private let timerQueue = DispatchQueue(label: "solstream.media.timer")
 
-    public init(keys: MediaKeys, host: String, port: UInt16) {
+    public init(keys: MediaKeys, host: String, port: UInt16, videoCodec: VideoCodec = .h264) {
         self.host = host
         self.port = port
+        self.videoCodec = videoCodec
+        self.reassembler = VideoReassembler(codec: videoCodec)
         self.toHost = SMTDirection(key: keys.clientToHost, fixed: keys.fixedClientToHost)
         self.fromHost = SMTDirection(key: keys.hostToClient, fixed: keys.fixedHostToClient)
         self.sessionTag = keys.sessionTag

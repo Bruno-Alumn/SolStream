@@ -3,6 +3,7 @@ import AppKit
 import SolStreamLogging
 import MediaSession
 import AgentChannel
+import VideoDecoder
 
 /// SolStream macOS client entry point.
 struct SolStreamApp {
@@ -98,6 +99,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             config.frameRate = fps
             overrides.insert(.frameRate)
             Log.info("[stream] \(fps) fps")
+        }
+        if let name = value(after: "--video-codec") {
+            // Settings' names: automatic, h264, hevc. "hevc" offers H.264
+            // second, as the setting does, so a PC without HEVC still streams.
+            let all = StreamSettings.VideoCodecChoice.allCases
+            if let choice = all.first(where: {
+                $0.rawValue.caseInsensitiveCompare(name) == .orderedSame
+                    || $0.title.caseInsensitiveCompare(name) == .orderedSame
+            }) {
+                config.videoCodecs = choice.codecs(
+                    hardwareHEVC: VideoDecoder.decodesInHardware(.hevc))
+                overrides.insert(.videoCodec)
+                Log.info("[stream] video codec \(choice.title): offering "
+                         + config.videoCodecs.map(\.title).joined(separator: ", "))
+            } else {
+                Log.error("[stream] --video-codec \(name) is not one of "
+                          + all.map(\.rawValue).joined(separator: ", ") + "; using Settings")
+            }
         }
         if arguments.contains("--no-audio") {
             config.audio = false
@@ -761,7 +780,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 bitrate: config.bitrateKbps * 1000,
                 audio: config.audio,
                 audioEncoding: config.audioEncoding,
-                audioSource: config.audioSource)
+                audioSource: config.audioSource,
+                videoCodecs: config.videoCodecs)
             // The canvas, said out loud: it is the size every crop is expressed
             // in, so the host must encode exactly this and not the raw source.
             request.width = config.width
@@ -1288,8 +1308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      status: ("Applying settings…", "Restarting the picture from \(host)"))
     }
 
-    /// `request` and `config` with the settings' frame rate, bitrate, sound,
-    /// sound quality and sound source, or nil when the stream already has them
+    /// `request` and `config` with the settings' frame rate, bitrate, video
+    /// codec, sound, sound quality and sound source, or nil when the stream already has them
     /// all -- in which case there is nothing to restart for.
     ///
     /// The sound's quality and source count only while there is sound: with it off, the
@@ -1304,10 +1324,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || (fresh.audio && (fresh.audioEncoding != config.audioEncoding
                                 || fresh.audioSource != config.audioSource))
         guard fresh.frameRate != config.frameRate || fresh.bitrateKbps != config.bitrateKbps
+                || fresh.videoCodecs != config.videoCodecs
                 || soundChanged else { return nil }
         var updated = request
         updated.fps = fresh.frameRate
         updated.bitrate = fresh.bitrateKbps * 1000
+        updated.videoCodecs = fresh.videoCodecs
         updated.audio = fresh.audio
         updated.audioEncoding = fresh.audioEncoding
         updated.audioSource = fresh.audioSource
@@ -1316,6 +1338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static func describe(_ config: StreamConfig) -> String {
         "\(config.frameRate) fps, \(config.bitrateKbps) kbit/s, "
+            + config.videoCodecs.map(\.title).joined(separator: " or ") + ", "
             + (config.audio ? "sound \(config.audioEncoding.summary)"
                 + (config.audioSource == .apps ? " from the streamed apps" : " from the whole PC")
                 : "sound off")

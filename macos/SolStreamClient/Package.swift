@@ -61,7 +61,7 @@ let package = Package(
         // -- Video decoder (VideoToolbox + CAMetalLayer) --
         .target(
             name: "VideoDecoder",
-            dependencies: ["SolStreamLogging", "DesignSystem"],
+            dependencies: ["SolStreamLogging", "DesignSystem", "MediaSession"],
             linkerSettings: [
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreVideo"),

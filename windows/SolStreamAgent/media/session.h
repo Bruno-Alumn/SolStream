@@ -18,10 +18,12 @@
 #include <windows.h>
 
 #include "audio.h"
+#include "video_codec.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace solstream::media {
 
@@ -32,6 +34,9 @@ struct MediaConfig {
     UINT height = 0;
     UINT fps = 60;
     UINT bitrate = 20000000;
+    /// What the Mac decodes, most wanted first. H.264 alone -- the default,
+    /// and all an older Mac gets -- is what every Mac decodes.
+    std::vector<VideoCodec> videoCodecs{VideoCodec::H264};
     unsigned short port = 47999;
     bool audio = true;
     /// PCM unless the Mac asked for Opus by name; see audio.h.
@@ -52,6 +57,10 @@ public:
 
     /// Point the capture at something else without renegotiating keys.
     bool Retarget(HWND window, HMONITOR monitor);
+
+    /// The codec this session sends, for the `media open` reply. Settled by
+    /// the time Start returns: see the fallback in RunCapture.
+    VideoCodec Codec() const;
 
     /// What the agent reports back on the channel, and what the log line says.
     std::string StatsJson() const;

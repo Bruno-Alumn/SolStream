@@ -1,4 +1,4 @@
-// encoder.h — the hardware H.264 encoder, fed a GPU texture.
+// encoder.h — the hardware H.264 or HEVC encoder, fed a GPU texture.
 //
 // spike/mf-encode answered the two questions this depends on. The encoder
 // exposes LTR, which the recovery design needs. And fed from SYSTEM MEMORY its
@@ -24,6 +24,8 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include "video_codec.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,11 +50,20 @@ public:
     Encoder& operator=(const Encoder&) = delete;
 
     /// `device` must be the same D3D11 device the capture textures live on.
-    bool Open(ID3D11Device* device, UINT width, UINT height, UINT fps, UINT bitrateBps);
+    ///
+    /// HEVC opens a hardware encoder or nothing: Windows has no software HEVC
+    /// encoder to fall back to, unlike H.264's. See `HardwareSupports`.
+    bool Open(ID3D11Device* device, UINT width, UINT height, UINT fps, UINT bitrateBps,
+              VideoCodec codec = VideoCodec::H264);
     void Close();
+
+    /// Whether this PC has a hardware encoder for `codec`. Asks the registry,
+    /// not a driver, so it is quick and needs no device.
+    static bool HardwareSupports(VideoCodec codec);
 
     UINT Width() const;
     UINT Height() const;
+    VideoCodec Codec() const;
 
     /// Called on an MF work-queue thread, with the picture's bytes valid only
     /// for the duration of the call.

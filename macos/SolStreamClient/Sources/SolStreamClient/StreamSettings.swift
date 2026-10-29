@@ -2,6 +2,7 @@ import Foundation
 import AudioRenderer
 import InputCapture
 import MediaSession
+import VideoDecoder
 
 /// Everything the person can choose about a stream, remembered across launches.
 ///
@@ -9,8 +10,8 @@ import MediaSession
 /// the code that opens a stream all read the same values. Each change posts
 /// `didChange` with `restartsStream` saying whether it can be applied to a
 /// running stream as it is (volume, buffering, mouse, clipboard) or needs the
-/// media session opened again (quality, frame rate, sound on or off, sound
-/// quality and source), because the host's encoders and audio capture are fixed
+/// media session opened again (quality, frame rate, codec, sound on or off,
+/// sound quality and source), because the host's encoders and audio capture are fixed
 /// when the session opens.
 ///
 /// The mouse settings live in InputCapture, which owns the behaviour; they are
@@ -85,6 +86,51 @@ final class StreamSettings {
             return Self.frameRates.contains(stored) ? stored : 60
         }
         set { set(Self.frameRates.contains(newValue) ? newValue : 60, Key.frameRate, restarts: true) }
+    }
+
+    /// What the PC encodes the picture in.
+    ///
+    /// HEVC carries the same picture in fewer bits than H.264 -- sharper text
+    /// at a given quality, or the same text over a slower network -- and both
+    /// ends do it in hardware on a recent GPU and any Apple silicon Mac. A PC
+    /// without a hardware HEVC encoder, or a host that predates the choice,
+    /// sends H.264 whatever is chosen here.
+    enum VideoCodecChoice: String, SettingChoice {
+        case automatic, h264, hevc
+
+        var title: String {
+            switch self {
+            case .automatic: return "Automatic"
+            case .h264: return "H.264"
+            case .hevc: return "HEVC"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .automatic: return "HEVC when this Mac and the PC both do it in hardware."
+            case .h264: return "Works with every PC. Uses more data for the same picture."
+            case .hevc: return "Sharper for the same data. H.264 if the PC cannot."
+            }
+        }
+
+        /// What to offer the host, most wanted first. H.264 is always in the
+        /// list, last, because it is what a PC without HEVC can fall back to.
+        /// Automatic offers HEVC only where this Mac decodes it in hardware;
+        /// HEVC chosen by name is offered even where it would be decoded in
+        /// software.
+        func codecs(hardwareHEVC: Bool) -> [VideoCodec] {
+            switch self {
+            case .automatic: return hardwareHEVC ? [.hevc, .h264] : [.h264]
+            case .h264: return [.h264]
+            case .hevc: return [.hevc, .h264]
+            }
+        }
+    }
+
+    var videoCodec: VideoCodecChoice {
+        get { defaults.string(forKey: Key.videoCodec).flatMap(VideoCodecChoice.init(rawValue:)) ?? .automatic }
+        set { set(newValue.rawValue, Key.videoCodec, restarts: true) }
     }
 
     // MARK: - Sound
@@ -312,18 +358,23 @@ final class StreamSettings {
         return parts[0] == 100 && (64...127).contains(parts[1])
     }
 
-    /// `base` with the chosen frame rate, bitrate and sound applied.
+    /// `base` with the chosen frame rate, bitrate, codec and sound applied.
     ///
     /// `overrides` names fields a command-line flag already set (`--bitrate`,
-    /// `--fps`, `--no-audio`, `--sound-quality`, `--sound-from`), which win: the
+    /// `--fps`, `--video-codec`, `--no-audio`, `--sound-quality`,
+    /// `--sound-from`), which win: the
     /// test harness and anyone debugging from a terminal must get exactly what
     /// they typed.
     func apply(to base: StreamConfig, host: String,
-               overrides: Set<Override> = []) -> StreamConfig {
+               overrides: Set<Override> = [],
+               hardwareHEVC: Bool = VideoDecoder.decodesInHardware(.hevc)) -> StreamConfig {
         var config = base
         if !overrides.contains(.frameRate) { config.frameRate = frameRate }
         if !overrides.contains(.bitrate) {
             config.bitrateKbps = videoQuality.bitrateKbps(remote: Self.isRemote(host: host))
+        }
+        if !overrides.contains(.videoCodec) {
+            config.videoCodecs = videoCodec.codecs(hardwareHEVC: hardwareHEVC)
         }
         if !overrides.contains(.audio) { config.audio = streamsAudio }
         if !overrides.contains(.soundQuality) { config.audioEncoding = soundQuality.encoding }
@@ -331,13 +382,14 @@ final class StreamSettings {
         return config
     }
 
-    enum Override: Hashable { case frameRate, bitrate, audio, soundQuality, soundSource }
+    enum Override: Hashable { case frameRate, bitrate, videoCodec, audio, soundQuality, soundSource }
 
     // MARK: - Storage
 
     private enum Key {
         static let quality = "SolStream.videoQuality"
         static let frameRate = "SolStream.frameRate"
+        static let videoCodec = "SolStream.videoCodec"
         static let audio = "SolStream.streamsAudio"
         static let volume = "SolStream.volume"
         static let muted = "SolStream.muted"
