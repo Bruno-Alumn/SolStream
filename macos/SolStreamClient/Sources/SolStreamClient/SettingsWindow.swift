@@ -271,7 +271,7 @@ final class SettingsPane: NSView {
                         bufferingPopUp] as [NSControl] {
             control.isEnabled = streamsAudio
         }
-        // After the enabling, which decides whether the speaker keeps its amber.
+        // After the enabling, which decides whether the speaker keeps its blue.
         showVolume(movingSlider: true)
         Self.dim(soundDependentLabels, !streamsAudio)
 
@@ -337,7 +337,7 @@ final class SettingsPane: NSView {
 
     /// The speaker, the slider and the figure beside it.
     ///
-    /// The same rule as the popover's: the amber goes to whichever part is in
+    /// The same rule as the popover's: the blue goes to whichever part is in
     /// charge -- the slider's fill while sound plays at that level, the slashed
     /// speaker while muted, which is the one state here you can forget you
     /// chose -- and to neither while the row does not apply, where AppKit's
@@ -951,11 +951,10 @@ extension NSPopUpButton {
 /// sit on `raised`.
 ///
 /// NSSegmentedControl takes its fill from `selectedSegmentBezelColor` but
-/// picks the ink by itself -- dark on the dark theme's amber, white on the
-/// light theme's, at about 2:1 -- and on macOS 26 a view AppKit hosts inside
-/// it does the drawing, which a custom cell cannot reach. So the light theme's
-/// one readable amber was a deeper one than every switch beside it. This is
-/// drawn from the tokens instead, as `SolarSwitch` is, with the same disabled
+/// picks the ink by itself, without asking what contrast it gets, and on
+/// macOS 26 a view AppKit hosts inside it does the drawing, which a custom
+/// cell cannot reach. This is drawn from the tokens instead, as `SolarSwitch`
+/// is, so the ink is always `onAccent`, with the same disabled
 /// rule: the chosen segment keeps `accentTint`, so it still says which.
 final class SolarSegments: NSControl {
     /// The height of AppKit's regular controls, so it lines up with the
@@ -1160,11 +1159,12 @@ private final class SegmentElement: NSAccessibilityElement {
 
 /// An on/off switch in Solar's colours.
 ///
-/// NSSwitch draws "on" in the system accent -- blue on most Macs -- and offers
-/// no way to say otherwise, which put blue switches beside amber segmented
-/// controls. This is the same control drawn from the tokens: amber with dark
-/// ink when on, graphite when off. Disabled, it gives the full amber up, as a
-/// disabled primary button does, rather than fading it to a muddy brown --
+/// NSSwitch draws "on" in the system accent, whatever the user picked in System
+/// Settings, and offers no way to say otherwise, so its colour would not match
+/// the segmented controls beside it. This is the same control drawn from the
+/// tokens: `accent` with `onAccent` ink when on, graphite when off. Disabled, it
+/// gives the accent up, as a disabled primary button does, rather than fading
+/// it to a muddy grey --
 /// but one that is on keeps `accentTint`, so a setting that is on and does
 /// not apply right now does not read as off.
 final class SolarSwitch: NSView {

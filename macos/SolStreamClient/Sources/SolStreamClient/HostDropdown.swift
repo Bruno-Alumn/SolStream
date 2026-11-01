@@ -310,7 +310,7 @@ final class HostDropdown: DS.Box {
     private func discoveryFooter() -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
-        // Amber and pulsing: the design's "working" dot, which is exactly what
+        // Blue and pulsing: the design's "working" dot, which is exactly what
         // discovery is doing.
         let pulse = DS.Dot(state: .working)
         let label = DS.label("Looking for more PCs…", font: DS.body, colour: DS.textMuted)

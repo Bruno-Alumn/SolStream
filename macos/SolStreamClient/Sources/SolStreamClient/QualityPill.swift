@@ -90,9 +90,9 @@ final class QualityPill: DS.Box {
         label.stringValue = stats.fps > 0 ? "\(stats.fps)" : "—"
         showAccessibilityValue()
         // Frames arriving is green, whatever the rate; nothing arriving is the
-        // idle grey. Not amber below some threshold: capture is change-driven,
+        // idle grey. Not blue below some threshold: capture is change-driven,
         // so a still application streams at 15 fps and is perfectly healthy —
-        // an amber dot there cried wolf on every dialog. A stream that really
+        // an blue dot there cried wolf on every dialog. A stream that really
         // is in trouble says so in the status card, in words.
         dot.state = stats.fps > 0 ? .live : .idle
         refreshDetail()
@@ -449,7 +449,7 @@ final class QualityPill: DS.Box {
     /// The speaker, the slider and the note under them, from the settings and
     /// from what the stream is sending.
     ///
-    /// The amber goes to whichever part is in charge: the slider's fill while
+    /// The blue goes to whichever part is in charge: the slider's fill while
     /// sound plays at that level, the slashed speaker while muted. A muted
     /// stream is the one state here you can forget you chose -- it is kept
     /// across launches -- so it is the one that has to be findable, and the
@@ -596,7 +596,7 @@ final class QualityPill: DS.Box {
 /// A button that reads as a link: words in `textSecondary` and a chevron in
 /// `textMuted`, both brightening to `text` under the pointer, and the pointing
 /// hand. For the way out of the popover, which should not look like one more
-/// setting in it, nor spend the amber that marks the choices above it.
+/// setting in it, nor spend the blue that marks the choices above it.
 ///
 /// The chevron is what says "go" before the pointer arrives: the words alone
 /// look like the values above them. Not "⌘,", which a menu would show --

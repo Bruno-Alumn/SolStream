@@ -10,7 +10,7 @@ import AgentChannel
 /// Reachability and pairing state are shown on the host row itself rather than
 /// behind a dialog, so connecting is one step and a problem is legible before you
 /// press anything. The dot is the only coloured thing on the row: green is
-/// reachable, a pulsing amber is still checking, coral is not answering. The
+/// reachable, a pulsing blue is still checking, coral is not answering. The
 /// primary button relabels — `Pair & Connect` rather than a second button — so
 /// there is never more than one way forward.
 final class ConnectWindow: NSObject, NSWindowDelegate {
@@ -186,7 +186,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hintLabel.maximumNumberOfLines = 2
 
         // A caption and a link, both quiet: this is advice for later, not the
-        // way forward, which stays the one amber button.
+        // way forward, which stays the one blue button.
         tailscaleWords.font = DS.caption
         tailscaleWords.textColor = DS.textMuted
         tailscaleWords.maximumNumberOfLines = 2

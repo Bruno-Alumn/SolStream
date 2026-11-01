@@ -92,7 +92,7 @@ final class SetupGuideView: NSView {
         var stepViews: [NSView] = []
         for (index, sentence) in words.enumerated() {
             let dot = DS.Dot(state: .idle)
-            // Current is a steady amber, not the pulse: the pulse means
+            // Current is a steady blue, not the pulse: the pulse means
             // something is under way, and nothing is until the person does it.
             dot.holdsSteady = true
             let text = NSTextField(wrappingLabelWithString: "")

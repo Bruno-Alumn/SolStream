@@ -6,7 +6,7 @@ It replaces Nocturne (navy ground, muted blurple accent). Nocturne was coherent 
 
 ## Idea
 
-*Sol* is the sun. The chrome is a deep, neutral graphite — still the darkest thing on screen, so a streamed app stays the brightest — and there is **one warm accent, sun amber**, used for the single most important thing on each screen: the primary button, the selected row, the live dot, the focus ring, the mark. Everything else is neutral.
+The chrome is a deep, neutral graphite — still the darkest thing on screen, so a streamed app stays the brightest — and there is **one accent, the logo's electric blue**, used for the single most important thing on each screen: the primary button, the selected row, the live dot, the focus ring. Everything else is neutral. Where the accent is text on the dark theme, it takes the logo's cyan instead, because the fill blue is too dark to read there.
 
 State gets real hues now, but only two and only small: a green dot for live and a coral one for failed. Severity is still carried by the words; the colour just makes it findable.
 
@@ -25,17 +25,17 @@ Every token is a role, with a dark and a light value. Drawing code never knows w
 | `textSecondary` | `#A9ADB8` | `#4A4E57` | supporting text |
 | `textMuted` | `#7C818D` | `#6A6F79` | labels, captions |
 | `textFaint` | `#5A5F6B` | `#9A9EA6` | placeholders, disabled |
-| `accent` | `#FFB547` | `#F59E0B` | primary button fill, live mark, focus ring, caret |
-| `accentHover` | `#FFC56E` | `#FBB13C` | primary button hover |
-| `accentPressed` | `#E89A2A` | `#D97706` | primary button pressed |
-| `onAccent` | `#1A1205` | `#1A1205` | text on a filled accent |
-| `accentInk` | `#FFC66B` | `#B45309` | accent used as text or a 1px line on `ground`/`surface` |
-| `accentTint` | `#2B2418` | `#FDF0DA` | selected row, text selection, primary-tag ground |
-| `accentTintInk` | `#FFD699` | `#8A4B06` | text on `accentTint` |
+| `accent` | `#2A64F5` | `#1652F0` | primary button fill, live mark, focus ring, caret |
+| `accentHover` | `#336BF7` | `#2E66F5` | primary button hover |
+| `accentPressed` | `#1F52D6` | `#0B3FC6` | primary button pressed |
+| `onAccent` | `#FFFFFF` | `#FFFFFF` | text on a filled accent |
+| `accentInk` | `#6CC4FF` | `#0B45D6` | accent used as text or a 1px line on `ground`/`surface` |
+| `accentTint` | `#132242` | `#E4ECFF` | selected row, text selection, primary-tag ground |
+| `accentTintInk` | `#A8C8FF` | `#0A2E91` | text on `accentTint` |
 | `live` | `#4ADE80` | `#16A34A` | live / connected dot |
 | `danger` | `#FF6B6B` | `#DC2626` | failed dot, destructive text |
 
-Contrast: `text` on `ground` and `surface` is ≥ 14:1 in both themes; `textSecondary` ≥ 7:1; `textMuted` ≥ 4.5:1; `onAccent` on `accent` ≥ 8.5:1; `accentInk` on `ground` ≥ 4.5:1. `textFaint` is for placeholders and disabled labels only, never for anything that must be read.
+Contrast: `text` on `ground` and `surface` is ≥ 14:1 in both themes; `textSecondary` ≥ 7:1; `textMuted` ≥ 4.5:1; `onAccent` on `accent` ≥ 4.5:1 (5.0 dark, 6.0 light); `accentInk` on `ground` ≥ 4.5:1 (10.0 dark, 6.9 light). `textFaint` is for placeholders and disabled labels only, never for anything that must be read.
 
 ## Type
 

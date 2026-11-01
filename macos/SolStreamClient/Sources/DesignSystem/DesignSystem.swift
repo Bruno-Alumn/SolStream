@@ -5,7 +5,7 @@ import AppKit
 /// `host_theme.h`, and the two change together or not at all.
 ///
 /// A deep, neutral graphite chrome — still the darkest thing on screen, so a
-/// streamed application stays the brightest — and ONE warm accent, sun amber,
+/// streamed application stays the brightest — and ONE accent, the logo's blue,
 /// spent on the single most important thing on each screen: the primary button,
 /// the selected row, the focus ring, a working dot. Everything else is neutral.
 ///
@@ -73,21 +73,22 @@ public enum DS {
     /// Placeholders and disabled labels ONLY — never anything that must be read.
     public static let textFaint = dynamic(dark: hex(0x5A5F6B), light: hex(0x9A9EA6))
 
-    /// Sun amber. The primary button's fill, a working dot, the focus ring, the
-    /// caret. One thing per screen.
-    public static let accent = dynamic(dark: hex(0xFFB547), light: hex(0xF59E0B))
-    public static let accentHover = dynamic(dark: hex(0xFFC56E), light: hex(0xFBB13C))
-    public static let accentPressed = dynamic(dark: hex(0xE89A2A), light: hex(0xD97706))
-    /// Text on a filled accent. The same near-black in both themes: amber is
-    /// light in both, so it always wants dark ink.
-    public static let onAccent = dynamic(dark: hex(0x1A1205), light: hex(0x1A1205))
-    /// The accent used as text or a 1px line on `ground`/`surface`, where the
-    /// fill value is too pale to read in the light theme.
-    public static let accentInk = dynamic(dark: hex(0xFFC66B), light: hex(0xB45309))
+    /// The logo's electric blue. The primary button's fill, a working dot, the
+    /// focus ring, the caret. One thing per screen. A shade deeper in the dark
+    /// theme than the logo's brightest, so white on it still reads at 5:1.
+    public static let accent = dynamic(dark: hex(0x2A64F5), light: hex(0x1652F0))
+    public static let accentHover = dynamic(dark: hex(0x336BF7), light: hex(0x2E66F5))
+    public static let accentPressed = dynamic(dark: hex(0x1F52D6), light: hex(0x0B3FC6))
+    /// Text on a filled accent: white in both themes, since the blue is dark
+    /// in both.
+    public static let onAccent = dynamic(dark: hex(0xFFFFFF), light: hex(0xFFFFFF))
+    /// The accent used as text or a 1px line on `ground`/`surface`. In the dark
+    /// theme the logo's cyan, because the fill blue is too dark to read there.
+    public static let accentInk = dynamic(dark: hex(0x6CC4FF), light: hex(0x0B45D6))
     /// A selected row, text selection, a primary tag's ground.
-    public static let accentTint = dynamic(dark: hex(0x2B2418), light: hex(0xFDF0DA))
+    public static let accentTint = dynamic(dark: hex(0x132242), light: hex(0xE4ECFF))
     /// Text that sits on `accentTint`.
-    public static let accentTintInk = dynamic(dark: hex(0xFFD699), light: hex(0x8A4B06))
+    public static let accentTintInk = dynamic(dark: hex(0xA8C8FF), light: hex(0x0A2E91))
 
     /// Live / connected. A dot, never a fill.
     public static let live = dynamic(dark: hex(0x4ADE80), light: hex(0x16A34A))
@@ -666,8 +667,8 @@ public enum DS {
             let ink: NSColor
             switch style {
             case .primary:
-                // Disabled, it gives the amber up entirely rather than fading
-                // it: amber at partial opacity over graphite is a muddy brown
+                // Disabled, it gives the blue up entirely rather than fading
+                // it: blue at partial opacity over graphite is a muddy grey
                 // that reads as a colour of its own, not as "not yet".
                 guard isEnabled else {
                     DS.raised.setFill()

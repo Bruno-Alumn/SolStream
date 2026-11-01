@@ -102,7 +102,7 @@ struct Palette {
     D2D1_COLOR_F textMuted;     ///< labels, captions
     D2D1_COLOR_F textFaint;     ///< placeholders and disabled only — never for reading
 
-    // The one warm accent, sun amber
+    // The one accent, the logo's electric blue
     D2D1_COLOR_F accent;        ///< primary fill, focus ring, the mark
     D2D1_COLOR_F accentHover;
     D2D1_COLOR_F accentPressed;
@@ -140,13 +140,13 @@ inline Palette DarkPalette() {
     p.textMuted = Hex(0x7C818D);
     p.textFaint = Hex(0x5A5F6B);
 
-    p.accent = Hex(0xFFB547);
-    p.accentHover = Hex(0xFFC56E);
-    p.accentPressed = Hex(0xE89A2A);
-    p.onAccent = Hex(0x1A1205);
-    p.accentInk = Hex(0xFFC66B);
-    p.accentTint = Hex(0x2B2418);
-    p.accentTintInk = Hex(0xFFD699);
+    p.accent = Hex(0x2A64F5);
+    p.accentHover = Hex(0x336BF7);
+    p.accentPressed = Hex(0x1F52D6);
+    p.onAccent = Hex(0xFFFFFF);
+    p.accentInk = Hex(0x6CC4FF);
+    p.accentTint = Hex(0x132242);
+    p.accentTintInk = Hex(0xA8C8FF);
 
     p.live = Hex(0x4ADE80);
     p.danger = Hex(0xFF6B6B);
@@ -156,9 +156,9 @@ inline Palette DarkPalette() {
 }
 
 /// The light ramps are not the dark ones inverted. The ground is a warm paper
-/// rather than white, so a white card reads as a card; the accent deepens to
-/// amber 500 so a filled button still holds onAccent at 8.5:1; and accentInk
-/// drops to amber 700, because amber 500 as text on paper fails AA.
+/// rather than white, so a white card reads as a card; the accent is a little
+/// brighter than the dark theme's, holding white at 6:1; and accentInk is a
+/// deeper blue, so the accent as text on paper still passes AA.
 inline Palette LightPalette() {
     Palette p{};
     p.ground = Hex(0xF7F6F3);
@@ -173,13 +173,13 @@ inline Palette LightPalette() {
     p.textMuted = Hex(0x6A6F79);
     p.textFaint = Hex(0x9A9EA6);
 
-    p.accent = Hex(0xF59E0B);
-    p.accentHover = Hex(0xFBB13C);
-    p.accentPressed = Hex(0xD97706);
-    p.onAccent = Hex(0x1A1205);
-    p.accentInk = Hex(0xB45309);
-    p.accentTint = Hex(0xFDF0DA);
-    p.accentTintInk = Hex(0x8A4B06);
+    p.accent = Hex(0x1652F0);
+    p.accentHover = Hex(0x2E66F5);
+    p.accentPressed = Hex(0x0B3FC6);
+    p.onAccent = Hex(0xFFFFFF);
+    p.accentInk = Hex(0x0B45D6);
+    p.accentTint = Hex(0xE4ECFF);
+    p.accentTintInk = Hex(0x0A2E91);
 
     p.live = Hex(0x16A34A);
     p.danger = Hex(0xDC2626);

@@ -552,7 +552,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                        subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
                        // Installed applications get no dot at all rather than a
                        // grey one: the dot means "this is live". A launch under
-                       // way is the amber working dot.
+                       // way is the blue working dot.
                        note: busy ? nil : entry.note,
                        dot: busy ? .working : (entry.isRunning ? .live : nil),
                        action: entry.isRunning ? "Attach" : "Launch")

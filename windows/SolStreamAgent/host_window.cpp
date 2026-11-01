@@ -239,6 +239,9 @@ float g_dpi = 96.0f;
 ID2D1Factory* g_d2d = nullptr;
 ID2D1HwndRenderTarget* g_target = nullptr;
 ID2D1SolidColorBrush* g_brush = nullptr;
+/// The logo at `g_logo_px` pixels; see LogoBitmap. Belongs to `g_target`.
+ID2D1Bitmap* g_logo = nullptr;
+int g_logo_px = 0;
 IDWriteFactory* g_dwrite = nullptr;
 /// Round caps and joins for the tick, so its two strokes meet as one mark
 /// instead of as two rectangles overlapping at a corner.
@@ -304,6 +307,7 @@ bool CreateDeviceIndependentResources() {
 }
 
 void DiscardTarget() {
+    if (g_logo) { g_logo->Release(); g_logo = nullptr; }
     if (g_brush) { g_brush->Release(); g_brush = nullptr; }
     if (g_target) { g_target->Release(); g_target = nullptr; }
 }
@@ -459,59 +463,73 @@ void FocusRing(const D2D1_RECT_F& control, float control_radius) {
                                    g_brush, stroke);
 }
 
-/// The mark: a hairline frame with a solid accent rect straddling its right
-/// edge — the host display, and the application half out of it.
-///
-/// Drawn rather than loaded from the .ico beside it, because this is the only
-/// place it appears at a size Windows has no artboard for, and because at 38
-/// DIP on a 200% display it wants 76 real pixels: a scaled 48px icon there is
-/// visibly soft next to text DirectWrite has hinted. Two rounded rectangles
-/// cost less than the code to pick the right icon size would.
-///
-/// With its tile, which is not decoration: the mark's artwork occupies the
-/// middle 48% of the tile, so without one it reads as a small glyph floating
-/// beside large type rather than as the application's icon. Every lockup in the
-/// design shows the tile, on light grounds as well as dark.
+/// The logo, as the application's own icon: resource 1, which holds it at the
+/// pixel sizes this window draws it at (38 DIP is 38 to 76 pixels from 100% to
+/// 200% scaling), so it is copied rather than scaled and stays as sharp as the
+/// text beside it. One bitmap is kept, for the size last asked for, and dropped
+/// with the render target it belongs to (`g_logo`).
+
+ID2D1Bitmap* LogoBitmap(int px) {
+    if (g_logo && g_logo_px == px) {
+        return g_logo;
+    }
+    if (g_logo) { g_logo->Release(); g_logo = nullptr; }
+    HICON icon = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                    IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
+    if (!icon) {
+        return nullptr;
+    }
+    std::vector<BYTE> pixels((size_t) px * px * 4);
+    bool read = false;
+    ICONINFO info{};
+    if (GetIconInfo(icon, &info)) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = px;
+        bmi.bmiHeader.biHeight = -px;  // top-down, as Direct2D wants the rows
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        HDC screen = GetDC(nullptr);
+        read = GetDIBits(screen, info.hbmColor, 0, (UINT) px, pixels.data(), &bmi,
+                         DIB_RGB_COLORS) == px;
+        ReleaseDC(nullptr, screen);
+        if (info.hbmColor) { DeleteObject(info.hbmColor); }
+        if (info.hbmMask) { DeleteObject(info.hbmMask); }
+    }
+    DestroyIcon(icon);
+    if (!read) {
+        return nullptr;
+    }
+    // The icon's colour is straight alpha; Direct2D draws premultiplied.
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        const unsigned a = pixels[i + 3];
+        pixels[i] = (BYTE) (pixels[i] * a / 255);
+        pixels[i + 1] = (BYTE) (pixels[i + 1] * a / 255);
+        pixels[i + 2] = (BYTE) (pixels[i + 2] * a / 255);
+    }
+    const D2D1_BITMAP_PROPERTIES properties = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        g_dpi, g_dpi);
+    if (FAILED(g_target->CreateBitmap(D2D1::SizeU((UINT32) px, (UINT32) px), pixels.data(),
+                                      (UINT32) px * 4, properties, &g_logo))) {
+        g_logo = nullptr;
+        return nullptr;
+    }
+    g_logo_px = px;
+    return g_logo;
+}
+
 void DrawLogo(const D2D1_RECT_F& box) {
     const float side = box.bottom - box.top;
-    const float stroke = side < 24.0f ? 1.0f : side / 17.0f;
-
-    // Solar's recolouring of the unchanged shape: tile `surface`, tile edge
-    // `hairline`, the application rectangle `accent`. The frame is `edge` in
-    // the design, brightened at small sizes — and this is a small size, where
-    // `edge` itself is close enough to the tile to disappear, so it takes the
-    // next ink up: textMuted on graphite, textFaint on paper, which is the
-    // same distance from the tile in either theme. These are the .ico's
-    // colours too, so the title bar and the header show one drawing.
-    const D2D1_COLOR_F tile = g_palette.surface;
-    const D2D1_COLOR_F tileEdge = g_palette.hairline;
-    const D2D1_COLOR_F frameInk = g_palette.dark ? g_palette.textMuted
-                                                 : g_palette.textFaint;
-    const D2D1_COLOR_F appInk = g_palette.accent;
-
-    // 22.4% — the macOS squircle radius, which is also what the tile is drawn at
-    // everywhere it appears beside the wordmark.
-    Fill(box, side * 0.224f, tile);
-    Stroke(box, side * 0.224f, tileEdge);
-
-    // The same fractions the icon artboards use, so the wordmark's companion and
-    // the taskbar icon are the same drawing rather than two things that look
-    // alike. See assets/logo/make-logo.swift.
-    const D2D1_RECT_F frame{box.left + side * 0.15f + stroke / 2,
-                            box.top + side * 0.26f + stroke / 2,
-                            box.left + side * 0.60f - stroke / 2,
-                            box.top + side * 0.74f - stroke / 2};
-    g_brush->SetColor(frameInk);
-    g_target->DrawRoundedRectangle(
-        D2D1::RoundedRect(frame, side * 0.055f, side * 0.055f), g_brush, stroke);
-
-    // Drawn second, so it covers the frame's right edge. The overlap IS the
-    // mark — a window that crossed a boundary and stopped being remote.
-    const D2D1_RECT_F app{box.left + side * 0.44f, box.top + side * 0.38f,
-                          box.left + side * 0.85f, box.top + side * 0.74f};
-    g_brush->SetColor(appInk);
-    g_target->FillRoundedRectangle(
-        D2D1::RoundedRect(app, side * 0.047f, side * 0.047f), g_brush);
+    const int px = (int) std::lround(side * g_dpi / 96.0f);
+    if (ID2D1Bitmap* logo = LogoBitmap(px)) {
+        g_target->DrawBitmap(logo, box, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        return;
+    }
+    // An executable without its icon is a broken build, but the window should
+    // still say whose it is: the tile's blue, at the tile's radius.
+    Fill(box, side * 0.224f, g_palette.accent);
 }
 
 /// A status dot, 8 DIP. Green = live, accent with a halo = needs you, coral =
@@ -654,7 +672,7 @@ void DrawButton(const Button& button) {
 
     D2D1_COLOR_F ink{};
     if (button.kind == ButtonKind::Primary) {
-        // Filled sun amber, no border. One of these per screen at most: it is
+        // Filled accent blue, no border. One of these per screen at most: it is
         // the thing the screen is asking you to do.
         Fill(button.rect, radius,
              down ? g_palette.accentPressed
@@ -955,18 +973,16 @@ struct Row {
 
 /// The horizontal lockup: mark, gap, wordmark.
 ///
-/// The design fixes the relationship rather than the sizes — the mark's artwork
-/// is as tall as the wordmark's cap height, and the gap between them is that
-/// height divided by 2.5. Segoe UI Variable's cap height is 0.7 of its em, so
-/// the 26 DIP display wordmark wants 18.2 DIP of artwork; the artwork is the
-/// middle 48% of the tile, so the tile is 18.2 / 0.48 = 38.
+/// The logo is the app icon, tile and all, so it sits beside the name the way
+/// an icon sits beside its label: the 38 DIP tile is a little taller than the
+/// 26 DIP wordmark's line, and the gap between them is 7 DIP.
 constexpr float kLockupMark = 38.0f;
 constexpr float kLockupH = 38.0f;
 
 void DrawLockup(float left, float top, float right) {
     const float mark_top = top + (kLockupH - kLockupMark) / 2.0f;
     DrawLogo(D2D1::RectF(left, mark_top, left + kLockupMark, mark_top + kLockupMark));
-    const float gap = std::round(kLockupMark * 0.48f / 2.5f);
+    const float gap = 7.0f;
     Text(L"SolStream", g_fmt_display,
          D2D1::RectF(left + kLockupMark + gap, top, right, top + kLockupH),
          g_palette.text);
@@ -1972,7 +1988,7 @@ void ApplyTheme(HWND window) {
 /// this control exists to provide.
 HBITMAP g_caret_bitmap = nullptr;
 
-void AmberCaret() {
+void AccentCaret() {
     if (!g_token_edit) {
         return;
     }
@@ -3031,7 +3047,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             if (LOWORD(wparam) == kEditId
                 && (HIWORD(wparam) == EN_SETFOCUS || HIWORD(wparam) == EN_KILLFOCUS)) {
                 if (HIWORD(wparam) == EN_SETFOCUS) {
-                    AmberCaret();
+                    AccentCaret();
                 }
                 InvalidateRect(window, nullptr, FALSE);
                 return 0;
