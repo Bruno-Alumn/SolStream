@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/media/icon.png" width="128" alt="SolStream logo">
+  <img src="docs/media/logo.png" width="128" alt="SolStream logo">
 </p>
 
 <h1 align="center">SolStream</h1>

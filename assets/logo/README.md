@@ -16,7 +16,7 @@ white page, draws every size with CoreGraphics, packs the `.icns` with
 | --- | --- |
 | `macos/SolStreamClient/Resources/AppIcon.icns` | the Mac app: Dock, Finder, the connect window |
 | `windows/SolStreamAgent/SolStream.ico` | the Windows host: taskbar, tray, Explorer, shortcuts, and the logo in its window |
-| `docs/media/icon.png` | the README |
+| `docs/media/logo.png` | the README |
 | `out/preview-512.png`, `out/preview-sizes.png` | for looking at, not committed |
 
 The outputs are committed. Regenerating is a deliberate act with a visible

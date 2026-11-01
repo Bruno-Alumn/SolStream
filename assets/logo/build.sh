@@ -22,10 +22,10 @@ iconutil --convert icns --output out/AppIcon.icns out/AppIcon.iconset
 
 cp out/AppIcon.icns "$ROOT/macos/SolStreamClient/Resources/AppIcon.icns"
 cp out/SolStream.ico "$ROOT/windows/SolStreamAgent/SolStream.ico"
-cp out/icon.png "$ROOT/docs/media/icon.png"
+cp out/icon.png "$ROOT/docs/media/logo.png"
 
 echo ""
 echo "  macos/SolStreamClient/Resources/AppIcon.icns  $(wc -c < out/AppIcon.icns | tr -d ' ') bytes"
 echo "  windows/SolStreamAgent/SolStream.ico          $(wc -c < out/SolStream.ico | tr -d ' ') bytes"
-echo "  docs/media/icon.png                           $(wc -c < out/icon.png | tr -d ' ') bytes"
+echo "  docs/media/logo.png                           $(wc -c < out/icon.png | tr -d ' ') bytes"
 echo "  assets/logo/out/preview-*.png                 for looking at"
