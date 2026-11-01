@@ -143,8 +143,10 @@ starts again when you sign back in. Locking the PC doesn't stop it.
 
 ## Updates and security
 
-Both apps check for updates a minute after launch and then daily, or on
-request from *Check for Updates*. Nothing is installed without your
+Both apps check GitHub for new releases on their own: the Mac app when it
+opens and the PC host shortly after it starts, then once a day, or whenever
+you choose *Check for Updates* (the SolStream menu on the Mac, the tray menu
+on the PC). Nothing is installed without your
 confirmation, and never during a stream. Each release's checksums are signed;
 a download that doesn't verify against the key built into both apps is
 discarded ([details](docs/updates.md)).

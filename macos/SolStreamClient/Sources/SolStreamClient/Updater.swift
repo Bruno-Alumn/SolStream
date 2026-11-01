@@ -5,7 +5,7 @@ import SolStreamLogging
 /// Keeps SolStream up to date from the repository's GitHub releases, by the
 /// contract in docs/updates.md.
 ///
-/// Quiet by design. It checks a minute after launch and then once a day,
+/// Quiet by design. It checks a few seconds after launch and then once a day,
 /// downloads and verifies what it finds while nothing is streaming, and then
 /// waits: an update is announced in Settings and on the connect window, and
 /// installed only when the person presses the button -- never in the middle of
@@ -63,7 +63,11 @@ final class Updater {
         static let replacedBundle = "SolStream.update.replacedBundle"
     }
 
-    static let launchDelay: TimeInterval = 60
+    /// Seconds, not a minute: the Mac app is often opened for one stream and
+    /// quit, and a copy that was never open for a whole minute never checked
+    /// at all -- one stayed on 1.0.1 through two releases. The check is one
+    /// small request, which costs launch nothing.
+    static let launchDelay: TimeInterval = 3
     static let interval: TimeInterval = 24 * 60 * 60
 
     var state: State = .idle {
@@ -144,7 +148,7 @@ final class Updater {
     /// The archive's own fetch, cancelled when a stream opens.
     private var zipFetch: Task<UpdateTransport.Response, Error>?
     private var timers: [Timer] = []
-    /// When this run last asked GitHub, so the check a minute after launch is
+    /// When this run last asked GitHub, so the check just after launch is
     /// skipped if somebody pressed Check now first.
     private var askedThisRun: Date?
 
@@ -201,7 +205,7 @@ final class Updater {
     // MARK: - Schedule
 
     /// At launch: tidy up after an update that just went in, then check in a
-    /// minute and every day after.
+    /// few seconds and every day after.
     func start() {
         guard timers.isEmpty else { return }
         cleanUpAfterUpdate()

@@ -89,8 +89,10 @@ and the release workflow run it on `tests/update-vector`.
 
 ## When
 
-On launch, after a minute, then every 24 hours; and when the person asks
-("Check for Updates…"). At most one check in flight. Unauthenticated, the
+The Mac app a few seconds after launch, since it is often open only for one
+stream; the Windows host a minute after it starts, since it runs all day in the
+tray. Both then every 24 hours, and whenever the person asks ("Check for
+Updates…"). At most one check in flight. Unauthenticated, the
 GitHub API allows 60 requests an hour per address, which this never comes near.
 
 ## Installing
