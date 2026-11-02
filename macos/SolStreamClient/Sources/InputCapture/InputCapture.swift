@@ -1668,8 +1668,11 @@ public final class InputCapture {
         let wasHidden = policy.hostCursorHidden
         // Only gaming mode ever takes the mouse, so only it asks where the
         // pointer is.
-        let inside = isCapturing && mode == .gaming
-            && (pointerIsOverPicture() || !heldButtons.isEmpty)
+        // Over the picture, held button or not: taken anywhere else -- a drag
+        // carried past the window's edge or onto the title bar -- the hidden
+        // cursor stays frozen there, and every click after goes to whatever
+        // is under it: the title bar, another application.
+        let inside = isCapturing && mode == .gaming && pointerIsOverPicture()
         apply(policy.wantsCapture(after: .hostCursor(hidden: hidden), moment(pointerInside: inside)),
               because: hidden ? "the PC hid its cursor" : "the PC showed its cursor")
         guard wasHidden, !hidden, isCapturing, !isPointerCaptured, mode == .gaming,
@@ -1728,10 +1731,10 @@ public final class InputCapture {
         let isClick = Self.buttonDowns.contains(event.type)
         let isMove = event.type == .mouseMoved || Self.drags.contains(event.type)
         guard isClick || isMove else { return false }
-        // A click must land in the picture itself; a move may be a drag that
-        // has carried a held button out of it.
+        // In the picture itself, a click or a move alike: a drag that has
+        // carried a held button out of it is taken when it comes back, not
+        // where the frozen cursor would send every later click elsewhere.
         let inside = pictureUnitPoint(for: event, in: view) != nil
-            || (isMove && !heldButtons.isEmpty)
         guard policy.wantsCapture(after: isClick ? .click : .pointerMoved,
                                   moment(pointerInside: inside)) else { return false }
         // The key window hears every move, wherever the pointer is -- over
@@ -1739,7 +1742,7 @@ public final class InputCapture {
         // delivered to the window it lands on, so only a move has to ask
         // whether the picture is really what is under the pointer. Asked only
         // now, when the answer would take the mouse.
-        if isMove, heldButtons.isEmpty, !pointerIsOverPicture() { return false }
+        if isMove, !pointerIsOverPicture() { return false }
 
         if policy.isFollowing(followsCursor) {
             // The game has its cursor hidden and is reading motion, not
