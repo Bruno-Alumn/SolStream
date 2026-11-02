@@ -4599,7 +4599,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     if (command == "clipboard") {
         std::string text;
         if (FieldString(line, "text", text)) {
-            return solstream::ClipboardSetJson(text);
+            // Formatting rides beside it when the Mac's copy had some.
+            std::string html, rtf;
+            FieldString(line, "html", html);
+            FieldString(line, "rtf", rtf);
+            return solstream::ClipboardSetJson(text, html, rtf);
         }
         // No text field means "what have you got"; a seq that matches what the
         // Mac already has means it need not ask for the contents.

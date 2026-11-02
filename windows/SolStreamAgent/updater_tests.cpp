@@ -1745,6 +1745,55 @@ HGLOBAL GlobalBytes(const void* bytes, size_t size) {
     return memory;
 }
 
+/// Windows' "HTML Format" carries byte offsets in a header; the Mac's HTML is
+/// the document alone. Each way, and back again.
+void TestClipboardHtml() {
+    // A body without markers: the body's contents become the fragment.
+    const std::string document = "<html><body><b>bold</b> text</body></html>";
+    const std::string cf = CfHtmlFromHtml(document);
+    CHECK(cf.rfind("Version:0.9\r\n", 0) == 0);
+    CHECK(cf.find("<!--StartFragment--><b>bold</b> text<!--EndFragment-->") != std::string::npos);
+    const std::string back = HtmlFromCfHtml(cf);
+    CHECK(back.find("<b>bold</b> text") != std::string::npos);
+    CHECK(back.rfind("<html><body>", 0) == 0);
+    // The offsets in the header point where they say.
+    const size_t start_fragment = cf.find("StartFragment:") + 14;
+    const size_t fragment = std::stoul(cf.substr(start_fragment, 10));
+    CHECK(cf.compare(fragment, 11, "<b>bold</b>") == 0);
+    const size_t end_html = std::stoul(cf.substr(cf.find("EndHTML:") + 8, 10));
+    CHECK(end_html == cf.size());
+
+    // A bare fragment is wrapped, and one that marks itself kept as it is.
+    CHECK(HtmlFromCfHtml(CfHtmlFromHtml("<i>x</i>")).find("<!--StartFragment--><i>x</i><!--EndFragment-->")
+          != std::string::npos);
+    const std::string marked = "<html><body><p><!--StartFragment-->y<!--EndFragment--></p></body></html>";
+    CHECK(HtmlFromCfHtml(CfHtmlFromHtml(marked)) == marked);
+    // Upper-case tags find the body too.
+    CHECK(CfHtmlFromHtml("<HTML><BODY>z</BODY></HTML>").find("<BODY><!--StartFragment-->z<!--EndFragment--></BODY>")
+          != std::string::npos);
+
+    // StartHTML of -1 says only the fragment is marked.
+    const std::string fragment_only =
+        "Version:0.9\r\nStartHTML:-1\r\nEndHTML:-1\r\nStartFragment:0000000089\r\n"
+        "EndFragment:0000000093\r\nabcd";
+    CHECK(fragment_only.size() == 93);
+    CHECK(HtmlFromCfHtml(fragment_only) == "<html><body><!--StartFragment-->abcd<!--EndFragment--></body></html>");
+    // Offsets past the end, or none at all: nothing, never a read past it.
+    CHECK(HtmlFromCfHtml("Version:0.9\r\nStartHTML:0000000010\r\nEndHTML:0000099999\r\n").empty());
+    CHECK(HtmlFromCfHtml("not a header").empty());
+    CHECK(HtmlFromCfHtml("").empty());
+}
+
+/// Formatting travels within its budget, and RTF only as the ASCII it is.
+void TestRichTextTravels() {
+    CHECK(RichTextTravels("{\\rtf1 hi}", true));
+    CHECK(!RichTextTravels("", true));
+    CHECK(!RichTextTravels("{\\rtf1 caf\xc3\xa9}", true));
+    CHECK(RichTextTravels("<p>caf\xc3\xa9</p>", false));
+    CHECK(RichTextTravels(std::string(kMaxRichClipboardBytes, 'a'), false));
+    CHECK(!RichTextTravels(std::string(kMaxRichClipboardBytes + 1, 'a'), false));
+}
+
 void TestClipboardLineEndings() {
     // A Mac's lines become Windows' lines.
     CHECK(ToWindowsLineEndings("one\ntwo\n") == "one\r\ntwo\r\n");
@@ -3909,6 +3958,8 @@ int wmain(int argc, wchar_t** argv) {
     TestTailscaleAdapter();
     TestPickTailscaleAddress();
     TestClipboardLineEndings();
+    TestClipboardHtml();
+    TestRichTextTravels();
     TestClipboardMarkers();
     TestSoundReadTrouble();
     TestSoundReopener();

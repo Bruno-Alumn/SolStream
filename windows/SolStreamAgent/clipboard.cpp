@@ -151,6 +151,152 @@ void MarkClipboardPrivate() {
     }
 }
 
+namespace {
+
+/// The number after `name` in a CF_HTML header, or -1.
+long long HeaderNumber(const std::string& cf_html, const char* name) {
+    const size_t header_end = (std::min)(cf_html.size(), static_cast<size_t>(512));
+    const size_t at = cf_html.find(name);
+    if (at == std::string::npos || at >= header_end) {
+        return -1;
+    }
+    size_t i = at + std::strlen(name);
+    bool negative = false;
+    if (i < cf_html.size() && cf_html[i] == '-') {
+        negative = true;
+        ++i;
+    }
+    long long value = 0;
+    size_t digits = 0;
+    while (i < cf_html.size() && cf_html[i] >= '0' && cf_html[i] <= '9' && digits < 12) {
+        value = value * 10 + (cf_html[i] - '0');
+        ++i;
+        ++digits;
+    }
+    return (digits == 0 || negative) ? -1 : value;
+}
+
+constexpr char kStartFragment[] = "<!--StartFragment-->";
+constexpr char kEndFragment[] = "<!--EndFragment-->";
+
+/// A registered clipboard format's bytes, up to `cap` and the first NUL, or
+/// nothing when it is absent or longer than `cap`. The caller has the
+/// clipboard open.
+std::optional<std::string> ClipboardBytes(const wchar_t* format, size_t cap) {
+    const UINT id = RegisterClipboardFormatW(format);
+    HANDLE handle = id ? GetClipboardData(id) : nullptr;
+    if (!handle) {
+        return std::nullopt;
+    }
+    const size_t size = GlobalSize(handle);
+    const auto* bytes = static_cast<const char*>(GlobalLock(handle));
+    if (!bytes) {
+        return std::nullopt;
+    }
+    const size_t length = strnlen(bytes, size);
+    std::optional<std::string> read;
+    if (length <= cap) {
+        read = std::string(bytes, length);
+    }
+    GlobalUnlock(handle);
+    return read;
+}
+
+/// Put `bytes`, NUL-terminated, on the clipboard as a registered format.
+/// Best effort: the plain text is already there. The caller holds it.
+void SetClipboardBytes(const wchar_t* format, const std::string& bytes) {
+    const UINT id = RegisterClipboardFormatW(format);
+    HGLOBAL memory = id ? GlobalAlloc(GMEM_MOVEABLE, bytes.size() + 1) : nullptr;
+    if (!memory) {
+        return;
+    }
+    if (void* target = GlobalLock(memory)) {
+        std::memcpy(target, bytes.c_str(), bytes.size() + 1);
+        GlobalUnlock(memory);
+        if (SetClipboardData(id, memory)) {
+            return;
+        }
+    }
+    GlobalFree(memory);
+}
+
+}  // namespace
+
+std::string HtmlFromCfHtml(const std::string& cf_html) {
+    const long long size = static_cast<long long>(cf_html.size());
+    const long long start = HeaderNumber(cf_html, "StartHTML:");
+    const long long end = HeaderNumber(cf_html, "EndHTML:");
+    if (start >= 0 && start < end && end <= size) {
+        return cf_html.substr(static_cast<size_t>(start), static_cast<size_t>(end - start));
+    }
+    // StartHTML may be -1, which says only the fragment is marked.
+    const long long fragment_start = HeaderNumber(cf_html, "StartFragment:");
+    const long long fragment_end = HeaderNumber(cf_html, "EndFragment:");
+    if (fragment_start >= 0 && fragment_start <= fragment_end && fragment_end <= size) {
+        return std::string("<html><body>") + kStartFragment
+             + cf_html.substr(static_cast<size_t>(fragment_start),
+                              static_cast<size_t>(fragment_end - fragment_start))
+             + kEndFragment + "</body></html>";
+    }
+    return {};
+}
+
+std::string CfHtmlFromHtml(const std::string& html) {
+    std::string document;
+    if (html.find(kStartFragment) != std::string::npos
+        && html.find(kEndFragment) != std::string::npos) {
+        document = html;
+    } else {
+        // The body's contents are the fragment when there is a body; a Mac
+        // copy is often a whole document without the markers.
+        std::string lower = html;
+        for (char& c : lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const size_t body = lower.find("<body");
+        const size_t body_open_end = body == std::string::npos ? body : lower.find('>', body);
+        const size_t body_close = lower.rfind("</body>");
+        if (body_open_end != std::string::npos && body_close != std::string::npos
+            && body_close > body_open_end) {
+            document = html.substr(0, body_open_end + 1) + kStartFragment
+                     + html.substr(body_open_end + 1, body_close - body_open_end - 1)
+                     + kEndFragment + html.substr(body_close);
+        } else {
+            document = std::string("<html><body>") + kStartFragment + html + kEndFragment
+                     + "</body></html>";
+        }
+    }
+    // Fixed-width numbers, so the header's own length is known before them.
+    constexpr char kHeader[] =
+        "Version:0.9\r\nStartHTML:%010zu\r\nEndHTML:%010zu\r\n"
+        "StartFragment:%010zu\r\nEndFragment:%010zu\r\n";
+    char probe[160];
+    const int header_length = std::snprintf(probe, sizeof(probe), kHeader,
+                                             size_t{0}, size_t{0}, size_t{0}, size_t{0});
+    const size_t start = static_cast<size_t>(header_length);
+    const size_t fragment_start =
+        start + document.find(kStartFragment) + std::strlen(kStartFragment);
+    const size_t fragment_end = start + document.find(kEndFragment);
+    char header[160];
+    std::snprintf(header, sizeof(header), kHeader, start, start + document.size(),
+                  fragment_start, fragment_end);
+    return header + document;
+}
+
+bool RichTextTravels(const std::string& text, bool ascii_only) {
+    if (text.empty() || text.size() > kMaxRichClipboardBytes) {
+        return false;
+    }
+    if (ascii_only) {
+        for (const char c : text) {
+            if (static_cast<unsigned char>(c) >= 0x80) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 DWORD ClipboardSequence() {
     return GetClipboardSequenceNumber();
 }
@@ -216,12 +362,31 @@ std::string ClipboardGetJson() {
         text.resize(cut);
         truncated = true;
     }
+    // Formatting only with the whole text: cut, it would say more than the
+    // text it travels with. Read while the clipboard is still held.
+    std::string rich;
+    if (!truncated) {
+        // Read a little past the cap: the header and the document around the
+        // fragment are not what is measured.
+        if (auto cf_html = ClipboardBytes(L"HTML Format", kMaxRichClipboardBytes + 4096)) {
+            const std::string html = HtmlFromCfHtml(*cf_html);
+            if (RichTextTravels(html, false)) {
+                rich += ",\"html\":\"" + JsonEscape(html) + "\"";
+            }
+        }
+        if (auto rtf = ClipboardBytes(L"Rich Text Format", kMaxRichClipboardBytes)) {
+            if (RichTextTravels(*rtf, true)) {
+                rich += ",\"rtf\":\"" + JsonEscape(*rtf) + "\"";
+            }
+        }
+    }
     return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":" + std::to_string(ClipboardSequence())
          + ",\"truncated\":" + (truncated ? "true" : "false")
-         + ",\"text\":\"" + JsonEscape(text) + "\"}";
+         + ",\"text\":\"" + JsonEscape(text) + "\"" + rich + "}";
 }
 
-std::string ClipboardSetJson(const std::string& text) {
+std::string ClipboardSetJson(const std::string& text, const std::string& html,
+                             const std::string& rtf) {
     // Windows' line endings whatever the Mac sent: one from before it learned
     // to convert sends bare LF. No echo follows from changing the text: the
     // Mac adopts the sequence number this write produces, so it never reads
@@ -252,6 +417,14 @@ std::string ClipboardSetJson(const std::string& text) {
         // Ownership only transfers on success; on failure it is still ours.
         GlobalFree(memory);
         return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"clipboard rejected it\"}";
+    }
+    // The formatting beside it, for an app that pastes formatted. An app that
+    // can't takes the plain text, which is already there.
+    if (RichTextTravels(html, false)) {
+        SetClipboardBytes(L"HTML Format", CfHtmlFromHtml(html));
+    }
+    if (RichTextTravels(rtf, true)) {
+        SetClipboardBytes(L"Rich Text Format", rtf);
     }
     return "{\"type\":\"clipboard\",\"ok\":true,\"seq\":"
          + std::to_string(ClipboardSequence()) + "}";

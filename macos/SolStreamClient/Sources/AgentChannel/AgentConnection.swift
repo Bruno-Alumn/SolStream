@@ -1450,6 +1450,39 @@ public final class AgentConnection {
         /// No text, but a picture, to fetch with `clipboardImage`. A host from
         /// before pictures crossed never says so.
         public var hasImage: Bool = false
+        /// The text's formatting, when the copy had some and it fit.
+        public var rich = RichText()
+    }
+
+    /// Formatted text beside the plain text: HTML, as a web page or Word puts
+    /// it, and RTF, as TextEdit or WordPad does. Each is optional, and an app
+    /// that can't paste either takes the plain text.
+    public struct RichText: Sendable, Equatable {
+        public var html: String?
+        public var rtf: String?
+
+        public init(html: String? = nil, rtf: String? = nil) {
+            self.html = html
+            self.rtf = rtf
+        }
+
+        public var isEmpty: Bool { html == nil && rtf == nil }
+
+        /// Only what travels, as the host's `RichTextTravels`: within
+        /// `maxRichClipboardBytes` each, and RTF only as plain ASCII, which
+        /// RTF is when written by anything current.
+        public func travelling() -> RichText {
+            RichText(html: html.flatMap { Self.travels($0, asciiOnly: false) ? $0 : nil },
+                     rtf: rtf.flatMap { Self.travels($0, asciiOnly: true) ? $0 : nil })
+        }
+
+        static func travels(_ text: String, asciiOnly: Bool) -> Bool {
+            let utf8 = text.utf8
+            guard !utf8.isEmpty, utf8.count <= AgentConnection.maxRichClipboardBytes else {
+                return false
+            }
+            return !asciiOnly || utf8.allSatisfy { $0 < 0x80 }
+        }
     }
 
     /// Read the host's clipboard, skipping the transfer if it has not changed.
@@ -1472,7 +1505,9 @@ public final class AgentConnection {
                                        isUnchanged: message["unchanged"] as? Bool ?? false,
                                        wasTruncated: message["truncated"] as? Bool ?? false,
                                        isPrivate: message["private"] as? Bool ?? false,
-                                       hasImage: message["image"] as? Bool ?? false))
+                                       hasImage: message["image"] as? Bool ?? false,
+                                       rich: RichText(html: message["html"] as? String,
+                                                      rtf: message["rtf"] as? String).travelling()))
         }
     }
 
@@ -1483,6 +1518,10 @@ public final class AgentConnection {
     /// live while every window command quietly stops working.
     public static let maxClipboardBytes = 256 * 1024
     static let maxLineBytes = 4 * 1024 * 1024
+    /// HTML and RTF each, beside the text; as the host's
+    /// `kMaxRichClipboardBytes`. Six times a set with both, escaped at worst,
+    /// still fits a line.
+    public static let maxRichClipboardBytes = 64 * 1024
     /// Largest text a set carries. The Mac cuts its copy to `maxClipboardBytes`
     /// while its lines end in LF, then gives every line Windows' CR, which can
     /// at most double it. No host cuts a set, and six times this still clears
@@ -1525,12 +1564,21 @@ public final class AgentConnection {
 
     /// Put text on the host's clipboard, already in Windows' line endings: a
     /// `clipboardPayload` once every LF has gained its CR.
-    public func setClipboard(_ text: String, completion: ((Int?) -> Void)? = nil) {
+    public func setClipboard(_ text: String, rich: RichText = RichText(),
+                             completion: ((Int?) -> Void)? = nil) {
         let (text, truncated) = Self.clipboardSetPayload(text)
         if truncated {
             Log.info("[clipboard] trimmed to \(text.utf8.count) bytes for the host")
         }
-        send(["cmd": "clipboard", "text": text]) { result in
+        var request: [String: Any] = ["cmd": "clipboard", "text": text]
+        // Formatting only with the whole text: cut, it would say more than
+        // the text it travels with.
+        if !truncated {
+            let rich = rich.travelling()
+            if let html = rich.html { request["html"] = html }
+            if let rtf = rich.rtf { request["rtf"] = rtf }
+        }
+        send(request) { result in
             guard case .success(let message) = result,
                   message["ok"] as? Bool == true else {
                 completion?(nil)

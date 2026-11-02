@@ -33,8 +33,12 @@ constexpr size_t kMaxLineBytes = 4 * 1024 * 1024;
 // A set from the Mac is cut to the cap while its lines still end in LF, then
 // given Windows' CRs, which can double it -- and is taken at whatever size it
 // arrives. So the line limit has to clear six times that as well.
-static_assert(6 * 2 * kMaxClipboardBytes < kMaxLineBytes,
-              "a clipboard set, escaped at worst, must fit in a line");
+// Formatted text travels beside the plain text, HTML and RTF each up to this.
+// Bigger, and only the plain text goes: what people copy formatted is a
+// paragraph or a table, and a whole document is not this channel's to carry.
+constexpr size_t kMaxRichClipboardBytes = 64 * 1024;
+static_assert(6 * (2 * kMaxClipboardBytes + 2 * kMaxRichClipboardBytes) < kMaxLineBytes,
+              "a clipboard set with its formatting, escaped at worst, must fit in a line");
 
 /// Text as Windows keeps it on the clipboard: every line ending CRLF.
 ///
@@ -97,13 +101,31 @@ void MarkClipboardPrivate();
 /// for "has it changed" without transferring the contents every time.
 DWORD ClipboardSequence();
 
+/// The HTML in Windows' "HTML Format": a header of byte offsets, then the
+/// document. The document from StartHTML to EndHTML, or the fragment wrapped
+/// in one when only that is marked; empty when the offsets don't hold up.
+std::string HtmlFromCfHtml(const std::string& cf_html);
+
+/// HTML as Windows' "HTML Format" wants it: the header, then the document
+/// with its fragment marked. A document that marks its own fragment keeps
+/// it; one with a body has the body marked; anything else is the fragment.
+std::string CfHtmlFromHtml(const std::string& html);
+
+/// Formatted text that can travel: within kMaxRichClipboardBytes, and for RTF
+/// plain ASCII, which RTF is when written by anything current -- characters
+/// beyond it are escapes. Anything else is left behind and the plain text
+/// goes alone.
+bool RichTextTravels(const std::string& text, bool ascii_only);
+
 /// The reply to a `clipboard` that asks what is there: its text in the Mac's
-/// line endings, cut to kMaxClipboardBytes, or none when it is private.
+/// line endings, cut to kMaxClipboardBytes, or none when it is private; and
+/// beside it, when the copy has them and they travel, its HTML and RTF.
 std::string ClipboardGetJson();
 
 /// The reply to a `clipboard` that carries text, having put it on Windows'
-/// clipboard in Windows' line endings.
-std::string ClipboardSetJson(const std::string& text);
+/// clipboard in Windows' line endings, with its HTML and RTF when given.
+std::string ClipboardSetJson(const std::string& text, const std::string& html = {},
+                             const std::string& rtf = {});
 
 /// The reply to a `clipboard` whose sequence number is still the current one.
 std::string ClipboardUnchangedJson();

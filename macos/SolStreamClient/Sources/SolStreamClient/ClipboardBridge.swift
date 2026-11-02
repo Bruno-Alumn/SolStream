@@ -69,6 +69,9 @@ final class ClipboardBridge {
         var read: (_ since: Int?,
                    _ completion: @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void
         var write: (_ text: String, _ completion: @escaping (Int?) -> Void) -> Void
+        /// The text with its formatting. Without it, the formatting stays here.
+        var writeRich: ((_ text: String, _ rich: AgentConnection.RichText,
+                         _ completion: @escaping (Int?) -> Void) -> Void)?
         /// The host's picture for a clipboard sequence, as PNG.
         var readImage: (_ sequence: Int, _ completion: @escaping (Data?) -> Void) -> Void
         /// A PNG onto the host's clipboard; the sequence that made.
@@ -77,9 +80,12 @@ final class ClipboardBridge {
         init(read: @escaping (Int?, @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void,
              write: @escaping (String, @escaping (Int?) -> Void) -> Void,
              readImage: @escaping (Int, @escaping (Data?) -> Void) -> Void = { $1(nil) },
-             writeImage: @escaping (Data, @escaping (Int?) -> Void) -> Void = { $1(nil) }) {
+             writeImage: @escaping (Data, @escaping (Int?) -> Void) -> Void = { $1(nil) },
+             writeRich: ((String, AgentConnection.RichText,
+                          @escaping (Int?) -> Void) -> Void)? = nil) {
             self.read = read
             self.write = write
+            self.writeRich = writeRich
             self.readImage = readImage
             self.writeImage = writeImage
         }
@@ -88,7 +94,8 @@ final class ClipboardBridge {
             self.init(read: { agent.clipboard(since: $0, completion: $1) },
                       write: { agent.setClipboard($0, completion: $1) },
                       readImage: { agent.clipboardImage(sequence: $0, completion: $1) },
-                      writeImage: { agent.setClipboardImage($0, completion: $1) })
+                      writeImage: { agent.setClipboardImage($0, completion: $1) },
+                      writeRich: { agent.setClipboard($0, rich: $1, completion: $2) })
         }
     }
 
@@ -414,7 +421,9 @@ final class ClipboardBridge {
                 lastSyncedText = sent
                 lastSyncedImage = nil
                 inFlight = true
-                host.write(Self.windowsLineEndings(sent)) { [weak self] sequence in
+                let rich = local.truncated ? AgentConnection.RichText()
+                                           : Self.richText(on: pasteboard)
+                let done: (Int?) -> Void = { [weak self] sequence in
                     DispatchQueue.main.async {
                         guard let self else { return }
                         if let sequence {
@@ -432,6 +441,12 @@ final class ClipboardBridge {
                         }
                         self.settle()
                     }
+                }
+                let text = Self.windowsLineEndings(sent)
+                if let writeRich = host.writeRich, !rich.isEmpty {
+                    writeRich(text, rich, done)
+                } else {
+                    host.write(text, done)
                 }
                 return
             }
@@ -516,6 +531,8 @@ final class ClipboardBridge {
                 self.lastSyncedImage = nil
                 self.pasteboard.clearContents()
                 self.pasteboard.setString(text, forType: .string)
+                // Its formatting beside it, for an app that pastes formatted.
+                Self.put(remote.rich, on: self.pasteboard)
                 // Writing bumps the local counter; record it now so this write is
                 // not mistaken for the user copying something next tick.
                 self.lastLocalChangeCount = self.pasteboard.changeCount
@@ -524,6 +541,25 @@ final class ClipboardBridge {
                              + "its transfer limit")
                 }
             }
+        }
+    }
+
+    /// The formatting on the pasteboard beside its text: HTML and RTF, as
+    /// browsers, Mail, Notes and TextEdit put them. `travelling()` leaves out
+    /// what would not fit.
+    static func richText(on pasteboard: NSPasteboard) -> AgentConnection.RichText {
+        let html = pasteboard.string(forType: .html)
+        let rtf = pasteboard.data(forType: .rtf).flatMap { String(data: $0, encoding: .ascii) }
+        return AgentConnection.RichText(html: html, rtf: rtf).travelling()
+    }
+
+    /// The PC's formatting onto the pasteboard, after its text.
+    static func put(_ rich: AgentConnection.RichText, on pasteboard: NSPasteboard) {
+        if let html = rich.html {
+            pasteboard.setString(html, forType: .html)
+        }
+        if let rtf = rich.rtf, let data = rtf.data(using: .ascii) {
+            pasteboard.setData(data, forType: .rtf)
         }
     }
 

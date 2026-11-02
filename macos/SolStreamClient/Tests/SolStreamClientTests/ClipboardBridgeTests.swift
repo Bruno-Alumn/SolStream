@@ -12,6 +12,8 @@ final class ClipboardBridgeTests: XCTestCase {
     private final class FakeHost {
         var reads: [Int?] = []
         var writes: [String] = []
+        /// The formatting each write carried; empty for a plain one.
+        var richWrites: [AgentConnection.RichText] = []
         var imageReads: [Int] = []
         var imageWrites: [Data] = []
         private var pendingReads: [(AgentConnection.RemoteClipboard?) -> Void] = []
@@ -36,6 +38,11 @@ final class ClipboardBridgeTests: XCTestCase {
                 writeImage: { [unowned self] png, completion in
                     self.imageWrites.append(png)
                     self.pendingImageWrites.append(completion)
+                },
+                writeRich: { [unowned self] text, rich, completion in
+                    self.writes.append(text)
+                    self.richWrites.append(rich)
+                    self.pendingWrites.append(completion)
                 })
         }
 
@@ -45,11 +52,12 @@ final class ClipboardBridgeTests: XCTestCase {
         }
 
         func answerRead(text: String = "", sequence: Int, unchanged: Bool = false,
-                        isPrivate: Bool = false, hasImage: Bool = false) {
+                        isPrivate: Bool = false, hasImage: Bool = false,
+                        rich: AgentConnection.RichText = AgentConnection.RichText()) {
             guard !pendingReads.isEmpty else { return XCTFail("no read to answer") }
             pendingReads.removeFirst()(AgentConnection.RemoteClipboard(
                 text: text, sequence: sequence, isUnchanged: unchanged,
-                wasTruncated: false, isPrivate: isPrivate, hasImage: hasImage))
+                wasTruncated: false, isPrivate: isPrivate, hasImage: hasImage, rich: rich))
         }
 
         func answerImageRead(_ png: Data?) {
@@ -134,6 +142,74 @@ final class ClipboardBridgeTests: XCTestCase {
         item.setString(text, forType: .string)
         item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
         pasteboard.writeObjects([item])
+    }
+
+    // MARK: - Formatting
+
+    /// Copied formatted, as Safari or Notes copy: text, HTML and RTF.
+    private func copyFormattedOnTheMac(_ text: String, html: String?, rtf: String?) {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        if let html { pasteboard.setString(html, forType: .html) }
+        if let rtf { pasteboard.setData(Data(rtf.utf8), forType: .rtf) }
+    }
+
+    func testAFormattedMacCopyTakesItsFormattingToThePC() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyFormattedOnTheMac("bold", html: "<b>bold</b>", rtf: "{\\rtf1 {\\b bold}}")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["bold"])
+        XCTAssertEqual(fake.richWrites,
+                       [AgentConnection.RichText(html: "<b>bold</b>", rtf: "{\\rtf1 {\\b bold}}")])
+    }
+
+    /// Plain text stays plain: no formatting to send, so the plain write.
+    func testAPlainMacCopySendsNoFormatting() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("plain")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["plain"])
+        XCTAssertEqual(fake.richWrites, [])
+    }
+
+    /// Formatting too big for the channel stays behind; the text still goes.
+    func testFormattingOverTheBudgetIsLeftBehind() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let huge = "<p>" + String(repeating: "x", count: AgentConnection.maxRichClipboardBytes) + "</p>"
+        copyFormattedOnTheMac("x", html: huge, rtf: "{\\rtf1 x}")
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["x"])
+        XCTAssertEqual(fake.richWrites, [AgentConnection.RichText(html: nil, rtf: "{\\rtf1 x}")])
+    }
+
+    /// The PC's formatted copy arrives with its HTML and RTF beside the text.
+    func testAFormattedPCCopyArrivesFormatted() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        bridge.syncNow()
+        fake.answerRead(text: "", sequence: 1)
+        settle()
+        streamHasKeyboard = false
+        bridge.syncNow()
+        fake.answerRead(text: "table", sequence: 2,
+                        rich: AgentConnection.RichText(html: "<table><tr><td>table</td></tr></table>",
+                                                       rtf: "{\\rtf1 table}"))
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "table")
+        XCTAssertEqual(pasteboard.string(forType: .html), "<table><tr><td>table</td></tr></table>")
+        XCTAssertEqual(pasteboard.data(forType: .rtf).flatMap { String(data: $0, encoding: .ascii) },
+                       "{\\rtf1 table}")
+    }
+
+    /// RTF travels as the ASCII it is written in; anything else is left out.
+    func testOnlyAsciiRTFTravels() {
+        let rich = AgentConnection.RichText(html: "<p>café</p>", rtf: "{\\rtf1 café}").travelling()
+        XCTAssertEqual(rich.html, "<p>café</p>")
+        XCTAssertNil(rich.rtf)
+        XCTAssertTrue(AgentConnection.RichText(html: "", rtf: nil).travelling().isEmpty)
     }
 
     // MARK: - Mac to PC
