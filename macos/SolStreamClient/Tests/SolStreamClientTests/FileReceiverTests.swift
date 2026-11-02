@@ -34,4 +34,17 @@ final class FileReceiverTests: XCTestCase {
         XCTAssertTrue(FileReceiver.hasRoom(for: 100, free: (1 << 30) + 100))
         XCTAssertFalse(FileReceiver.hasRoom(for: 101, free: (1 << 30) + 100))
     }
+
+    /// A file from the PC is quarantined, as a browser download is, so
+    /// Gatekeeper checks a script or an app before it runs.
+    func testAFileFromThePCIsMarkedAsDownloaded() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-quarantine-\(UUID().uuidString).command")
+        try Data("echo hi".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        FileReceiver.markDownloaded(url)
+        let values = try url.resourceValues(forKeys: [.quarantinePropertiesKey])
+        let properties = try XCTUnwrap(values.quarantineProperties)
+        XCTAssertEqual(properties[kLSQuarantineAgentNameKey as String] as? String, "SolStream")
+    }
 }

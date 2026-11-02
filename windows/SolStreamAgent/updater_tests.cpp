@@ -1834,6 +1834,13 @@ void TestFileOffers() {
     CHECK(none != 0);
     CHECK(DownloadJson(static_cast<long long>(none), 0).find("\"ok\":true") != std::string::npos);
 
+    // Forgotten -- the Mac gave up -- and gone at once.
+    const uint64_t dropped = AddFileOffer(file, error);
+    CHECK(dropped != 0);
+    ForgetFileOffer(dropped);
+    CHECK(FileOfferJson(dropped).empty());
+    CHECK(DownloadJson(static_cast<long long>(dropped), 0).find("\"ok\":false") != std::string::npos);
+
     CHECK(PushFeaturesFrom("fileOffer") == kPushFileOffer);
 }
 

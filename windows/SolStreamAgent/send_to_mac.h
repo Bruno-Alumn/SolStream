@@ -30,8 +30,13 @@ std::string FileOfferJson(uint64_t id);
 
 /// The reply to `{"cmd":"download","id":N,"offset":O}`: up to
 /// kTransferChunkBytes of the offered file from O. The last chunk closes the
-/// offer.
+/// offer, and each one served gives it another half hour, so a slow transfer
+/// of a large file doesn't run out of time.
 std::string DownloadJson(long long id, long long offset);
+
+/// Close offer `id`: the Mac gave up on it (`"cancel":1`), or it was never
+/// told of it. Its slot is free again at once.
+void ForgetFileOffer(uint64_t id);
 
 /// The "Send to Mac" item on every file's right-click menu, machine-wide, as
 /// the install is. Logged, never fatal.

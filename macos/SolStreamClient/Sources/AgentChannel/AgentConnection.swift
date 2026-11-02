@@ -201,7 +201,7 @@ public final class AgentConnection {
         case "apps": return 30
         // A chunk is 700 KB on the wire, and a slow relay can take seconds
         // over one; the host encodes a large picture before its first chunk.
-        case "upload", "clipboardImage": return 60
+        case "upload", "clipboardImage", "download": return 60
         case "media" where request["op"] as? String == "open": return 15
         default: return 10
         }
@@ -1655,6 +1655,11 @@ public final class AgentConnection {
                          completion: @escaping (Bool) -> Void) {
         var received: Int64 = 0
         func finish(_ ok: Bool) { DispatchQueue.main.async { completion(ok) } }
+        // Given up on: the host frees its slot now rather than in half an hour.
+        // Over a connection that has gone, it fails quietly, as it should.
+        func cancelDownload(_ id: UInt64) {
+            send(["cmd": "download", "id": id, "offset": 0, "cancel": 1]) { _ in }
+        }
         func next() {
             send(["cmd": "download", "id": id, "offset": received]) { result in
                 guard case .success(let message) = result,
@@ -1668,12 +1673,14 @@ public final class AgentConnection {
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[files] the host stopped sending file \(id): \(why)")
                     }
+                    cancelDownload(id)
                     return finish(false)
                 }
                 do {
                     try handle.write(contentsOf: chunk)
                 } catch {
                     Log.error("[files] could not write file \(id): \(error)")
+                    cancelDownload(id)
                     return finish(false)
                 }
                 received += Int64(chunk.count)

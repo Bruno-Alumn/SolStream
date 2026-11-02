@@ -59,9 +59,13 @@ final class FileReceiver {
         Log.info("[files] receiving \(offer.size) bytes from the PC")
         agent.download(id: offer.id, size: offer.size, into: handle) { [weak self] ok in
             try? handle.close()
+            // Before anything else: this receiver may have been replaced by a
+            // new connection's, and a part file must not outlive its download.
+            if !ok {
+                try? FileManager.default.removeItem(at: partial)
+            }
             guard let self else { return }
             guard ok else {
-                try? FileManager.default.removeItem(at: partial)
                 return self.done("\(name) didn't arrive from the PC. Send it again.")
             }
             let destination = Self.uniqueURL(for: name, in: folder) {
@@ -73,6 +77,7 @@ final class FileReceiver {
                 try? FileManager.default.removeItem(at: partial)
                 return self.done("Couldn't save \(name) in Downloads › SolStream.")
             }
+            Self.markDownloaded(destination)
             // The Downloads stack in the Dock bounces, as for any download.
             DistributedNotificationCenter.default().post(
                 name: Notification.Name("com.apple.DownloadFileFinished"),
@@ -87,6 +92,23 @@ final class FileReceiver {
         onReport?(report)
         busy = false
         next()
+    }
+
+    /// Quarantined as a download, as a browser marks one: Gatekeeper checks it
+    /// before it runs, which a script or an app from the PC must not skip --
+    /// all it takes to offer one is a program running on the PC.
+    static func markDownloaded(_ url: URL) {
+        var values = URLResourceValues()
+        values.quarantineProperties = [
+            kLSQuarantineAgentNameKey as String: "SolStream",
+            kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
+        ]
+        var marked = url
+        do {
+            try marked.setResourceValues(values)
+        } catch {
+            Log.error("[files] could not mark a file from the PC as downloaded: \(error)")
+        }
     }
 
     /// Room for `size` bytes with 1 GB left over.

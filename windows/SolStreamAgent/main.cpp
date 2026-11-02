@@ -2677,7 +2677,10 @@ void NotifyStreamedWindows() {
         const std::string line = solstream::FileOfferJson(id);
         if (!line.empty()) {
             Log("[files] offering file %llu to the Mac", (unsigned long long) id);
-            PushLine(line, 0, solstream::kPushFileOffer);
+            // A Mac that went in between never hears of it: its slot is freed.
+            if (!PushLine(line, 0, solstream::kPushFileOffer)) {
+                solstream::ForgetFileOffer(id);
+            }
         }
     }
 
@@ -4840,9 +4843,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     // Pictures and files in chunks; see transfer.h.
     // A file the PC offered the Mac, a chunk at a time; see send_to_mac.h.
     if (command == "download") {
-        long long id = 0, offset = 0;
+        long long id = 0, offset = 0, cancel = 0;
         if (!FieldNumber(line, "id", id) || !FieldNumber(line, "offset", offset)) {
             return "{\"type\":\"error\",\"message\":\"download needs id, offset\"}";
+        }
+        if (FieldNumber(line, "cancel", cancel) && cancel != 0) {
+            if (id > 0) {
+                solstream::ForgetFileOffer(static_cast<uint64_t>(id));
+            }
+            return "{\"type\":\"download\",\"ok\":true,\"cancelled\":true}";
         }
         return solstream::DownloadJson(id, offset);
     }

@@ -119,6 +119,7 @@ std::string DownloadJson(long long id, long long offset) {
         if (found == g_offers.end()) {
             return Fail("no such file on offer");
         }
+        found->second.made = GetTickCount64();
         offer = found->second;
     }
     if (offset < 0 || static_cast<unsigned long long>(offset) > offer.size
@@ -155,6 +156,11 @@ std::string DownloadJson(long long id, long long offset) {
     return "{\"type\":\"download\",\"ok\":true,\"id\":" + std::to_string(id)
          + ",\"total\":" + std::to_string(offer.size) + ",\"offset\":" + std::to_string(offset)
          + ",\"data\":\"" + Base64Encode(chunk.data(), chunk.size()) + "\"}";
+}
+
+void ForgetFileOffer(uint64_t id) {
+    std::lock_guard<std::mutex> lock(g_offers_cs);
+    g_offers.erase(id);
 }
 
 void RegisterSendToMac(const std::wstring& exe) {
