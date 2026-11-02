@@ -6172,7 +6172,9 @@ int wmain(int argc, wchar_t** argv) {
                 CloseHandle(instance);
                 instance = nullptr;
             }
-            bool focused = solstream::FocusExistingHostWindow();
+            // Started for the tray -- a second logon start -- this copy has
+            // nothing to show, and must not bring the running one's window up.
+            bool focused = !start_hidden && solstream::FocusExistingHostWindow();
             // The other copy may still be starting. It takes this mutex before
             // anything else and makes its window only once it is listening and
             // the virtual display is set up, which takes seconds -- more when
@@ -6699,6 +6701,14 @@ int wmain(int argc, wchar_t** argv) {
             "only refresh when it reconnects");
     }
 
+    solstream::SetEndSessionHandler([] {
+        // As the exit below does, without the ExitProcess: Windows ends the
+        // process itself once the window has answered.
+#ifdef SOLSTREAM_MEDIA
+        solstream::media::MediaSession::Instance().Stop();
+#endif
+        UnlockAll();
+    });
     const int code = solstream::RunHostWindowLoop();
     Log("[agent] the window has closed; stopping (exit code %d)", code);
     if (name_hook) { UnhookWinEvent(name_hook); }

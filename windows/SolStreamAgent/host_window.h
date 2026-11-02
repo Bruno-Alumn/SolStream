@@ -114,6 +114,10 @@ bool HostWindowClosed();
 /// something. The shortcuts point at the executable with no arguments, so
 /// without this a second press would start a second agent to fight the first
 /// for the port — and the window the user was asking to see would never appear.
+/// What to run when Windows ends this process -- sign-out, shutdown, an
+/// installer's Restart Manager -- which it does without the window closing.
+void SetEndSessionHandler(void (*handler)());
+
 bool FocusExistingHostWindow();
 
 }  // namespace solstream

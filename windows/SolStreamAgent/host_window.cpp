@@ -159,6 +159,8 @@ Phase g_phase = Phase::Choosing;
 std::wstring g_step;      ///< what the working phase is doing right now
 std::wstring g_outcome;   ///< the sentence shown when it finishes, either way
 bool g_job_running = false;
+/// What main gives back when Windows ends the process; see WM_ENDSESSION.
+void (*g_end_session_handler)() = nullptr;
 
 /// A one-off message the Host window shows in place of its usual banner — the
 /// result of pressing a button, which used to be a MessageBox. A modal system
@@ -2413,6 +2415,21 @@ void ApplyInstallerExited(HWND window, DWORD exit_code) {
     InvalidateRect(window, nullptr, FALSE);
 }
 
+/// Whether `id` is a button or checkbox drawn on the current screen.
+bool IsShownControl(int id) {
+    const Button* button = FindButton(id);
+    if (button != nullptr) {
+        return button->visible;
+    }
+    const Check* check = FindCheck(id);
+    return check != nullptr && check->visible;
+}
+
+/// When the banner's button last changed what it does, by dismissing a
+/// notice. A second press that close behind -- a double click on OK -- is the
+/// first one's, not a request for the job the button now offers.
+ULONGLONG g_banner_changed_at = 0;
+
 void Activate(HWND window, int id) {
     switch (id) {
         case kIdCopyToken: {
@@ -2429,9 +2446,15 @@ void Activate(HWND window, int id) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 status = g_status;
             }
-            switch (Describe(status).action) {
+            const BannerAction action = Describe(status).action;
+            if (action != BannerAction::Dismiss
+                && GetTickCount64() - g_banner_changed_at < 600) {
+                break;
+            }
+            switch (action) {
                 case BannerAction::Dismiss:
                     SetNotice(L"", L"", Mark::None, false);
+                    g_banner_changed_at = GetTickCount64();
                     InvalidateRect(window, nullptr, FALSE);
                     break;
                 case BannerAction::InstallDriver:
@@ -2592,9 +2615,15 @@ void AddTrayIcon(HWND window) {
     // that size picks it rather than shrinking the 256. Not LoadIconMetric,
     // which lives only in Common Controls 6 -- a version this executable does
     // not opt into, so importing it stopped the program loading at all.
-    data.hIcon = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
-                                    IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-                                    GetSystemMetrics(SM_CYSMICON), 0);
+    // Loaded once and kept: the icon is added again each time Explorer
+    // restarts, and a handle per re-add was never given back.
+    static HICON tray_icon = nullptr;
+    if (tray_icon == nullptr) {
+        tray_icon = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                       IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                       GetSystemMetrics(SM_CYSMICON), 0);
+    }
+    data.hIcon = tray_icon;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
@@ -2628,7 +2657,15 @@ void ShowTrayMenu(HWND window) {
         return;
     }
     AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open SolStream");
-    AppendMenuW(menu, MF_STRING, kTrayCopyToken, L"Copy pairing token");
+    // Greyed while a Mac is connected, as the window hides the token then:
+    // the two said different things.
+    bool connected = false;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        connected = g_status.connected_clients > 0;
+    }
+    AppendMenuW(menu, MF_STRING | (connected ? MF_GRAYED : 0), kTrayCopyToken,
+                L"Copy pairing token");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // Greyed rather than left out while something else is under way, or while
     // a Mac is streaming, so the menu keeps its shape from one opening to the
@@ -2735,7 +2772,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         PostMessageW(window, WM_CLOSE, 0, 0);
         return (LRESULT) kHostQuitting;
     }
-    if (g_progress_message != 0 && message == g_progress_message) {
+    if (g_progress_message != 0 && message == g_progress_message && g_job_running) {
         // The virtual display's progress, from the elevated half. Each step is
         // a wait the person would otherwise sit through wondering, and the
         // second one is a Windows prompt they need to know is coming.
@@ -3014,7 +3051,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 MoveFocus(window, (GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
                 return 0;
             }
-            if ((wparam == VK_SPACE || wparam == VK_RETURN) && g_focus != 0) {
+            // Only a control still on show, and only a fresh press: the focus
+            // outlives a control the next screen hid -- Enter on Done ran the
+            // install again -- and a held key's repeats would go on to press
+            // whatever took its place.
+            if ((wparam == VK_SPACE || wparam == VK_RETURN) && g_focus != 0
+                && (lparam & (1 << 30)) == 0 && IsShownControl(g_focus)) {
                 Activate(window, g_focus);
                 return 0;
             }
@@ -3153,6 +3195,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // process once this returns, without WM_DESTROY. The log is the
             // only place that can say so -- otherwise a host that vanished
             // at sign-out looks like one that crashed.
+            if (wparam && g_end_session_handler) {
+                // Give back what the session holds -- the windows it locked,
+                // the capture -- before Windows ends the process. Quit does
+                // this on its way out; ending the session never gets there.
+                g_end_session_handler();
+            }
             if (wparam) {
                 const char* why = (lparam & ENDSESSION_CLOSEAPP) ? "an installer closed it"
                                 : (lparam & ENDSESSION_LOGOFF)   ? "sign-out"
@@ -3183,11 +3231,10 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     // installer that sends it is elevated, which UIPI lets through, and nothing
     // less privileged than this process has any business ending it.
     g_quit_request = RegisterWindowMessageW(kQuitHostMessage);
+    // Not added to the message filter: the elevated half that sends it is
+    // more privileged, and UIPI always lets a message go downwards. Adding it
+    // only let processes LESS privileged than this one write the notice.
     g_progress_message = RegisterWindowMessageW(kSetupProgressMessage);
-    // A message from a more privileged process than this one is let through
-    // UIPI's filter as long as it goes downwards, which this one does -- but
-    // say so, so that a setup run from an elevated prompt still hears it.
-    ChangeWindowMessageFilter(g_progress_message, MSGFLT_ADD);
     if (!CreateDeviceIndependentResources()) {
         return false;
     }
@@ -3376,6 +3423,10 @@ bool HostWindowClosed() {
     return g_closed;
 }
 
+void SetEndSessionHandler(void (*handler)()) {
+    g_end_session_handler = handler;
+}
+
 bool FocusExistingHostWindow() {
     HWND existing = FindWindowW(kClassName, nullptr);
     if (!existing || existing == g_window) {
@@ -3390,8 +3441,8 @@ bool FocusExistingHostWindow() {
     if (owner) {
         AllowSetForegroundWindow(owner);
     }
-    PostMessageW(existing, RegisterWindowMessageW(L"SolStream.ShowHostWindow"), 0, 0);
-    return true;
+    return PostMessageW(existing, RegisterWindowMessageW(L"SolStream.ShowHostWindow"), 0, 0)
+        != FALSE;
 }
 
 }  // namespace solstream
