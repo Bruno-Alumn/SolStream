@@ -578,10 +578,30 @@ void DeleteRulesForProgram(const std::wstring& directory) {
     }
 }
 
+/// Replace the rule called `name` with one for `program` and `ports`.
+///
+/// The new rule goes in first, under a name of its own, and the old one comes
+/// out only once it has: deleting first and then failing to add -- netsh
+/// refusing, or timing out mid-update -- left a PC that had been working with
+/// no rule at all, and the Mac unable to reach it. A new rule that cannot be
+/// given the old name back keeps the temporary one, which lets the same traffic
+/// in; the uninstall's sweep finds it by program either way.
 bool AddRule(const std::wstring& name, const std::wstring& program,
              const std::wstring& protocol, const std::wstring& ports) {
+    // Not cleared first: a rule left under the temporary name by an earlier
+    // update may be the one letting traffic in. A second of that name is
+    // harmless, and the rename below takes both.
+    const std::wstring incoming = name + L" (updating)";
+    if (RunHidden(FirewallRuleCommand(incoming, program, protocol, ports)) != 0) {
+        return false;
+    }
     DeleteRule(name);
-    return RunHidden(FirewallRuleCommand(name, program, protocol, ports)) == 0;
+    if (RunHidden(L"netsh.exe advfirewall firewall set rule name=\"" + incoming
+                  + L"\" new name=\"" + name + L"\"") != 0) {
+        InstallLog("the firewall rule " + ToUtf8(name)
+                   + " is in place under a temporary name");
+    }
+    return true;
 }
 
 // ── Shortcuts ────────────────────────────────────────────────────────────────
