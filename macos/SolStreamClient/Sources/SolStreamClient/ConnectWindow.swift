@@ -1081,9 +1081,24 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var recentHosts: [String] { Self.recentHosts(in: defaults) }
 
     private func remember(host: String) {
-        var hosts = recentHosts.filter { $0 != host }
-        hosts.insert(host, at: 0)
-        defaults.set(Array(hosts.prefix(5)), forKey: Self.recentHostsKey)
+        let hosts = [host] + recentHosts.filter { !TokenStore.sameHost($0, host) }
+        defaults.set(Self.kept(hosts, limit: 5), forKey: Self.recentHostsKey)
         defaults.set(host, forKey: Self.lastHostKey)
+    }
+
+    /// The most recent `limit` of `hosts` -- but never at the cost of a
+    /// Tailscale address while a home-network one could go instead. Every
+    /// probe that answers is remembered, so a few DHCP renewals at home used to
+    /// push out the one address that reaches the PC from anywhere, and with it
+    /// the route the window finds by itself away from home.
+    static func kept(_ hosts: [String], limit: Int) -> [String] {
+        var kept = Array(hosts.prefix(limit))
+        for dropped in hosts.dropFirst(limit) where StreamSettings.isRemote(host: dropped) {
+            guard let local = kept.lastIndex(where: { !StreamSettings.isRemote(host: $0) }),
+                  local > 0 else { break }
+            kept.remove(at: local)
+            kept.append(dropped)
+        }
+        return kept
     }
 }

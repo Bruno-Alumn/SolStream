@@ -418,3 +418,22 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertTrue(shown(in: window).contains("Reachable and paired"))
     }
 }
+
+/// What the recent list keeps when it is full.
+final class RecentHostsTests: XCTestCase {
+    func testATailscaleAddressOutlastsHomeAddresses() {
+        let hosts = ["192.168.1.24", "192.168.1.23", "192.168.1.22", "192.168.1.21",
+                     "192.168.1.20", "100.101.102.103"]
+        XCTAssertEqual(ConnectWindow.kept(hosts, limit: 5),
+                       ["192.168.1.24", "192.168.1.23", "192.168.1.22", "192.168.1.21",
+                        "100.101.102.103"])
+    }
+
+    func testTheMostRecentStaysFirstAndAShortListIsKeptWhole() {
+        XCTAssertEqual(ConnectWindow.kept(["a", "b"], limit: 5), ["a", "b"])
+        let tailnet = ["pc.tailnet.ts.net", "100.1.1.1", "100.1.1.2", "100.1.1.3",
+                       "100.1.1.4", "100.1.1.5"]
+        XCTAssertEqual(ConnectWindow.kept(tailnet, limit: 5), Array(tailnet.prefix(5)),
+                       "nothing local to give up")
+    }
+}

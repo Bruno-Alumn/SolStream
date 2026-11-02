@@ -128,3 +128,12 @@ final class TokenStoreTests: XCTestCase {
         XCTAssertNil(TokenStore.token(for: host))
     }
 }
+
+/// Names written two ways are one PC to the store and to the recent list.
+final class HostVariantTests: XCTestCase {
+    func testCaseAndATrailingDotAreTheSameHost() {
+        XCTAssertTrue(TokenStore.sameHost("PC.local", "pc.local."))
+        XCTAssertTrue(TokenStore.sameHost("Gaming-PC", "gaming-pc"))
+        XCTAssertFalse(TokenStore.sameHost("pc.local", "pc2.local"))
+    }
+}

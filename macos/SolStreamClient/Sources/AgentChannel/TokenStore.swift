@@ -39,7 +39,7 @@ public enum TokenStore {
     public static func token(for host: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        if let known = loaded()[host] { return known }
+        if let known = stored(host) { return known }
         guard let moved = legacyDefault(host) ?? legacyKeychain(host) else { return nil }
         if store(moved, for: host) {
             Log.info("[agent] moved the pairing token for \(host) to SolStream's own store")
@@ -53,7 +53,7 @@ public enum TokenStore {
     public static func hasToken(for host: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if loaded()[host] != nil { return true }
+        if stored(host) != nil { return true }
         if legacyChecked.contains(host) { return false }
         if UserDefaults.standard.string(forKey: legacyPrefix + host) != nil { return true }
         // Attributes only: whether an old keychain item exists is answerable
@@ -97,10 +97,27 @@ public enum TokenStore {
         return false
     }
 
+    /// The same PC written two ways: a name's case means nothing, and a
+    /// trailing dot is the same name. "PC.local", "pc.local" and "PC.local."
+    /// were three PCs to the store -- a token typed once, asked for again.
+    public static func sameHost(_ a: String, _ b: String) -> Bool {
+        func plain(_ host: String) -> String {
+            host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+        }
+        return plain(a) == plain(b)
+    }
+
+    /// The token kept for `host` under any way of writing it. Call with
+    /// `lock` held.
+    private static func stored(_ host: String) -> String? {
+        let all = loaded()
+        return all[host] ?? all.first { sameHost($0.key, host) }?.value
+    }
+
     public static func set(_ token: String, for host: String) {
         lock.lock()
         defer { lock.unlock() }
-        guard loaded()[host] != token else { return }
+        guard stored(host) != token else { return }
         store(token, for: host)
     }
 
@@ -108,7 +125,7 @@ public enum TokenStore {
         lock.lock()
         defer { lock.unlock() }
         var current = loaded()
-        current[host] = nil
+        for key in current.keys where sameHost(key, host) { current[key] = nil }
         save(current)
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
         SecItemDelete(keychainQuery(host) as CFDictionary)
@@ -170,6 +187,8 @@ public enum TokenStore {
     @discardableResult
     private static func store(_ token: String, for host: String) -> Bool {
         var current = loaded()
+        // One entry per PC, however its name was typed.
+        for key in current.keys where sameHost(key, host) { current[key] = nil }
         current[host] = token
         // Gone from the old places once the new one has it, so a token is never
         // in two stores that could disagree -- and only then: a write that
