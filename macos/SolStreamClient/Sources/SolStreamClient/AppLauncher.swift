@@ -3,6 +3,7 @@ import CoreServices
 import CryptoKit
 import ImageIO
 import UniformTypeIdentifiers
+import DesignSystem
 import SolStreamLogging
 
 /// A small Mac application for one Windows one, so it can sit in the Dock and
@@ -71,7 +72,7 @@ enum AppLauncher {
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
 
         try link.encoded().write(to: resources.appendingPathComponent(linkFileName))
-        if let art = Self.icon(from: icon, badge: Self.badge()) {
+        if let art = Self.icon(from: icon, badge: Self.badge(), name: link.name) {
             try writeICNS(art, to: resources.appendingPathComponent("AppIcon.icns"))
         }
 
@@ -225,7 +226,9 @@ enum AppLauncher {
     /// SolStream's (`assets/logo`), so it sits at the size of its neighbours.
     /// Hosts send 64 pixels, or 256 when asked and able, often with empty
     /// margins; the margins are trimmed so a small icon is not drawn smaller.
-    static func icon(from windowsIcon: CGImage?, badge: CGImage?) -> CGImage? {
+    /// With no icon at all -- some shortcuts have none Windows will give up --
+    /// the app's initials, as its row in the picker shows.
+    static func icon(from windowsIcon: CGImage?, badge: CGImage?, name: String) -> CGImage? {
         let side = 1024
         guard let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
                                       bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -262,6 +265,18 @@ enum AppLauncher {
             context.draw(art, in: CGRect(x: (CGFloat(side) - size.width) / 2,
                                          y: (CGFloat(side) - size.height) / 2 + 20,
                                          width: size.width, height: size.height))
+        } else {
+            let initials = DS.Monogram.initials(from: name)
+            let text = NSAttributedString(string: initials, attributes: [
+                .font: NSFont.systemFont(ofSize: 300, weight: .semibold),
+                .foregroundColor: NSColor(srgbRed: 0.27, green: 0.31, blue: 0.38, alpha: 1),
+            ])
+            let size = text.size()
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            text.draw(at: NSPoint(x: (CGFloat(side) - size.width) / 2,
+                                  y: (CGFloat(side) - size.height) / 2 + 20))
+            NSGraphicsContext.restoreGraphicsState()
         }
 
         if let badge {

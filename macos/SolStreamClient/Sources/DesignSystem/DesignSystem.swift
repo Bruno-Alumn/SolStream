@@ -407,7 +407,7 @@ public enum DS {
             needsDisplay = true
         }
 
-        static func initials(from name: String) -> String {
+        public static func initials(from name: String) -> String {
             let words = name.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
                 .filter { $0.first?.isLetter == true || $0.first?.isNumber == true }
             if words.count >= 2 {

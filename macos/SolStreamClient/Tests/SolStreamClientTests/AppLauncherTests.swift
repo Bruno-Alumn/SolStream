@@ -102,8 +102,8 @@ final class AppLauncherTests: XCTestCase {
     }
 
     func testTheTileIsDrawnWithOrWithoutAnIcon() {
-        XCTAssertEqual(AppLauncher.icon(from: icon(64), badge: nil)?.width, 1024)
-        XCTAssertEqual(AppLauncher.icon(from: nil, badge: icon(512))?.width, 1024)
+        XCTAssertEqual(AppLauncher.icon(from: icon(64), badge: nil, name: "Steam")?.width, 1024)
+        XCTAssertEqual(AppLauncher.icon(from: nil, badge: icon(512), name: "Steam")?.width, 1024)
     }
 
     func testFindingATileInTheDocksList() {

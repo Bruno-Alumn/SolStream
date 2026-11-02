@@ -357,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func open(link: AppLink) {
         NSApp.activate(ignoringOtherApps: true)
         if let streamLink, streamLink.sameApp(as: link), let window = appWindows.first?.window {
+            Log.info("[app] \"\(link.name)\" is on screen already; bringing it forward")
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
             return
@@ -412,7 +413,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Make `link`'s launcher, with its icon from the PC, and put it in the
     /// Dock -- or, where the Dock cannot be changed, show it in Finder to be
     /// dragged there.
-    private func addToDock(_ link: AppLink, agent: AgentConnection, over parent: NSWindow?) {
+    /// - Parameter windowID: an open window of the app, whose icon stands in
+    ///   when its shortcut gives none -- Steam's, on some PCs.
+    private func addToDock(_ link: AppLink, windowID: UInt64?, agent: AgentConnection,
+                           over parent: NSWindow?) {
         guard let path = link.path else {
             Self.inform("SolStream can't tell which app this window belongs to",
                         "Add the app itself to the Dock: right-click it under Installed apps.",
@@ -422,7 +426,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // This SolStream, so a development build makes launchers for itself;
         // a bare binary has no bundle and stands in for the released one.
         let opener = Bundle.main.bundleIdentifier ?? "com.solstream.macclient"
-        agent.icon(path: path, size: 256) { image in
+        let fromWindow: (@escaping (CGImage?) -> Void) -> Void = { done in
+            guard let windowID else { return done(nil) }
+            agent.icon(windowID: windowID, completion: done)
+        }
+        func made(_ image: CGImage?) {
             DispatchQueue.main.async {
                 do {
                     let launcher = try AppLauncher.make(link, icon: image, opener: opener)
@@ -435,6 +443,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 error.localizedDescription, over: parent)
                 }
             }
+        }
+        agent.icon(path: path, size: 256) { shortcutIcon in
+            guard shortcutIcon == nil else { return made(shortcutIcon) }
+            fromWindow(made)
         }
     }
 
@@ -453,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func addStreamToDock() {
         guard let streamLink, let agent else { return }
-        addToDock(streamLink, agent: agent,
+        addToDock(streamLink, windowID: appWindows.first?.remoteWindowID, agent: agent,
                   over: appWindows.first { $0.window?.isKeyWindow == true }?.window)
     }
 
@@ -502,8 +514,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker.agent = agent
         picker.onAddToDock = { [weak self, weak agent, weak picker] choice in
             guard let self, let agent else { return }
-            self.addToDock(AppLink.of(choice, host: host, apps: self.pickerApps), agent: agent,
-                           over: picker?.window)
+            var windowID: UInt64?
+            if case .running(let window) = choice { windowID = window.id }
+            self.addToDock(AppLink.of(choice, host: host, apps: self.pickerApps),
+                           windowID: windowID, agent: agent, over: picker?.window)
         }
         self.picker = picker
         pickerHost = host
