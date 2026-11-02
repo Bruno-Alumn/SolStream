@@ -296,13 +296,19 @@ enum AppLauncher {
     static func trimmed(_ image: CGImage) -> CGImage? {
         let width = image.width, height = image.height
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(data: &pixels, width: width, height: height,
-                                      bitsPerComponent: 8, bytesPerRow: width * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            return image
+        // Drawn inside the closure: `&pixels` passed straight to CGContext is
+        // a pointer good only for that one call, and the context keeps it.
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                return false
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
         }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard drawn else { return image }
         var minX = width, minY = height, maxX = -1, maxY = -1
         for y in 0..<height {
             for x in 0..<width where pixels[(y * width + x) * 4 + 3] > 8 {

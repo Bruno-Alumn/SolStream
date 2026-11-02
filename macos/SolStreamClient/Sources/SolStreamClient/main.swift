@@ -18,6 +18,8 @@ struct SolStreamApp {
 SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Every pairing was forgotten this run: nothing is saved to reopen.
+    private var forgotPairings = false
     /// The display stays on while a stream is open; see StayAwake.
     private let stayAwake = StayAwake()
     private var connectWindow: ConnectWindow?
@@ -290,7 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // What is on screen now is what opens next time; nothing on screen,
         // nothing does.
-        if !commandLineSession, !testMode {
+        if !commandLineSession, !testMode, !forgotPairings {
             AppLink.setLast(appWindows.isEmpty ? nil : streamLink)
         }
         // Synchronous: the process is about to exit and the host needs to see
@@ -392,9 +394,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func openPending(windows: [RemoteWindow], apps: [RemoteApp], host: String,
                              agent: AgentConnection) {
         guard let link = pendingOpen, AppLink.sameHost(link.host, host), let picker else { return }
-        // Nothing at all is a PC that has not answered yet, not one without
-        // the application: every PC has a Start Menu.
-        guard !(windows.isEmpty && apps.isEmpty) else { return }
+        // No apps is a PC that has not answered yet, or a list that failed
+        // to come, not one without the application: every PC has a Start
+        // Menu. Taken as the answer, it said "isn't on the PC any more" for an
+        // app that was, after one timed-out list; the next fill brings it.
+        guard !apps.isEmpty else { return }
         pendingOpen = nil
         guard !picker.isOpening else {
             // One open at a time, as on the list itself; the picker is
@@ -570,7 +574,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let agent else { return }
             latestFill += 1
             let mine = latestFill
-            let reuse = includeApps ? nil : cachedApps
+            // An empty list is asked for again: it is what a failed request
+            // gives, and reused, a launcher waiting on its app waited until
+            // the next reconnect.
+            let reuse = includeApps || cachedApps?.isEmpty == true ? nil : cachedApps
             agent.windows { windows in
                 let present: ([RemoteApp]) -> Void = { apps in
                     DispatchQueue.main.async {
@@ -591,6 +598,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             if fetched, !apps.isEmpty, let shownWindows {
                                 picker?.present(windows: shownWindows, apps: apps)
                                 self.pickerApps = apps
+                                self.openPending(windows: shownWindows, apps: apps,
+                                                 host: host, agent: agent)
                             }
                             return
                         }
@@ -1165,6 +1174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // With it, a launcher's request still waiting: this open beat it.
         forgetPicker()
         streamLink = openingLink
+        // A stream after Forget Paired PCs is a pairing made again: what it
+        // streams is worth reopening.
+        forgotPairings = false
         openingLink = nil
         // The picker's refresh goes with it. Left installed, every window the
         // host opened or closed during the stream — and every reconnect's
@@ -2013,6 +2025,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         TokenStore.removeAll()
         // And how to wake each one: a PC's hardware address is about that PC.
         WakeOnLAN.forgetAll()
+        // And what to reopen: kept, the next launch connected to a PC just
+        // forgotten, by itself, and asked for its token at once. A stream
+        // open now is not saved at quit either, for the same reason.
+        AppLink.setLast(nil)
+        forgotPairings = true
         Log.info("[agent] every stored pairing token forgotten")
     }
 

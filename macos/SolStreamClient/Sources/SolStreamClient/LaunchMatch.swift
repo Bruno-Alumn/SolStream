@@ -27,8 +27,14 @@ enum LaunchMatch {
         let name = normalised(name)
         guard !name.isEmpty else { return false }
         // The application's own part is its name, give or take a word.
-        if names(ownPart(of: title), name) { return true }
+        let own = ownPart(of: title)
+        if names(own, name) { return true }
         // Or the name comes first, exactly, ahead of the rest: "Steam - News".
+        // Not when the rest names a browser or Explorer, though: there the name
+        // is the page or folder shown -- "WhatsApp - Google Chrome", "Steam -
+        // File Explorer" -- and attaching to it streamed Chrome for WhatsApp,
+        // and never started the app.
+        if isContainer(own) { return false }
         return separators.contains { title.hasPrefix(name + $0) }
     }
 
@@ -79,6 +85,16 @@ enum LaunchMatch {
     }
 
     // MARK: - Reading a title
+
+    /// Applications whose title is what they show, then their own name.
+    private static let containers: Set<String> = [
+        "google chrome", "microsoft edge", "mozilla firefox", "firefox", "brave",
+        "opera", "vivaldi", "arc", "file explorer", "explorer",
+    ]
+
+    private static func isContainer(_ own: String) -> Bool {
+        containers.contains(withoutCount(own))
+    }
 
     /// Lower case, trimmed, and without the zero-width spaces some
     /// applications hide in their names.

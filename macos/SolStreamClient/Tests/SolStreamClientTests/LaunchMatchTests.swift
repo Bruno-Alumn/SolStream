@@ -103,4 +103,15 @@ final class LaunchMatchTests: XCTestCase {
                        window("Downloads", pid: 30, id: 3)]
         XCTAssertNil(LaunchMatch.afterLaunch("Steam", in: windows, knownPIDs: [10]))
     }
+
+    /// A browser tab or Explorer folder named for the app is the page or the
+    /// folder, not the app: attaching streamed Chrome and never started it.
+    func testABrowserTabOrFolderNamedForTheAppIsNotTheApp() {
+        XCTAssertFalse(LaunchMatch.isConfident(title: "WhatsApp - Google Chrome", name: "WhatsApp"))
+        XCTAssertFalse(LaunchMatch.isConfident(title: "Settings - Microsoft Edge", name: "Settings"))
+        XCTAssertFalse(LaunchMatch.isConfident(title: "Steam - File Explorer", name: "Steam"))
+        XCTAssertNil(LaunchMatch.existing("Spotify", in: [window("Spotify - Web Player - Google Chrome")]))
+        // The browser itself still is.
+        XCTAssertTrue(LaunchMatch.isConfident(title: "WhatsApp - Google Chrome", name: "Google Chrome"))
+    }
 }

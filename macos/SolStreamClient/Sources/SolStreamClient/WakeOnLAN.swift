@@ -72,10 +72,18 @@ enum WakeOnLAN {
     /// up, so a wired desktop that connected once over Wi-Fi with its cable
     /// out would otherwise lose the one address it can be woken through.
     /// The newer word on an address it repeats wins.
+    ///
+    /// At most `maxTargets`, newest first: Windows can give Wi-Fi a new random
+    /// hardware address every day, and kept for ever, the list -- and the
+    /// packets sent for every wake -- grew by one each day, all to addresses
+    /// nothing answers to any more.
     static func merged(_ old: [Target], _ new: [Target]) -> [Target] {
         let reported = Set(new.map { $0.mac.uppercased() })
-        return new + old.filter { !reported.contains($0.mac.uppercased()) }
+        return Array((new + old.filter { !reported.contains($0.mac.uppercased()) })
+            .prefix(maxTargets))
     }
+
+    static let maxTargets = 8
 
     static func forgetAll(in defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: key)

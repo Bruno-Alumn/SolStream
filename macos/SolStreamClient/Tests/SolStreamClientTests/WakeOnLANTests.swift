@@ -59,4 +59,15 @@ final class WakeOnLANTests: XCTestCase {
                        "the newer word on the same adapter wins")
         XCTAssertEqual(WakeOnLAN.merged([wired], []), [wired], "nothing up now forgets nothing")
     }
+
+    /// A new random Wi-Fi address every day does not grow the list for ever.
+    func testOnlyTheNewestAddressesAreKept() {
+        var kept: [WakeOnLAN.Target] = []
+        for day in 0..<30 {
+            let mac = String(format: "02:00:00:00:00:%02X", day)
+            kept = WakeOnLAN.merged(kept, [WakeOnLAN.Target(mac: mac, broadcast: nil)])
+        }
+        XCTAssertEqual(kept.count, WakeOnLAN.maxTargets)
+        XCTAssertEqual(kept.first?.mac, "02:00:00:00:00:1D", "the newest first")
+    }
 }
