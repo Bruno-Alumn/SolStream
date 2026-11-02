@@ -33,6 +33,8 @@ long PushFeaturesFrom(const std::string& names) {
             features |= kPushOpenUrl;
         } else if (name == "fileOffer") {
             features |= kPushFileOffer;
+        } else if (name == "fullScreen") {
+            features |= kPushFullScreen;
         }
         if (end == std::string::npos) {
             break;

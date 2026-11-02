@@ -60,6 +60,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var lifeTimer: Timer?
     private var statusInFlight = false
     private var isClosing = false
+    /// This window went full screen because the app did on the PC, so it comes
+    /// out when the app does. Not when the user put it there themselves.
+    private var fullScreenForHost = false
     /// Set while this window is being resized to match the host, so the resize
     /// handler does not bounce the request straight back at it.
     private var isMatchingHostSize = false
@@ -1136,6 +1139,45 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func hostAskedForAttention() {
         guard !isClosing, !NSApp.isActive else { return }
         NSApp.requestUserAttention(.informationalRequest)
+    }
+
+    /// What a window does when its app goes into or out of full screen on
+    /// the PC: follow it in, and back out only from a full screen it went
+    /// into for the app -- one the user chose stays.
+    enum FullScreenFollow: Equatable { case enter, leave, stay }
+
+    static func followFullScreen(hostOn: Bool, isFullScreen: Bool,
+                                 enteredForHost: Bool) -> FullScreenFollow {
+        if hostOn { return isFullScreen ? .stay : .enter }
+        return isFullScreen && enteredForHost ? .leave : .stay
+    }
+
+    /// The app went full screen on the PC, or came out of it: a video, a
+    /// game, a presentation. This window follows, and the PC window is then
+    /// sized to it as after any other resize.
+    func hostFullScreenChanged(_ on: Bool) {
+        guard !isClosing, let window else { return }
+        let isFullScreen = window.styleMask.contains(.fullScreen)
+        switch Self.followFullScreen(hostOn: on, isFullScreen: isFullScreen,
+                                     enteredForHost: fullScreenForHost) {
+        case .enter:
+            Log.info("[window] the app went full screen on the PC; following it")
+            fullScreenForHost = true
+            window.toggleFullScreen(nil)
+        case .leave:
+            Log.info("[window] the app came out of full screen on the PC; following it")
+            window.toggleFullScreen(nil)
+        case .stay:
+            break
+        }
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        fullScreenForHost = false
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        fullScreenForHost = false
     }
 
     func setStatus(_ title: String, detail: String? = nil) {

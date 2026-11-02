@@ -44,6 +44,7 @@ constexpr long kPushTitle = 1;
 constexpr long kPushAttention = 2;
 constexpr long kPushOpenUrl = 4;
 constexpr long kPushFileOffer = 8;
+constexpr long kPushFullScreen = 16;
 
 /// The bits for the auth line's "pushes": names separated by spaces or
 /// commas; unknown names are ignored. Nothing for a Mac that sent none.

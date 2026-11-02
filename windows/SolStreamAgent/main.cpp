@@ -71,6 +71,7 @@
 #include "display_setup.h"
 #include "driver_install.h"
 #include "foreground.h"
+#include "full_screen.h"
 #include "tailscale.h"
 #include "transfer.h"
 #include "wake.h"
@@ -1945,6 +1946,9 @@ struct WindowLock {
     WINDOWPLACEMENT saved_placement{};
     bool saved_topmost = false;
     bool geometry_locked = false;  // the watcher holds this one in place
+    /// The application has gone full screen, as far as the Mac was told; see
+    /// full_screen.h. Watcher thread only, under the lock.
+    bool full_screen = false;
     bool active = false;           // the agent owes this window a restore
     /// Bumped on every claim, so the watcher can tell that the slot it read a
     /// moment ago is still the same tenancy.
@@ -3203,6 +3207,40 @@ constexpr ULONGLONG kRescueIntervalMs = 900;
 
 void RetryOwedRestoresIfDue();
 
+/// Tell the Mac when the window in slot `i` goes full screen or comes out of it.
+/// True when it has just gone in. Nothing here messages the window, so a hung
+/// application cannot hold the watcher.
+bool WatchFullScreen(int i, HWND window, uint64_t generation) {
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    RECT bounds{};
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetWindowRect(window, &bounds)
+        || !GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return false;
+    }
+    solstream::FullScreenChange change = solstream::FullScreenChange::None;
+    EnterCriticalSection(&g_lock_cs);
+    if (g_locks[i].active && g_locks[i].window == window
+        && g_locks[i].generation == generation) {
+        change = solstream::NextFullScreen(g_locks[i].full_screen, style, bounds,
+                                           monitor.rcMonitor, g_locks[i].desired);
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    if (change == solstream::FullScreenChange::None) {
+        return false;
+    }
+    const bool entered = change == solstream::FullScreenChange::Entered;
+    Log("[agent] window %llu %s full screen", (unsigned long long) IdFromWindow(window),
+        entered ? "went" : "came out of");
+    // Not retried when it does not go: a Mac that cannot follow carries on as
+    // before, and the next change says where things stand.
+    PushFeature(solstream::kPushFullScreen,
+                "{\"type\":\"fullScreen\",\"id\":" + std::to_string(IdFromWindow(window))
+                    + ",\"on\":" + (entered ? "true" : "false") + "}");
+    return entered;
+}
+
 /// Put a locked window back if anything moved or resized it, and everything
 /// else that has to notice the desktop changing. Runs for the life of the host.
 DWORD WINAPI WatcherProc(LPVOID) {
@@ -3249,6 +3287,11 @@ DWORD WINAPI WatcherProc(LPVOID) {
             // A minimised window is the user's business; leave it alone and let it
             // settle back when they restore it.
             if (IsIconic(window) || Unresponsive(window)) {
+                continue;
+            }
+            if (WatchFullScreen(i, window, generation)) {
+                // Left where the application put it for now: the Mac is about
+                // to go full screen and ask for a size of its own.
                 continue;
             }
             // Un-maximised asynchronously, and placed on a later tick once the

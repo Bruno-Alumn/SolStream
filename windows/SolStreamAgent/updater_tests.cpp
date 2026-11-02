@@ -46,6 +46,7 @@
 #include "wake.h"
 #include "driver_install.h"
 #include "foreground.h"
+#include "full_screen.h"
 #include "media/audio_reopen.h"
 #include "media/audio_source.h"
 #include "media/feed_ledger.h"
@@ -1842,6 +1843,7 @@ void TestFileOffers() {
     CHECK(DownloadJson(static_cast<long long>(dropped), 0).find("\"ok\":false") != std::string::npos);
 
     CHECK(PushFeaturesFrom("fileOffer") == kPushFileOffer);
+    CHECK(PushFeaturesFrom("title fullScreen") == (kPushTitle | kPushFullScreen));
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
@@ -4101,6 +4103,46 @@ void TestAgentCrypto() {
 
 }  // namespace
 
+void TestFullScreen() {
+    using namespace solstream;
+    const RECT monitor{0, 0, 3024, 1964};
+    const RECT tile{100, 100, 1300, 900};
+    const RECT whole{0, 0, 3024, 1964};
+    const LONG_PTR framed = WS_OVERLAPPEDWINDOW;
+    const LONG_PTR popup = WS_POPUP | WS_VISIBLE;
+
+    CHECK(HasCaption(framed));
+    CHECK(!HasCaption(popup));
+    // A border alone is not a caption.
+    CHECK(!HasCaption(WS_POPUP | WS_BORDER));
+    CHECK(LooksFullScreen(popup, whole, monitor));
+    // Hanging past the edges, as a window with invisible borders does.
+    CHECK(LooksFullScreen(popup, RECT{-8, -8, 3032, 1972}, monitor));
+    CHECK(!LooksFullScreen(framed, whole, monitor));
+    CHECK(!LooksFullScreen(popup, tile, monitor));
+    CHECK(!LooksFullScreen(popup, RECT{0, 0, 3024, 1963}, monitor));
+    CHECK(!LooksFullScreen(popup, whole, RECT{}));
+
+    bool on = false;
+    // A framed window on its tile: nothing.
+    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::None && !on);
+    // The app drops its caption and covers the display.
+    CHECK(NextFullScreen(on, popup, whole, monitor, tile) == FullScreenChange::Entered && on);
+    CHECK(NextFullScreen(on, popup, whole, monitor, tile) == FullScreenChange::None && on);
+    // The Mac went full screen and the host holds it to a size of its own:
+    // still full screen, as far as the app is concerned.
+    CHECK(NextFullScreen(on, popup, RECT{0, 0, 2800, 1800}, monitor, RECT{0, 0, 2800, 1800})
+          == FullScreenChange::None && on);
+    // Its caption comes back: out.
+    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::Left && !on);
+    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::None && !on);
+
+    // A captionless app the host itself sized to the whole display, because
+    // its Mac window is that big, has not gone full screen.
+    on = false;
+    CHECK(NextFullScreen(on, popup, whole, monitor, whole) == FullScreenChange::None && !on);
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc != 2) {
         std::fputs("usage: SolStreamUpdaterTests <path to tests/update-vector>\n", stderr);
@@ -4209,6 +4251,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferNames();
     TestTransferEncoding();
     TestWake();
+    TestFullScreen();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

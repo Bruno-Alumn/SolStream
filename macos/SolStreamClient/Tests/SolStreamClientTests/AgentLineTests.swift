@@ -72,6 +72,15 @@ final class AgentLineTests: XCTestCase {
         }
     }
 
+    func testFullScreenIsListedAndPassedOverWhenGarbled() {
+        XCTAssertTrue(AgentConnection.understoodPushes.split(separator: " ").contains("fullScreen"))
+        let text = #"{"type":"fullScreen","id":7,"on":"#
+        guard case .unreadablePush(let named) = AgentConnection.read(line: Data(text.utf8)) else {
+            return XCTFail("a garbled fullScreen should have been passed over")
+        }
+        XCTAssertEqual(named, "fullScreen")
+    }
+
     func testAPushThatWillNotParseIsPassedOver() {
         let broken = [
             (#"{"type":"occluded","id":7,"by":}"#, "occluded"),

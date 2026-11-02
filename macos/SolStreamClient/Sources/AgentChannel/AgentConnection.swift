@@ -287,6 +287,9 @@ public final class AgentConnection {
     public var onWindowTitle: ((UInt64, String) -> Void)?
     /// A streamed window's taskbar button flashed on the host.
     public var onAttention: ((UInt64) -> Void)?
+    /// A streamed application went full screen on the host (true), or came
+    /// out of it (false).
+    public var onFullScreen: ((UInt64, Bool) -> Void)?
     /// A link clicked on the host, with SolStream chosen as its browser there,
     /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
     public var onOpenLink: ((String) -> Void)?
@@ -1012,6 +1015,7 @@ public final class AgentConnection {
         onWindowsChanged = nil
         onWindowTitle = nil
         onAttention = nil
+        onFullScreen = nil
         onOpenLink = nil
         onFileOffer = nil
         onOccluded = nil
@@ -2599,6 +2603,14 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onOpenLink?(url) }
             }
             return
+        case "fullScreen":
+            // Unsolicited, sent only to a Mac that listed it among the pushes
+            // it understands.
+            if let id = (message["id"] as? NSNumber)?.uint64Value,
+               let on = message["on"] as? Bool {
+                DispatchQueue.main.async { [weak self] in self?.onFullScreen?(id, on) }
+            }
+            return
         case "attention":
             // Unsolicited; the host sends one per flash every few seconds.
             if let id = (message["id"] as? NSNumber)?.uint64Value {
@@ -2701,11 +2713,11 @@ public final class AgentConnection {
     /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
                                                "title", "attention", "openURL",
-                                               "fileOffer"]
+                                               "fileOffer", "fullScreen"]
 
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
-    static let understoodPushes = "title attention openURL fileOffer"
+    static let understoodPushes = "title attention openURL fileOffer fullScreen"
 
     /// A link from the host that this Mac may open: web or mail, as the host
     /// registered for, and nothing else -- not a file, not a script, not an
