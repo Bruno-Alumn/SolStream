@@ -4409,6 +4409,16 @@ std::string HandleMedia(const std::string& line) {
         // far out is a client bug, not a preference worth honouring.
         config.bitrate =
             (UINT) (bitrate > 1000000 && bitrate <= 500000000 ? bitrate : 20000000);
+        // And no more than 8 Mbit -- a megabyte -- per frame on average: a
+        // keyframe runs to several times the average, and one of 16 MiB or
+        // more cannot be sent at all (see SendPicture). 500 Mbit/s at 1 fps
+        // asked for exactly that.
+        const UINT perFrameCap = config.fps * 8000000u;
+        if (config.bitrate > perFrameCap) {
+            Log("[media] %u bit/s at %u fps is more per frame than a picture can "
+                "carry; using %u", config.bitrate, config.fps, perFrameCap);
+            config.bitrate = perFrameCap;
+        }
         // The Mac asks for a canvas so that its crops are pixel-exact
         // against the capture display; when it asks for nothing, the first
         // captured frame decides, exactly as before. Clamped here as well as

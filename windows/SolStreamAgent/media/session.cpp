@@ -343,6 +343,15 @@ void MediaSession::Impl::WaitUntil(long long deadline) {
 void MediaSession::Impl::SendPicture(const Picture& picture) {
     const size_t size = picture.bytes.size();
     if (size == 0) { return; }
+    // A fragment says where it sits in three bytes, so a picture of 16 MiB or
+    // more cannot be described: sent, its offsets wrapped, the Mac rejected
+    // it as damaged and asked for a keyframe -- no smaller -- for ever. Not
+    // sent, and said; main.cpp keeps the bitrate per frame well under it.
+    if (size > 0xFFFFFF) {
+        picturesDropped.fetch_add(1);
+        Log("[media] a %zu-byte picture is too large to send; dropped", size);
+        return;
+    }
 
     const uint32_t captureUs = (uint32_t) MicrosSinceStart(picture.capturedAt);
 
