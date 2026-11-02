@@ -272,6 +272,19 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             buttonsDown_ = trackedDown ? (unsigned char) (buttonsDown_ | bit)
                                        : (unsigned char) (buttonsDown_ & ~bit);
         }
+        // Pressed again, or let go of after all: no release is owed for it
+        // any more. A retry left owed would let go of a key held down anew.
+        if (trackedKey != 0) {
+            for (int i = 0; i < owedKeysCount_; ++i) {
+                if (owedKeys_[i] == trackedKey) {
+                    owedKeys_[i] = owedKeys_[--owedKeysCount_];
+                    break;
+                }
+            }
+        }
+        if (trackedButton != 0) {
+            owedButtons_ = (unsigned char) (owedButtons_ & ~(1u << (trackedButton - 1)));
+        }
     } else if (!trackedDown) {
         // A release refused is owed, not forgotten; see RetryOwedReleases.
         if (trackedKey != 0 && owedKeysCount_ < 16) {
@@ -460,7 +473,7 @@ void InputInjector::RetryOwedReleases() {
         for (int k = 0; k < keysDownCount_; ++k) {
             if (keysDown_[k] == key) { held = true; break; }
         }
-        // Pressed again since, or let go of some other way: nothing owed.
+        // No longer held -- ReleaseAll let go of it -- so nothing owed.
         if (!held) { continue; }
         INPUT up{};
         if (KeyUpInput(key, &up) && SendInput(1, &up, sizeof(INPUT)) == 1) {
