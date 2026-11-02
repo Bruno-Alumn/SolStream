@@ -217,6 +217,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// uses for document windows, which is the same problem.
     private static var cascadePoint = NSPoint.zero
 
+    /// Centre the next window again: the last one has closed, so the one
+    /// after Switch App or a launcher is not a second window to step away
+    /// from the first, and used to open a little further down-right each time.
+    static func resetCascade() {
+        cascadePoint = .zero
+    }
+
     /// How much of the screen a window may take when it opens. Not a limit on
     /// the window — it resizes to anything afterwards — just a starting size that
     /// leaves the desktop visible around it.
@@ -538,6 +545,17 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     // MARK: - NSWindowDelegate
 
+    /// Onto a screen of another scale, or another screen: the host window's
+    /// pixel size, and the window's size limits, were worked out for the
+    /// last one, and the picture stayed soft until an edge was nudged.
+    func windowDidChangeBackingProperties(_ notification: Notification) {
+        requestResize()
+    }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        requestResize()
+    }
+
     func windowDidResize(_ notification: Notification) {
         // Resizing the macOS window resizes the real Windows window while the
         // drag is happening, not after it, at whatever rate the host keeps up
@@ -699,7 +717,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 }
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
-                if matchBack {
+                // Never under a hand that took an edge again while the answer
+                // was on its way.
+                if matchBack, !(self.window?.inLiveResize ?? false) {
                     self.matchWindow(to: shown, scale: scale)
                 }
                 if visible != achieved {
@@ -999,7 +1019,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 DispatchQueue.main.async {
                     // Whether or not the window is still there: a window closed
                     // mid-upload must not leave every later drop refused.
-                    guard let self else {
+                    // And not one closed meanwhile: the files still to go stay
+                    // on the Mac, and nothing is put on the PC's clipboard
+                    // after the stream it was for has ended.
+                    guard let self, !self.isClosing else {
                         AppWindow.isSendingFiles = false
                         return
                     }

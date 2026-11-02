@@ -1137,6 +1137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.appWindows.removeAll { $0 === appWindow }
                 guard self.appWindows.isEmpty else { return }
+                AppWindow.resetCascade()
                 // End the media session by asking, not by dropping the socket.
                 // The UDP BYE alone only sets `running = false` on the host: the
                 // capture, encoder, sender and receive threads, the socket and
@@ -1414,8 +1415,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // of it: back to the picker instead. Current after a reconnect, because
         // `onReconnected` fires only once the greeting's display list is in.
         let displays = agent.displays
+        // Where it is as well as how big: the same display back in another
+        // place on the PC's desktop puts the app off the captured area, and
+        // every tile is in desktop coordinates.
         if !displays.isEmpty, !displays.contains(where: {
             $0.name == display.name && $0.width == display.width && $0.height == display.height
+                && $0.x == display.x && $0.y == display.y
         }) {
             Log.info("[app] \(display.name) changed while the stream was down; "
                      + "returning to the picker")
