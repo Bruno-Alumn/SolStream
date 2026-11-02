@@ -532,6 +532,13 @@ final class AgentReconnectLoopbackTests: XCTestCase {
             done.fulfill()
         }
         wait(for: [done], timeout: 10)
+        // The scripted host notes what it received after its last reply, so
+        // the upload can finish here a moment before it has: waited for, or
+        // the check raced it and failed on a slower machine.
+        let noted = Date().addingTimeInterval(3)
+        while seen.get("received") == nil && Date() < noted {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
         XCTAssertEqual(path, #"C:\\D\\report.pdf"#)
         XCTAssertEqual(seen.get("offsets") as? [Int],
                        [0, AgentConnection.transferChunkBytes, 2 * AgentConnection.transferChunkBytes])
