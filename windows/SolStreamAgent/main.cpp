@@ -80,6 +80,7 @@
 #include "ports.h"
 #include "quit_app.h"
 #include "session_takeover.h"
+#include "token_store.h"
 #include "stranded.h"
 #include "window_restore.h"
 #include "updater.h"
@@ -1693,9 +1694,10 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy, int size =
 // on that network still gets in. So a client must present a shared token before
 // any command is accepted.
 //
-// The token is generated on first run and kept in the user's own profile. It is
-// not encrypted, deliberately — the point is for the person at the machine to be
-// able to read it and give it to their Mac.
+// The token is generated on first run and kept in the user's own profile,
+// encrypted for that account with DPAPI (token_store.h): the host can still
+// show it in its window, for the person at the machine to give to their Mac,
+// and nothing running as anybody else -- nor a copy of the disk -- can read it.
 //
 // The token itself never crosses the wire: the client proves it holds it with
 // an HMAC over a per-connection challenge, and the same exchange agrees the
@@ -1715,26 +1717,9 @@ unsigned long long g_media_count = 0;
 
 std::string LoadOrCreateToken() {
     const std::wstring path = LocalDataPath(L"agent.token");
-    if (path.empty()) {
-        return {};
-    }
-    std::string existing;
-    if (solstream::ReadSmallFile(path, 127, existing) && !existing.empty()) {
-        while (!existing.empty()
-               && (existing.back() == '\n' || existing.back() == '\r' || existing.back() == ' ')) {
-            existing.pop_back();
-        }
-        if (existing.size() >= 16) {
-            return existing;
-        }
-    }
-
-    const std::string fresh = RandomHex(16);
-    if (fresh.empty()) {
-        return {};
-    }
-    solstream::WriteWholeFile(path, fresh);
-    return fresh;
+    const size_t slash = path.find_last_of(L'\\');
+    return solstream::LoadOrCreateToken(slash == std::wstring::npos ? std::wstring()
+                                                                    : path.substr(0, slash));
 }
 
 /// The counter as it stood when this machine last opened a media session.

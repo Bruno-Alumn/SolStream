@@ -235,8 +235,10 @@ Each step is measurable before the next exists.
   The receiver requires the next counter exactly — TCP already delivers in order
   and once — so any record sealed and not delivered is fatal by design. That is
   what made (2) visible rather than silent, and it should stay.
-- **The token is a bearer secret in a plaintext file** at
-  `%LOCALAPPDATA%\SolStream\agent.token`. Keychain and DPAPI are the answer.
+- **The token is a bearer secret.** On the PC it is encrypted with DPAPI for
+  the host's account (`agent.token.dpapi`, see `token_store.h`); on the Mac it
+  is a 0600 file in Application Support, not the Keychain, which an ad-hoc
+  signed app can't use without prompting.
 - **IPv4 only**, inherited deliberately from the existing sockets.
 - **Every quantitative claim in the full design is arithmetic, not measurement.**
   The ring sizes, thresholds and periods are reasoned from configured defaults.

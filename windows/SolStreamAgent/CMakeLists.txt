@@ -97,6 +97,8 @@ add_library(SolStreamCore OBJECT
     wake.cpp
     # Whether a Mac knocking on a busy host may take back the session it left.
     session_takeover.cpp
+    # The pairing token, encrypted for the account with DPAPI.
+    token_store.cpp
     # Quitting a streamed application from the Mac.
     quit_app.cpp
     # Links clicked on the PC, opened on the Mac.

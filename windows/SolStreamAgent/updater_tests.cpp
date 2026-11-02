@@ -55,6 +55,7 @@
 #include "quit_app.h"
 #include "links.h"
 #include "session_takeover.h"
+#include "token_store.h"
 #include "stranded.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
@@ -1725,6 +1726,51 @@ void TestUploadRefusal() {
     CHECK(!UploadRefusal(gb + 1, 3 * gb).empty());
     CHECK(!UploadRefusal(1, gb).empty());
     CHECK(!UploadRefusal(0, 0).empty());
+}
+
+/// The pairing token, encrypted for this account: made once and read back the
+/// same, a plain one from before moved in and its plain file gone, and an
+/// unreadable one set aside for a new token rather than read as garbage.
+void TestTokenStore() {
+    wchar_t base[MAX_PATH] = {0};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    const std::wstring folder = std::wstring(base) + L"\\TokenStore";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    const std::wstring plain = folder + L"\\agent.token";
+    const std::wstring sealed = folder + L"\\agent.token.dpapi";
+    auto exists = [](const std::wstring& path) {
+        return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+    };
+
+    // Round trip, and the blob holds no copy of the token in the clear.
+    std::string blob, back;
+    CHECK(ProtectToken("0123456789abcdef0123456789abcdef", blob));
+    CHECK(blob.find("0123456789abcdef") == std::string::npos);
+    CHECK(UnprotectToken(blob, back) && back == "0123456789abcdef0123456789abcdef");
+    CHECK(!UnprotectToken("not a blob at all", back));
+
+    // Made the first time, encrypted, and the same the next.
+    const std::string made = LoadOrCreateToken(folder);
+    CHECK(made.size() == 32 && IsTokenText(made));
+    CHECK(exists(sealed) && !exists(plain));
+    CHECK(LoadOrCreateToken(folder) == made);
+
+    // A plain token from before is moved in, and its file goes.
+    DeleteFileW(sealed.c_str());
+    CHECK(WriteWholeFile(plain, "fedcba9876543210fedcba9876543210\r\n"));
+    CHECK(LoadOrCreateToken(folder) == "fedcba9876543210fedcba9876543210");
+    CHECK(exists(sealed) && !exists(plain));
+    CHECK(LoadOrCreateToken(folder) == "fedcba9876543210fedcba9876543210");
+
+    // Damaged: set aside, not read as a token, and a new one made.
+    CHECK(WriteWholeFile(sealed, "damaged"));
+    const std::string fresh = LoadOrCreateToken(folder);
+    CHECK(IsTokenText(fresh) && fresh != "fedcba9876543210fedcba9876543210");
+    CHECK(exists(sealed + L".unreadable"));
+
+    CHECK(!IsTokenText("short"));
+    CHECK(!IsTokenText("has a space in it, sadly"));
+    CHECK(IsTokenText("ABCDEF0123456789-old-style"));
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
@@ -4050,6 +4096,7 @@ int wmain(int argc, wchar_t** argv) {
     TestWaitsForRestart();
     TestPushFeatures();
     TestUploadRefusal();
+    TestTokenStore();
     TestWindowsToClose();
     TestForceQuitRefusal();
     TestForwardableLinks();

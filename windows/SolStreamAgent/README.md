@@ -150,7 +150,10 @@ every client prove it holds a shared token before **any** command is accepted â€
 `ping`, `status` and the proof itself aside, and including the display list,
 which would otherwise leak the machine's monitor layout to anyone who can open a
 socket. The token is generated on first run and kept in the user's own profile at
-`%LOCALAPPDATA%\SolStream\agent.token`.
+`%LOCALAPPDATA%\SolStream\agent.token.dpapi`, encrypted with DPAPI for that
+account: the host shows it, and nothing running as anybody else, nor a copy of
+the disk, can read it. A plain `agent.token` from an older host is moved in and
+deleted.
 
 ```
 SolStream.exe --print-token
