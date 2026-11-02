@@ -1055,14 +1055,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let wasStreaming = Updater.shared.isStreaming
             Updater.shared.isStreaming = true
             guard let media = await agent.openMediaSession(request) else {
-                Updater.shared.isStreaming = wasStreaming
+                // Only for the connection still in use: one left meanwhile
+                // has had the flag set by whatever left it.
+                if self.isCurrent(agent) { Updater.shared.isStreaming = wasStreaming }
                 Log.error("[app] \(host) refused the media session")
                 self.failOpen("\(host) didn't start streaming. Try again; if it keeps happening, "
                               + "restart SolStream on the PC.", for: agent)
                 return
             }
             guard media.streaming else {
-                Updater.shared.isStreaming = wasStreaming
+                if self.isCurrent(agent) { Updater.shared.isStreaming = wasStreaming }
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
                 self.failOpen("\(host) couldn't start streaming: "
@@ -1072,7 +1074,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Agreed with a PC that has since been left: its connection is
             // gone, and the PC ends the stream with it.
             guard self.isCurrent(agent) else {
-                Updater.shared.isStreaming = wasStreaming
+                // Left while the PC answered: whatever left it set the flag,
+                // and a newer open may have set its own.
                 return
             }
             self.mediaRequest = request
@@ -1861,7 +1864,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Stop the stream and its clipboard sync, and forget what it was opened
     /// with. `closing` runs just before an update the person asked for during
-    /// the stream is let go, which installs it and may relaunch the app.
+    /// the stream is let go -- unless `keepsSession` holds it until the picker
+    /// that follows is left -- which installs it and may relaunch the app.
     /// - Parameter keepsSession: the picker follows on the same connection, so
     ///   an update waiting for the stream to close goes on waiting until it is
     ///   left (`showPicker`'s cancel, `leaveHost`).
