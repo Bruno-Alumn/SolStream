@@ -1606,6 +1606,32 @@ void TestSwitchedOff() {
     CHECK(!IsSwitchedOff(CM_PROB_NEED_RESTART));
 }
 
+/// Only SolStream's own displays are restarted after its settings change. With
+/// none of its own present, every display was restarted -- Parsec's,
+/// spacedesk's -- blanking them for a file that was not theirs.
+void TestSolStreamDisplays() {
+    const auto display = [](const wchar_t* name) {
+        VirtualDisplay d;
+        d.friendly_name = name;
+        d.instance_id = std::wstring(L"ROOT\\DISPLAY\\") + name;
+        return d;
+    };
+    CHECK(IsSolStreamDisplayDriver(L"Virtual Display Driver"));
+    CHECK(IsSolStreamDisplayDriver(L"IddSampleDriver Device"));
+    CHECK(IsSolStreamDisplayDriver(L"VDD by MTT"));
+    CHECK(!IsSolStreamDisplayDriver(L"Parsec Virtual Display Adapter"));
+    CHECK(!IsSolStreamDisplayDriver(L"spacedesk Graphics Adapter"));
+
+    CHECK(SolStreamDisplays({}).empty());
+    CHECK(SolStreamDisplays({display(L"Parsec Virtual Display Adapter"),
+                             display(L"spacedesk Graphics Adapter")}).empty());
+    const auto ours = SolStreamDisplays({display(L"Parsec Virtual Display Adapter"),
+                                         display(L"Virtual Display Driver"),
+                                         display(L"spacedesk Graphics Adapter")});
+    CHECK(ours.size() == 1);
+    CHECK(!ours.empty() && ours[0].friendly_name == L"Virtual Display Driver");
+}
+
 // ── Tailscale ────────────────────────────────────────────────────────────────
 
 /// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
@@ -3878,6 +3904,7 @@ int wmain(int argc, wchar_t** argv) {
     TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+    TestSolStreamDisplays();
     TestSwitchedOff();
     TestTailscaleAdapter();
     TestPickTailscaleAddress();

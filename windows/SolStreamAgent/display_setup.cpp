@@ -231,24 +231,48 @@ bool ReadFileText(const std::wstring& path, std::string& out) {
     out.clear();
     char buffer[8192];
     DWORD read = 0;
-    while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    bool ok = true;
+    for (;;) {
+        // A read that fails partway is not the end of the file. Taken as one,
+        // the half that was read would be patched and written back as all of it.
+        if (!ReadFile(file, buffer, sizeof(buffer), &read, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (read == 0) {
+            break;
+        }
         out.append(buffer, read);
     }
     CloseHandle(file);
-    return true;
+    return ok;
 }
 
+/// Written beside it and moved over it, so a write that fails or a process
+/// killed partway leaves the old file whole: an empty vdd_settings.xml is a
+/// driver with no modes, which is no virtual display at all. The file beside it
+/// is deleted first and then made new, never opened as it is -- elevated, this
+/// must not write through a link somebody left at that name.
 bool WriteFileText(const std::wstring& path, const std::string& text) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    const std::wstring temporary = path + L".new";
+    if (!DeleteFileW(temporary.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        return false;
+    }
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
     DWORD written = 0;
-    const bool ok = WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr)
-                    && written == text.size();
+    const bool wrote = WriteFile(file, text.data(), (DWORD) text.size(), &written, nullptr)
+                       && written == text.size() && FlushFileBuffers(file);
     CloseHandle(file);
-    return ok;
+    if (!wrote || !MoveFileExW(temporary.c_str(), path.c_str(),
+                               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
 }
 
 /// Case-insensitive replace of `<tag>true</tag>` with false, tolerating the
@@ -360,7 +384,13 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
 
     // Keep the original, once. A driver that will not start after this is a
     // machine with no virtual display and no way back to the file that caused it.
-    CopyFileW(path.c_str(), (path + kVddSettingsBackupSuffix).c_str(), TRUE);
+    // A copy that failed is no copy: then the file stays as it is.
+    if (!CopyFileW(path.c_str(), (path + kVddSettingsBackupSuffix).c_str(), TRUE)
+        && GetLastError() != ERROR_FILE_EXISTS) {
+        error = "Could not keep a copy of " + ToUtf8(path)
+              + " before changing it, so it was left as it is.";
+        return false;
+    }
     if (!WriteFileText(path, xml)) {
         error = "Could not write " + ToUtf8(path)
               + ". Installing the display driver needs administrator rights.";
@@ -570,14 +600,22 @@ bool QueryPaths(std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
                 std::vector<DISPLAYCONFIG_MODE_INFO>& modes) {
     UINT32 path_count = 0;
     UINT32 mode_count = 0;
-    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count)
-        != ERROR_SUCCESS) {
-        return false;
+    // The layout can change between asking for the sizes and reading the paths
+    // -- most of all just after attaching a display -- and then the read
+    // answers ERROR_INSUFFICIENT_BUFFER. Asking again is the documented answer;
+    // giving up left HDR on, which is a black picture on the Mac.
+    LONG result = ERROR_INSUFFICIENT_BUFFER;
+    for (int attempt = 0; attempt < 3 && result == ERROR_INSUFFICIENT_BUFFER; ++attempt) {
+        if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count)
+            != ERROR_SUCCESS) {
+            return false;
+        }
+        paths.assign(path_count, DISPLAYCONFIG_PATH_INFO{});
+        modes.assign(mode_count, DISPLAYCONFIG_MODE_INFO{});
+        result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+                                    &mode_count, modes.data(), nullptr);
     }
-    paths.assign(path_count, DISPLAYCONFIG_PATH_INFO{});
-    modes.assign(mode_count, DISPLAYCONFIG_MODE_INFO{});
-    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
-                           &mode_count, modes.data(), nullptr) != ERROR_SUCCESS) {
+    if (result != ERROR_SUCCESS) {
         return false;
     }
     // QueryDisplayConfig writes back how many it actually filled, which can be
@@ -753,20 +791,15 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     if (cycle) {
         // Only the driver whose settings were just written. Restarting someone
         // else's virtual display blanks whatever they had on it, for nothing.
-        const auto displays = FindVirtualDisplays();
-        const bool ours_present = std::any_of(
-            displays.begin(), displays.end(), [](const VirtualDisplay& display) {
-                return IsSolStreamDisplayDriver(display.friendly_name);
-            });
+        // With none of ours here, nothing: the file belongs to a driver that is
+        // not installed, and every display left is somebody else's.
+        const auto displays = SolStreamDisplays(FindVirtualDisplays());
         // And checked. A restart that was refused — no administrator rights, or
         // pnputil answering 3010 because the device wants a reboot instead — left
         // the driver on its old mode list, and the only trace of it was the
         // fifteen-second wait below for modes that were never going to appear.
         bool restarted = false;
         for (const VirtualDisplay& display : displays) {
-            if (ours_present && !IsSolStreamDisplayDriver(display.friendly_name)) {
-                continue;
-            }
             const DWORD code = RunHidden(L"pnputil.exe /restart-device \""
                                          + display.instance_id + L"\"", 120000);
             if (code == 0) {
@@ -794,13 +827,17 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     // The retry is only for the case where the device was just restarted. With
     // no cycle the answer is already known, and ten seconds of sleeping to
     // rediscover that would be ten seconds on every logon.
-    for (int attempt = 0; attempt < (cycle ? 10 : 1); ++attempt) {
+    const int tries = cycle ? 10 : 1;
+    for (int attempt = 0; attempt < tries; ++attempt) {
         // Ours, not merely any: another product's display is listed straight
         // away while ours is still coming back from the restart.
         if (FindVirtualAdapter(adapter) && adapter.ours) {
             break;
         }
-        Sleep(1000);
+        // Only before another look: after the last one, waiting tells nothing.
+        if (attempt + 1 < tries) {
+            Sleep(1000);
+        }
     }
     if (adapter.gdi_name.empty()) {
         error = "No virtual display adapter is present. Install the display "
@@ -842,6 +879,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     // taught the ladder — because nobody has run this with administrator rights
     // yet — still offers its own modes, and streaming at the largest of those
     // is a picture rather than an error message.
+    std::string fallback;
     if (!offered) {
         // Largest first: the ladder is written smallest to largest, and the
         // biggest canvas that fits is the one that resamples least on the Mac.
@@ -854,11 +892,11 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                 width = mode.width;
                 height = mode.height;
                 offered = true;
-                Add(note, "The display driver does not offer that size yet, so "
+                fallback = "The display driver does not offer that size yet, so "
                           "SolStream used " + std::to_string(width) + "x"
                           + std::to_string(height)
                           + ". Set the display up with administrator rights to "
-                            "add the rest.");
+                            "add the rest.";
                 break;
             }
         }
@@ -875,6 +913,11 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
             return false;
         }
         Sleep(2000);
+        // Said only when it happened: with the display already at a size of the
+        // ladder, the size fallen back to was never put on it.
+        if (!fallback.empty()) {
+            Add(note, fallback);
+        }
         Add(note, "Attached the virtual display at " + std::to_string(width) + "x"
                   + std::to_string(height) + ".");
     }

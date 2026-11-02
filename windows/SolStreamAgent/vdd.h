@@ -74,6 +74,10 @@ bool HasVirtualDisplayCached();
 /// size SolStream can stream", and fall back to the real monitor.
 bool IsSolStreamDisplayDriver(const std::wstring& name);
 
+/// The displays among these that are SolStream's own (IsSolStreamDisplayDriver):
+/// the only ones its settings concern, and so the only ones it may restart.
+std::vector<VirtualDisplay> SolStreamDisplays(const std::vector<VirtualDisplay>& displays);
+
 // Installing one is driver_install.h's job.
 
 }  // namespace solstream

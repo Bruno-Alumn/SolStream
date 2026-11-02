@@ -113,6 +113,16 @@ bool IsSolStreamDisplayDriver(const std::wstring& name) {
     return false;
 }
 
+std::vector<VirtualDisplay> SolStreamDisplays(const std::vector<VirtualDisplay>& displays) {
+    std::vector<VirtualDisplay> ours;
+    for (const VirtualDisplay& display : displays) {
+        if (IsSolStreamDisplayDriver(display.friendly_name)) {
+            ours.push_back(display);
+        }
+    }
+    return ours;
+}
+
 bool HasVirtualDisplay() {
     // When SolStream's own driver is installed, only it counts. Another
     // product's display running beside a stopped one of ours is not a display
