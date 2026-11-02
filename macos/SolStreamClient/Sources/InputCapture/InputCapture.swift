@@ -509,14 +509,11 @@ public final class InputCapture {
 
     // MARK: - Keyboard
 
-    /// - Returns: true when the event went to the host and must not also act on
-    ///   this Mac.
-    ///
-    /// Not private so the translation can be tested against real `NSEvent`s
-    /// rather than against a restatement of the mapping table: what matters is
-    /// the bytes a ⌘C actually puts on the wire.
-    @discardableResult
     /// Whether a key goes to the Mac's input method rather than the PC.
+    ///
+    /// A key the input method settles a word with and then passes on --
+    /// Korean's Return or arrow after a syllable -- comes back as not taken
+    /// (`MetalView.handToInputMethod`), and goes on to the PC after the word.
     ///
     /// Keys go to the PC by position, typed with the PC's layout, which is
     /// right for every layout but the ones that are not a layout at all: a
@@ -532,11 +529,19 @@ public final class InputCapture {
         if event.type == .keyUp {
             return keysAtInputMethod.remove(event.keyCode) != nil
         }
-        guard let hand = inputMethodHandles, Self.inputMethodSelected(),
-              event.modifierFlags.intersection([.command, .control]).isEmpty else { return false }
+        // Not in gaming mode, where letters are controls, nor with ⌥ held,
+        // which the PC has as Alt: Alt+F is a menu there, not a letter here.
+        guard let hand = inputMethodHandles, Self.pointerMode != .gaming, !isPointerCaptured,
+              event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              Self.inputMethodSelected() else { return false }
         let composing = inputMethodComposing?() ?? false
-        guard composing || Self.typesCharacters(event), hand(event) else { return false }
+        // Space with nothing composed is the Space key, not the input
+        // method's full-width space: it pauses a video, it is a game's jump.
+        let typesWord = Self.typesCharacters(event) && event.keyCode != 0x31
+        guard composing || typesWord, hand(event) else { return false }
         keysAtInputMethod.insert(event.keyCode)
+        // The input method had the key, so no dead key is waiting for it.
+        followsDeadKey = false
         return true
     }
 
@@ -565,6 +570,13 @@ public final class InputCapture {
             && !(0xF700...0xF8FF).contains(scalar.value)
     }
 
+    /// - Returns: true when the event went to the host and must not also act on
+    ///   this Mac.
+    ///
+    /// Not private so the translation can be tested against real `NSEvent`s
+    /// rather than against a restatement of the mapping table: what matters is
+    /// the bytes a ⌘C actually puts on the wire.
+    @discardableResult
     func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard isCapturing else { return false }
 

@@ -185,9 +185,16 @@ public final class MetalView: NSView {
 
     public override var acceptsFirstResponder: Bool { onInsertText != nil }
 
-    /// Commands a key would have sent through the input system. None should
-    /// arrive, see `onInsertText`; one that did is not this Mac's to act on.
-    public override func doCommand(by selector: Selector) {}
+    /// Commands a key would have sent through the input system. Only a key
+    /// handed to the input method sends one -- one it settled a word with and
+    /// then passed on, as Korean does with Return -- and that key is the PC's:
+    /// `handToInputMethod` says it was not taken, and it goes on there.
+    public override func doCommand(by selector: Selector) {
+        passedOn = true
+    }
+
+    /// Set while a key is with the input method, when it passes the key on.
+    private var passedOn = false
 
     // MARK: - Status overlay
 
@@ -421,7 +428,18 @@ extension MetalView: NSTextInputClient {
     /// Give a key to the Mac's input method, which answers through the
     /// methods below. True if it took the key.
     public func handToInputMethod(_ event: NSEvent) -> Bool {
-        inputContext?.handleEvent(event) ?? false
+        passedOn = false
+        let taken = inputContext?.handleEvent(event) ?? false
+        return taken && !passedOn
+    }
+
+    /// Drop whatever the input method is composing, with the input method
+    /// told: the window is losing the keyboard, and a word left half made
+    /// would hold every key there when it comes back.
+    public func dropComposition() {
+        guard !markedText.isEmpty else { return }
+        inputContext?.discardMarkedText()
+        setMarked("")
     }
 
     public func insertText(_ string: Any, replacementRange: NSRange) {

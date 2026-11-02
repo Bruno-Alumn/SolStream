@@ -885,6 +885,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        metalView?.dropComposition()
         inputCapture?.disableCapture()
         onKeyboardChange?()
     }
