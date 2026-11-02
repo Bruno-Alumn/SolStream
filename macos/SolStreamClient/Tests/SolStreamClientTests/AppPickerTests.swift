@@ -214,6 +214,22 @@ final class AppPickerTests: XCTestCase {
         XCTAssertEqual(chosen, ["Calculator"])
     }
 
+    /// A launcher's open, with a search hiding its app: the search goes, and
+    /// the app's own row is marked, not the one the search left selected.
+    func testAnOpenFromOutsideMarksItsOwnRowThroughASearch() throws {
+        let picker = makePicker()
+        let window = picker.window
+        let field = try XCTUnwrap(find(DS.Field.self, in: window.contentView))
+        let table = try XCTUnwrap(find(NSTableView.self, in: window.contentView))
+        window.makeFirstResponder(field)
+        try search("calc", in: field)
+        XCTAssertEqual(table.numberOfRows, 1)
+
+        picker.highlight(.launch(RemoteApp(name: "Notepad", path: "C:\\Notepad.lnk")))
+        picker.showBusy("Opening Notepad on pc…")
+        XCTAssertEqual(busyTitles(in: table), ["Notepad"])
+    }
+
     // MARK: - Failures on the status line
 
     /// The PC was asleep, then came up: its lists fill, and the red message

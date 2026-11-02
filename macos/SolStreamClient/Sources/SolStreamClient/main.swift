@@ -559,14 +559,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and it is the expensive half, while the host's `windowsChanged` push
         // fires for every window opened or closed anywhere on the PC.
         var cachedApps: [RemoteApp]?
+        // Which fill was asked for last. A full one waits on the slow Start
+        // Menu, and a quicker windows-only one asked for meanwhile -- a window
+        // opened on the PC -- used to be overwritten when the full one landed,
+        // putting back the window list from before it.
+        var latestFill = 0
+        /// The windows the newest fill showed.
+        var shownWindows: [RemoteWindow]?
         let fill: (_ includeApps: Bool) -> Void = { [weak self, weak agent, weak picker] includeApps in
             guard let agent else { return }
+            latestFill += 1
+            let mine = latestFill
             let reuse = includeApps ? nil : cachedApps
             agent.windows { windows in
                 let present: ([RemoteApp]) -> Void = { apps in
                     DispatchQueue.main.async {
                         guard let self else { return }
-                        cachedApps = apps
+                        // Reused, the newest list there is now: a full fill
+                        // may have landed since this one was asked for.
+                        let apps = reuse == nil ? apps : (cachedApps ?? apps)
+                        // An empty answer is also what a failed request gives,
+                        // and kept, it would list no apps until the next full
+                        // fill; a good list is not replaced by one.
+                        let fetched = reuse == nil
+                        if !fetched || !apps.isEmpty || cachedApps == nil { cachedApps = apps }
+                        guard mine == latestFill else {
+                            // Its windows are older than the list on screen,
+                            // but apps it fetched itself are newer: the Start
+                            // Menu a reconnect re-read, which a quicker
+                            // windows-only fill went ahead of with the old one.
+                            if fetched, !apps.isEmpty, let shownWindows {
+                                picker?.present(windows: shownWindows, apps: apps)
+                                self.pickerApps = apps
+                            }
+                            return
+                        }
+                        shownWindows = windows
                         picker?.present(windows: windows, apps: apps)
                         self.pickerApps = apps
                         self.openPending(windows: windows, apps: apps, host: host, agent: agent)

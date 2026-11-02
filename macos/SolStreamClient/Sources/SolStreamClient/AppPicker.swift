@@ -304,9 +304,19 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// the row as one clicked here would.
     func highlight(_ choice: Choice) {
         let key = Self.key(of: choice)
+        // Hidden by the search: cleared, so the row can be shown. Left as it
+        // was, the open's progress went on whichever row was selected -- a
+        // Notepad launcher marked Calculator, under "calc", as starting.
+        if !rows.contains(where: { $0.key == key }), allRows.contains(where: { $0.key == key }) {
+            searchField.stringValue = ""
+            applyFilter()
+        }
         if let index = rows.firstIndex(where: { $0.key == key }) {
             tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             tableView.scrollRowToVisible(index)
+        } else {
+            // Not in the list at all: nothing selected stands in for it.
+            tableView.deselectAll(nil)
         }
     }
 
