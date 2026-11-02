@@ -79,7 +79,9 @@ final class KeyboardMapTests: XCTestCase {
         XCTAssertEqual(scan(0x45), 0x4E)  // +
         XCTAssertEqual(scan(0x4E), 0x4A)  // -
         XCTAssertEqual(scan(0x51), 0x59)  // =
-        XCTAssertEqual(scan(0x47), 0x45)  // Clear, where a PC keyboard has Num Lock
+        // Clear, where a PC keyboard has Num Lock: the extended 0x45, since
+        // the bare one is Pause/Break.
+        XCTAssertEqual(scan(0x47), 0xE045)
 
         XCTAssertEqual(scan(0x72), 0xE052)  // Help → Insert
         XCTAssertEqual(vk(0x72), 0x2D)

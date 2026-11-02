@@ -122,6 +122,10 @@ public final class InputCapture {
     /// Runs on the main thread, and so before the post that changed a
     /// setting returns: nothing reads the copies above stale.
     private var modeObserver: NSObjectProtocol?
+    /// The screen locking, the session switching away, the displays sleeping;
+    /// see `enableCapture`. The first is the distributed center's, the rest
+    /// the workspace's.
+    private var lockObservers: [NSObjectProtocol] = []
     private var policy = CapturePolicy()
 
     /// Whether the host reports its cursor going away and coming back, so
@@ -411,6 +415,13 @@ public final class InputCapture {
     deinit {
         disableCapture()
         if let modeObserver { NotificationCenter.default.removeObserver(modeObserver) }
+        for (index, observer) in lockObservers.enumerated() {
+            if index == 0 {
+                DistributedNotificationCenter.default().removeObserver(observer)
+            } else {
+                NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            }
+        }
     }
 
     /// Attach to the view whose bounds define the input coordinate space.
@@ -447,6 +458,23 @@ public final class InputCapture {
             }
         }
         installMonitors()
+        if lockObservers.isEmpty {
+            // The screen locking or the session switching away leaves the
+            // window key, and the releases of whatever was held then go to the
+            // lock screen. Let go of everything on the PC as it happens.
+            let release: (Notification) -> Void = { [weak self] _ in
+                self?.releaseHeldInput()
+            }
+            lockObservers.append(DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil,
+                queue: .main, using: release))
+            lockObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.sessionDidResignActiveNotification, object: nil,
+                queue: .main, using: release))
+            lockObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.screensDidSleepNotification, object: nil,
+                queue: .main, using: release))
+        }
         syncCapsLock(to: NSEvent.modifierFlags.contains(.capsLock))
         // A game that already has its cursor hidden gets the mouse back as the
         // window comes forward, as one running on this Mac would -- if the
@@ -600,6 +628,10 @@ public final class InputCapture {
                     || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
+            // A repeat of a key the PC never had pressed is the tail of a
+            // SolStream shortcut whose ⌃⌘ went up first -- ⌃⌘F, F still
+            // held -- and would type "fff" into the app. Dropped.
+            if held == nil, event.type == .keyDown, event.isARepeat { return true }
             if held == nil, routeToInputMethod(event) { return true }
             // A key already down on the host is let go of as it was pressed.
             // Anything else is first asked whether a key typed it at all --
@@ -1466,8 +1498,23 @@ public final class InputCapture {
     }
 
     private func sendWheel(_ event: NSEvent) {
-        let wheel = Self.wheelUnits(deltaX: event.scrollingDeltaX,
-                                    deltaY: event.scrollingDeltaY,
+        // With the modifiers as they are now: a ⌃ or ⌘ whose release went to
+        // the lock screen or a menu is still down on the PC, and every
+        // scroll after it would be Ctrl+wheel -- a zoom.
+        syncModifiers(to: event.modifierFlags)
+        // macOS turns Shift and a mouse wheel into a horizontal scroll before
+        // the app sees it. Windows leaves that to the app -- a game's sprint
+        // and weapon wheel, a spreadsheet's own Shift+wheel -- so a wheel's
+        // turn goes as the wheel it was, with Shift held.
+        var deltaX = event.scrollingDeltaX
+        var deltaY = event.scrollingDeltaY
+        if event.modifierFlags.contains(.shift), !event.hasPreciseScrollingDeltas,
+           deltaY == 0, deltaX != 0 {
+            deltaY = deltaX
+            deltaX = 0
+        }
+        let wheel = Self.wheelUnits(deltaX: deltaX,
+                                    deltaY: deltaY,
                                     precise: event.hasPreciseScrollingDeltas,
                                     residual: scrollResidual)
         scrollResidual = wheel.residual
@@ -1959,8 +2006,14 @@ public final class InputCapture {
         let insetX = min(edgeGuard, max(0, (source.width - 1) / 2))
         let insetY = min(edgeGuard, max(0, (source.height - 1) / 2))
         let safe = source.insetBy(dx: insetX, dy: insetY)
-        return CGPoint(x: min(max(source.minX + unit.x * source.width, safe.minX), safe.maxX),
-                       y: min(max(source.minY + unit.y * source.height, safe.minY), safe.maxY))
+        // The last pixel inside, not the edge past it: maxX is the first pixel
+        // of whatever is to the right, and a drag held off the edge ended a
+        // pixel into the neighbouring window.
+        // With a guard the inset already keeps it inside.
+        let lastX = insetX > 0 ? safe.maxX : max(safe.minX, safe.maxX - 1)
+        let lastY = insetY > 0 ? safe.maxY : max(safe.minY, safe.maxY - 1)
+        return CGPoint(x: min(max(source.minX + unit.x * source.width, safe.minX), lastX),
+                       y: min(max(source.minY + unit.y * source.height, safe.minY), lastY))
     }
 
     private func button(for event: NSEvent) -> SMTInput.MouseButton? {

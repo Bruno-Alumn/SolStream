@@ -122,7 +122,9 @@ enum KeyboardMap {
         0x4B: k(0xE035, 0x6F),  // /
         0x4C: k(0xE01C, 0x0D),  // Enter
         0x51: k(0x59, 0xBB),    // =, by name as the main keyboard's
-        0x47: k(0x45, 0x90),    // Clear → Num Lock
+        // Num Lock is the extended 0x45: the bare one is Pause/Break, which
+        // the Mac's Clear key used to send.
+        0x47: k(0xE045, 0x90),  // Clear → Num Lock
 
         // JIS
         0x5D: k(0x7D, 0xDC),  // ¥ (VK_OEM_5 on a Japanese layout)
