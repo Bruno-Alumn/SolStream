@@ -3154,8 +3154,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // only place that can say so -- otherwise a host that vanished
             // at sign-out looks like one that crashed.
             if (wparam) {
-                media::Log("[window] Windows is ending the session (%s); the host stops with it",
-                           (lparam & ENDSESSION_LOGOFF) ? "sign-out" : "restart or shut down");
+                const char* why = (lparam & ENDSESSION_CLOSEAPP) ? "an installer closed it"
+                                : (lparam & ENDSESSION_LOGOFF)   ? "sign-out"
+                                                                 : "restart or shut down";
+                media::Log("[window] Windows is ending this program (%s)", why);
             }
             return 0;
 
