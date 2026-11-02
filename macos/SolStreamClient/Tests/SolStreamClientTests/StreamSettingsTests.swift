@@ -52,4 +52,15 @@ final class StreamSettingsTests: XCTestCase {
         XCTAssertFalse(settings.hidesTitleBar(of: "Discord.exe"))
         XCTAssertTrue(settings.hidesTitleBar(of: "msedge.exe"))
     }
+
+    /// A bare MagicDNS name says nothing; the address it reached does.
+    func testTheAddressReachedDecidesForANameThatCannot() {
+        XCTAssertEqual(StreamSettings.route(host: "gaming-pc", reached: "100.101.102.103"),
+                       "100.101.102.103")
+        XCTAssertTrue(StreamSettings.isRemote(host: StreamSettings.route(host: "gaming-pc",
+                                                                         reached: "100.64.0.9")))
+        XCTAssertEqual(StreamSettings.route(host: "gaming-pc", reached: "192.168.1.20"), "gaming-pc")
+        XCTAssertEqual(StreamSettings.route(host: "pc.tailnet.ts.net", reached: nil),
+                       "pc.tailnet.ts.net")
+    }
 }

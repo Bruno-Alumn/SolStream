@@ -19,6 +19,8 @@ import AudioRenderer
 /// is a UDP socket carrying AES-256-GCM.
 final class StreamSession {
     let host: String
+    /// The IPv4 address the agent's connection reached, which the stream goes to.
+    private let reachedAddress: String?
 
     /// The full streamed canvas, in pixels. Windows express their crops in it.
     let canvasSize: CGSize
@@ -192,6 +194,7 @@ final class StreamSession {
                                            : "by US-layout name; it predates sending them by position"))
         // The address the agent's connection reached, when there is one: see
         // `MediaSession.address`.
+        self.reachedAddress = session.address
         self.media = MediaClient(keys: session.keys, host: session.address ?? host,
                                  port: session.port,
                                  videoCodec: session.videoCodec)
@@ -436,7 +439,8 @@ final class StreamSession {
     /// one loudness curve.
     private func applyAudioSettings(to renderer: AudioRenderer) {
         let settings = StreamSettings.shared
-        let remote = StreamSettings.isRemote(host: host)
+        let remote = StreamSettings.isRemote(host: StreamSettings.route(host: host,
+                                                                        reached: reachedAddress))
         let buffering = settings.audioBuffering.resolved(remote: remote)
         renderer.volume = AudioRenderer.amplitude(forPosition: settings.volume)
         renderer.isMuted = settings.isMuted

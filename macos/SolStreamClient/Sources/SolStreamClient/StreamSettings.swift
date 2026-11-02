@@ -358,6 +358,15 @@ final class StreamSettings {
 
     // MARK: - Applying
 
+    /// What to judge the way to the PC by: the address the connection
+    /// reached, when that says Tailscale -- which a bare MagicDNS name such as
+    /// "gaming-pc" cannot, and so got the home network's settings over the
+    /// internet -- and otherwise the name typed.
+    static func route(host: String, reached: String?) -> String {
+        if let reached, isRemote(host: reached) { return reached }
+        return host
+    }
+
     /// Whether `host` is reached over Tailscale -- an address in
     /// 100.64.0.0/10 or fd7a:115c:a1e0::/48, or a MagicDNS `*.ts.net` name --
     /// and so possibly over the internet, for the Automatic choices.

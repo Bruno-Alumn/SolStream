@@ -18,6 +18,12 @@ struct SolStreamApp {
 SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// `host`, or the address the connection reached when that is the one
+    /// that says how far away the PC is; see `StreamSettings.route`.
+    private func route(_ host: String) -> String {
+        StreamSettings.route(host: host, reached: agent?.reachedIPv4)
+    }
+
     /// Every pairing was forgotten this run: nothing is saved to reopen.
     private var forgotPairings = false
     /// The display stays on while a stream is open; see StayAwake.
@@ -1089,7 +1095,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // What the Settings window chose, under whatever the command line set.
-        var config = StreamSettings.shared.apply(to: baseConfig, host: host,
+        var config = StreamSettings.shared.apply(to: baseConfig, host: route(host),
                                                  overrides: QualityPill.commandLineOverrides)
         Log.info("[stream] \(Self.describe(config))")
         // The encode canvas matches the capture display, which makes the scale
@@ -1368,7 +1374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // found no windows to restart, so it is caught up with here; the
         // debounce and the recovery guards treat it like any other.
         if let request = mediaRequest,
-           Self.applying(StreamSettings.shared, to: request, config: config, host: host,
+           Self.applying(StreamSettings.shared, to: request, config: config, host: route(host),
                          overrides: QualityPill.commandLineOverrides) != nil {
             Log.info("[app] settings changed while the stream was opening")
             scheduleMediaRestart()
@@ -1668,7 +1674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let fresh = Self.applying(StreamSettings.shared, to: request, config: config,
-                                        host: host,
+                                        host: route(host),
                                         overrides: QualityPill.commandLineOverrides) else {
             // Balanced at home is the same 20 Mbps as Automatic: nothing to do.
             return

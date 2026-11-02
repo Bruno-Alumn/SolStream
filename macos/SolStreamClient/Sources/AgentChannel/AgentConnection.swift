@@ -1206,6 +1206,9 @@ public final class AgentConnection {
     /// the host takes the stream only on the address its channel came in on.
     private var connectedIPv4: String?
 
+    /// The IPv4 address the connection reached, when it reached one.
+    public var reachedIPv4: String? { currentIPv4() }
+
     private func currentIPv4() -> String? {
         stateLock.lock()
         defer { stateLock.unlock() }
