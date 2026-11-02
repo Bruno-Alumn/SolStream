@@ -28,7 +28,7 @@ public struct AudioSequencer: Sendable {
             return .play(missing: 0)
         }
         let step = Int32(bitPattern: sequence &- last)
-        if step <= 0 && Int(-step) < Self.resetGap { return .drop }
+        if step <= 0 && -Int(step) < Self.resetGap { return .drop }
         self.last = sequence
         if step <= 0 || Int(step) > Self.resetGap { return .play(missing: 0) }
         return .play(missing: Int(step) - 1)

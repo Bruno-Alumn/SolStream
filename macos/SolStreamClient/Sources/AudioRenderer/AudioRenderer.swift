@@ -22,8 +22,14 @@ public final class AudioRenderer {
     /// failed and its status. Nil while playing, and before the first try.
     public var failure: String? { failureLock.withLock { $0 } }
     private let failureLock = OSAllocatedUnfairLock<String?>(initialState: nil)
-    /// When a failed start was last retried, in uptime nanoseconds.
+    /// When a failed start was last retried, in uptime nanoseconds; receive
+    /// thread only.
     private var lastAttempt: UInt64 = 0
+    /// Where a retry builds the unit, and where `stop()` waits for one: off
+    /// the receive thread, which carries the picture too, and a start can take
+    /// a long while when the sound server is unwell. Every change to
+    /// `audioUnit` after `init` happens on this queue.
+    private let retryQueue = DispatchQueue(label: "com.solstream.audio.retry")
 
     // Audio format: 16-bit signed PCM, 48kHz, stereo
     private let sampleRate: Double = 48000
@@ -178,10 +184,14 @@ public final class AudioRenderer {
         let tick = DispatchTime.now().uptimeNanoseconds
         guard tick - lastAttempt >= 2_000_000_000 else { return false }
         lastAttempt = tick
-        tearDownUnit()
-        setupAudio()
-        if isRunning { Log.info("[audio] sound started on a later try") }
-        return isRunning
+        // Packets meanwhile are dropped, as they were while it was not running.
+        retryQueue.async { [self] in
+            guard !state.withLock({ $0.stopped }) else { return }
+            tearDownUnit()
+            setupAudio()
+            if isRunning { Log.info("[audio] sound started on a later try") }
+        }
+        return false
     }
 
     // MARK: - Whether anything can be heard
@@ -220,8 +230,11 @@ public final class AudioRenderer {
     /// Stop audio playback.
     public func stop() {
         state.withLock { $0 = (running: false, stopped: true) }
-        if let audioUnit {
-            AudioOutputUnitStop(audioUnit)
+        // After any retry under way, which is what may be changing the unit.
+        retryQueue.sync {
+            if let audioUnit {
+                AudioOutputUnitStop(audioUnit)
+            }
         }
     }
 

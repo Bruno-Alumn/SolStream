@@ -117,8 +117,6 @@ final class StreamSession {
     /// session, as the answer is.
     let hostSendsWholePC: Bool
 
-    /// Whether the PC's sound has been above silence in the last two seconds:
-    /// what "Playing from the PC" means.
     /// Sound packets in order, once each; the receive thread's alone.
     private var audioSequencer = AudioSequencer()
 
@@ -130,6 +128,8 @@ final class StreamSession {
         return renderer?.failure
     }
 
+    /// Whether the PC's sound has been above silence in the last two seconds:
+    /// what "Playing from the PC" means.
     var soundIsAudible: Bool {
         audioLock.lock()
         let renderer = audioRenderer
