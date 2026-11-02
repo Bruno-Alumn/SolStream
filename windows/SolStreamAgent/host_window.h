@@ -133,6 +133,15 @@ void SetLinkHandler(bool (*handler)(const std::string& url));
 /// there is none, or no Mac took it -- then it is the caller's to open here.
 bool SendLinkToRunningHost(const std::string& url);
 
+/// What to run with a file handed over by `--send-to-mac` (send_to_mac.h):
+/// 1 when it is on its way to a Mac, 0 when no Mac can take it, 2 when too
+/// many already are. Runs on the window's thread.
+void SetFileHandler(int (*handler)(const std::wstring& path));
+
+/// From `--send-to-mac`: hand the file to the host already running. Its
+/// answer as above, or 0 when there is no host.
+int SendFileToRunningHost(const std::wstring& path);
+
 bool FocusExistingHostWindow();
 
 }  // namespace solstream

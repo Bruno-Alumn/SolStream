@@ -31,6 +31,8 @@ long PushFeaturesFrom(const std::string& names) {
             features |= kPushAttention;
         } else if (name == "openURL") {
             features |= kPushOpenUrl;
+        } else if (name == "fileOffer") {
+            features |= kPushFileOffer;
         }
         if (end == std::string::npos) {
             break;

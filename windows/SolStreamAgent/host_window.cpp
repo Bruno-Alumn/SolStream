@@ -168,6 +168,9 @@ UINT g_shell_hook_message = 0;
 /// See SetLinkHandler, and the tag its WM_COPYDATA carries: "SOLL".
 bool (*g_link_handler)(const std::string&) = nullptr;
 constexpr ULONG_PTR kLinkCopyData = 0x534F4C4C;
+/// See SetFileHandler, and its tag: "SOLF".
+int (*g_file_handler)(const std::wstring&) = nullptr;
+constexpr ULONG_PTR kFileCopyData = 0x534F4C46;
 
 /// A one-off message the Host window shows in place of its usual banner — the
 /// result of pressing a button, which used to be a MessageBox. A modal system
@@ -2765,6 +2768,12 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             const std::string url(static_cast<const char*>(data->lpData), data->cbData);
             return g_link_handler(url) ? 1 : 0;
         }
+        if (data && data->dwData == kFileCopyData && data->lpData && data->cbData <= 65536
+            && data->cbData % sizeof(wchar_t) == 0 && g_file_handler) {
+            const std::wstring path(static_cast<const wchar_t*>(data->lpData),
+                                    data->cbData / sizeof(wchar_t));
+            return g_file_handler(path);
+        }
         return 0;
     }
     if (g_shell_hook_message != 0 && message == g_shell_hook_message) {
@@ -3494,6 +3503,27 @@ bool SendLinkToRunningHost(const std::string& url) {
         return false;
     }
     return answer == 1;
+}
+
+void SetFileHandler(int (*handler)(const std::wstring& path)) {
+    g_file_handler = handler;
+}
+
+int SendFileToRunningHost(const std::wstring& path) {
+    HWND host = FindWindowW(kClassName, nullptr);
+    if (!host) {
+        return 0;
+    }
+    COPYDATASTRUCT data{};
+    data.dwData = kFileCopyData;
+    data.cbData = static_cast<DWORD>(path.size() * sizeof(wchar_t));
+    data.lpData = const_cast<wchar_t*>(path.data());
+    DWORD_PTR answer = 0;
+    if (!SendMessageTimeoutW(host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &answer)) {
+        return 0;
+    }
+    return static_cast<int>(answer);
 }
 
 bool FocusExistingHostWindow() {

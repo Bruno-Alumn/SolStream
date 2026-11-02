@@ -30,6 +30,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let stayAwake = StayAwake()
     private var connectWindow: ConnectWindow?
     private var agent: AgentConnection?
+    /// Files sent from the PC with Send to Mac; one per connection.
+    private var fileReceiver: FileReceiver?
     private var session: StreamSession?
     private var appWindows: [AppWindow] = []
     private var picker: AppPicker?
@@ -626,6 +628,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agent.onWindowsChanged = { fill(false) }
         agent.onOpenLink = { Self.openLinkFromPC($0) }
+        agent.onFileOffer = { [weak self, weak agent] id, name, size in
+            guard let self, let agent else { return }
+            self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
+        }
         refillPicker = { fill(false) }
         if existing == nil {
             agent.connect()
@@ -1308,6 +1314,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         agent.onOpenLink = { Self.openLinkFromPC($0) }
+        agent.onFileOffer = { [weak self, weak agent] id, name, size in
+            guard let self, let agent else { return }
+            self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
+        }
         agent.onWindowTitle = { [weak self] id, title in
             self?.appWindows.first { $0.remoteWindowID == id }?.hostTitleChanged(title)
         }
@@ -2108,6 +2118,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return menu
+    }
+
+    /// A file sent from the PC: saved in Downloads › SolStream, and said in the
+    /// stream window in front -- or, with none, by bouncing the Dock icon.
+    private func receiveFile(_ offer: FileReceiver.Offer, from agent: AgentConnection) {
+        if fileReceiver?.agent !== agent {
+            let receiver = FileReceiver(agent: agent)
+            receiver.onReport = { [weak self] text in
+                Log.info("[files] \(text)")
+                if let window = self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
+                    ?? self?.appWindows.first {
+                    window.tell(text)
+                }
+                if !NSApp.isActive {
+                    NSApp.requestUserAttention(.informationalRequest)
+                }
+            }
+            fileReceiver = receiver
+        }
+        fileReceiver?.receive(offer)
     }
 
     /// A link clicked on the PC, with SolStream chosen as its browser there:

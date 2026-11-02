@@ -54,6 +54,7 @@
 #include "media/video_codec.h"
 #include "quit_app.h"
 #include "links.h"
+#include "send_to_mac.h"
 #include "session_takeover.h"
 #include "token_store.h"
 #include "stranded.h"
@@ -1776,6 +1777,64 @@ void TestTokenStore() {
     CHECK(!IsTokenText("short"));
     CHECK(!IsTokenText("has a space in it, sadly"));
     CHECK(IsTokenText("ABCDEF0123456789-old-style"));
+}
+
+/// A file sent to the Mac: offered by path, fetched only by its offer's
+/// number, a chunk at a time, and closed after its last chunk. Folders and
+/// missing files are refused with a reason a person can act on.
+void TestFileOffers() {
+    wchar_t base[MAX_PATH] = {0};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    const std::wstring folder = std::wstring(base) + L"\\Offers";
+    CreateDirectoryW(folder.c_str(), nullptr);
+    const std::wstring file = folder + L"\\report.txt";
+    std::string body(kTransferChunkBytes + 10, 'r');
+    CHECK(WriteWholeFile(file, body));
+
+    std::string error;
+    CHECK(AddFileOffer(folder, error) == 0 && error.find("folder") != std::string::npos);
+    CHECK(AddFileOffer(folder + L"\\missing.txt", error) == 0 && !error.empty());
+
+    const uint64_t id = AddFileOffer(file, error);
+    CHECK(id != 0 && error.empty());
+    const std::string offer = FileOfferJson(id);
+    CHECK(offer.find("\"name\":\"report.txt\"") != std::string::npos);
+    CHECK(offer.find("\"size\":" + std::to_string(body.size())) != std::string::npos);
+
+    // Only by number, and only within the file.
+    CHECK(DownloadJson(static_cast<long long>(id) + 1000, 0).find("\"ok\":false") != std::string::npos);
+    CHECK(DownloadJson(static_cast<long long>(id), -1).find("\"ok\":false") != std::string::npos);
+    CHECK(DownloadJson(static_cast<long long>(id), static_cast<long long>(body.size()))
+              .find("\"ok\":false") != std::string::npos);
+
+    std::string fetched;
+    long long offset = 0;
+    for (int chunk = 0; chunk < 4 && offset < static_cast<long long>(body.size()); ++chunk) {
+        const std::string reply = DownloadJson(static_cast<long long>(id), offset);
+        CHECK(reply.find("\"ok\":true") != std::string::npos);
+        // Base64 holds no quote, so the field ends at the next one.
+        const size_t from = reply.find("\"data\":\"");
+        CHECK(from != std::string::npos);
+        const std::string data = from == std::string::npos
+            ? std::string() : reply.substr(from + 8, reply.find('"', from + 8) - (from + 8));
+        std::vector<unsigned char> bytes;
+        CHECK(Base64Decode(data, bytes));
+        fetched.append(bytes.begin(), bytes.end());
+        offset += static_cast<long long>(bytes.size());
+    }
+    CHECK(fetched == body);
+    // The last chunk closed the offer.
+    CHECK(DownloadJson(static_cast<long long>(id), 0).find("\"ok\":false") != std::string::npos);
+    CHECK(FileOfferJson(id).empty());
+
+    // An empty file is one empty chunk.
+    const std::wstring empty = folder + L"\\empty.txt";
+    CHECK(WriteWholeFile(empty, ""));
+    const uint64_t none = AddFileOffer(empty, error);
+    CHECK(none != 0);
+    CHECK(DownloadJson(static_cast<long long>(none), 0).find("\"ok\":true") != std::string::npos);
+
+    CHECK(PushFeaturesFrom("fileOffer") == kPushFileOffer);
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
@@ -4099,6 +4158,7 @@ int wmain(int argc, wchar_t** argv) {
     TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+    TestFileOffers();
     TestPushFeatures();
     TestUploadRefusal();
     TestTokenStore();

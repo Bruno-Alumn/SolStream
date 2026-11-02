@@ -79,6 +79,7 @@
 #include "links.h"
 #include "ports.h"
 #include "quit_app.h"
+#include "send_to_mac.h"
 #include "session_takeover.h"
 #include "token_store.h"
 #include "stranded.h"
@@ -2585,6 +2586,36 @@ void StreamedWindowFlashed(HWND window) {
 /// the link in Edge as well.
 std::mutex g_links_cs;
 std::vector<std::string> g_links_pending;  // guarded by g_links_cs
+/// Files offered from Explorer, waiting for the watcher to tell the Mac;
+/// guarded by g_links_cs too.
+std::vector<uint64_t> g_offers_pending;
+
+/// From the host window: a file handed over by `--send-to-mac`. 1 when a
+/// signed-in Mac that takes offers will be told of it, 0 when none can, 2
+/// when too many are already on their way. Checked again here: any program
+/// on the PC can send this, though all it can do is offer a file that this
+/// account can read to this account's own Mac.
+int QueueFileForMac(const std::wstring& path) {
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0
+        || (InterlockedCompareExchange(&g_push_features, 0, 0) & solstream::kPushFileOffer)
+               == 0) {
+        return 0;
+    }
+    std::string error;
+    const uint64_t id = solstream::AddFileOffer(path, error);
+    if (id == 0) {
+        Log("[files] not offering %s: %s", ToUtf8(path).c_str(), error.c_str());
+        return 2;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_links_cs);
+        g_offers_pending.push_back(id);
+    }
+    if (g_watcher_wake) {
+        SetEvent(g_watcher_wake);
+    }
+    return 1;
+}
 
 /// From the host window: a link handed over by `--open-url`. True when a
 /// signed-in Mac that understands links will be sent it; false sends the
@@ -2636,6 +2667,18 @@ void NotifyStreamedWindows() {
         Log("[links] sending a %s link to the Mac", url.rfind("mailto:", 0) == 0 ? "mail" : "web");
         PushLine("{\"type\":\"openURL\",\"url\":\"" + JsonEscape(url) + "\"}", 0,
                  solstream::kPushOpenUrl);
+    }
+    std::vector<uint64_t> offers;
+    {
+        std::lock_guard<std::mutex> lock(g_links_cs);
+        offers.swap(g_offers_pending);
+    }
+    for (const uint64_t id : offers) {
+        const std::string line = solstream::FileOfferJson(id);
+        if (!line.empty()) {
+            Log("[files] offering file %llu to the Mac", (unsigned long long) id);
+            PushLine(line, 0, solstream::kPushFileOffer);
+        }
     }
 
     std::vector<HWND> flashed;
@@ -4795,6 +4838,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     // Pictures and files in chunks; see transfer.h.
+    // A file the PC offered the Mac, a chunk at a time; see send_to_mac.h.
+    if (command == "download") {
+        long long id = 0, offset = 0;
+        if (!FieldNumber(line, "id", id) || !FieldNumber(line, "offset", offset)) {
+            return "{\"type\":\"error\",\"message\":\"download needs id, offset\"}";
+        }
+        return solstream::DownloadJson(id, offset);
+    }
+
     if (command == "clipboardImage") {
         long long offset = 0, total = 0, seq = -1;
         FieldNumber(line, "offset", offset);
@@ -6402,6 +6454,30 @@ void RaiseToNormalPriority() {
 int wmain(int argc, wchar_t** argv) {
     // A link clicked with SolStream chosen as the browser (links.h). Before
     // anything else, and doing nothing else: this copy lives for one click.
+    // "Send to Mac" on a file in Explorer (send_to_mac.h): one copy per file.
+    if (argc >= 3 && std::wstring(argv[1]) == L"--send-to-mac") {
+        ReleaseUnwantedConsole();
+        wchar_t full[MAX_PATH * 4] = {0};
+        const DWORD length = GetFullPathNameW(argv[2], MAX_PATH * 4, full, nullptr);
+        const std::wstring path = length > 0 && length < MAX_PATH * 4 ? full : argv[2];
+        std::string refusal = solstream::FileOfferRefusal(path);
+        if (refusal.empty()) {
+            switch (solstream::SendFileToRunningHost(path)) {
+                case 1:
+                    return 0;
+                case 2:
+                    refusal = "SolStream couldn't send that file just now. Wait for the files "
+                              "already on their way to arrive, then try again.";
+                    break;
+                default:
+                    refusal = "No Mac is connected to send this file to. Open SolStream on "
+                              "your Mac, connect to this PC, then try again.";
+            }
+        }
+        MessageBoxW(nullptr, ToWide(refusal).c_str(), L"Send to Mac",
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        return 0;
+    }
     if (argc >= 3 && std::wstring(argv[1]) == L"--open-url") {
         // No console for a click. The manifest keeps Windows 11 24H2 and later
         // from making one at all; before that, it is let go at once.
@@ -7351,6 +7427,7 @@ int wmain(int argc, wchar_t** argv) {
 
     solstream::SetShellFlashHandler(StreamedWindowFlashed);
     solstream::SetLinkHandler(QueueLinkForMac);
+    solstream::SetFileHandler(QueueFileForMac);
     solstream::SetEndSessionHandler([] {
         // As the exit below does, without the ExitProcess: Windows ends the
         // process itself once the window has answered.

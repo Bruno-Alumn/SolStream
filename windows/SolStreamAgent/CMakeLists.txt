@@ -103,6 +103,8 @@ add_library(SolStreamCore OBJECT
     quit_app.cpp
     # Links clicked on the PC, opened on the Mac.
     links.cpp
+    # Files sent from the PC to the Mac.
+    send_to_mac.cpp
     # Putting a streamed window back as it was, and remembering what is owed.
     window_restore.cpp
     installer.cpp

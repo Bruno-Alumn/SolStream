@@ -290,6 +290,9 @@ public final class AgentConnection {
     /// A link clicked on the host, with SolStream chosen as its browser there,
     /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
     public var onOpenLink: ((String) -> Void)?
+    /// A file sent from the host with Send to Mac: its offer number, name
+    /// and size, to fetch with `download`.
+    public var onFileOffer: ((UInt64, String, Int64) -> Void)?
     /// Something belonging to another application on the PC is sitting on top of
     /// the window with this id. An empty name means it has gone away again.
     public var onOccluded: ((UInt64, String) -> Void)?
@@ -1010,6 +1013,7 @@ public final class AgentConnection {
         onWindowTitle = nil
         onAttention = nil
         onOpenLink = nil
+        onFileOffer = nil
         onOccluded = nil
     }
 
@@ -1638,6 +1642,43 @@ public final class AgentConnection {
                 }
                 png.append(chunk)
                 if png.count < total { next() } else { completion(png) }
+            }
+        }
+        next()
+    }
+
+    /// Fetch offered file `id`, `size` bytes, into `handle`, a chunk at a time,
+    /// so a large file is never in memory whole. Answers on the main queue
+    /// with whether every byte came, in order.
+    public func download(id: UInt64, size: Int64, into handle: FileHandle,
+                         progress: ((Int64) -> Void)? = nil,
+                         completion: @escaping (Bool) -> Void) {
+        var received: Int64 = 0
+        func finish(_ ok: Bool) { DispatchQueue.main.async { completion(ok) } }
+        func next() {
+            send(["cmd": "download", "id": id, "offset": received]) { result in
+                guard case .success(let message) = result,
+                      message["ok"] as? Bool == true,
+                      (message["total"] as? NSNumber)?.int64Value == size,
+                      (message["offset"] as? NSNumber)?.int64Value == received,
+                      let base64 = message["data"] as? String,
+                      let chunk = Data(base64Encoded: base64),
+                      received + Int64(chunk.count) <= size,
+                      !chunk.isEmpty || size == 0 else {
+                    if case .success(let message) = result, let why = message["message"] as? String {
+                        Log.error("[files] the host stopped sending file \(id): \(why)")
+                    }
+                    return finish(false)
+                }
+                do {
+                    try handle.write(contentsOf: chunk)
+                } catch {
+                    Log.error("[files] could not write file \(id): \(error)")
+                    return finish(false)
+                }
+                received += Int64(chunk.count)
+                progress?(received)
+                if received < size { next() } else { finish(true) }
             }
         }
         next()
@@ -2535,6 +2576,15 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onWindowTitle?(id, title) }
             }
             return
+        case "fileOffer":
+            // Unsolicited: Send to Mac on the PC. Sent only to a Mac that
+            // listed it among the pushes it understands.
+            if let id = (message["id"] as? NSNumber)?.uint64Value,
+               let name = message["name"] as? String,
+               let size = (message["size"] as? NSNumber)?.int64Value, size >= 0 {
+                DispatchQueue.main.async { [weak self] in self?.onFileOffer?(id, name, size) }
+            }
+            return
         case "openURL":
             // Unsolicited: a click on the PC, sent only to a Mac that listed
             // it among the pushes it understands.
@@ -2643,11 +2693,12 @@ public final class AgentConnection {
     /// is a reply as often as it is the greeting's push; and not `busy`, which
     /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
-                                               "title", "attention", "openURL"]
+                                               "title", "attention", "openURL",
+                                               "fileOffer"]
 
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
-    static let understoodPushes = "title attention openURL"
+    static let understoodPushes = "title attention openURL fileOffer"
 
     /// A link from the host that this Mac may open: web or mail, as the host
     /// registered for, and nothing else -- not a file, not a script, not an

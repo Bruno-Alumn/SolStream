@@ -1,0 +1,41 @@
+// send_to_mac.h — files sent from the PC to the Mac.
+//
+// "Send to Mac" in Explorer's right-click menu starts `SolStream.exe
+// --send-to-mac <file>`, which hands the path to the running host. The host
+// offers the file to the signed-in Mac -- only to one that says it
+// understands offers -- and the Mac fetches it, a chunk at a time, into its
+// Downloads\SolStream. Only a file offered that way can be fetched, by the
+// number its offer was given: the Mac never names a path on the PC.
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+namespace solstream {
+
+/// Why `path` can't be sent, in words for the person who asked, or empty
+/// when it can: it has to be a file, not a folder, of at most
+/// kMaxUploadBytes. Asked by the click before the host is, and by the host
+/// again when it makes the offer.
+std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size = nullptr);
+
+/// Offer `path` (a file, not a folder, at most kMaxUploadBytes) to the Mac.
+/// Its offer number, or 0 with `error` saying why not -- to the person who
+/// asked. Offers expire after half an hour, and at most 16 are open.
+uint64_t AddFileOffer(const std::wstring& path, std::string& error);
+
+/// The push that tells the Mac about offer `id`: its name and size.
+std::string FileOfferJson(uint64_t id);
+
+/// The reply to `{"cmd":"download","id":N,"offset":O}`: up to
+/// kTransferChunkBytes of the offered file from O. The last chunk closes the
+/// offer.
+std::string DownloadJson(long long id, long long offset);
+
+/// The "Send to Mac" item on every file's right-click menu, machine-wide, as
+/// the install is. Logged, never fatal.
+void RegisterSendToMac(const std::wstring& exe);
+void RemoveSendToMac();
+
+}  // namespace solstream
