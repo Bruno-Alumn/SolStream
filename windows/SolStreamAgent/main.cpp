@@ -492,6 +492,13 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
         if (mode.dmBitsPerPel != 32) {
             continue;
         }
+        // The encoder takes nothing wider or taller than 4096 -- the same limit
+        // ConfigureVirtualDisplay keeps -- and the driver offers bigger. The
+        // request is checked against 8192, and the "largest" fallback below
+        // would otherwise pick a size that never streams a frame.
+        if (mode.dmPelsWidth > 4096 || mode.dmPelsHeight > 4096) {
+            continue;
+        }
         const long long area = (long long) mode.dmPelsWidth * mode.dmPelsHeight;
         const long long largest_area =
             (long long) largest.dmPelsWidth * largest.dmPelsHeight;
@@ -2290,7 +2297,7 @@ bool WorkOutCaptureDisplayIsInvisible(const std::vector<Display>& displays, RECT
     if (!captured || !primary || captured == primary) {
         return false;
     }
-    if (captured->adapter.find("Virtual Display") == std::string::npos) {
+    if (!solstream::IsSolStreamDisplayDriver(ToWide(captured->adapter))) {
         return false;
     }
     capture = captured->bounds;
@@ -4472,6 +4479,25 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!window) {
             return refusal;
         }
+        // Moving a window owes it a trip back, as pinning one does; see
+        // `topmost`. The Mac asks for both, but a `topmost` refused with every
+        // slot taken, or a restore still running, left `place` free to move a
+        // window that nothing had recorded -- so it stayed wherever the session
+        // put it, on the virtual display, after the session ended.
+        WaitForRestoreToFinish(window);
+        EnterCriticalSection(&g_lock_cs);
+        const int slot = ClaimSlot(window);
+        LeaveCriticalSection(&g_lock_cs);
+        if (slot == kClaimRestoreInProgress) {
+            return "{\"type\":\"placed\",\"ok\":false,\"message\":\"this window is "
+                   "still being restored; try again shortly\"}";
+        }
+        if (slot < 0) {
+            Log("[agent] refused place: all %d window slots are taken", kMaxLocks);
+            return "{\"type\":\"placed\",\"ok\":false,\"message\":\"too many windows "
+                   "are being managed; close one on the Mac first\"}";
+        }
+        RecordOwedWindows();
         RECT client{};
         long long missed = 0;
         // A window that cannot be resized is moved and keeps its own size; see

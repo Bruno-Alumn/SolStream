@@ -794,7 +794,9 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     // no cycle the answer is already known, and ten seconds of sleeping to
     // rediscover that would be ten seconds on every logon.
     for (int attempt = 0; attempt < (cycle ? 10 : 1); ++attempt) {
-        if (FindVirtualAdapter(adapter)) {
+        // Ours, not merely any: another product's display is listed straight
+        // away while ours is still coming back from the restart.
+        if (FindVirtualAdapter(adapter) && adapter.ours) {
             break;
         }
         Sleep(1000);
@@ -802,6 +804,26 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     if (adapter.gdi_name.empty()) {
         error = "No virtual display adapter is present. Install the display "
                 "driver first, or restart this PC if you just did.";
+        return false;
+    }
+    // Another product's virtual display -- Parsec's, Sunshine's, spacedesk's --
+    // is that product's to size, scale and colour. Without our own driver this
+    // used to resize it, set it to 200% and turn its HDR off at every logon.
+    // VirtualDisplayDevice already refuses it for capture, so configuring it
+    // bought nothing.
+    if (!adapter.ours) {
+        const auto displays = FindVirtualDisplays();
+        const bool ours_installed = std::any_of(
+            displays.begin(), displays.end(), [](const VirtualDisplay& display) {
+                return IsSolStreamDisplayDriver(display.friendly_name);
+            });
+        error = ours_installed
+            ? "SolStream's virtual display is installed but has not started, so "
+              "another program's was left alone. Restart this PC and open "
+              "SolStream again."
+            : "SolStream's display driver is not installed, and the virtual "
+              "display that is belongs to another program, so it was left "
+              "alone. Choose Set up in SolStream to install SolStream's.";
         return false;
     }
 
