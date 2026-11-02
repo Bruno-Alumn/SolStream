@@ -219,8 +219,10 @@ public final class AgentConnection {
     /// connection can ask it something while the proof is on the wire, so
     /// those requests are held here and sent once the reply has landed.
     private var authInFlight = false
-    private var heldWhileAuthenticating: [(request: [String: Any],
+    private var heldWhileAuthenticating: [(id: UInt64, request: [String: Any],
                                            completion: (Result<[String: Any], Error>) -> Void)] = []
+    /// Numbers held requests, for their time limit; see `hold`.
+    private var nextHeldID: UInt64 = 0
 
     private var storedDisplays: [RemoteDisplay] = []
 
@@ -1105,8 +1107,10 @@ public final class AgentConnection {
         authInFlight = false
         let held = heldWhileAuthenticating
         heldWhileAuthenticating.removeAll()
+        // In the order they were asked for, and ahead of anything asked for
+        // since: put on the wire here, not queued again behind newer sends.
         for item in held {
-            send(item.request, completion: item.completion)
+            enqueue(item.request, completion: item.completion)
         }
     }
 
@@ -1881,7 +1885,41 @@ public final class AgentConnection {
     private func send(_ request: [String: Any],
                       completion: @escaping (Result<[String: Any], Error>) -> Void) {
         queue.async { [weak self] in
-            guard let self, let connection = self.connection else {
+            guard let self else {
+                completion(.failure(AgentError.disconnected))
+                return
+            }
+            self.enqueue(request, completion: completion)
+        }
+    }
+
+    /// Hold a request until the connection may carry it, for no longer than
+    /// it would be given to be answered. A connection waiting on a token the
+    /// user put off typing can stay open for minutes, and what was asked of
+    /// it meanwhile -- a picker's lists, a stream's recovery -- must fail and
+    /// say so rather than wait unseen.
+    private func hold(_ request: [String: Any],
+                      completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        nextHeldID &+= 1
+        let id = nextHeldID
+        heldWhileAuthenticating.append((id, request, completion))
+        queue.asyncAfter(deadline: .now() + Self.timeout(for: request)) { [weak self] in
+            guard let self,
+                  let index = self.heldWhileAuthenticating.firstIndex(where: { $0.id == id }) else {
+                return
+            }
+            let item = self.heldWhileAuthenticating.remove(at: index)
+            Log.error("[agent] \(item.request["cmd"] as? String ?? "?") waited too long for "
+                      + "\(self.host) to be ready")
+            item.completion(.failure(AgentError.timedOut))
+        }
+    }
+
+    /// `send`, on `queue`.
+    private func enqueue(_ request: [String: Any],
+                         completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        do {
+            guard let connection = self.connection else {
                 completion(.failure(AgentError.disconnected))
                 return
             }
@@ -1891,7 +1929,7 @@ public final class AgentConnection {
             // the host reads exactly one line before it answers.
             if self.authInFlight || self.takeoverInFlight
                 || (!self.mayTalk && request["cmd"] as? String != "ping") {
-                self.heldWhileAuthenticating.append((request, completion))
+                self.hold(request, completion: completion)
                 return
             }
             guard let body = try? JSONSerialization.data(withJSONObject: request) else {
