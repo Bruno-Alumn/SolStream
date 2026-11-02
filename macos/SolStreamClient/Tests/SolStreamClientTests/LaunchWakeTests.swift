@@ -27,3 +27,19 @@ final class LaunchWakeTests: XCTestCase {
         XCTAssertFalse(wake.isRunning)
     }
 }
+
+import Network
+@testable import AgentChannel
+
+/// Only a PC that does not answer at all is woken: one that refused is
+/// awake, and a name that did not resolve is not a PC to wake.
+final class MightBeAsleepTests: XCTestCase {
+    func testWakesOnlyWhatLooksAsleep() {
+        XCTAssertTrue(AgentConnection.mightBeAsleep(.posix(.ETIMEDOUT)))
+        XCTAssertTrue(AgentConnection.mightBeAsleep(.posix(.EHOSTDOWN)))
+        XCTAssertTrue(AgentConnection.mightBeAsleep(.posix(.EHOSTUNREACH)))
+        XCTAssertFalse(AgentConnection.mightBeAsleep(.posix(.ECONNREFUSED)))
+        XCTAssertFalse(AgentConnection.mightBeAsleep(.posix(.ENETUNREACH)))
+        XCTAssertFalse(AgentConnection.mightBeAsleep(.dns(-65554)))
+    }
+}

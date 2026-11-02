@@ -26,7 +26,7 @@ final class LaunchWake {
         "Waking \(host) to open \(app)… This can take up to a minute."
     }
 
-    /// What it says when the minute is up, after the connection's own words.
+    /// What it says when the minute is up.
     static func gaveUp(_ host: String) -> String {
         "\(host) didn't wake. Wake-on-LAN may be off on it, or it's on another network, "
             + "or nobody is signed in to Windows."
@@ -38,8 +38,7 @@ final class LaunchWake {
     /// Starts retrying at once; `retry` and `gaveUp` run on the main thread.
     init(retry: @escaping () -> Void, gaveUp: @escaping () -> Void) {
         startedAt = Date()
-        timer = Timer.scheduledTimer(withTimeInterval: Self.retryEvery, repeats: true) {
-            [weak self] _ in
+        let timer = Timer(timeInterval: Self.retryEvery, repeats: true) { [weak self] _ in
             guard let self else { return }
             switch Self.step(elapsed: Date().timeIntervalSince(self.startedAt)) {
             case .retry:
@@ -49,6 +48,9 @@ final class LaunchWake {
                 gaveUp()
             }
         }
+        // Common modes: a menu held open does not hold up the wait.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     var isRunning: Bool { timer != nil }

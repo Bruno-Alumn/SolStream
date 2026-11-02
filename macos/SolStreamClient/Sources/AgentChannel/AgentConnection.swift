@@ -173,6 +173,10 @@ public final class AgentConnection {
     /// another thread does not mean touching the NWConnection reference itself.
     /// Guarded by `stateLock`.
     private var connectionIsUp = false
+    /// Whether the last failure to connect looked like a PC that is off or
+    /// asleep, rather than one that refused or a name that did not resolve.
+    /// Guarded by `stateLock`; see `lastFailureMightBeAsleep`.
+    private var failureMightBeAsleep = false
     private var buffer = Data()
     /// Replies arrive in request order, so a FIFO of continuations is enough —
     /// no request ids needed in the protocol.
@@ -771,12 +775,19 @@ public final class AgentConnection {
     /// A first connection to a host that cannot be reached sits waiting, and
     /// NWConnection tries it again only when this Mac's network changes, not
     /// when the PC comes back; one that failed outright waits out a backoff
-    /// of up to half a minute. Nothing once the socket is up.
+    /// of up to half a minute. Nothing while a socket is connecting or up.
     public func retryUnanswered() {
         queue.async { [weak self] in
-            guard let self, self.wantsConnection else { return }
+            // A reconnect already due -- a backoff, or the wait a busy host
+            // asked for -- is left to come.
+            guard let self, self.wantsConnection, !self.reconnectPending else { return }
             if let stale = self.connection {
-                if case .ready = stale.state { return }
+                // Only one that is stuck: one still connecting, or up, is left
+                // to finish.
+                switch stale.state {
+                case .waiting, .failed: break
+                default: return
+                }
                 // Silenced first: its last states are about a socket that is
                 // no longer this object's, and `.failed` would nil the new one.
                 stale.stateUpdateHandler = nil
@@ -845,9 +856,11 @@ public final class AgentConnection {
             guard let self else { return }
             switch state {
             case .ready:
+                guard self.connection === connection else { return }
                 Log.info("[agent] connected to \(self.host):\(self.port)")
                 let reached = Self.dottedIPv4(connection.currentPath?.remoteEndpoint)
                 self.stateLock.lock()
+                self.failureMightBeAsleep = false
                 self.connectedIPv4 = reached
                 self.stateLock.unlock()
                 let reconnected = self.reconnectAttempt > 0
@@ -862,6 +875,9 @@ public final class AgentConnection {
                     self.reconnectedNeedsAnnouncing = true
                 }
             case .failed(let error):
+                // A socket `retryUnanswered` has replaced says nothing more.
+                guard self.connection === connection else { return }
+                self.noteFailure(error)
                 Log.error("[agent] connection failed: \(error)")
                 // Not the error's own words, which are a socket's; and it is
                 // coming back by itself, which they did not say.
@@ -894,6 +910,7 @@ public final class AgentConnection {
         // loopback-bound agent looked like from another machine.
         // The log keeps the whole story: which port, and the fact that
         // an agent bound to one address answers on that address only.
+        noteFailure(error)
         Log.error("[agent] cannot reach \(host):\(port): \(error). "
                   + "If SolStream is running there, it may be bound to one "
                   + "address only, or a firewall may be blocking the port.")
@@ -1002,6 +1019,32 @@ public final class AgentConnection {
             return "Can't reach \(host) from this Mac. Check both are on the same network, "
                 + "or on Tailscale."
         }
+    }
+
+    /// Errors a sleeping or switched-off PC gives: nothing answers, or
+    /// nothing on the network says it is there. Not a refusal, which is a PC
+    /// awake without SolStream, nor a name that does not resolve.
+    static func mightBeAsleep(_ error: NWError) -> Bool {
+        switch error {
+        case .posix(.ETIMEDOUT), .posix(.EHOSTDOWN), .posix(.EHOSTUNREACH):
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether the last failure to connect could be a PC asleep, so worth
+    /// waking; see `mightBeAsleep`.
+    public var lastFailureMightBeAsleep: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return failureMightBeAsleep
+    }
+
+    private func noteFailure(_ error: NWError) {
+        stateLock.lock()
+        failureMightBeAsleep = Self.mightBeAsleep(error)
+        stateLock.unlock()
     }
 
     /// The host this connection was made to, as it was given.

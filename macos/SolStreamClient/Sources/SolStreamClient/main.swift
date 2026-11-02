@@ -388,6 +388,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let picker, let agent, AppLink.sameHost(pickerHost, link.host) {
             pendingOpen = link
             picker.show()
+            // `isConnected` is a socket, not an answer: one stuck waiting
+            // on a sleeping PC counts, and that is the case here.
+            if !agent.isConnected || agent.lastFailureMightBeAsleep, let host = pickerHost {
+                // A picker that has been failing to reach the PC since before
+                // this click: a new request, so a new wake, and a new try.
+                launchWake?.stop()
+                launchWake = nil
+                if !wakeForLauncher(host: host, agent: agent, picker: picker) {
+                    agent.retryUnanswered()
+                }
+            }
             // Listed again only over a live connection. One still connecting
             // or reconnecting fills the list when it greets, and asking now
             // would answer with two empty lists -- shown as "0 windows open"
@@ -410,7 +421,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func wakeForLauncher(host: String, agent: AgentConnection?,
                                  picker: AppPicker?) -> Bool {
         guard launchWake == nil, let agent, let picker, let link = pendingOpen,
-              AppLink.sameHost(link.host, host) else { return false }
+              AppLink.sameHost(link.host, host), agent.lastFailureMightBeAsleep
+        else { return false }
         let targets = WakeOnLAN.targets(for: host)
         guard !targets.isEmpty, WakeOnLAN.wake(targets) else { return false }
         Log.info("[app] \(host) is not answering; woke it to open \"\(link.name)\"")
@@ -577,9 +589,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 // Asleep, for a launcher: woken, and tried again until it
                 // answers. Each try that fails meanwhile is expected.
-                if self.wakeForLauncher(host: host, agent: agent, picker: picker)
-                    || self.launchWake?.isRunning == true {
+                if self.wakeForLauncher(host: host, agent: agent, picker: picker) {
                     return
+                }
+                if self.launchWake?.isRunning == true {
+                    // A refusal no retry can fix -- another Mac streaming --
+                    // is not the PC still waking.
+                    if agent?.willReconnect == true { return }
+                    self.launchWake?.stop()
                 }
                 // `explain` already names the host and says what to do.
                 picker?.showFailure(message, isConnection: true)
@@ -587,6 +604,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.launchWake?.stop()
                 picker?.connectionIsBack()
             case .waiting(let message):
+                // The PC answered: it is awake, and saying what it waits on.
+                self?.launchWake?.stop()
                 picker?.showWaiting(message)
             case .needsToken(let host, let rejected):
                 // A sheet on the picker the person is already looking at.
