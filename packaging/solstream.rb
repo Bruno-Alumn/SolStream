@@ -34,9 +34,9 @@ cask "solstream" do
   ]
 
   caveats <<~EOS
-    SolStream isn't notarized by Apple. The first time you open it, macOS
-    asks whether to open it: choose Open, or allow it in System Settings →
-    Privacy & Security → Open Anyway.
+    SolStream isn't notarized by Apple, so macOS refuses it the first time
+    you open it. Dismiss the warning, then choose Open Anyway in System
+    Settings → Privacy & Security.
 
     The PC needs SolStream too: run SolStreamSetup from
     https://github.com/Bruno-Alumn/SolStream/releases/latest on Windows.

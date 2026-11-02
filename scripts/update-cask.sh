@@ -31,12 +31,16 @@ sha=$(awk -v f="SolStream-$version-macOS.zip" '$2 == f { print $1 }' "$work/SHA2
 sed -i.bak -E \
     -e "s/^  version \"[^\"]*\"/  version \"$version\"/" \
     -e "s/^  sha256 \"[^\"]*\"/  sha256 \"$sha\"/" \
-    "$cask" && rm -f "$cask.bak"
+    "$cask"
+rm -f "$cask.bak"
+grep -q "^  version \"$version\"\$" "$cask" && grep -q "^  sha256 \"$sha\"\$" "$cask" ||
+    { echo "packaging/solstream.rb has no version or sha256 line to set" >&2; exit 1; }
 echo "packaging/solstream.rb: $version $sha"
 
 if $push; then
     path=Casks/solstream.rb
-    current=$(gh api "repos/$tap/contents/$path" -q .sha 2>/dev/null || true)
+    # On a 404 gh still prints the error body, so only trust a successful call.
+    current=$(gh api "repos/$tap/contents/$path" -q .sha 2>/dev/null) || current=""
     gh api -X PUT "repos/$tap/contents/$path" \
         -f message="Update SolStream to $version" \
         -f content="$(base64 < "$cask" | tr -d '\n')" \

@@ -107,6 +107,7 @@ uploads to a draft and publishes last, which is what immutable releases need.
    scripts/update-cask.sh v1.0.1 --push
    git add packaging/solstream.rb
    TZ=UTC git commit -m "Point the cask at 1.0.1"
+   git push origin main
    ```
 
    Until then `brew install` keeps giving the previous version, and copies
