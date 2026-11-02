@@ -106,6 +106,34 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(host.connections, 1, "no second knock")
     }
 
+    // MARK: - A host that will not go on in the clear
+
+    /// The host took the token but refused because the channel was not
+    /// sealed: the token was right, so it is kept, and the failure is said.
+    func testARefusalToGoOnInTheClearKeepsTheToken() throws {
+        let host = ScriptedHost { _, connection in
+            let challenge = ScriptedHost.randomHex(32)
+            connection.send(#"{"type":"hello","version":2,"host":"TEST-PC","needsAuth":true,"#
+                            + #""challenge":"\#(challenge)","channelCrypto":2}"#)
+            _ = connection.readLine(timeout: 5)
+            connection.send(#"{"type":"auth","ok":false,"reason":"seal","#
+                            + #""message":"this host only accepts an encrypted channel"}"#)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        TokenStore.set(Self.token, for: "::1")
+        let agent = AgentConnection(host: "::1", port: port, token: Self.token)
+        defer { agent.disconnect() }
+        let states = StateRecord(agent)
+        let failed = expectation(description: "failed")
+        states.onFailure = { _ in failed.fulfill() }
+        agent.connect()
+        wait(for: [failed], timeout: 5)
+        XCTAssertEqual(TokenStore.token(for: "::1"), Self.token, "a token that works was forgotten")
+        XCTAssertTrue(states.failures.first?.contains("could not agree a key") == true)
+    }
+
     // MARK: - A host that offers a takeover
 
     /// The host offers the session back and this Mac asks for it. A request

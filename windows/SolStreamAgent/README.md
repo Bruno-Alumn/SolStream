@@ -198,7 +198,7 @@ everything after the proof is encrypted (see Pairing).
 |---|---|
 | `{"cmd":"ping"}` | `{"type":"pong"}` (before authentication) |
 | `{"cmd":"status"}` | `{"type":"status","ok":true,"agent":"listening","clients","streaming","mediaPort","captureDisplay","virtualDisplay"}` (before authentication) |
-| `{"cmd":"auth","proof":"…","cnonce":"…","channelCrypto":2,"cpub":"…"}` | `{"type":"auth","ok":true,"channelCrypto":2,"hpub","hauth"}`, or `{"type":"auth","ok":false,"message":"bad token"}` |
+| `{"cmd":"auth","proof":"…","cnonce":"…","channelCrypto":2,"cpub":"…"}` | `{"type":"auth","ok":true,"channelCrypto":2,"hpub","hauth"}`, `{"type":"auth","ok":false,"message":"bad token"}`, or `{"type":"auth","ok":false,"reason":"seal","message":…}` for a right token without the channel sealed, which this host refuses |
 | `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary","captured"}]}` |
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","exStyle","captionInset","naturalW","naturalH","occluded","occludedBy"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |

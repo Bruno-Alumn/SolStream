@@ -4174,12 +4174,17 @@ std::string HandleAuth(const std::string& line, bool& authenticated,
     std::string proof, cnonce;
     if (FieldString(line, "proof", proof) && FieldString(line, "cnonce", cnonce)) {
         if (solstream::ProofMatches(g_token, challenge, cnonce, proof)) {
-            if (!authenticated) {
-                g_clients_authenticated.fetch_add(1);
-            }
-            authenticated = true;
             // The channel's own keys, agreed in the same message that
             // proved the token so it costs no extra round trip.
+            //
+            // And required, in a build that can seal: the proof covers the
+            // challenge and the nonce but not the request to seal, so anyone
+            // between the Mac and this PC could strip `channelCrypto` from a
+            // genuine proof and be handed an authenticated session in the
+            // clear -- clipboard, windows, launching -- while the Mac only
+            // learned it had been refused. Every Mac since 1.0.0 asks to seal.
+            // A substituted `cpub` gains nothing: the keys are derived with
+            // the token, which whoever substituted it does not have.
             //
             // Version 2 exactly, not "2 or more" and not "anything
             // non-zero": a client that speaks a version this host does not
@@ -4209,6 +4214,10 @@ std::string HandleAuth(const std::string& line, bool& authenticated,
                         && solstream::media::DeriveChannelKeys(
                                g_pending_channel, g_token, challenge, cnonce,
                                cpub, hpub, secret, hostAuth)) {
+                        if (!authenticated) {
+                            g_clients_authenticated.fetch_add(1);
+                        }
+                        authenticated = true;
                         channel_cnonce = cnonce;
                         const std::string hpubHex = ToHex(hpub);
                         return "{\"type\":\"auth\",\"ok\":true"
@@ -4217,13 +4226,26 @@ std::string HandleAuth(const std::string& line, bool& authenticated,
                                ",\"hauth\":\"" + hostAuth + "\"}";
                     }
                 }
-                Log("[agent] could not agree channel keys; staying in the clear");
+                Log("[agent] could not agree channel keys; refusing the session");
+                // "reason": the token was right, so a Mac that reads it keeps it.
+                return "{\"type\":\"auth\",\"ok\":false,\"reason\":\"seal\","
+                       "\"message\":\"the channel's keys could not be agreed; connect "
+                       "again\"}";
             }
-#endif  // SOLSTREAM_MEDIA
-            // Logged because which auth path a client took is the first question
-            // when one misbehaves.
+            Log("[agent] refused a valid proof that did not ask to seal the channel");
+            return "{\"type\":\"auth\",\"ok\":false,\"reason\":\"seal\","
+                   "\"message\":\"this host only accepts an encrypted channel; update "
+                   "SolStream on the Mac\"}";
+#else
+            // A build with no sealing at all -- the cross-compiled syntax check,
+            // never shipped -- has nothing to require.
+            if (!authenticated) {
+                g_clients_authenticated.fetch_add(1);
+            }
+            authenticated = true;
             Log("[agent] client authenticated with a v2 proof");
             return "{\"type\":\"auth\",\"ok\":true}";
+#endif  // SOLSTREAM_MEDIA
         }
         ++auth_failures;
         Log("[agent] rejected a bad auth proof (%d on this connection)",

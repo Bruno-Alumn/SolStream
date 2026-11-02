@@ -2229,6 +2229,20 @@ public final class AgentConnection {
                     report(.needsToken(host: host, rejected: false))
                     return
                 }
+                // Nor a proof to a host that does not offer to seal: every host
+                // that asks for a token offers the channel, so one that does
+                // not is old enough to need updating or somebody in the middle
+                // -- and a proof given to the second is a session handed over.
+                // Said as what it is, rather than the refusal it would earn.
+                guard message["channelCrypto"] as? Int == 2 else {
+                    Log.error("[agent] \(host) asks for a token but offers no encrypted "
+                              + "channel -- not proving the token to it")
+                    report(.failed("\(host) would not encrypt the connection. Update "
+                                   + "SolStream on that PC; if it is already up to "
+                                   + "date, something may be impersonating it."))
+                    dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+                    return
+                }
                 // NO FALLBACK. A greeting with no challenge is either an agent
                 // older than auth v2 or something pretending to be one, and
                 // there is no way to tell them apart -- so the only safe
@@ -2336,6 +2350,18 @@ public final class AgentConnection {
                 // address, and be shown as paired, and chosen automatically.
                 if let token { Self.rememberToken(token, for: host) }
                 mayTalk = true
+            } else if message["reason"] as? String == "seal" {
+                // The token was right; the encrypted channel was not agreed.
+                // Kept, and said: forgetting it would ask for a token that
+                // works, and every Mac asks to seal, so this is a failure of
+                // the exchange -- or somebody between the two machines.
+                Log.error("[agent] \(host) took the token but could not agree an "
+                          + "encrypted channel: \(message["message"] as? String ?? "")")
+                pendingEphemeral = nil
+                report(.failed("\(host) could not agree a key with this Mac. "
+                               + "Connect again; if it keeps happening, pair again."))
+                dropConnection(AgentError.protocolDesync, reconnect: false)
+                return
             } else {
                 Log.error("[agent] token rejected")
                 TokenStore.remove(for: host)

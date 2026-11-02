@@ -51,6 +51,11 @@ before it, four-byte-length-prefixed AES-256-GCM records after. Both ends
 negotiate it in the greeting, because a mismatch is not a degraded channel but a
 socket where each end reads the other's bytes as the wrong thing.
 
+The host requires it. The proof does not cover the request to seal, so a host
+that accepted a proof without one would hand whoever stripped the request from
+a genuine proof an authenticated session in the clear. Refused instead; a
+substituted public key gains nothing, since the keys are derived with the token.
+
 It **is forward secret**. The proof message carries an ephemeral P-256 public
 point and the reply carries the host's; the shared secret is mixed with the token
 into the same HKDF and then discarded, so someone who later learns the token
