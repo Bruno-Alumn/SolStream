@@ -1,115 +1,110 @@
-<p align="center">
-  <img src="docs/media/logo.png" width="128" alt="SolStream logo">
-</p>
+<div align="center">
 
-<h1 align="center">SolStream</h1>
+<img src="docs/media/logo.png" width="128" height="128" alt="SolStream app icon">
 
-<p align="center">
-  Windows apps on your Mac, each in a native window.
-</p>
+# SolStream
 
-<p align="center">
-  <a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/github/v/release/Bruno-Alumn/SolStream?label=release&color=2A64F5" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/macOS-14%2B-555" alt="macOS 14 or later">
-  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-555" alt="Windows 10 or 11">
-</p>
+**Windows apps, at home on your Mac.**
 
-<p align="center">
+Each app from your PC opens in its own native Mac window.
+
+<a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac_%26_PC-2A64F5?style=for-the-badge&logo=apple&logoColor=white" alt="Download SolStream for Mac and PC" height="36"></a>
+
+<a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/github/v/release/Bruno-Alumn/SolStream?style=flat-square&color=2A64F5&label=release" alt="Latest release"></a>
+<img src="https://img.shields.io/badge/macOS-14%2B-1f2937?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later">
+<img src="https://img.shields.io/badge/Windows-10_%7C_11-1f2937?style=flat-square&logo=windows&logoColor=white" alt="Windows 10 or 11">
+<img src="https://img.shields.io/badge/license-All_rights_reserved-6b7280?style=flat-square" alt="All rights reserved">
+
+[Features](#features) · [Install](#install) · [Using SolStream](#using-solstream) · [Troubleshooting](#troubleshooting) · [Privacy](#privacy) · [Contribute](#contribute)
+
+</div>
+
+---
+
+SolStream brings individual apps from your Windows PC to your Mac. Each one
+appears as a regular Mac window you can move, resize, put in full screen and
+switch to with <kbd>⌘</kbd><kbd>Tab</kbd>, while the app keeps running on the
+PC. Not a remote desktop or a second screen to squint at: only the app, right
+where you’re working.
+
+<div align="center">
   <img src="docs/media/demo.gif" width="860" alt="Calculator and a command prompt from a Windows PC, each in its own window on a Mac. Calculator works out 12 × 3 and the prompt prints a line typed on the Mac.">
-</p>
-
-SolStream streams individual applications from a Windows PC to a Mac. Each
-app appears as a regular macOS window that you can move, resize, put in full
-screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
-
-<p align="center">
-  <img src="docs/media/resize.gif" width="640" alt="PhotoCraft, an image editor running on the PC, in a Mac window. Dragging the window's corner resizes it, and the editor re-lays itself out at each size.">
-  <br><sub>Resizing the Mac window resizes the app on the PC, so its layout adapts instead of being scaled.</sub>
-</p>
+</div>
 
 ## Features
 
-| | |
-| --- | --- |
-| **Window per app** | Stream several apps at once, each in its own Mac window. |
-| **In the Dock** | Add a Windows app to the Dock, and find it in Spotlight and Launchpad. |
-| **Clipboard and files** | Copy and paste text and pictures both ways. Drop files on a window to send them to the PC. |
-| **Dedicated display** | Apps run on a virtual display sized to your Mac, leaving the PC's monitor untouched. |
-| **Low latency** | Hardware H.264 or HEVC encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
-| **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. Japanese, Chinese and Korean input methods on the Mac compose as usual. |
-| **Per-app sound** | Audio from the streamed apps only on Windows 11, or the whole PC on Windows 10. Opus or lossless. |
-| **Gaming mode** | Raw mouse input for games. Press ⌃⌥ to release the mouse. |
-| **Automatic recovery** | Reconnects after Wi-Fi drops, network changes and host restarts. |
-| **Encrypted** | Pairing token authentication; AES-256-GCM on every packet. |
-| **Signed updates** | Both apps check for new releases, verify the signature and ask before installing. |
+**Feels like a Mac app**
 
-## Requirements
+- Stream several apps at once, each in its own window.
+- Resize a window and the app re-lays itself out on the PC instead of being
+  scaled.
+- Add a Windows app to the Dock, Spotlight and Launchpad.
+- Copy and paste text and pictures both ways; drop files on a window to send
+  them to the PC.
+- Your keyboard layout, Caps Lock and input methods work as usual.
+- Apps run on a virtual display, leaving the PC’s own monitor untouched.
 
-- A Mac with **macOS 14** or later
-- A PC with **Windows 10 or 11**; a GPU with a hardware video encoder is strongly
-  recommended
-- Both on the same network, or both on [Tailscale](https://tailscale.com/download)
+**Fast and dependable**
 
-## Installation
+- Hardware H.264 or HEVC encoding; 49 fps at 3600×2338 in testing.
+- Sound from only the streamed apps on Windows 11, in Opus or lossless.
+- A gaming mode with raw mouse input.
+- Reconnects by itself after Wi-Fi drops, network changes and restarts.
 
-Download both installers from the
-[latest release](https://github.com/Bruno-Alumn/SolStream/releases/latest).
+**Private by design**
 
-| | File | Steps |
-| --- | --- | --- |
-| **Mac** | `SolStream-X.Y.Z-macOS.dmg` | Drag SolStream into Applications. |
-| **PC** | `SolStreamSetup-X.Y.Z.exe` | Run it and keep *Set up a virtual display* selected. |
+- Pairing-token authentication and AES-256-GCM on every packet.
+- Signed updates that ask before installing.
 
-The installers are not yet signed with a paid certificate, so each system
-shows a warning the first time:
+<div align="center">
+  <img src="docs/media/resize.gif" width="640" alt="PhotoCraft, an image editor running on the PC, in a Mac window. Dragging the window's corner resizes it, and the editor re-lays itself out at each size.">
+  <br><sub>Resize the window and the app adapts its layout on the PC.</sub>
+</div>
 
-- **Mac:** open SolStream, dismiss the warning, then choose *Open Anyway* in
-  System Settings → Privacy & Security.
-- **PC:** on the "Windows protected your PC" screen, choose *More info* →
-  *Run anyway*.
+## Install
 
-Setup installs the host, adds its firewall rules and starts it in the system
-tray at sign-in.
+You need a Mac with macOS 14 or later and a PC with Windows 10 or 11 (ideally
+with a GPU video encoder), on the same network or both on
+[Tailscale](https://tailscale.com/download).
 
-## Getting started
+1. Download both installers from the
+   [latest release](https://github.com/Bruno-Alumn/SolStream/releases/latest).
+2. **On the Mac,** open `SolStream-X.Y.Z-macOS.dmg` and drag **SolStream** into
+   **Applications**.
+3. **On the PC,** run `SolStreamSetup-X.Y.Z.exe` and keep **Set up a virtual
+   display** selected. Setup adds its firewall rules and starts the host in
+   the system tray at sign-in.
 
-1. **Open SolStream on the Mac.** It discovers the PC on the local network. If
-   the PC isn't listed, enter its name or IP address in the host list.
-2. **Pair.** Click the SolStream icon in the PC's system tray and enter the
-   pairing token it shows. This is needed once per PC.
-3. **Choose an app.** Pick an open window or any app from the Start menu,
-   Steam and Epic games included. It opens in its own window on the Mac.
+> **A note about signing:** the installers aren’t signed with a paid
+> certificate yet, so each system warns you the first time. On the Mac, open
+> SolStream, dismiss the warning, then choose **Open Anyway** in System
+> Settings › Privacy & Security. On the PC, choose **More info** › **Run
+> anyway** on the “Windows protected your PC” screen.
 
 ## Using SolStream
 
+1. **Open SolStream on the Mac.** It finds the PC on your network. If it
+   doesn’t, enter the PC’s name or IP address in the host list.
+2. **Pair, once per PC.** Click SolStream in the PC’s system tray and enter
+   the pairing token it shows.
+3. **Choose an app.** Pick an open window or anything from the Start menu,
+   Steam and Epic games included.
+
 <img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, and video quality.">
 
-The frame rate in each window's title bar opens the stream controls: volume,
-sound quality, video quality and mouse mode.
+| Action | What it does |
+|:--|:--|
+| Click the frame rate in the title bar | Open the stream controls: volume, quality, mouse mode |
+| Choose **Gaming mouse** | Give a game raw mouse input |
+| <kbd>⌃</kbd><kbd>⌥</kbd> | Release the mouse from a game |
+| Pinch on the trackpad | Zoom in the app |
+| Drop files on a window | Send them to the PC’s clipboard; paste with <kbd>⌘</kbd><kbd>V</kbd> |
+| Right-click an app › **Add to Dock** | Open it from the Dock, Spotlight or Launchpad |
+| **Title bar › Hide** | Remove the app’s own title bar |
 
-- **Desktop mouse** keeps the PC's pointer under yours. Use it for ordinary
-  apps.
-- **Gaming mouse** gives the game raw mouse input once you click into the
-  window. Press **⌃⌥** to release it. Games that show a cursor in their menus
-  release it automatically.
-- **Title bar → Hide** removes the app's own title bar for apps that draw one,
-  such as Chrome, Discord and File Explorer.
-- **Pinch** on the trackpad to zoom: it reaches the app as Ctrl and the scroll
-  wheel, which browsers, Office, maps and image viewers zoom with.
-- **Add to Dock**: right-click an app in the list, or choose **Add … to Dock**
-  from the Host menu while it's open. Clicking it in the Dock, Spotlight or
-  Launchpad connects to the PC and opens it. The launchers are kept in
-  `~/Applications/SolStream Apps`.
-- SolStream reopens the app you were streaming when you quit. Turn off
-  *Reopen the last app* in Settings to stop it.
-- **Drop files** on a window to send them to the PC. They're saved in
-  `Downloads\SolStream` there and put on its clipboard: press **⌘V** to paste
-  them into the app.
-- The Mac's display stays on while a stream is open, as it does for a video.
-  Closing the lid still puts the Mac to sleep.
-
-Other settings are in **SolStream › Settings**, or behind the gear on the
-connect window.
+SolStream reopens the app you were streaming when you quit, and keeps the
+Mac’s display awake during a stream. Everything else is in
+**SolStream › Settings**.
 
 <br clear="right">
 
@@ -169,54 +164,49 @@ starts again when you sign back in. Locking the PC doesn't stop it.
 
 - **Mac:** quit SolStream and move it to the Trash. Pairings are stored in
   `~/Library/Application Support/SolStream`; delete that folder to remove them.
-- **PC:** Settings → Apps → SolStream → *Uninstall*. This removes the host,
+- **PC:** Settings › Apps › SolStream › **Uninstall**. This removes the host,
   its firewall rules, its sign-in task and the virtual display it installed.
 </details>
 
-## Updates and security
+## Privacy
 
-Both apps check GitHub for new releases on their own: the Mac app when it
-opens and the PC host shortly after it starts, then once a day, or whenever
-you choose *Check for Updates* (the SolStream menu on the Mac, the tray menu
-on the PC). Nothing is installed without your
-confirmation, and never during a stream. Each release's checksums are signed;
-a download that doesn't verify against the key built into both apps is
-discarded ([details](docs/updates.md)).
+SolStream has no accounts and no analytics. Your apps, keystrokes and files
+travel only between your own Mac and PC, encrypted end to end.
 
-A Mac must prove it knows the PC's pairing token before the host accepts any
-command. After that, the control channel and all media are encrypted. Run the
-host on a trusted network, or reach it over a VPN such as Tailscale. To report
-a vulnerability, see [SECURITY.md](SECURITY.md).
+A Mac must prove it knows the PC’s pairing token before the host accepts any
+command; after that, the control channel and all media are encrypted with
+AES-256-GCM. Run the host on a trusted network, or reach it over a VPN such
+as Tailscale.
 
-## Architecture
+The only other network requests are update checks to GitHub: the Mac app when
+it opens and the PC host shortly after it starts, then once a day. Nothing is
+installed without your confirmation, never during a stream, and a download
+that doesn’t verify against the signing key built into both apps is discarded
+([details](docs/updates.md)).
 
-```
-   macOS                                  Windows
-   ┌───────────────────┐                  ┌────────────────────────┐
-   │ SolStream.app     │  control, TCP    │ SolStream.exe          │
-   │  picker           │◄────47630───────►│  windows, apps, launch │
-   │  window + decode  │   encrypted      │  window placement      │
-   │  input capture    │                  │  keys for the session  │
-   │                   │                  │                        │
-   │                   │  SMT/1, UDP      │  Windows.Graphics      │
-   │                   │◄────47631───────►│   .Capture             │
-   │                   │  AES-256-GCM     │  hardware H.264        │
-   └───────────────────┘                  │  per-app sound, Opus   │
-                                          └───────────┬────────────┘
-                                                      │ captures
-                                                      ▼
-                                              virtual display
-```
+### Permissions
 
-The **host** moves the selected app onto the virtual display, captures it with
-Windows.Graphics.Capture and encodes it on the GPU. The **Mac client** decodes
-the stream with VideoToolbox, crops each app into its own window and sends
-keyboard and mouse input back. The two communicate over an encrypted TCP
-control channel and SMT/1, SolStream's UDP media transport
-([specification](docs/transport-smt1.md)).
+| Permission | Why it’s needed |
+|:--|:--|
+| **Local Network** (Mac) | Finds and connects to your PC on your network or VPN. |
+| **Windows Firewall rules** (PC) | Setup opens TCP 47630 and UDP 47629 and 47631 so the Mac can reach the host. |
+
+## Contribute
+
+- **Found something broken?** [Open an issue](https://github.com/Bruno-Alumn/SolStream/issues/new)
+  with what you did, what happened, and your macOS and Windows versions.
+- **Found a security problem?** Report it privately as described in
+  [SECURITY.md](SECURITY.md).
+
+SolStream isn’t open source, so pull requests can’t be merged as they are,
+but bug reports and ideas are always welcome.
+
+Much of SolStream was built with AI coding agents, then compiled, tested and
+exercised on real hardware before merging.
 
 <details>
-<summary><strong>Building from source</strong></summary>
+<summary><strong>Build from source</strong></summary>
+<br>
 
 **Mac client** (Xcode command-line tools, macOS 14 or later):
 
@@ -253,16 +243,48 @@ Releases are published by pushing a version tag; see
 
 </details>
 
-## License
+<details>
+<summary><strong>Architecture</strong></summary>
+<br>
 
-All rights reserved. There is no open-source license: the code may be read
-here, but not copied, modified or redistributed without the owner's
-permission.
+```
+   macOS                                  Windows
+   ┌───────────────────┐                  ┌────────────────────────┐
+   │ SolStream.app     │  control, TCP    │ SolStream.exe          │
+   │  picker           │◄────47630───────►│  windows, apps, launch │
+   │  window + decode  │   encrypted      │  window placement      │
+   │  input capture    │                  │  keys for the session  │
+   │                   │                  │                        │
+   │                   │  SMT/1, UDP      │  Windows.Graphics      │
+   │                   │◄────47631───────►│   .Capture             │
+   │                   │  AES-256-GCM     │  hardware H.264        │
+   └───────────────────┘                  │  per-app sound, Opus   │
+                                          └───────────┬────────────┘
+                                                      │ captures
+                                                      ▼
+                                              virtual display
+```
+
+The **host** moves the selected app onto the virtual display, captures it with
+Windows.Graphics.Capture and encodes it on the GPU. The **Mac client** decodes
+the stream with VideoToolbox, crops each app into its own window and sends
+keyboard and mouse input back. The two communicate over an encrypted TCP
+control channel and SMT/1, SolStream's UDP media transport
+([specification](docs/transport-smt1.md)).
+
+</details>
+
+---
 
 The Windows host includes [libopus](https://opus-codec.org) 1.6.1 (BSD
 3-clause) for audio ([notes](third_party/opus/SOLSTREAM.md); run
 `SolStream.exe --licenses` to print its license). The
 [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
 (MIT) is not bundled: setup downloads a pinned, hash-verified release, and
-uninstalling removes it ([details](installer/README.md)). Everything else is
-part of macOS and Windows.
+uninstalling removes it ([details](installer/README.md)).
+
+**All rights reserved:** © 2026 Bruno-Alumn. There is no open-source license:
+the code may be read here, but not copied, modified or redistributed without
+the owner's permission.
+
+<sub>More Mac apps by Bruno-Alumn: [Tuckaway](https://github.com/Bruno-Alumn/Tuckaway) · [ThockBox](https://github.com/Bruno-Alumn/ThockBox)</sub>
