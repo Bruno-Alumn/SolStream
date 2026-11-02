@@ -231,7 +231,7 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertFalse(shown(in: window).contains("Reachable"), "the old answer is not kept")
         waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
         XCTAssertGreaterThan(world.probes, before)
-        XCTAssertTrue(shown(in: window).contains("Tailscale is off on this Mac"))
+        XCTAssertTrue(shown(in: window).contains("turn Tailscale on on this Mac"))
 
         // On again: the window says it is checking, not that the PC is not
         // answering and should be looked at.
@@ -261,7 +261,7 @@ final class ConnectWindowTests: XCTestCase {
         XCTAssertFalse(shown(in: window).contains("Reachable"), "the old answer is not kept")
         waitUntil { world.probes > before && self.shown(in: window).contains("Not answering") }
         XCTAssertGreaterThan(world.probes, before)
-        XCTAssertTrue(shown(in: window).contains("Tailscale is off on this Mac"))
+        XCTAssertTrue(shown(in: window).contains("turn Tailscale on on this Mac"))
     }
 
     /// A change from a monitor the window no longer has -- one cancelled
