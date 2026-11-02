@@ -716,7 +716,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             guard let existing = LaunchMatch.afterLaunch(
                                 app.name, in: windows, knownPIDs: knownPIDs) else {
-                                self.failOpen("\(app.name) didn't open a window.", for: agent)
+                                self.failOpen("\(app.name) didn't open a window. If it opened on the PC's own "
+                                              + "screen, pick it under Open windows; otherwise try again.",
+                                              for: agent)
                                 return
                             }
                             Log.info("[app] \"\(app.name)\" was already open; "
@@ -733,7 +735,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.failOpen("\(app.name) opened a window that vanished.", for: agent)
+                            self.failOpen("\(app.name) opened a window and closed it again. Try opening it "
+                                          + "once more.", for: agent)
                             return
                         }
                         self.attach(target, host: host, agent: agent)
@@ -830,7 +833,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isCurrent(agent) else { return }
         guard let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
-            failOpen("\(host) did not offer a display to capture.", for: agent)
+            failOpen("\(host) didn't offer a screen to capture. Check someone is signed in to "
+                     + "Windows on the PC, then try again.", for: agent)
             return
         }
         Self.logCapture(capture)
@@ -1042,15 +1046,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let media = await agent.openMediaSession(request) else {
                 Updater.shared.isStreaming = false
                 Log.error("[app] \(host) refused the media session")
-                self.failOpen("\(host) refused to start streaming.", for: agent)
+                self.failOpen("\(host) didn't start streaming. Try again; if it keeps happening, "
+                              + "restart SolStream on the PC.", for: agent)
                 return
             }
             guard media.streaming else {
                 Updater.shared.isStreaming = false
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
-                self.failOpen("\(host) agreed to stream and then did not: "
-                              + (media.message ?? "it gave no reason"), for: agent)
+                self.failOpen("\(host) couldn't start streaming: "
+                              + (media.message ?? "it gave no reason") + ". Try again.", for: agent)
                 return
             }
             // Agreed with a PC that has since been left: its connection is
@@ -1292,7 +1297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // rather than a fourth "Reconnecting…" and a fifth.
                     self.appWindows.forEach {
                         $0.setError("Lost the stream",
-                                    detail: "No picture from \(host) after three restarts.")
+                                    detail: "No picture from \(host) after three restarts. Try Again; "
+                                        + "if it keeps happening, check the PC's network.")
                     }
                     return
                 }
