@@ -19,10 +19,20 @@ constexpr wchar_t kProtectedName[] = L"agent.token.dpapi";
 /// user from reading the blob without knowing it is SolStream's.
 constexpr char kEntropy[] = "SolStream pairing token v1";
 
+/// A view of `bytes`, which must outlive it: DPAPI reads through the
+/// pointer. Never a temporary -- Blob(std::string(...)) handed it freed
+/// memory, different entropy every call, and nothing sealed could be opened.
 DATA_BLOB Blob(const std::string& bytes) {
     DATA_BLOB blob{};
     blob.cbData = static_cast<DWORD>(bytes.size());
     blob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(bytes.data()));
+    return blob;
+}
+
+DATA_BLOB EntropyBlob() {
+    DATA_BLOB blob{};
+    blob.cbData = static_cast<DWORD>(sizeof(kEntropy) - 1);
+    blob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(kEntropy));
     return blob;
 }
 
@@ -83,7 +93,7 @@ bool IsTokenText(const std::string& text) {
 
 bool ProtectToken(const std::string& token, std::string& blob) {
     DATA_BLOB in = Blob(token);
-    DATA_BLOB entropy = Blob(std::string(kEntropy));
+    DATA_BLOB entropy = EntropyBlob();
     DATA_BLOB out{};
     if (!CryptProtectData(&in, L"SolStream pairing token", &entropy, nullptr, nullptr,
                           CRYPTPROTECT_UI_FORBIDDEN, &out)) {
@@ -96,7 +106,7 @@ bool ProtectToken(const std::string& token, std::string& blob) {
 
 bool UnprotectToken(const std::string& blob, std::string& token) {
     DATA_BLOB in = Blob(blob);
-    DATA_BLOB entropy = Blob(std::string(kEntropy));
+    DATA_BLOB entropy = EntropyBlob();
     DATA_BLOB out{};
     if (!CryptUnprotectData(&in, nullptr, &entropy, nullptr, nullptr,
                             CRYPTPROTECT_UI_FORBIDDEN, &out)) {
