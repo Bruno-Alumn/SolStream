@@ -1383,7 +1383,8 @@ enum class LaunchTrouble {
     /// What it points at is gone: an app uninstalled or moved since the
     /// Start Menu was read, or a shortcut whose target was deleted.
     Missing,
-    /// Windows would not start it, for another reason it gave.
+    /// Windows would not start it, for a reason that means nothing started:
+    /// no program for a link, access denied, not a program at all.
     Refused,
 };
 
@@ -1460,7 +1461,13 @@ bool ShellExecuteBounded(const std::wstring& path, DWORD wait_ms, DWORD& launche
             trouble = LaunchTrouble::Declined;
         } else if (state->error == ERROR_FILE_NOT_FOUND || state->error == ERROR_PATH_NOT_FOUND) {
             trouble = LaunchTrouble::Missing;
-        } else {
+        } else if (state->error == ERROR_NO_ASSOCIATION || state->error == ERROR_ACCESS_DENIED
+                   || state->error == ERROR_BAD_EXE_FORMAT || state->error == ERROR_DIRECTORY
+                   || state->error == ERROR_ELEVATION_REQUIRED
+                   || state->error == ERROR_BAD_NETPATH) {
+            // Only errors that mean nothing started. A DDE handler, or a Store
+            // app's activation, can report a failure while the app comes up
+            // anyway, and the Mac then looks for its window as before.
             trouble = LaunchTrouble::Refused;
         }
         return false;

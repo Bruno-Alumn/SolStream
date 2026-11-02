@@ -898,8 +898,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .declined:
             return "\(app) needs administrator permission, and it was declined on \(host)."
         case .missing:
-            return "\(app) isn't on \(host) any more: it was uninstalled or moved, or its "
-                + "shortcut points at something deleted. Choose another app, or reinstall it."
+            // Not "uninstalled": a game on a drive that isn't plugged in, or
+            // a network share that is down, looks the same from here.
+            return "\(app) can't be found on \(host). It may have been uninstalled or moved, "
+                + "or be on a drive that isn't connected. Choose another app, or check the PC."
         case .refused:
             return "Windows wouldn't start \(app) on \(host). Open it on the PC once to see "
                 + "why, then try again."
