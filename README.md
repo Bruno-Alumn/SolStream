@@ -77,6 +77,12 @@ with a GPU video encoder), on the same network or both on
    display** selected. Setup adds its firewall rules and starts the host in
    the system tray at sign-in.
 
+With [Homebrew](https://brew.sh), step 2 is one command instead:
+
+```bash
+brew install --cask bruno-alumn/solstream/solstream
+```
+
 > **A note about signing:** the installers aren’t signed with a paid
 > certificate yet, so each system warns you the first time. On the Mac, open
 > SolStream, dismiss the warning, then choose **Open Anyway** in System

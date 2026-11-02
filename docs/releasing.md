@@ -99,6 +99,19 @@ uploads to a draft and publishes last, which is what immutable releases need.
    somebody asks: *Check for Updates…* on the Mac, *Check for updates* on the
    PC.
 
+4. Bring the Homebrew cask up to the new release. This sets the version and
+   checksum in `packaging/solstream.rb` from the release's `SHA256SUMS`, and
+   `--push` writes it to the tap, `Bruno-Alumn/homebrew-solstream`:
+
+   ```bash
+   scripts/update-cask.sh v1.0.1 --push
+   git add packaging/solstream.rb
+   TZ=UTC git commit -m "Point the cask at 1.0.1"
+   ```
+
+   Until then `brew install` keeps giving the previous version, and copies
+   installed that way still update themselves.
+
 What the six jobs do:
 
 | Job | Does |
