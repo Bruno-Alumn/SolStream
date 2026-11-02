@@ -241,6 +241,22 @@ final class VideoReassemblyTests: XCTestCase {
         XCTAssertEqual(pictures.first?.frameId, 1)
     }
 
+    /// Bytes past the picture's end are not this picture's: a fragment from
+    /// past the 3-byte offset, wrapped round to the start, or a stray. Such a
+    /// picture is never handed to the decoder as complete.
+    func testAPictureWithBytesPastItsEndIsNotComplete() {
+        let reassembler = VideoReassembler()
+        var pictures = 0
+        reassembler.onPicture = { _ in pictures += 1 }
+        let chunk = Data(repeating: 1, count: 1000)
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: chunk, start: true, end: false))
+        reassembler.ingest(fragment(frameId: 1, offset: 1000, payload: chunk, start: false, end: false))
+        // A last fragment that ends the picture short of what already arrived.
+        reassembler.ingest(fragment(frameId: 1, offset: 0, payload: Data(repeating: 2, count: 500),
+                                    start: false, end: true))
+        XCTAssertEqual(pictures, 0, "a picture with bytes past its end was emitted")
+    }
+
     func testAPictureLostWholeIsReportedDamaged() {
         let reassembler = VideoReassembler()
         var damaged: [UInt32] = []

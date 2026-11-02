@@ -786,7 +786,13 @@ public final class MediaClient {
             // Its 512 KB assembly buffer stayed in `building` for the life of
             // the session, one per lost fragment, and the picture the user was
             // looking at simply stopped moving.
-            if Self.millis(since: lastTickAt) >= 25 {
+            //
+            // Only with nothing else waiting in the socket, though. The idle
+            // clock runs from when a fragment was handled, not when it arrived,
+            // so after this thread stalled -- a decoder rebuilt, a slow log
+            // write -- every picture looked idle while its remaining fragments
+            // sat queued behind the stall, was given up, and cost a keyframe.
+            if Self.millis(since: lastTickAt) >= 25, Self.nothingQueued(on: socket) {
                 reassembler.tick()
                 lastTickAt = DispatchTime.now().uptimeNanoseconds
             }
@@ -801,6 +807,12 @@ public final class MediaClient {
             handle(plaintext)
 
         }
+    }
+
+    /// Whether the socket has no datagram waiting to be read.
+    private static func nothingQueued(on socket: Int32) -> Bool {
+        var ready = pollfd(fd: socket, events: Int16(POLLIN), revents: 0)
+        return poll(&ready, 1, 0) <= 0
     }
 
     private func handle(_ plaintext: Data) {

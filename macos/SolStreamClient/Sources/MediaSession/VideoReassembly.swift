@@ -115,12 +115,17 @@ public final class VideoReassembler {
         }
 
         /// Every byte from zero to `total` present, rather than merely that
-        /// many bytes having been received.
+        /// many bytes having been received -- and none past it. A picture's
+        /// last fragment ends it, so bytes beyond `total` are another
+        /// picture's, or this one's from past the 16 MiB the 3-byte offset can
+        /// address, wrapped round to the start: a picture that size whose one
+        /// fragment crossing the boundary was lost assembled as a small
+        /// corrupt one and went to the decoder as an IDR.
         var isComplete: Bool {
             guard total >= 0, covered.count == 1, let only = covered.first else {
                 return false
             }
-            return only.start == 0 && only.end >= total
+            return only.start == 0 && only.end == total
         }
     }
 

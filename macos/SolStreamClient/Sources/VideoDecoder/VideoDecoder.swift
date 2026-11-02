@@ -171,6 +171,20 @@ public final class VideoDecoder {
         }
 
         guard let formatDescription, let session else {
+            // The parameter sets came and the decoder still could not be built
+            // from them: asking for another IDR every half second would only
+            // make the host send megabits of them, forever. Asked again less
+            // and less often instead, up to every ten seconds -- a decoder that
+            // failed after a wake or a GPU switch may build at the next one.
+            if buildFailures > 0 {
+                let wait = min(Self.keyframeRequestInterval * pow(2, Double(buildFailures - 1)), 10)
+                if Date().timeIntervalSince(lastKeyframeRequest) >= wait,
+                   requestKeyframeNow(throttled: false) {
+                    Log.error("[decode] the \(codec.title) decoder could not be built "
+                              + "(\(buildFailures) tries); asking for another IDR")
+                }
+                return
+            }
             // Nothing to decode against yet — ask the host for an IDR so the
             // parameter sets show up, and keep asking: the request is one
             // datagram, and it can be lost.
@@ -328,6 +342,9 @@ public final class VideoDecoder {
 
     /// Ask the host for an IDR, at most every `keyframeRequestInterval` when
     /// `throttled`. Returns whether it asked. Call with `lock` held.
+    /// Builds in a row that failed with parameter sets in hand; see `decode`.
+    private var buildFailures = 0
+
     @discardableResult
     private func requestKeyframeNow(throttled: Bool) -> Bool {
         let now = Date()
@@ -349,6 +366,7 @@ public final class VideoDecoder {
                                                         parameterSets: parameterSets)
         guard status == noErr, let newFormat = made else {
             Log.error("[decode] could not build a format description: \(status)")
+            buildFailures += 1
             return
         }
         formatDescription = newFormat
@@ -394,9 +412,11 @@ public final class VideoDecoder {
 
         guard sessionStatus == noErr, let newSession else {
             Log.error("[decode] VTDecompressionSessionCreate failed: \(sessionStatus)")
+            buildFailures += 1
             return
         }
         session = newSession
+        buildFailures = 0
         Log.info("[decode] \(codec.title) decoder ready"
                  + (Self.decodesInHardware(codec) ? "" : " (in software: this Mac has no hardware decoder for it)"))
     }
