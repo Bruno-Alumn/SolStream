@@ -457,6 +457,7 @@ public final class InputCapture {
         releaseHeldInput()
         removeMonitors()
         scrollResidual = .zero
+        pinchResidual = 0
     }
 
     // MARK: - Monitors
@@ -1329,15 +1330,26 @@ public final class InputCapture {
     /// ⌃ or by ⌘, which the PC has as Ctrl -- and let go straight after, so
     /// nothing else typed meanwhile is a Ctrl chord.
     private func sendPinch(_ event: NSEvent) {
+        // A new pinch starts from nothing: what the last one left, whether
+        // its end was seen here or not, is not this one's.
+        if event.phase.contains(.began) { pinchResidual = 0 }
         let pinch = Self.pinchUnits(magnification: event.magnification, residual: pinchResidual)
         pinchResidual = event.phase.contains(.ended) || event.phase.contains(.cancelled)
             ? 0 : pinch.residual
         guard pinch.units != 0 else { return }
         let control = Self.modifierKeys[2].hostKey
         let held = lastDeviceFlags & Self.controlOrCommandBits != 0
-        if !held { emit(keyPacket(control, pressed: true, modifiers: [.control])) }
-        emit(SMTInput.scroll(amount: pinch.units))
-        if !held { emit(keyPacket(control, pressed: false, modifiers: [])) }
+        // With the Mac's Caps Lock as it is: a host that takes scan codes
+        // sets its own Caps Lock to match every press, Ctrl's included.
+        let modifiers = Self.modifiers(from: event.modifierFlags)
+        // One notch per wheel message, for the applications that zoom a step
+        // per message whatever its size.
+        let step = pinch.units > 0 ? 120 : -120
+        if !held { emit(keyPacket(control, pressed: true, modifiers: modifiers.union(.control))) }
+        for _ in 0..<(abs(pinch.units) / 120) {
+            emit(SMTInput.scroll(amount: step))
+        }
+        if !held { emit(keyPacket(control, pressed: false, modifiers: modifiers)) }
     }
 
     /// A pinch's magnification in Windows wheel units, in whole notches, with
@@ -1346,9 +1358,14 @@ public final class InputCapture {
     /// applications zoom by, so the zoom keeps up with the fingers. Whole
     /// notches, because some applications zoom a step per wheel message
     /// whatever its size, and a stream of small ones zoomed far too fast.
+    ///
+    /// What was left over is dropped when the pinch turns round, as for the
+    /// wheel: carried, it held back the first notch the other way.
     static func pinchUnits(magnification: CGFloat, residual: CGFloat)
         -> (units: Int, residual: CGFloat) {
-        let total = magnification * 1000 + residual
+        let movement = magnification * 1000
+        let carried = movement * residual < 0 ? 0 : residual
+        let total = movement + carried
         let notches = (total / 120).rounded(.towardZero)
         return (Int(notches) * 120, total - notches * 120)
     }

@@ -26,4 +26,11 @@ final class PinchZoomTests: XCTestCase {
     func testAPinchToTwiceTheSizeIsAboutEightNotches() {
         XCTAssertEqual(InputCapture.pinchUnits(magnification: 1, residual: 0).units, 960)
     }
+
+    /// Turning round mid-pinch starts the other way from nothing.
+    func testTurningRoundDropsWhatWasCarried() {
+        let out = InputCapture.pinchUnits(magnification: -0.12, residual: 110)
+        XCTAssertEqual(out.units, -120)
+        XCTAssertEqual(out.residual, 0, accuracy: 0.0001)
+    }
 }
