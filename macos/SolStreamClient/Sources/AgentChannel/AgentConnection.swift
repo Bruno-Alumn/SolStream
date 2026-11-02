@@ -766,6 +766,29 @@ public final class AgentConnection {
         }
     }
 
+    /// Try the host again now, for a PC that may just have woken up.
+    ///
+    /// A first connection to a host that cannot be reached sits waiting, and
+    /// NWConnection tries it again only when this Mac's network changes, not
+    /// when the PC comes back; one that failed outright waits out a backoff
+    /// of up to half a minute. Nothing once the socket is up.
+    public func retryUnanswered() {
+        queue.async { [weak self] in
+            guard let self, self.wantsConnection else { return }
+            if let stale = self.connection {
+                if case .ready = stale.state { return }
+                // Silenced first: its last states are about a socket that is
+                // no longer this object's, and `.failed` would nil the new one.
+                stale.stateUpdateHandler = nil
+                stale.cancel()
+                self.connection = nil
+                self.failPending(AgentError.disconnected)
+            }
+            Log.info("[agent] trying \(self.host) again")
+            self.openConnection()
+        }
+    }
+
     private func openConnection() {
         guard connection == nil else { return }
         wantsConnection = true

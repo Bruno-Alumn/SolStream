@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// or as the one reopened at launch -- waiting for the picker's lists to
     /// be found in. See `open(link:)`.
     private var pendingOpen: AppLink?
+    /// The PC being woken for `pendingOpen`; see `LaunchWake`. Kept once it
+    /// has given up, so one launcher click wakes the PC once.
+    private var launchWake: LaunchWake?
     /// Handed over before launching had finished, and opened once it has.
     private var queuedLink: AppLink?
     private var didFinishLaunching = false
@@ -395,6 +398,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         leaveHost()
         pendingOpen = link
         showPicker(host: link.host)
+        // Said from the start, so a slow PC reads as one being reached for
+        // this app rather than a list nobody asked for.
+        picker?.showWaiting("Connecting to \(link.host) to open \(link.name)…")
+    }
+
+    /// Wake the PC a launcher asked for, when it does not answer and this Mac
+    /// has learned how. True when the wake went out and the picker is
+    /// waiting on it. Once per picker: a PC that did not wake in time is
+    /// said as the failure it is.
+    private func wakeForLauncher(host: String, agent: AgentConnection?,
+                                 picker: AppPicker?) -> Bool {
+        guard launchWake == nil, let agent, let picker, let link = pendingOpen,
+              AppLink.sameHost(link.host, host) else { return false }
+        let targets = WakeOnLAN.targets(for: host)
+        guard !targets.isEmpty, WakeOnLAN.wake(targets) else { return false }
+        Log.info("[app] \(host) is not answering; woke it to open \"\(link.name)\"")
+        picker.showWaiting(LaunchWake.waking(host, app: link.name))
+        launchWake = LaunchWake(retry: { [weak agent] in
+            agent?.retryUnanswered()
+        }, gaveUp: { [weak picker] in
+            Log.error("[app] \(host) did not answer within a minute of the wake")
+            picker?.showFailure(LaunchWake.gaveUp(host), isConnection: true)
+        })
+        return true
     }
 
     /// The application `pendingOpen` asks for, now that the picker has lists
@@ -547,9 +574,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.onState = { [weak self, weak picker, weak agent] state in
             switch state {
             case .failed(let message):
+                guard let self else { return }
+                // Asleep, for a launcher: woken, and tried again until it
+                // answers. Each try that fails meanwhile is expected.
+                if self.wakeForLauncher(host: host, agent: agent, picker: picker)
+                    || self.launchWake?.isRunning == true {
+                    return
+                }
                 // `explain` already names the host and says what to do.
                 picker?.showFailure(message, isConnection: true)
             case .connected:
+                self?.launchWake?.stop()
                 picker?.connectionIsBack()
             case .waiting(let message):
                 picker?.showWaiting(message)
@@ -1988,6 +2023,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// another PC, is not wanting that any more.
     private func forgetPicker() {
         pendingOpen = nil
+        launchWake?.stop()
+        launchWake = nil
         picker = nil
         pickerHost = nil
         pickerApps = []
