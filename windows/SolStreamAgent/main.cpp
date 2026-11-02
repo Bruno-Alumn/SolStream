@@ -3987,6 +3987,8 @@ std::string WindowStatusJson(uint64_t id) {
     std::string out = "{\"type\":\"window\",\"id\":" + std::to_string(id);
     out += ",\"alive\":true";
     out += ",\"minimized\":" + std::string(IsIconic(handle) ? "true" : "false");
+    // Hidden but alive: an app that closes to the notification area.
+    out += ",\"visible\":" + std::string(IsWindowVisible(handle) ? "true" : "false");
     out += ",\"x\":" + std::to_string(client.left);
     out += ",\"y\":" + std::to_string(client.top);
     out += ",\"w\":" + std::to_string(client.right - client.left);
@@ -4972,6 +4974,12 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         HWND window = WindowArg(line, "quit needs id", refusal);
         if (!window) {
             return refusal;
+        }
+        // Only a window being streamed: the Mac names what it shows, never
+        // some other window it happens to know the id of.
+        if (!HeldWindow(window, nullptr)) {
+            return "{\"type\":\"quit\",\"ok\":false,\"reason\":"
+                   "\"Only an app being streamed can be quit from the Mac.\"}";
         }
         long long force = 0;
         FieldNumber(line, "force", force);

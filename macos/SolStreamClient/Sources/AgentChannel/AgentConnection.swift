@@ -110,6 +110,9 @@ public struct RemoteWindowStatus: Sendable, Equatable {
     /// that instead of the application.
     public let isOccluded: Bool
     public let occludedBy: String?
+    /// Shown on the PC. An app that closes to the notification area hides its
+    /// window and keeps running. A host from before this says nothing: shown.
+    public var isVisible: Bool = true
 }
 
 /// Talks to the SolStream agent running on the Windows host.
@@ -1914,7 +1917,8 @@ public final class AgentConnection {
             completion(RemoteWindowStatus(
                 isAlive: alive,
                 isOccluded: message["occluded"] as? Bool ?? false,
-                occludedBy: message["occludedBy"] as? String))
+                occludedBy: message["occludedBy"] as? String,
+                isVisible: message["visible"] as? Bool ?? true))
         }
     }
 

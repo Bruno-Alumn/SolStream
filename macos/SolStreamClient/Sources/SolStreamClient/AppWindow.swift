@@ -170,6 +170,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
         qualityTimer = timer
     }
 
+    /// Quit was asked of this app on the PC. Until then a hidden window is
+    /// just hidden; after it, one that hid instead of closing is done with.
+    var quitRequested = false
+
     /// End the session because the application has gone on the host.
     ///
     /// Called from the host's push and from the poll below, whichever notices
@@ -204,7 +208,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     // the window on a transient failure would be worse than
                     // doing nothing.
                     guard let status else { return }
-                    if status.isAlive {
+                    if status.isAlive, self.quitRequested, !status.isVisible {
+                        // Asked to quit, it went to the notification area
+                        // instead -- Steam, Discord -- and nothing is left to show.
+                        self.hostWindowClosed(noticedBy: "quit to the notification area")
+                    } else if status.isAlive {
                         self.reportOcclusion(status)
                     } else {
                         self.hostWindowClosed(noticedBy: "poll")

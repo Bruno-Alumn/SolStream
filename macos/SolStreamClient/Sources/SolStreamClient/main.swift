@@ -2069,13 +2069,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Ask the PC to quit it. Its window closes on the Mac by itself once the
-    /// app's window is gone there; only a refusal needs saying.
+    /// app's window is gone there, or hidden, for an app that goes to the
+    /// notification area instead; only a refusal needs saying.
     private func quit(_ target: AppWindow, force: Bool) {
         guard let agent else { return }
         let name = target.window?.title ?? "the app"
         Log.info("[quit] \(force ? "force quitting" : "quitting") \"\(name)\" on the PC")
         agent.quit(windowID: target.remoteWindowID, force: force) { reason in
-            guard let reason else { return }
+            guard let reason else {
+                target.quitRequested = true
+                return
+            }
             Log.info("[quit] the PC refused: \(reason)")
             let alert = NSAlert()
             alert.messageText = "Couldn\u{2019}t quit \u{201C}\(name)\u{201D}"
@@ -2171,7 +2175,7 @@ extension AppDelegate: NSMenuItemValidation {
                     + (name.map { "\u{201C}\($0)\u{201D}" } ?? "App")
                     + (force ? " on PC…" : " on PC")
             }
-            return target != nil
+            return target != nil && agent != nil
         }
         return Self.hostMenuAllows(menuItem.action,
                             connected: agent != nil || picker != nil || session != nil,

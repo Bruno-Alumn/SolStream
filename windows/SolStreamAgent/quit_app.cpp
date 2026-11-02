@@ -102,12 +102,15 @@ std::string ForceQuitRefusal(DWORD pid, DWORD own_pid, DWORD session, DWORD own_
 }
 
 std::string QuitAppJson(HWND streamed, bool force) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(streamed, &pid);
-    std::wstring image = ImageName(pid);
     auto refused = [](const std::string& reason) {
         return "{\"type\":\"quit\",\"ok\":false,\"reason\":\"" + JsonEscape(reason) + "\"}";
     };
+    DWORD pid = 0;
+    GetWindowThreadProcessId(streamed, &pid);
+    if (pid == 0) {
+        return refused("The app's window has already closed on the PC.");
+    }
+    std::wstring image = ImageName(pid);
 
     if (!force) {
         if (pid == GetCurrentProcessId()) {
@@ -130,7 +133,10 @@ std::string QuitAppJson(HWND streamed, bool force) {
                 wchar_t name[256] = {0};
                 GetClassNameW(window, name, 256);
                 candidate.class_name = name;
-                candidate.visible = IsWindowVisible(window) != FALSE;
+                // A tool window -- a palette, a floating toolbar -- goes with
+                // the app's main window rather than being closed on its own.
+                candidate.visible = IsWindowVisible(window) != FALSE
+                    && (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) == 0;
                 candidate.owned = GetWindow(window, GW_OWNER) != nullptr;
                 walk->windows.push_back(candidate);
                 return TRUE;
@@ -140,14 +146,21 @@ std::string QuitAppJson(HWND streamed, bool force) {
         // SC_CLOSE rather than WM_CLOSE: what the close box sends, so an app
         // that asks to save first still asks.
         int posted = 0;
+        DWORD denied = 0;
         for (HWND window : close) {
             if (PostMessageW(window, WM_SYSCOMMAND, SC_CLOSE, 0)) {
                 ++posted;
+            } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+                ++denied;
             }
         }
         if (posted == 0) {
-            return refused("The app didn't take the request to close. It may be "
-                           "busy; try Force Quit.");
+            // A hung app takes the message and never acts on it, so a refusal
+            // is never that: Windows keeps the host, which isn't elevated, from
+            // reaching an app that is.
+            return refused(denied > 0
+                ? "The app runs as administrator, so SolStream can't close it. Quit it on the PC."
+                : "The app's window has already closed on the PC.");
         }
         return "{\"type\":\"quit\",\"ok\":true,\"windows\":" + std::to_string(posted) + "}";
     }
