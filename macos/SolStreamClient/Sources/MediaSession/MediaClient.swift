@@ -794,11 +794,16 @@ public final class MediaClient {
             // sat queued behind the stall, was given up, and cost a keyframe.
             let datagram = Data(buffer[0..<n])
             let opened = SMTPacket.open(datagram, direction: fromHost, window: &window)
-            stateLock.lock()
-            stats.datagramsReceived &+= 1
-            stats.bytesReceived &+= UInt64(n)
-            if opened != nil { lastHeardAt = DispatchTime.now().uptimeNanoseconds }
-            stateLock.unlock()
+            // Counted once it is the host's: forged ones, which anyone who can
+            // spoof its address may send, inflated the bitrate the window
+            // shows and the count the feedback reports.
+            if opened != nil {
+                stateLock.lock()
+                stats.datagramsReceived &+= 1
+                stats.bytesReceived &+= UInt64(n)
+                lastHeardAt = DispatchTime.now().uptimeNanoseconds
+                stateLock.unlock()
+            }
             if let (plaintext, _) = opened { handle(plaintext) }
             // After the datagram in hand is handled, so that "nothing queued"
             // means everything that arrived has been seen. And at least every

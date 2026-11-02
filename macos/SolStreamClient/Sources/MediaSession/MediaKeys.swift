@@ -68,6 +68,7 @@ public enum MediaKeySchedule {
         // without the ECDH private half, which that session discarded.
         var ikm = secret
         ikm += tokenBytes
+        defer { ikm.wipe() }
         let prk = HKDF<SHA256>.extract(inputKeyMaterial: SymmetricKey(data: ikm),
                                        salt: transcriptHash)
 
@@ -75,9 +76,11 @@ public enum MediaKeySchedule {
         info.append(UInt8(epoch >> 8))
         info.append(UInt8(epoch & 0xFF))
         info += transcriptHash
-        let okm = HKDF<SHA256>.expand(pseudoRandomKey: prk, info: info,
+        var okm = HKDF<SHA256>.expand(pseudoRandomKey: prk, info: info,
                                       outputByteCount: 108)
             .withUnsafeBytes { Data($0) }
+        // As in ChannelCrypto: the plain copy of every key, wiped on the way out.
+        defer { okm.wipe() }
 
         let sid = okm[76..<80].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         return MediaKeys(hostToClient: SymmetricKey(data: okm[0..<32]),

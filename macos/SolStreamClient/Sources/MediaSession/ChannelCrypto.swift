@@ -96,10 +96,17 @@ public final class ChannelCrypto {
         ikm += tokenBytes
         let prk = HKDF<SHA256>.extract(inputKeyMaterial: SymmetricKey(data: ikm),
                                        salt: salt)
-        let okm = HKDF<SHA256>.expand(pseudoRandomKey: prk,
+        var okm = HKDF<SHA256>.expand(pseudoRandomKey: prk,
                                       info: Data("SolStream channel keys v2".utf8),
                                       outputByteCount: 100)
             .withUnsafeBytes { Data($0) }
+        // CryptoKit's own types wipe themselves; these plain copies of the
+        // shared secret, the token and every key did not, and lay in freed
+        // memory for anything that could read it later.
+        defer {
+            ikm.wipe()
+            okm.wipe()
+        }
 
         toHost = SMTDirection(key: SymmetricKey(data: okm[32..<64]),
                               fixed: Data(okm[70..<76]))
@@ -162,5 +169,16 @@ public final class ChannelCrypto {
         expectedCounter &+= 1
         buffer.removeSubrange(base..<(base + 4 + sealedLength))
         return plaintext
+    }
+}
+
+extension Data {
+    /// Overwrite these bytes with zeros in a way the compiler keeps: key
+    /// material held in a plain `Data` is otherwise freed as it was.
+    mutating func wipe() {
+        withUnsafeMutableBytes { bytes in
+            guard let base = bytes.baseAddress, bytes.count > 0 else { return }
+            _ = memset_s(base, bytes.count, 0, bytes.count)
+        }
     }
 }
