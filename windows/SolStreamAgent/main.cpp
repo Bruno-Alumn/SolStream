@@ -95,6 +95,7 @@
 #include "media/session.h"
 #endif
 #include "vdd.h"
+#include "app_ids.h"
 
 namespace {
 
@@ -1166,9 +1167,7 @@ void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int dept
         if (_wcsicmp(name.c_str() + name.size() - 4, L".url") == 0) {
             wchar_t target[512] = {};
             GetPrivateProfileStringW(L"InternetShortcut", L"URL", L"", target, 512, full.c_str());
-            const std::wstring scheme = FoldCase(target);
-            if (scheme.empty() || scheme.rfind(L"http:", 0) == 0
-                || scheme.rfind(L"https:", 0) == 0 || scheme.rfind(L"file:", 0) == 0) {
+            if (!solstream::IsLaunchableUrl(target)) {
                 continue;
             }
         }
@@ -1182,49 +1181,15 @@ void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int dept
     FindClose(handle);
 }
 
-/// How an application from the Store is named to ShellExecute: the shell's
-/// Apps folder and the application's AppUserModelID. Nothing ScanShortcuts
-/// finds starts with it.
-constexpr wchar_t kAppsFolderPrefix[] = L"shell:AppsFolder\\";
-
-bool IsAppsFolderPath(const std::wstring& path) {
-    const size_t prefix = wcslen(kAppsFolderPrefix);
-    return path.size() > prefix && _wcsnicmp(path.c_str(), kAppsFolderPrefix, prefix) == 0;
-}
+using solstream::IsAppsFolderPath;
+using solstream::IsPackagedAppId;
+using solstream::kAppsFolderPrefix;
 
 /// PKEY_AppUserModel_ID, spelled out rather than taken from propkey.h: which
 /// property keys come with uuid.lib differs between mingw and the Windows SDK,
 /// and one that does not only shows up at link time, on the PC.
 constexpr PROPERTYKEY kAppUserModelIdKey = {
     {0x9f4c2855, 0x9f79, 0x4b39, {0xa8, 0xd0, 0xe1, 0xd4, 0x2d, 0xe1, 0xd5, 0xf3}}, 5};
-
-/// Whether an AppUserModelID is a packaged application's: Package!App, the
-/// package family name, a bang, and the application's id within it.
-///
-/// Every desktop application is in the Apps folder too, with an id of its own
-/// choosing or the path to its .exe, and those are already offered by their
-/// Start Menu shortcuts, which keep the arguments the installer chose. So
-/// only this shape is taken, and taken strictly -- the characters a package
-/// name and an application id can have, and one bang -- since it ends up in a
-/// string ShellExecute parses: nothing with a path separator, a colon or a
-/// space gets through.
-bool IsPackagedAppId(const wchar_t* id) {
-    if (!id) {
-        return false;
-    }
-    size_t length = 0, bangs = 0, bang_at = 0;
-    for (const wchar_t* c = id; *c; ++c, ++length) {
-        if (*c == L'!') {
-            ++bangs;
-            bang_at = length;
-        } else if (!((*c >= L'a' && *c <= L'z') || (*c >= L'A' && *c <= L'Z')
-                     || (*c >= L'0' && *c <= L'9') || *c == L'.' || *c == L'-'
-                     || *c == L'_')) {
-            return false;
-        }
-    }
-    return length <= 256 && bangs == 1 && bang_at > 0 && bang_at + 1 < length;
-}
 
 /// The applications from the Store -- Calculator, Xbox, WhatsApp, a Game
 /// Pass game -- which have no Start Menu shortcut to find: the shell lists

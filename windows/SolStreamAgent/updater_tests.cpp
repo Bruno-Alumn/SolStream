@@ -42,6 +42,7 @@
 #include "capture_display.h"
 #include "clipboard.h"
 #include "transfer.h"
+#include "app_ids.h"
 #include "wake.h"
 #include "driver_install.h"
 #include "foreground.h"
@@ -3486,6 +3487,44 @@ std::vector<unsigned char> SealGcm(const std::vector<unsigned char>& key,
     return out;
 }
 
+// ── What is offered to launch ────────────────────────────────────────────────
+
+void TestAppIds() {
+    using solstream::IsAppsFolderPath;
+    using solstream::IsLaunchableUrl;
+    using solstream::IsPackagedAppId;
+    // Store applications, as the Apps folder names them.
+    CHECK(IsPackagedAppId(L"Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"));
+    CHECK(IsPackagedAppId(L"Microsoft.GamingApp_8wekyb3d8bbwe!Microsoft.Xbox.App"));
+    // Desktop applications' own ids and paths are not, and neither is
+    // anything ShellExecute could read as more than a name.
+    CHECK(!IsPackagedAppId(nullptr));
+    CHECK(!IsPackagedAppId(L""));
+    CHECK(!IsPackagedAppId(L"Chrome"));
+    CHECK(!IsPackagedAppId(L"{6D809377-6AF0-444B-8957-A3773F02200E}\\app.exe"));
+    CHECK(!IsPackagedAppId(L"C:\\Games\\game.exe"));
+    CHECK(!IsPackagedAppId(L"!App"));
+    CHECK(!IsPackagedAppId(L"Package!"));
+    CHECK(!IsPackagedAppId(L"A!B!C"));
+    CHECK(!IsPackagedAppId(L"Pkg_x!App a"));
+    CHECK(!IsPackagedAppId(L"Pkg_x!App\"cmd"));
+    CHECK(!IsPackagedAppId(L"http://x!y"));
+    CHECK(!IsPackagedAppId(std::wstring(300, L'a').append(L"!b").c_str()));
+
+    CHECK(IsAppsFolderPath(L"shell:AppsFolder\\Pkg_x!App"));
+    CHECK(IsAppsFolderPath(L"SHELL:appsfolder\\Pkg_x!App"));
+    CHECK(!IsAppsFolderPath(L"shell:AppsFolder\\"));
+    CHECK(!IsAppsFolderPath(L"C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\x.lnk"));
+
+    // Games' links open their launcher; a page or a file is not an app.
+    CHECK(IsLaunchableUrl(L"steam://rungameid/570"));
+    CHECK(IsLaunchableUrl(L"com.epicgames.launcher://apps/Fortnite?action=launch"));
+    CHECK(!IsLaunchableUrl(L"https://example.com/support"));
+    CHECK(!IsLaunchableUrl(L"HTTP://example.com"));
+    CHECK(!IsLaunchableUrl(L"file:///C:/readme.txt"));
+    CHECK(!IsLaunchableUrl(L""));
+}
+
 // ── Pictures and files in chunks ─────────────────────────────────────────────
 
 void TestTransferNames() {
@@ -3691,6 +3730,7 @@ int wmain(int argc, wchar_t** argv) {
     std::replace(vector.begin(), vector.end(), L'/', L'\\');
 
     TestVersions();
+    TestAppIds();
     TestBase64();
     TestSignature(vector);
     TestVouch(vector);

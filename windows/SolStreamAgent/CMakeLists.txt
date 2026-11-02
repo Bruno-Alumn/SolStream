@@ -82,6 +82,8 @@ add_library(SolStreamCore OBJECT
     clipboard.cpp
     # Pictures on the clipboard, and files dropped on a window, in chunks.
     transfer.cpp
+    # Which Start Menu entries and Store applications are offered to launch.
+    app_ids.cpp
     # Not media-only: the host window logs through it too, and it has no
     # dependency beyond stdio.
     media/log.cpp
