@@ -897,6 +897,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + "this, turn off \"Run as administrator\" for the app on the PC."
         case .declined:
             return "\(app) needs administrator permission, and it was declined on \(host)."
+        case .missing:
+            return "\(app) isn't on \(host) any more: it was uninstalled or moved, or its "
+                + "shortcut points at something deleted. Choose another app, or reinstall it."
+        case .refused:
+            return "Windows wouldn't start \(app) on \(host). Open it on the PC once to see "
+                + "why, then try again."
         }
     }
 

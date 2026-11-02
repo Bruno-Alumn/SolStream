@@ -1993,11 +1993,18 @@ public final class AgentConnection {
         case needsApproval
         /// The administrator prompt was answered No on the PC.
         case declined
+        /// Uninstalled or moved since the list was read, or a shortcut whose
+        /// target is gone.
+        case missing
+        /// Windows would not start it, for some other reason.
+        case refused
 
         init?(reason: String?) {
             switch reason {
             case "approval": self = .needsApproval
             case "declined": self = .declined
+            case "missing": self = .missing
+            case "refused": self = .refused
             default: return nil
             }
         }

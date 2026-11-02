@@ -1380,6 +1380,11 @@ enum class LaunchTrouble {
     NeedsApproval,
     /// The administrator prompt was answered No.
     Declined,
+    /// What it points at is gone: an app uninstalled or moved since the
+    /// Start Menu was read, or a shortcut whose target was deleted.
+    Missing,
+    /// Windows would not start it, for another reason it gave.
+    Refused,
 };
 
 /// ShellExecuteEx, on a thread of its own, given `wait_ms` to return.
@@ -1453,6 +1458,10 @@ bool ShellExecuteBounded(const std::wstring& path, DWORD wait_ms, DWORD& launche
         Log("[agent] ShellExecuteEx failed: %lu", state->error);
         if (state->error == ERROR_CANCELLED) {
             trouble = LaunchTrouble::Declined;
+        } else if (state->error == ERROR_FILE_NOT_FOUND || state->error == ERROR_PATH_NOT_FOUND) {
+            trouble = LaunchTrouble::Missing;
+        } else {
+            trouble = LaunchTrouble::Refused;
         }
         return false;
     }
@@ -5086,7 +5095,8 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         const std::wstring wide = ToWide(path);
         if (!IsAdvertisedApp(wide)) {
             Log("[agent] refused to launch %s: not an advertised application", path.c_str());
-            return "{\"type\":\"error\",\"message\":\"not an installed application\"}";
+            return "{\"type\":\"error\",\"reason\":\"missing\",\"message\":\"not an "
+                   "installed application\"}";
         }
         long long timeout = 20000;
         FieldNumber(line, "timeoutMs", timeout);
@@ -5104,6 +5114,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (trouble == LaunchTrouble::Declined) {
             return "{\"type\":\"error\",\"reason\":\"declined\",\"message\":\"the "
                    "administrator prompt was declined on the PC\"}";
+        }
+        if (trouble == LaunchTrouble::Missing) {
+            return "{\"type\":\"error\",\"reason\":\"missing\",\"message\":\"what it "
+                   "points at is not on the PC\"}";
+        }
+        if (trouble == LaunchTrouble::Refused) {
+            return "{\"type\":\"error\",\"reason\":\"refused\",\"message\":\"Windows "
+                   "would not start it\"}";
         }
         if (id == 0) {
             return "{\"type\":\"error\",\"message\":\"launched, but no window appeared\"}";
