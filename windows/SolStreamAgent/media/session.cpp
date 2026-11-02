@@ -477,8 +477,12 @@ void MediaSession::Impl::RunCapture() {
     // The first frame decides the encode size, because a window's size is not
     // known until something has been captured from it.
     Frame frame{};
-    for (int tries = 0; tries < 100 && running.load(); ++tries) {
+    // Not past a retarget asked for meanwhile: the next pass is the one wanted.
+    for (int tries = 0; tries < 100 && running.load() && !retargetWanted.load(); ++tries) {
         if (capture->Acquire(frame, 0, 50) && frame.width > 0) { break; }
+    }
+    if (retargetWanted.load()) {
+        return;
     }
     if (!frame.width || !running.load()) {
         Log("[media] nothing was ever captured");

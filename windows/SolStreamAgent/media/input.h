@@ -145,6 +145,19 @@ private:
     /// Note a key going down or up, so ReleaseAll can let go of it.
     void TrackKey(uint32_t key, bool down);
 
+    /// Releases Windows refused -- an elevated window had focus -- tried
+    /// again with each later input datagram, so a key let go of over Task
+    /// Manager or a UAC prompt is not held for the rest of the session once
+    /// focus comes back. Keys as in `keysDown_`; buttons as in `buttonsDown_`.
+    void RetryOwedReleases();
+    uint32_t owedKeys_[16] = {};
+    int owedKeysCount_ = 0;
+    unsigned char owedButtons_ = 0;
+    /// The input that lets go of a held key, the way it was pressed.
+    static bool KeyUpInput(uint32_t key, INPUT* up);
+    /// The input that lets go of mouse button `index` (0 = left).
+    static INPUT ButtonUpInput(int index);
+
     /// Press Caps Lock if the PC's is not what the Mac says its own is. See
     /// keys.h. Only the receive thread touches the belief; Reset clears it.
     void MatchCapsLock(bool wanted);

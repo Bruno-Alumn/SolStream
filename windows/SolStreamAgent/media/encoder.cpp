@@ -133,6 +133,11 @@ struct Encoder::Impl {
     UINT sourceWidth = 0, sourceHeight = 0;
 
     IMFTransform* mft = nullptr;
+    /// What `mft` was activated from, kept to shut it down: an asynchronous
+    /// hardware MFT that is only released keeps its event queue -- with a
+    /// BeginGetEvent still pending on it -- and, on some drivers, its
+    /// hardware encoder session, one per pass; consumer cards allow few.
+    IMFActivate* activate = nullptr;
     ICodecAPI* codec = nullptr;
     IMFMediaEventGenerator* events = nullptr;
     IMFDXGIDeviceManager* manager = nullptr;
@@ -945,6 +950,10 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
             "will not keep up at a high resolution");
     }
     const HRESULT activated = activates[0]->ActivateObject(IID_PPV_ARGS(&s.mft));
+    if (SUCCEEDED(activated)) {
+        s.activate = activates[0];
+        s.activate->AddRef();
+    }
     for (UINT32 i = 0; i < count; ++i) { activates[i]->Release(); }
     CoTaskMemFree(activates);
     if (FAILED(activated)) {
@@ -1131,6 +1140,12 @@ void Encoder::Close() {
         s.mft->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
         s.mft->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
     }
+    // Shut down, not only released: see `activate`. The callback is already
+    // detached, so the event the shutdown completes is answered by nobody.
+    if (s.activate) {
+        s.activate->ShutdownObject();
+    }
+    Release(s.activate);
     Release(s.events);
     Release(s.codec);
     Release(s.mft);

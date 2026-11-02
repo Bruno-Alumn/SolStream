@@ -1,5 +1,6 @@
 #include "input.h"
 #include "keys.h"
+#include "log.h"
 #include "smt.h"
 
 #include <dwmapi.h>
@@ -271,6 +272,18 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             buttonsDown_ = trackedDown ? (unsigned char) (buttonsDown_ | bit)
                                        : (unsigned char) (buttonsDown_ & ~bit);
         }
+    } else if (!trackedDown) {
+        // A release refused is owed, not forgotten; see RetryOwedReleases.
+        if (trackedKey != 0 && owedKeysCount_ < 16) {
+            bool already = false;
+            for (int i = 0; i < owedKeysCount_; ++i) {
+                if (owedKeys_[i] == trackedKey) { already = true; break; }
+            }
+            if (!already) { owedKeys_[owedKeysCount_++] = trackedKey; }
+        }
+        if (trackedButton != 0) {
+            owedButtons_ = (unsigned char) (owedButtons_ | (1u << (trackedButton - 1)));
+        }
     }
     return sent;
 }
@@ -278,6 +291,9 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
 uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     if (length < 4 || plaintext[0] != 0x30) {
         return acked_.load();
+    }
+    if (owedKeysCount_ > 0 || owedButtons_ != 0) {
+        RetryOwedReleases();
     }
     // Each event needs at least a 4-byte sequence, kind, and body-length byte,
     // so the count cannot honestly exceed this; ignore an implausible one.
@@ -414,35 +430,80 @@ void InputInjector::TrackKey(uint32_t key, bool down) {
     }
 }
 
-void InputInjector::ReleaseAll() {
-    for (int i = 0; i < keysDownCount_; ++i) {
-        INPUT up{};
-        if (keysDown_[i] & kHeldByScan) {
-            // Released the way it was pressed: by scan code, or by whatever
-            // BuildScanKeyInput chose for it.
-            if (!BuildScanKeyInput((uint16_t) (keysDown_[i] & 0xFFFF), false, &up)) {
-                continue;
-            }
-        } else {
-            up = VirtualKeyInput((WORD) keysDown_[i], false);
-        }
-        SendInput(1, &up, sizeof(INPUT));
+bool InputInjector::KeyUpInput(uint32_t key, INPUT* up) {
+    *up = INPUT{};
+    if (key & kHeldByScan) {
+        // Released the way it was pressed: by scan code, or by whatever
+        // BuildScanKeyInput chose for it.
+        return BuildScanKeyInput((uint16_t) (key & 0xFFFF), false, up);
     }
-    keysDownCount_ = 0;
+    *up = VirtualKeyInput((WORD) key, false);
+    return true;
+}
 
+INPUT InputInjector::ButtonUpInput(int index) {
     static const DWORD ups[5] = {MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEUP,
                                  MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_XUP,
                                  MOUSEEVENTF_XUP};
+    INPUT up{};
+    up.type = INPUT_MOUSE;
+    up.mi.dwFlags = ups[index];
+    if (index >= 3) { up.mi.mouseData = index == 3 ? XBUTTON1 : XBUTTON2; }
+    return up;
+}
+
+void InputInjector::RetryOwedReleases() {
+    int kept = 0;
+    for (int i = 0; i < owedKeysCount_; ++i) {
+        const uint32_t key = owedKeys_[i];
+        bool held = false;
+        for (int k = 0; k < keysDownCount_; ++k) {
+            if (keysDown_[k] == key) { held = true; break; }
+        }
+        // Pressed again since, or let go of some other way: nothing owed.
+        if (!held) { continue; }
+        INPUT up{};
+        if (KeyUpInput(key, &up) && SendInput(1, &up, sizeof(INPUT)) == 1) {
+            TrackKey(key, false);
+            Log("[input] a release Windows refused earlier went through");
+            continue;
+        }
+        owedKeys_[kept++] = key;
+    }
+    owedKeysCount_ = kept;
+    for (int i = 0; i < 5; ++i) {
+        const unsigned char bit = (unsigned char) (1u << i);
+        if (!(owedButtons_ & bit)) { continue; }
+        if (!(buttonsDown_ & bit)) {
+            owedButtons_ = (unsigned char) (owedButtons_ & ~bit);
+            continue;
+        }
+        INPUT up = ButtonUpInput(i);
+        if (SendInput(1, &up, sizeof(INPUT)) == 1) {
+            buttonsDown_ = (unsigned char) (buttonsDown_ & ~bit);
+            owedButtons_ = (unsigned char) (owedButtons_ & ~bit);
+        }
+    }
+}
+
+void InputInjector::ReleaseAll() {
+    for (int i = 0; i < keysDownCount_; ++i) {
+        INPUT up{};
+        if (KeyUpInput(keysDown_[i], &up)) {
+            SendInput(1, &up, sizeof(INPUT));
+        }
+    }
+    keysDownCount_ = 0;
+    owedKeysCount_ = 0;
+
     for (int i = 0; i < 5; ++i) {
         if (buttonsDown_ & (1u << i)) {
-            INPUT up{};
-            up.type = INPUT_MOUSE;
-            up.mi.dwFlags = ups[i];
-            if (i >= 3) { up.mi.mouseData = i == 3 ? XBUTTON1 : XBUTTON2; }
+            INPUT up = ButtonUpInput(i);
             SendInput(1, &up, sizeof(INPUT));
         }
     }
     buttonsDown_ = 0;
+    owedButtons_ = 0;
 }
 
 }  // namespace solstream::media
