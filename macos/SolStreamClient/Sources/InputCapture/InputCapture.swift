@@ -378,6 +378,9 @@ public final class InputCapture {
     public var inputMethodHandles: ((NSEvent) -> Bool)?
     /// Whether the input method has text it has not settled on yet.
     public var inputMethodComposing: (() -> Bool)?
+    /// Whether a composing input method is selected; `inputMethodSelected`,
+    /// other than in the tests, which cannot select one.
+    var inputMethodIsSelected: () -> Bool = InputCapture.inputMethodSelected
     /// Keys whose press went to the input method: their release does too,
     /// not to the PC, which never saw them go down.
     private var keysAtInputMethod: Set<UInt16> = []
@@ -533,7 +536,7 @@ public final class InputCapture {
         // which the PC has as Alt: Alt+F is a menu there, not a letter here.
         guard let hand = inputMethodHandles, Self.pointerMode != .gaming, !isPointerCaptured,
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-              Self.inputMethodSelected() else { return false }
+              inputMethodIsSelected() else { return false }
         let composing = inputMethodComposing?() ?? false
         // Space with nothing composed is the Space key, not the input
         // method's full-width space: it pauses a video, it is a game's jump.
