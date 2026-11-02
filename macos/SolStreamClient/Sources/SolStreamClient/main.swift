@@ -44,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Handed over before launching had finished, and opened once it has.
     private var queuedLink: AppLink?
     private var didFinishLaunching = false
+    private var receivedLink = false
     /// Which PC the picker is showing, what it can launch, and how to have
     /// it list them again.
     private var pickerHost: String?
@@ -94,7 +95,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return arguments[index + 1]
         }
-        testMode = arguments.contains("--test-screenshot")
+        // --test-dropdown too, here rather than where it is acted on below:
+        // the launch path, which reopens the last app outside a test, runs
+        // before that.
+        testMode = arguments.contains("--test-screenshot") || arguments.contains("--test-dropdown")
         if let path = value(after: "--screenshot-path") { screenshotPath = path }
 
         // --screenshot-after <seconds> waits long enough for real frames to
@@ -216,17 +220,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let queued {
             open(link: queued)
         } else if !defaultLaunch {
-            // Whatever it was is not a link this version can open, or it
-            // never came: the connect window, rather than nothing at all.
+            // Started to be handed something -- a link, which may still be on
+            // its way -- or by the system restoring the session at log-in,
+            // which hands over nothing. A moment's wait tells the two apart,
+            // and without a link it is an ordinary start.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                guard let self, self.picker == nil, self.appWindows.isEmpty else { return }
-                self.showConnectWindow()
+                guard let self, !self.receivedLink else { return }
+                self.startWithoutLink()
             }
-        } else if StreamSettings.shared.reopensLastApp, !testMode, let last = AppLink.last() {
-            Log.info("[app] reopening \"\(last.name)\" on \(last.host), as it was at quit")
-            open(link: last)
         } else {
-            showConnectWindow()
+            startWithoutLink()
         }
 
         // --test-input drives the host pointer to a known spot shortly before
@@ -254,7 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // --test-dropdown photographs the host list, which is otherwise only
         // reachable with the mouse.
         if arguments.contains("--test-dropdown") {
-            testMode = true
             DispatchQueue.main.asyncAfter(deadline: .now() + max(0.5, captureDelay - 1.5)) {
                 [weak self] in
                 self?.dropdownWindow = self?.connectWindow?.openDropdownForTesting()
@@ -270,6 +272,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // a check would put network traffic and log lines into a run that
             // is meant to show one thing.
             MainActor.assumeIsolated { Updater.shared.start() }
+        }
+    }
+
+    /// The last app again, or the connect window.
+    private func startWithoutLink() {
+        if StreamSettings.shared.reopensLastApp, !testMode, let last = AppLink.last() {
+            Log.info("[app] reopening \"\(last.name)\" on \(last.host), as it was at quit")
+            open(link: last)
+        } else {
+            showConnectWindow()
         }
     }
 
@@ -315,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       + "SolStream link")
             return
         }
+        receivedLink = true
         if didFinishLaunching {
             open(link: link)
         } else {
@@ -349,19 +362,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         Log.info("[app] asked to open \"\(link.name)\" on \(link.host)")
-        pendingOpen = link
         if !appWindows.isEmpty, AppLink.sameHost(streamHost, link.host) {
             // One application at a time, as Switch App: the stream closes and
             // the picker comes back over the same connection, and opens this.
+            pendingOpen = link
             switchApp()
             return
         }
-        if let picker, agent != nil, AppLink.sameHost(pickerHost, link.host) {
+        if let picker, let agent, AppLink.sameHost(pickerHost, link.host) {
+            pendingOpen = link
             picker.show()
-            refillPicker?()
+            // Listed again only over a live connection. One still connecting
+            // or reconnecting fills the list when it greets, and asking now
+            // would answer with two empty lists -- shown as "0 windows open"
+            // over whatever the picker was saying.
+            if agent.isConnected { refillPicker?() }
             return
         }
         leaveHost()
+        pendingOpen = link
         showPicker(host: link.host)
     }
 
@@ -375,7 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !(windows.isEmpty && apps.isEmpty) else { return }
         pendingOpen = nil
         guard !picker.isOpening else {
+            // One open at a time, as on the list itself; the picker is
+            // showing the other one's progress.
             Log.info("[app] not opening \"\(link.name)\": something else is opening already")
+            NSSound.beep()
             return
         }
         guard let choice = link.choice(windows: windows, apps: apps) else {
@@ -420,7 +442,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = detail
-        if let parent {
+        // A sheet on a window still on screen: the picker can have been put
+        // away while the icon was fetched, and a sheet on it would never show.
+        if let parent, parent.isVisible {
             alert.beginSheetModal(for: parent)
         } else {
             alert.runModal()
@@ -642,8 +666,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Whether an open under way on `agent` is still wanted.
+    ///
+    /// An open is a chain of round trips to the PC, each answered later, and
+    /// the picker it reports to can have been replaced meanwhile -- by a
+    /// launcher clicked for another PC, or Disconnect. Every step checks that
+    /// its connection is still the one in use before it touches the picker
+    /// or goes on, so the old PC's progress, failure or stream never lands
+    /// on the new one's picker.
+    private func isCurrent(_ agent: AgentConnection) -> Bool {
+        guard self.agent === agent else {
+            Log.info("[app] dropping an open on a connection that has since been left")
+            return false
+        }
+        return true
+    }
+
     private func launch(app: RemoteApp, host: String, agent: AgentConnection,
                         knownPIDs: Set<Int>) {
+        guard isCurrent(agent) else { return }
         picker?.showBusy("Starting \(app.name) on \(host)…")
         agent.launch(path: app.path) { [weak self] id in
             DispatchQueue.main.async {
@@ -656,7 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             guard let existing = LaunchMatch.afterLaunch(
                                 app.name, in: windows, knownPIDs: knownPIDs) else {
-                                self.failOpen("\(app.name) didn't open a window.")
+                                self.failOpen("\(app.name) didn't open a window.", for: agent)
                                 return
                             }
                             Log.info("[app] \"\(app.name)\" was already open; "
@@ -673,7 +714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.failOpen("\(app.name) opened a window that vanished.")
+                            self.failOpen("\(app.name) opened a window that vanished.", for: agent)
                             return
                         }
                         self.attach(target, host: host, agent: agent)
@@ -684,7 +725,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Says on the picker, still up, why there is no stream to look at.
-    private func failOpen(_ message: String) {
+    private func failOpen(_ message: String, for agent: AgentConnection) {
+        guard isCurrent(agent) else { return }
         picker?.clearBusy()
         picker?.showFailure(message)
     }
@@ -695,6 +737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// every failure on the way — no display, a refused or dead media session —
     /// puts its reason on the picker the person is still looking at.
     private func attach(_ window: RemoteWindow, host: String, agent: AgentConnection) {
+        guard isCurrent(agent) else { return }
         picker?.showBusy("Opening \(window.title) on \(host)…")
         start(host: host, agent: agent, targets: [window])
     }
@@ -765,9 +808,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func start(host: String, agent: AgentConnection, targets: [RemoteWindow],
                        displays: [RemoteDisplay]) {
+        guard isCurrent(agent) else { return }
         guard let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
-            failOpen("\(host) did not offer a display to capture.")
+            failOpen("\(host) did not offer a display to capture.", for: agent)
             return
         }
         Self.logCapture(capture)
@@ -923,12 +967,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func openApps(host: String, agent: AgentConnection,
                           targets: [RemoteWindow], display: RemoteDisplay,
                           config baseConfig: StreamConfig) {
+        guard isCurrent(agent) else { return }
         // The host encodes the whole display and each window shows a crop, so
         // on a real monitor everything on it is sent; asked before any of it is.
         guard confirmWholeDisplayCapture(host: host, display: display, targets: targets) else {
             failOpen("Nothing was streamed. \(display.name) on \(host) is a real "
                      + "monitor, so everything on it would have been sent, not "
-                     + "just \(targets.count == 1 ? "this window" : "these windows").")
+                     + "just \(targets.count == 1 ? "this window" : "these windows").",
+                     for: agent)
             return
         }
 
@@ -977,7 +1023,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let media = await agent.openMediaSession(request) else {
                 Updater.shared.isStreaming = false
                 Log.error("[app] \(host) refused the media session")
-                self.failOpen("\(host) refused to start streaming.")
+                self.failOpen("\(host) refused to start streaming.", for: agent)
                 return
             }
             guard media.streaming else {
@@ -985,7 +1031,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
                 self.failOpen("\(host) agreed to stream and then did not: "
-                              + (media.message ?? "it gave no reason"))
+                              + (media.message ?? "it gave no reason"), for: agent)
+                return
+            }
+            // Agreed with a PC that has since been left: its connection is
+            // gone, and the PC ends the stream with it.
+            guard self.isCurrent(agent) else {
+                Updater.shared.isStreaming = false
                 return
             }
             self.mediaRequest = request
@@ -1001,9 +1053,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the picker has done its job. It was kept open all the way through the
         // negotiation so that a refusal had somewhere to be said; see `attach`.
         picker?.close()
+        // With it, a launcher's request still waiting: this open beat it.
         forgetPicker()
-        // A launcher's request still waiting was for an open this one beat.
-        pendingOpen = nil
         streamLink = openingLink
         openingLink = nil
         // The picker's refresh goes with it. Left installed, every window the
@@ -1755,7 +1806,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let connectWindow, connectWindow.isOpen { connectWindow.close() }
     }
 
+    /// Also what the picker was asked to open: leaving it, by Back or for
+    /// another PC, is not wanting that any more.
     private func forgetPicker() {
+        pendingOpen = nil
         picker = nil
         pickerHost = nil
         pickerApps = []

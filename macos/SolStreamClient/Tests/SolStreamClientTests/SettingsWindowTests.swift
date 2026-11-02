@@ -19,6 +19,7 @@ final class SettingsWindowTests: XCTestCase {
         "SolStream.volume", "SolStream.muted", "SolStream.audioBuffering",
         "SolStream.syncsClipboard", "SolStream.pointerMode",
         "SolStream.gamingSensitivity", "SolStream.followsHostCursor",
+        "SolStream.reopensLastApp",
     ]
     private var saved: [String: Any] = [:]
     private let settings = StreamSettings.shared
@@ -196,6 +197,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.gamingSensitivity = 1
         settings.followsHostCursor = true
         settings.syncsClipboard = true
+        settings.reopensLastApp = true
         let pane = SettingsPane(updater: makeUpdater())
 
         var restarts: [Bool] = []
