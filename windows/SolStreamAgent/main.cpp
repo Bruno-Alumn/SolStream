@@ -732,7 +732,13 @@ bool IsUserWindowAsideFromFrame(HWND window) {
         return false;
     }
 
-    return GetWindowTextLengthW(window) != 0;
+    // InternalGetWindowText reads the title Windows keeps for the window and
+    // never sends it a message. GetWindowTextLength may send one, and this runs
+    // on the host window's own thread for every window event, and on the
+    // command thread for `windows` and every quarter second of a `launch`: one
+    // hung application could stop all three.
+    wchar_t title[2] = {};
+    return InternalGetWindowText(window, title, 2) != 0;
 }
 
 /// Is this a window a user would think of as an application window?
@@ -792,10 +798,13 @@ BOOL CALLBACK WindowProc(HWND window, LPARAM param) {
     info.caption_inset = (int) std::max(0L, info.client.top - info.frame.top);
     GetWindowThreadProcessId(window, &info.pid);
 
-    std::wstring title(static_cast<size_t>(GetWindowTextLengthW(window)) + 1, L'\0');
-    const int copied = GetWindowTextW(window, title.data(), (int) title.size());
-    title.resize(static_cast<size_t>(std::max(copied, 0)));
-    info.title = ToUtf8(title);
+    // Never by messaging the window; see IsUserWindowAsideFromFrame. Sized by
+    // GetWindowTextLength, this sent every listed window a message, and one
+    // hung application held the command thread -- and every request behind it
+    // -- for as long as it stayed hung. A title past 1023 characters is cut.
+    wchar_t title[1024] = {};
+    const int copied = InternalGetWindowText(window, title, 1024);
+    info.title = ToUtf8(std::wstring(title, static_cast<size_t>(std::max(copied, 0))));
 
     wchar_t class_name[256] = {};
     GetClassNameW(window, class_name, 256);
@@ -1084,7 +1093,7 @@ bool ForceForeground(HWND window) {
 
 struct AppEntry {
     std::string name;
-    std::wstring path;  // the .lnk itself; ShellExecute resolves it
+    std::wstring path;  // the .lnk or .url itself; ShellExecute resolves it
 };
 
 /// Walk a Start Menu tree collecting shortcuts.
@@ -1110,11 +1119,28 @@ void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int dept
             ScanShortcuts(full, out, depth + 1);
             continue;
         }
-        if (name.size() <= 4 || _wcsicmp(name.c_str() + name.size() - 4, L".lnk") != 0) {
+        // .url as well as .lnk: Steam and Epic put a .url in the Start Menu for
+        // every game, and without them a gaming PC offered none of its games.
+        // ShellExecute opens either, and the shell gives either an icon.
+        if (name.size() <= 4
+            || (_wcsicmp(name.c_str() + name.size() - 4, L".lnk") != 0
+                && _wcsicmp(name.c_str() + name.size() - 4, L".url") != 0)) {
             continue;
         }
         const std::wstring stem = name.substr(0, name.size() - 4);
         const std::wstring lowered = FoldCase(stem);
+        // A .url to a web page -- an installer's "Visit our website" -- is not
+        // an application, and launching it would stream a browser. Games'
+        // are steam:// and com.epicgames.launcher:// links.
+        if (_wcsicmp(name.c_str() + name.size() - 4, L".url") == 0) {
+            wchar_t target[512] = {};
+            GetPrivateProfileStringW(L"InternetShortcut", L"URL", L"", target, 512, full.c_str());
+            const std::wstring scheme = FoldCase(target);
+            if (scheme.empty() || scheme.rfind(L"http:", 0) == 0
+                || scheme.rfind(L"https:", 0) == 0 || scheme.rfind(L"file:", 0) == 0) {
+                continue;
+            }
+        }
         // Nobody wants to stream an uninstaller, and clicking one by accident
         // from a list of application names would be genuinely bad.
         if (lowered.find(L"uninstall") != std::wstring::npos) {
@@ -2353,7 +2379,8 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
     // line that separates the Windows Security dialog — which they need — from
     // the shell's untitled modal dimmer behind it, which is a full-screen sheet
     // there is no point carrying anywhere.
-    if (GetWindowTextLengthW(window) == 0) {
+    wchar_t titled[2] = {};
+    if (InternalGetWindowText(window, titled, 2) == 0) {
         return TRUE;
     }
     const LONG_PTR ex_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
@@ -4372,8 +4399,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             }
         }
         HICON large = nullptr;
-        // ExtractIconEx resolves a .lnk to its target on its own.
+        // ExtractIconEx resolves a .lnk to its target on its own. A .url is not
+        // a file it can read icons from; the shell knows its icon instead.
         if (ExtractIconExW(wide.c_str(), 0, &large, nullptr, 1) == 0 || !large) {
+            large = nullptr;
+            // COM scoped to the call, as in LargeFileIcon.
+            const HRESULT com =
+                CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            SHFILEINFOW info{};
+            if (SHGetFileInfoW(wide.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON)) {
+                large = info.hIcon;
+            }
+            if (SUCCEEDED(com)) {
+                CoUninitialize();
+            }
+        }
+        if (!large) {
             return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
         }
         return IconJson(path, large, true);
@@ -6722,6 +6763,18 @@ int wmain(int argc, wchar_t** argv) {
     HWINEVENTHOOK name_hook = SetWinEventHook(
         EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, WindowSetChanged, 0, 0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    // The list leaves out minimised and cloaked windows, and neither changes
+    // with any event above: a window restored on the PC stayed off the Mac's
+    // list, and one minimised stayed on it, until something unrelated moved.
+    // A virtual-desktop switch cloaks and uncloaks windows in bulk, and a
+    // Store app's frame is shown while still cloaked, so it is listed only
+    // when it uncloaks.
+    HWINEVENTHOOK minimise_hook = SetWinEventHook(
+        EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr, WindowSetChanged, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    HWINEVENTHOOK cloak_hook = SetWinEventHook(
+        EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, WindowSetChanged, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     if (!window_set_hook) {
         Log("[agent] could not watch for window changes; the Mac's list will "
             "only refresh when it reconnects");
@@ -6737,6 +6790,8 @@ int wmain(int argc, wchar_t** argv) {
     });
     const int code = solstream::RunHostWindowLoop();
     Log("[agent] the window has closed; stopping (exit code %d)", code);
+    if (cloak_hook) { UnhookWinEvent(cloak_hook); }
+    if (minimise_hook) { UnhookWinEvent(minimise_hook); }
     if (name_hook) { UnhookWinEvent(name_hook); }
     if (window_set_hook) { UnhookWinEvent(window_set_hook); }
     // Closing the window takes the host down with it. A capture still holding

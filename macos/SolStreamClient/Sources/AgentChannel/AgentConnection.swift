@@ -95,7 +95,7 @@ public struct RemoteWindow: Sendable, Equatable, Identifiable {
 /// A launchable application on the host, from its Start Menu shortcut.
 public struct RemoteApp: Sendable, Equatable, Identifiable, Hashable {
     public let name: String
-    /// The `.lnk` path, passed straight back to the agent to launch.
+    /// The `.lnk` or `.url` path, passed straight back to the agent to launch.
     public let path: String
 
     public var id: String { path }
@@ -1699,15 +1699,18 @@ public final class AgentConnection {
 
     private static func image(fromBGRA bytes: Data, width: Int, height: Int) -> CGImage? {
         guard let provider = CGDataProvider(data: bytes as CFData) else { return nil }
-        // Windows hands over straight (un-premultiplied) alpha in BGRA order, and
-        // says so here rather than converting: Core Graphics will do the right
-        // thing given an accurate description.
+        // BGRA with premultiplied alpha: the host draws the icon with DrawIconEx
+        // on a cleared bitmap, which blends it, so every colour already carries
+        // its alpha. Read as straight alpha it was darkened a second time, and
+        // soft edges and shadows came out with a grey halo in the picker and
+        // the Dock. An icon with no alpha channel is solid or clear, which
+        // reads the same either way.
         return CGImage(width: width, height: height,
                        bitsPerComponent: 8, bitsPerPixel: 32,
                        bytesPerRow: width * 4,
                        space: CGColorSpaceCreateDeviceRGB(),
                        bitmapInfo: CGBitmapInfo(rawValue:
-                           CGImageAlphaInfo.first.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                           CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
                        provider: provider, decode: nil,
                        shouldInterpolate: true, intent: .defaultIntent)
     }
