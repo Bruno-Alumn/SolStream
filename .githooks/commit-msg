@@ -1,0 +1,20 @@
+#!/bin/sh
+# Every commit is the owner's alone; see CLAUDE.md. Strips co-author lines
+# and AI credits from the message, and refuses another author or committer.
+# Enabled per clone with: git config core.hooksPath .githooks
+owner="171815746+Bruno-Alumn@users.noreply.github.com"
+msg="$1"
+
+sed -i.bak -E \
+    -e '/^[Cc]o-[Aa]uthored-[Bb]y:/d' \
+    -e '/[Gg]enerated with \[?Claude/d' \
+    "$msg" && rm -f "$msg.bak"
+
+for who in AUTHOR COMMITTER; do
+    email=$(git var "GIT_${who}_IDENT" | sed -E 's/.*<([^>]*)>.*/\1/')
+    if [ "$email" != "$owner" ]; then
+        echo "commit-msg: the $who is <$email>; commits here are $owner's alone." >&2
+        echo "  git config user.name Bruno-Alumn && git config user.email $owner" >&2
+        exit 1
+    fi
+done

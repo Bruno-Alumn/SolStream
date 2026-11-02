@@ -31,3 +31,41 @@ jobs:
         run: |
           curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
           ./gitleaks git --config .gitleaks.toml --redact --exit-code 1 .
+
+  authors:
+    name: Commit authors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Every commit is the owner's alone (CLAUDE.md): no other author or
+      # committer, and no co-author lines or AI credits. GitHub itself may
+      # commit a merge made in its web interface, so its address is allowed
+      # as committer only.
+      - name: Only the owner, and no co-authors
+        env:
+          OWNER: 171815746+Bruno-Alumn@users.noreply.github.com
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            range="$HEAD"
+          else
+            range="$BASE..$HEAD"
+          fi
+          bad=0
+          for c in $(git rev-list "$range"); do
+            author=$(git log -1 --format=%ae "$c")
+            committer=$(git log -1 --format=%ce "$c")
+            if [ "$author" != "$OWNER" ]; then
+              echo "::error::$c is authored by <$author>"; bad=1
+            fi
+            if [ "$committer" != "$OWNER" ] && [ "$committer" != "noreply@github.com" ]; then
+              echo "::error::$c is committed by <$committer>"; bad=1
+            fi
+            if git log -1 --format=%B "$c" | grep -Eiq '^co-authored-by:|generated with \[?claude'; then
+              echo "::error::$c carries a co-author line or an AI credit"; bad=1
+            fi
+          done
+          exit $bad

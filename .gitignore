@@ -20,7 +20,9 @@ macos/SolStreamClient/.build/
 .stversions/
 
 # Local tool and editor state -- never part of the project
-.claude/
+.claude/*
+# Except the settings every session in this repo shares; see CLAUDE.md.
+!.claude/settings.json
 events/
 .pytest_cache/
 .vscode/
