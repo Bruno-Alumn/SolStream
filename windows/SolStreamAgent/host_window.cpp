@@ -3195,17 +3195,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // process once this returns, without WM_DESTROY. The log is the
             // only place that can say so -- otherwise a host that vanished
             // at sign-out looks like one that crashed.
+            if (wparam) {
+                // Said first: the giving back below can take a while, and
+                // Windows may end the process before it is done.
+                const char* why = (lparam & ENDSESSION_CLOSEAPP) ? "an installer closed it"
+                                : (lparam & ENDSESSION_LOGOFF)   ? "sign-out"
+                                                                 : "restart or shut down";
+                media::Log("[window] Windows is ending this program (%s)", why);
+            }
             if (wparam && g_end_session_handler) {
                 // Give back what the session holds -- the windows it locked,
                 // the capture -- before Windows ends the process. Quit does
                 // this on its way out; ending the session never gets there.
                 g_end_session_handler();
-            }
-            if (wparam) {
-                const char* why = (lparam & ENDSESSION_CLOSEAPP) ? "an installer closed it"
-                                : (lparam & ENDSESSION_LOGOFF)   ? "sign-out"
-                                                                 : "restart or shut down";
-                media::Log("[window] Windows is ending this program (%s)", why);
             }
             return 0;
 
