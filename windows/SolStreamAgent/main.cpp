@@ -685,8 +685,17 @@ RECT ClientAreaInScreen(HWND window) {
 /// IsUserWindow, all but its last test: that the window's visible frame covers
 /// anything. Split out so a caller that has measured the frame already need
 /// not measure it again.
+/// The taskbars and the desktop: windows no application owns, which nothing
+/// the Mac does should list, move or lock.
+bool IsShellWindow(HWND window) {
+    wchar_t cls[64] = {0};
+    GetClassNameW(window, cls, 64);
+    return wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0
+        || wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0;
+}
+
 bool IsUserWindowAsideFromFrame(HWND window) {
-    if (!IsWindowVisible(window) || IsIconic(window)) {
+    if (!IsWindowVisible(window) || IsIconic(window) || IsShellWindow(window)) {
         return false;
     }
 
@@ -856,10 +865,7 @@ HWND WindowFromId(uint64_t id) {
         Log("[agent] refused a command aimed at a child window");
         return nullptr;
     }
-    wchar_t cls[64] = {0};
-    GetClassNameW(handle, cls, 64);
-    if (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0
-        || wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0) {
+    if (IsShellWindow(handle)) {
         Log("[agent] refused a command aimed at the taskbar or the desktop");
         return nullptr;
     }
