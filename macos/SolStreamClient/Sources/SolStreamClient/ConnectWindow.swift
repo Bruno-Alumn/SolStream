@@ -44,6 +44,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// alert and not the accent: the one thing this window is for is the PC,
     /// and the update waits in Settings until somebody wants it.
     private let updateNotice = NSButton(title: "", target: nil, action: nil)
+    /// Settings, from the first window, rather than only from a menu.
+    let settingsButton = NSButton(title: "", target: nil, action: nil)
     private var updateObserver: NSObjectProtocol?
     /// Escape quits from here; see `installEscapeToQuit`.
     private var escapeMonitor: Any?
@@ -222,13 +224,29 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         updateNotice.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         updateNotice.isHidden = true
 
+        // A gear at the leading end, quiet like the update notice beside it:
+        // a way to Settings before connecting, where the codec, sound and
+        // mouse are chosen, without hunting for the menu.
+        settingsButton.target = self
+        settingsButton.action = #selector(settingsTapped)
+        settingsButton.isBordered = false
+        settingsButton.image = NSImage(systemSymbolName: "gearshape",
+                                       accessibilityDescription: "Settings")
+        settingsButton.symbolConfiguration = .init(pointSize: 17, weight: .regular)
+        settingsButton.imagePosition = .imageOnly
+        settingsButton.contentTintColor = DS.textSecondary
+        settingsButton.toolTip = "Settings (⌘,)"
+        settingsButton.setAccessibilityLabel("Settings")
+        settingsButton.setContentHuggingPriority(.required, for: .horizontal)
+
         // Both buttons trailing, the primary last, the way every Mac dialog puts
-        // them: the eye ends where the way forward is. The update notice, when
-        // there is one, takes the leading end of the same line, so it costs
-        // the window no height.
+        // them: the eye ends where the way forward is. Settings, and the update
+        // notice when there is one, take the leading end of the same line, so
+        // they cost the window no height.
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [updateNotice, spacer, quitButton, connectButton])
+        let buttons = NSStackView(views: [settingsButton, updateNotice, spacer, quitButton,
+                                          connectButton])
         buttons.orientation = .horizontal
         buttons.spacing = DS.Space.x3
 
@@ -832,6 +850,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func removeEscapeToQuit() {
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
+    }
+
+    @objc private func settingsTapped() {
+        NotificationCenter.default.post(name: StreamSettings.openSettingsRequest, object: nil)
     }
 
     @objc private func quitTapped() {

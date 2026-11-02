@@ -152,6 +152,16 @@ final class ConnectWindowTests: XCTestCase {
         connect.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: window))
     }
 
+    /// The gear opens Settings, as the menu and ⌘, do, before any PC is
+    /// connected to.
+    func testTheGearOpensSettings() throws {
+        let (connect, _) = try makeWindow(World(tailscale: .missing, answering: []))
+        let asked = expectation(forNotification: StreamSettings.openSettingsRequest, object: nil)
+        XCTAssertEqual(connect.settingsButton.accessibilityLabel(), "Settings")
+        connect.settingsButton.performClick(nil)
+        wait(for: [asked], timeout: 1)
+    }
+
     // MARK: - The Tailscale line
 
     /// A paired Mac without Tailscale, at home: the line's words come up
