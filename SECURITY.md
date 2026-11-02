@@ -34,8 +34,9 @@ impact you expect.
 - Pairing tokens live on the Mac in
   `~/Library/Application Support/SolStream/pairing-tokens.json` (the folder and
   the file readable only by your user, the file excluded from backups) and on the PC
-  in `%LOCALAPPDATA%\SolStream\agent.token`, never in the repository. Anyone who
-  can read either file can pair with that PC, so treat them like a password.
+  in `%LOCALAPPDATA%\SolStream\agent.token.dpapi`, encrypted with DPAPI so that
+  only your Windows account can read it; never in the repository. Anyone who
+  can read the token can pair with that PC, so treat it like a password.
 - The Mac's token is not in the Keychain. SolStream is signed ad hoc, so macOS
   sees every update as a different program, and a Keychain item tied to the old
   one asked for your password again after each update. A Mac that kept its

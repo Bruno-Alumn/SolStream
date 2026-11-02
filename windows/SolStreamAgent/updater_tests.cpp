@@ -1766,7 +1766,12 @@ void TestTokenStore() {
     CHECK(WriteWholeFile(sealed, "damaged"));
     const std::string fresh = LoadOrCreateToken(folder);
     CHECK(IsTokenText(fresh) && fresh != "fedcba9876543210fedcba9876543210");
-    CHECK(exists(sealed + L".unreadable"));
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW((sealed + L".unreadable-*").c_str(), &found);
+    CHECK(search != INVALID_HANDLE_VALUE);
+    if (search != INVALID_HANDLE_VALUE) {
+        FindClose(search);
+    }
 
     CHECK(!IsTokenText("short"));
     CHECK(!IsTokenText("has a space in it, sadly"));

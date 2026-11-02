@@ -52,9 +52,19 @@ bool WriteAtomically(const std::wstring& path, const std::string& bytes) {
 
 /// The plain file gone, its bytes overwritten first: a deleted file's
 /// clusters keep what was in them until something else is written there.
+/// Overwritten with line ends, which every version trims to nothing: left
+/// behind by a delete that failed, it reads as no token at all -- never as one
+/// anybody could guess.
 void Shred(const std::wstring& path, size_t length) {
-    WriteWholeFile(path, std::string(length + 8, '0'));
-    DeleteFileW(path.c_str());
+    WriteWholeFile(path, std::string(length + 8, '\n'));
+    if (!DeleteFileW(path.c_str())) {
+        media::Log("[token] could not delete the old plain token file (error %lu); "
+                   "its contents were overwritten", GetLastError());
+    }
+}
+
+bool Exists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 }  // namespace
@@ -106,22 +116,42 @@ std::string LoadOrCreateToken(const std::wstring& folder) {
     const std::wstring plain_path = folder + L"\\" + kPlainName;
 
     std::string blob, token;
-    if (ReadSmallFile(protected_path, 4096, blob) && !blob.empty()) {
+    // There but not readable this moment -- a virus scanner holding it -- is
+    // not the same as not there: answered as that, a new token would replace
+    // it and every paired Mac would have to pair again. Waited on, and then
+    // refused, which keeps the host from starting rather than losing them.
+    bool read = ReadSmallFile(protected_path, 4096, blob);
+    for (int attempt = 0; !read && Exists(protected_path) && attempt < 10; ++attempt) {
+        Sleep(200);
+        read = ReadSmallFile(protected_path, 4096, blob);
+    }
+    if (!read && Exists(protected_path)) {
+        media::Log("[token] agent.token.dpapi is there but can't be read (error %lu); "
+                   "not replacing it", GetLastError());
+        return {};
+    }
+    if (read && !blob.empty()) {
         if (UnprotectToken(blob, token) && IsTokenText(token)) {
             // A plain copy beside it is one an older host made since; it is
             // not the token this PC pairs with, and must not sit there readable.
             std::string stale;
             if (ReadSmallFile(plain_path, 127, stale)) {
+                media::Log("[token] removed a plain token file an older SolStream left; "
+                           "the encrypted token is the one this PC pairs with");
                 Shred(plain_path, stale.size());
             }
             return token;
         }
-        // Another account's, or damaged: not this host's to read. Kept aside
-        // rather than overwritten, in case it is the account that is wrong.
-        media::Log("[token] could not read the saved pairing token; keeping it as "
-                   "agent.token.dpapi.unreadable and making a new one");
-        MoveFileExW(protected_path.c_str(), (protected_path + L".unreadable").c_str(),
-                    MOVEFILE_REPLACE_EXISTING);
+        // Another account's, damaged, or -- after an administrator reset this
+        // account's password -- no longer openable. Not this host's to read,
+        // and kept aside under a name of its own rather than overwritten, in
+        // case it is the account that is wrong.
+        const DWORD why = GetLastError();
+        const std::wstring aside = protected_path + L".unreadable-"
+                                 + std::to_wstring(GetTickCount64());
+        media::Log("[token] could not decrypt the saved pairing token (error %lu); kept it "
+                   "aside and made a new one -- paired Macs will ask for the new token", why);
+        MoveFileExW(protected_path.c_str(), aside.c_str(), 0);
     }
 
     // A plain token from before: moved in, so this PC's pairings carry over.
