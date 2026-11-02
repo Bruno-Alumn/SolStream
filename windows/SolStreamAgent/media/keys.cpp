@@ -1,5 +1,7 @@
 #include "keys.h"
 
+#include <atomic>
+
 namespace solstream::media {
 namespace {
 
@@ -12,6 +14,17 @@ constexpr unsigned char kScanKeypadEquals = 0x59;
 constexpr unsigned char kScanKeypadComma = 0x7E;  // JIS
 constexpr unsigned char kScanLang1 = 0xF2;  // Kana
 constexpr unsigned char kScanLang2 = 0xF1;  // Eisu
+
+/// Whether the keyboard layout of the window in front types a character at
+/// `scan`. A virtual key alone is not enough: Windows' base tables give 0x7E
+/// one, VK_ABNT_C2, on every layout, and only Brazil's makes it type.
+bool ForegroundLayoutHasKey(unsigned char scan) {
+    const HWND front = GetForegroundWindow();
+    const DWORD thread = front ? GetWindowThreadProcessId(front, nullptr) : 0;
+    const HKL layout = GetKeyboardLayout(thread);
+    const UINT vk = MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK, layout);
+    return vk != 0 && MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, layout) != 0;
+}
 
 /// Control's place, left and, behind 0xE0, right.
 constexpr unsigned char kScanControl = 0x1D;
@@ -77,6 +90,23 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
             input.ki.wVk = vk;
             input.ki.wScan = scan;
             input.ki.dwFlags = up;
+            *out = input;
+            return true;
+        }
+        // The JIS keypad comma's place is a key of its own on Brazil's ABNT2
+        // keyboard -- its keypad's '.' -- which a Mac reports as this same
+        // code. Where the PC's layout has a key there, it is that key, by its
+        // scan code like any other; only where it has none is it a ','.
+        // Decided when the key goes down and kept for its release: asked
+        // again, a layout switched while it was held made the release a ','
+        // and left the key itself down.
+        static std::atomic<bool> commaIsKey{false};
+        if (scan == kScanKeypadComma && down) {
+            commaIsKey.store(ForegroundLayoutHasKey(scan));
+        }
+        if (scan == kScanKeypadComma && commaIsKey.load()) {
+            input.ki.wScan = scan;
+            input.ki.dwFlags = KEYEVENTF_SCANCODE | up;
             *out = input;
             return true;
         }
