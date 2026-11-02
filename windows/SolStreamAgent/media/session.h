@@ -38,6 +38,10 @@ struct MediaConfig {
     /// and all an older Mac gets -- is what every Mac decodes.
     std::vector<VideoCodec> videoCodecs{VideoCodec::H264};
     unsigned short port = 47999;
+    /// The PC's own IPv4 address the Mac reached the agent on, in network
+    /// order, or 0 for every address. Bound to so replies leave from the
+    /// address the Mac sends to; see Start.
+    uint32_t bindAddress = 0;
     bool audio = true;
     /// PCM unless the Mac asked for Opus by name; see audio.h.
     AudioEncoding audioEncoding;

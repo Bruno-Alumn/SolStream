@@ -1073,9 +1073,25 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
+    // The address the Mac reached the agent on, when it is known. Bound to
+    // every address, Windows chose each reply's source by its routing table,
+    // and on a PC with Ethernet and Wi-Fi on the same network it could answer
+    // from the one the Mac had not sent to -- which the Mac's connected socket
+    // drops without a word: a black window, while every counter here looked
+    // healthy.
+    address.sin_addr.s_addr = config.bindAddress ? config.bindAddress : INADDR_ANY;
     address.sin_port = htons(config.port);
-    if (bind(s.socket, (sockaddr*) &address, sizeof(address)) == SOCKET_ERROR) {
+    bool bound = bind(s.socket, (sockaddr*) &address, sizeof(address)) != SOCKET_ERROR;
+    if (!bound && config.bindAddress) {
+        // That address went between the Mac connecting and asking -- a DHCP
+        // renewal, a network card switched off. Every address, as before,
+        // rather than no stream.
+        Log("[media] could not use the address the Mac came in on (%d); "
+            "listening on every address", WSAGetLastError());
+        address.sin_addr.s_addr = INADDR_ANY;
+        bound = bind(s.socket, (sockaddr*) &address, sizeof(address)) != SOCKET_ERROR;
+    }
+    if (!bound) {
         closesocket(s.socket);
         s.socket = INVALID_SOCKET;
         s.DropKeys();

@@ -190,7 +190,10 @@ final class StreamSession {
         Log.info("[input] keys go to \(host) "
                  + (session.takesScanCodes ? "by position, so the PC's layout decides what they type"
                                            : "by US-layout name; it predates sending them by position"))
-        self.media = MediaClient(keys: session.keys, host: host, port: session.port,
+        // The address the agent's connection reached, when there is one: see
+        // `MediaSession.address`.
+        self.media = MediaClient(keys: session.keys, host: session.address ?? host,
+                                 port: session.port,
                                  videoCodec: session.videoCodec)
 
         // One decoder, fanned out to every attached window. Each window carries

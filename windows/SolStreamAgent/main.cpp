@@ -1826,6 +1826,41 @@ void ResetChannel() {
     g_channel_socket = INVALID_SOCKET;
     LeaveCriticalSection(&g_send_cs);
 }
+
+/// This PC's IPv4 address that the Mac's sealed channel came in on, in
+/// network order, or 0 when there is none to say: no channel yet, or one over
+/// IPv6, which the media socket does not speak.
+uint32_t ChannelLocalIPv4() {
+    EnterCriticalSection(&g_send_cs);
+    const SOCKET channel = g_channel_socket;
+    sockaddr_storage local{};
+    int length = sizeof(local);
+    const bool named = channel != INVALID_SOCKET
+        && getsockname(channel, (sockaddr*) &local, &length) == 0;
+    LeaveCriticalSection(&g_send_cs);
+    if (!named) {
+        return 0;
+    }
+    uint32_t v4 = 0;
+    if (local.ss_family == AF_INET) {
+        v4 = ((const sockaddr_in&) local).sin_addr.s_addr;
+    }
+    if (local.ss_family == AF_INET6) {
+        // An IPv4 Mac on a dual-stack socket arrives as ::ffff:a.b.c.d.
+        const in6_addr& address = ((const sockaddr_in6&) local).sin6_addr;
+        if (IN6_IS_ADDR_V4MAPPED(&address)) {
+            std::memcpy(&v4, address.s6_addr + 12, sizeof(v4));
+        }
+    }
+    // Not loopback: a TCP-only forward from the network to an agent on
+    // 127.0.0.1 brings the channel in there while the stream arrives on the
+    // network's address, and a loopback client is served by every address
+    // just as well.
+    if ((ntohl(v4) >> 24) == 127) {
+        return 0;
+    }
+    return v4;
+}
 #endif
 
 /// Which cursor watcher is the current one.
@@ -4394,6 +4429,13 @@ std::string HandleMedia(const std::string& line) {
             }
         }
         config.port = solstream::kDefaultMediaPort;
+        // Only for a Mac that sends the stream where its channel went: an
+        // older one looks the name up again, and for a name with an address
+        // per network card could pick the other one, which a socket bound to
+        // this one would refuse.
+        long long udp_to_channel = 0;
+        FieldNumber(line, "udpToChannel", udp_to_channel);
+        config.bindAddress = udp_to_channel == 1 ? ChannelLocalIPv4() : 0;
         // Start does not return until the capture and the encoder have both
         // opened or one of them has failed, so `streaming` below is what
         // happened rather than what was intended. It used to be the latter:

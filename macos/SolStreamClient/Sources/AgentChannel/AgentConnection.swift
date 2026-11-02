@@ -806,6 +806,10 @@ public final class AgentConnection {
             switch state {
             case .ready:
                 Log.info("[agent] connected to \(self.host):\(self.port)")
+                let reached = Self.dottedIPv4(connection.currentPath?.remoteEndpoint)
+                self.stateLock.lock()
+                self.connectedIPv4 = reached
+                self.stateLock.unlock()
                 let reconnected = self.reconnectAttempt > 0
                 self.reconnectAttempt = 0
                 self.receive()
@@ -1187,6 +1191,33 @@ public final class AgentConnection {
         /// said nothing, because that is all one that predates the choice
         /// sends.
         public var videoCodec: VideoCodec = .h264
+        /// The PC's IPv4 address this connection reached it on, for the
+        /// stream to go to the same one; nil when it went another way.
+        public var address: String?
+    }
+
+    /// The IPv4 address the connection reached, as dotted digits; nil when
+    /// it went another way. Set when the connection comes up; guarded by
+    /// `stateLock`.
+    ///
+    /// The stream is sent there rather than to the name typed: looked up
+    /// again, a name with an address per network card -- a PC on Ethernet
+    /// and Wi-Fi, found as pc.local -- could give the other one first, and
+    /// the host takes the stream only on the address its channel came in on.
+    private var connectedIPv4: String?
+
+    private func currentIPv4() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connectedIPv4
+    }
+
+    static func dottedIPv4(_ endpoint: NWEndpoint?) -> String? {
+        guard case .hostPort(let host, _)? = endpoint, case .ipv4(let address) = host else {
+            return nil
+        }
+        let bytes = [UInt8](address.rawValue)
+        return bytes.count == 4 ? bytes.map(String.init).joined(separator: ".") : nil
     }
 
     /// The `media open` command's fields beyond the key material.
@@ -1276,6 +1307,11 @@ public final class AgentConnection {
         var message: [String: Any] = ["cmd": "media", "op": "open", "ver": 1,
                                       "cpub": cpub.smtHex, "cnonce": cnonce.smtHex]
         message.merge(Self.mediaOpenFields(request)) { _, field in field }
+        // This Mac sends the stream to the address its connection reached --
+        // see `connectedIPv4` -- so the host may take it on that address
+        // alone. A Mac that predates this looks the name up again, and the
+        // host keeps listening on every address for it.
+        message["udpToChannel"] = 1
 
         let reply: [String: Any]
         do {
@@ -1363,7 +1399,7 @@ public final class AgentConnection {
                             audioCodec: audioCodec, audioSource: audioSource,
                             audioSourceStated: reply["audioSource"] != nil,
                             takesScanCodes: Self.takesScanCodes(inReply: reply),
-                            videoCodec: videoCodec)
+                            videoCodec: videoCodec, address: currentIPv4())
     }
 
     /// Ask for the host's displays.
