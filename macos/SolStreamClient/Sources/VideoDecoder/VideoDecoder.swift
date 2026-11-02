@@ -185,6 +185,9 @@ public final class VideoDecoder {
         }
 
         guard let formatDescription, let session else {
+            // An IDR that never reached a session failed to build, not to
+            // decode: that has its own back-off just below.
+            if startsOver { recovery.keyframeNotTried() }
             // The parameter sets came and the decoder still could not be built
             // from them: asking for another IDR every half second would only
             // make the host send megabits of them, forever. Asked again less
@@ -465,7 +468,7 @@ public final class VideoDecoder {
     /// and dropped the healthy session that replaced it: a freeze and a second
     /// IDR asked for nothing, at every resolution change. Draining runs those
     /// callbacks now, and what they failed on belonged to the old session, so
-    /// it is forgotten with it. Safe with `lock` held: the callback never
+    /// it is forgotten with it, and so are its pictures. Safe with `lock` held: the callback never
     /// takes it.
     private func invalidateSession() {
         if let session {
@@ -473,6 +476,7 @@ public final class VideoDecoder {
             VTDecompressionSessionInvalidate(session)
             failureLock.lock()
             pendingAsyncFailure = noErr
+            decodedSinceLastLook = false
             failureLock.unlock()
         }
         session = nil
@@ -593,6 +597,12 @@ struct SessionRecovery {
             return true
         }
         return !awaitingIdr
+    }
+
+    /// An IDR let through never reached a session, because none could be
+    /// built: not one this Mac failed to decode.
+    mutating func keyframeNotTried() {
+        failedKeyframes = max(0, failedKeyframes - 1)
     }
 
     /// A picture came out: whatever failed before, this stream decodes.

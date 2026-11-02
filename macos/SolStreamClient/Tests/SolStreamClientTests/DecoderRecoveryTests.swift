@@ -114,4 +114,18 @@ final class DecoderRecoveryTests: XCTestCase {
         }
         XCTAssertEqual(recovery.keyframeWait(0.5), 0)
     }
+
+    /// IDRs that found no session to decode in failed to build, which has its
+    /// own back-off; they are not this Mac failing to decode the stream.
+    func testIdrsThatNeverReachedASessionDoNotCount() {
+        var recovery = SessionRecovery()
+        for _ in 0..<5 {
+            XCTAssertTrue(recovery.admit(isIdr: true))
+            recovery.keyframeNotTried()
+        }
+        XCTAssertEqual(recovery.failedKeyframes, 0)
+        _ = recovery.admit(isIdr: true)
+        _ = recovery.sessionDropped(beforeIdr: false)
+        XCTAssertEqual(recovery.keyframeWait(0.5), 0, "the first real failure is asked about at once")
+    }
 }
