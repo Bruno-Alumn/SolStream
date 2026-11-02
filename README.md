@@ -32,6 +32,7 @@ screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
 | | |
 | --- | --- |
 | **Window per app** | Stream several apps at once, each in its own Mac window. |
+| **In the Dock** | Add a Windows app to the Dock, and find it in Spotlight and Launchpad. |
 | **Dedicated display** | Apps run on a virtual display sized to your Mac, leaving the PC's monitor untouched. |
 | **Low latency** | Hardware H.264 encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
 | **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. |
@@ -92,6 +93,12 @@ sound quality, video quality and mouse mode.
   release it automatically.
 - **Title bar → Hide** removes the app's own title bar for apps that draw one,
   such as Chrome, Discord and File Explorer.
+- **Add to Dock**: right-click an app in the list, or choose
+  **Add … to Dock** from the Host menu while it's open. Clicking it in the Dock, Spotlight or
+  Launchpad connects to the PC and opens it. The launchers are kept in
+  `~/Applications/SolStream Apps`.
+- SolStream reopens the app you were streaming when you quit. Turn this off
+  in Settings.
 
 Other settings are in **SolStream › Settings**.
 

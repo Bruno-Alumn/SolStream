@@ -89,6 +89,7 @@ final class SettingsWindowTests: XCTestCase {
         settings.gamingSensitivity = 2
         settings.followsHostCursor = false
         settings.syncsClipboard = false
+        settings.reopensLastApp = false
 
         let pane = SettingsPane(updater: makeUpdater())
         XCTAssertEqual(pane.qualityPopUp.titleOfSelectedItem, "High")
@@ -124,6 +125,7 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertFalse(pane.followsCursorSwitch.isOn)
         XCTAssertTrue(pane.followsCursorSwitch.isEnabled)
         XCTAssertFalse(pane.clipboardSwitch.isOn)
+        XCTAssertFalse(pane.reopenSwitch.isOn)
     }
 
     /// Rows that mean nothing in the current state say so by being disabled:
@@ -293,6 +295,10 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertTrue(pane.clipboardSwitch.accessibilityPerformPress())
         XCTAssertFalse(settings.syncsClipboard)
         expect(restart: false, "clipboard")
+
+        XCTAssertTrue(pane.reopenSwitch.accessibilityPerformPress())
+        XCTAssertFalse(settings.reopensLastApp)
+        expect(restart: false, "reopening the last app")
     }
 
     func testADisabledSwitchCannotBePressed() {
@@ -753,7 +759,8 @@ final class SettingsWindowTests: XCTestCase {
             pane.soundQualityPopUp, pane.soundQualityDetail,
             pane.muteButton, pane.volumeSlider, pane.volumeValue, pane.bufferingPopUp,
             pane.bufferingDetail, pane.modeControl, pane.modeDetail, pane.sensitivitySlider,
-            pane.sensitivityValue, pane.followsCursorSwitch, pane.clipboardSwitch, pane.footnote,
+            pane.sensitivityValue, pane.followsCursorSwitch, pane.clipboardSwitch, pane.reopenSwitch,
+            pane.footnote,
             pane.versionLabel, pane.updateStatus, pane.automaticUpdatesSwitch,
             pane.installButton.isHidden ? pane.checkButton : pane.installButton,
         ]

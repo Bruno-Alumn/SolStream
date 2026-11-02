@@ -189,6 +189,7 @@ final class SettingsPane: NSView {
     let followsCursorSwitch = SolarSwitch(label: "Give the mouse back when the game shows its cursor")
     // General
     let clipboardSwitch = SolarSwitch(label: "Sync the clipboard")
+    let reopenSwitch = SolarSwitch(label: "Reopen the last app")
     // Updates
     let updater: Updater
     let versionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
@@ -287,6 +288,7 @@ final class SettingsPane: NSView {
         Self.dim(gamingDependentLabels, !gaming)
 
         clipboardSwitch.isOn = settings.syncsClipboard
+        reopenSwitch.isOn = settings.reopensLastApp
         refreshUpdates()
     }
 
@@ -486,6 +488,12 @@ final class SettingsPane: NSView {
         write { settings.syncsClipboard = sender.isOn }
     }
 
+    @objc private func reopenToggled(_ sender: SolarSwitch) {
+        guard sender.isOn != settings.reopensLastApp else { return }
+        Log.info("[settings] reopen the last app: \(sender.isOn ? "on" : "off")")
+        write { settings.reopensLastApp = sender.isOn }
+    }
+
     @objc private func checkForUpdatesPressed(_ sender: Any?) {
         updater.checkNow()
     }
@@ -640,13 +648,12 @@ final class SettingsPane: NSView {
 
         let sensitivityRow = row("Gaming sensitivity", trailing: sensitivityValue, below: [
             sensitivitySlider,
-            Self.caption("How far the PC's pointer moves for yours while the mouse is captured."),
+            Self.caption("How far the PC's pointer moves for yours."),
         ])
         let followsRow = row("Give the mouse back when the game shows its cursor",
                              trailing: followsCursorSwitch, below: [
-            Self.caption("A pause menu or an inventory gets your pointer back without ⌃⌥, once "
-                         + "SolStream on the PC is up to date. Turn it off if a game keeps a "
-                         + "pointer on screen while you play."),
+            Self.caption("Menus and inventories give your pointer back without ⌃⌥. Turn it "
+                         + "off if a game shows a pointer while you play."),
         ])
         gamingDependentLabels = sensitivityRow.labels + followsRow.labels
             + [Words(label: sensitivityValue, colour: DS.textSecondary)]
@@ -659,11 +666,15 @@ final class SettingsPane: NSView {
         // ── General ──────────────────────────────────────────────────────────
         clipboardSwitch.target = self
         clipboardSwitch.action = #selector(clipboardToggled(_:))
+        reopenSwitch.target = self
+        reopenSwitch.action = #selector(reopenToggled(_:))
         let general = section("General", rows: [
             row("Sync the clipboard", trailing: clipboardSwitch, below: [
-                Self.caption("Copy on one, paste on the other while a stream is open. "
-                             + "Anything a password manager marks private stays on the Mac."),
+                Self.caption("Copy on one, paste on the other while streaming. "
+                             + "Password manager copies stay on the Mac."),
             ]),
+            // No caption: the name says it, and this is the taller column.
+            row("Reopen the last app", trailing: reopenSwitch),
         ])
 
         // ── Updates ──────────────────────────────────────────────────────────

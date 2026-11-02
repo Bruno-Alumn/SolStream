@@ -37,6 +37,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// picture's own troubles must not paint over it. See `notice(for:)`.
     private var connectionLostShown = false
 
+    /// An application asked for from outside the picker -- by a launcher,
+    /// or as the one reopened at launch -- waiting for the picker's lists to
+    /// be found in. See `open(link:)`.
+    private var pendingOpen: AppLink?
+    /// Handed over before launching had finished, and opened once it has.
+    private var queuedLink: AppLink?
+    private var didFinishLaunching = false
+    /// Which PC the picker is showing, what it can launch, and how to have
+    /// it list them again.
+    private var pickerHost: String?
+    private var pickerApps: [RemoteApp] = []
+    private var refillPicker: (() -> Void)?
+    /// What is being opened, then what the stream on screen is: kept at quit
+    /// for next time, and what Add to Dock adds.
+    private var openingLink: AppLink?
+    private var streamLink: AppLink?
+    /// Started with `--host`: a test, or someone at a terminal. Nothing they
+    /// open is kept for next time.
+    private var commandLineSession = false
+
     private var settingsWindow: SettingsWindow?
     private var settingsObservers: [NSObjectProtocol] = []
     /// A settings change waiting out its debounce; see `scheduleMediaRestart`.
@@ -177,6 +197,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.displayQuery = value(after: "--display")
         self.baseConfig = config
 
+        commandLineSession = host != nil
+        didFinishLaunching = true
+        let queued = queuedLink
+        queuedLink = nil
+        // False when the system started SolStream to hand it a file: a
+        // launcher's link, which is on its way if it is not here already.
+        let defaultLaunch = notification.userInfo?["NSApplicationLaunchIsDefaultLaunchKey"]
+            as? Bool ?? true
+
         if let host, let launchQuery = value(after: "--launch") {
             // Starts an installed application by name, skipping the picker.
             startLaunching(host: host, agentHost: agentHost ?? host, matching: launchQuery)
@@ -184,6 +213,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startSingleApp(host: host, agentHost: agentHost ?? host, matching: appWindowQuery)
         } else if let host {
             showPicker(host: host)
+        } else if let queued {
+            open(link: queued)
+        } else if !defaultLaunch {
+            // Whatever it was is not a link this version can open, or it
+            // never came: the connect window, rather than nothing at all.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.picker == nil, self.appWindows.isEmpty else { return }
+                self.showConnectWindow()
+            }
+        } else if StreamSettings.shared.reopensLastApp, !testMode, let last = AppLink.last() {
+            Log.info("[app] reopening \"\(last.name)\" on \(last.host), as it was at quit")
+            open(link: last)
         } else {
             showConnectWindow()
         }
@@ -233,6 +274,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // What is on screen now is what opens next time; nothing on screen,
+        // nothing does.
+        if !commandLineSession, !testMode {
+            AppLink.setLast(appWindows.isEmpty ? nil : streamLink)
+        }
         // Synchronous: the process is about to exit and the host needs to see
         // us go, or it stays busy for every other client.
         session?.stop()
@@ -258,7 +304,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// A launcher's link, handed over by the system: from a launcher in the
+    /// Dock, Spotlight or Launchpad (`AppLauncher`), or anything dropped on
+    /// SolStream's icon, which is ignored unless it is one.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !testMode else { return }
+        // One application at a time, so the last one asked for.
+        guard let link = urls.compactMap(Self.link(at:)).last else {
+            Log.error("[app] asked to open \(urls.map(\.lastPathComponent)), which is not a "
+                      + "SolStream link")
+            return
+        }
+        if didFinishLaunching {
+            open(link: link)
+        } else {
+            queuedLink = link
+        }
+    }
+
+    /// The link in a file, if it is one. Small, or it is not ours.
+    static func link(at url: URL) -> AppLink? {
+        guard url.isFileURL, url.pathExtension == AppLink.fileExtension,
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size < 64 * 1024,
+              let data = try? Data(contentsOf: url) else { return nil }
+        return AppLink.decode(data)
+    }
+
     // MARK: - Flow
+
+    /// Open `link`'s application as though it had been picked, from whatever
+    /// SolStream is showing.
+    ///
+    /// Through the picker, always: it is where a pairing token is asked for
+    /// and where a PC that is asleep, or an app that is gone, is said -- so a
+    /// launcher clicked with the PC off shows why, and the list to pick from
+    /// instead. The picker finds the application in its lists when they come
+    /// (`openPending`) and opens it as a click on its row would.
+    private func open(link: AppLink) {
+        NSApp.activate(ignoringOtherApps: true)
+        if let streamLink, streamLink.sameApp(as: link), let window = appWindows.first?.window {
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        Log.info("[app] asked to open \"\(link.name)\" on \(link.host)")
+        pendingOpen = link
+        if !appWindows.isEmpty, AppLink.sameHost(streamHost, link.host) {
+            // One application at a time, as Switch App: the stream closes and
+            // the picker comes back over the same connection, and opens this.
+            switchApp()
+            return
+        }
+        if let picker, agent != nil, AppLink.sameHost(pickerHost, link.host) {
+            picker.show()
+            refillPicker?()
+            return
+        }
+        leaveHost()
+        showPicker(host: link.host)
+    }
+
+    /// The application `pendingOpen` asks for, now that the picker has lists
+    /// to find it in.
+    private func openPending(windows: [RemoteWindow], apps: [RemoteApp], host: String,
+                             agent: AgentConnection) {
+        guard let link = pendingOpen, AppLink.sameHost(link.host, host), let picker else { return }
+        // Nothing at all is a PC that has not answered yet, not one without
+        // the application: every PC has a Start Menu.
+        guard !(windows.isEmpty && apps.isEmpty) else { return }
+        pendingOpen = nil
+        guard !picker.isOpening else {
+            Log.info("[app] not opening \"\(link.name)\": something else is opening already")
+            return
+        }
+        guard let choice = link.choice(windows: windows, apps: apps) else {
+            Log.error("[app] \"\(link.name)\" is not on \(host) any more")
+            picker.showFailure("\(link.name) isn't on \(host) any more. Choose another app.")
+            return
+        }
+        picker.highlight(choice)
+        open(choice: choice, host: host, agent: agent)
+    }
+
+    /// Make `link`'s launcher, with its icon from the PC, and put it in the
+    /// Dock -- or, where the Dock cannot be changed, show it in Finder to be
+    /// dragged there.
+    private func addToDock(_ link: AppLink, agent: AgentConnection, over parent: NSWindow?) {
+        guard let path = link.path else {
+            Self.inform("SolStream can't tell which app this window belongs to",
+                        "Add the app itself to the Dock: right-click it under Installed apps.",
+                        over: parent)
+            return
+        }
+        // This SolStream, so a development build makes launchers for itself;
+        // a bare binary has no bundle and stands in for the released one.
+        let opener = Bundle.main.bundleIdentifier ?? "com.solstream.macclient"
+        agent.icon(path: path, size: 256) { image in
+            DispatchQueue.main.async {
+                do {
+                    let launcher = try AppLauncher.make(link, icon: image, opener: opener)
+                    if !AppLauncher.addToDock(launcher) {
+                        NSWorkspace.shared.activateFileViewerSelecting([launcher])
+                    }
+                } catch {
+                    Log.error("[launcher] could not make one for \"\(link.name)\": \(error)")
+                    Self.inform("Couldn't add \(link.name) to the Dock",
+                                error.localizedDescription, over: parent)
+                }
+            }
+        }
+    }
+
+    private static func inform(_ message: String, _ detail: String, over parent: NSWindow?) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = detail
+        if let parent {
+            alert.beginSheetModal(for: parent)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    @objc private func addStreamToDock() {
+        guard let streamLink, let agent else { return }
+        addToDock(streamLink, agent: agent,
+                  over: appWindows.first { $0.window?.isKeyWindow == true }?.window)
+    }
 
     private func showConnectWindow() {
         // One at a time. Replacing one that was still open dropped its
@@ -295,7 +468,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.open(choice: choice, host: host, agent: agent)
         }, onCancel: { [weak self] in
             guard let self else { return }
-            self.picker = nil
+            self.forgetPicker()
             self.agent = nil
             agent.disconnect()
             if self.appWindows.isEmpty && !self.testMode {
@@ -303,7 +476,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         })
         picker.agent = agent
+        picker.onAddToDock = { [weak self, weak agent, weak picker] choice in
+            guard let self, let agent else { return }
+            self.addToDock(AppLink.of(choice, host: host, apps: self.pickerApps), agent: agent,
+                           over: picker?.window)
+        }
         self.picker = picker
+        pickerHost = host
         picker.show()
 
         // [weak agent] throughout: `agent` stores these closures, so a strong
@@ -340,9 +519,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             agent.windows { windows in
                 let present: ([RemoteApp]) -> Void = { apps in
                     DispatchQueue.main.async {
-                        guard self != nil else { return }
+                        guard let self else { return }
                         cachedApps = apps
                         picker?.present(windows: windows, apps: apps)
+                        self.pickerApps = apps
+                        self.openPending(windows: windows, apps: apps, host: host, agent: agent)
                     }
                 }
                 if let reuse { present(reuse) } else { agent.apps(completion: present) }
@@ -350,6 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agent.onDisplays = { _ in fill(true) }
         agent.onWindowsChanged = { fill(false) }
+        refillPicker = { fill(false) }
         if existing == nil {
             agent.connect()
         } else if agent.isConnected {
@@ -426,6 +608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func open(choice: AppPicker.Choice, host: String, agent: AgentConnection) {
+        openingLink = AppLink.of(choice, host: host, apps: pickerApps)
         switch choice {
         case .running(let window):
             attach(window, host: host, agent: agent)
@@ -818,7 +1001,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the picker has done its job. It was kept open all the way through the
         // negotiation so that a refusal had somewhere to be said; see `attach`.
         picker?.close()
-        picker = nil
+        forgetPicker()
+        // A launcher's request still waiting was for an open this one beat.
+        pendingOpen = nil
+        streamLink = openingLink
+        openingLink = nil
         // The picker's refresh goes with it. Left installed, every window the
         // host opened or closed during the stream — and every reconnect's
         // greeting — re-enumerated windows and the Start Menu for a picker
@@ -1506,6 +1693,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                       action: #selector(switchApp), keyEquivalent: "o"))
         Self.reserve(hostMenu.addItem(withTitle: "Disconnect",
                                       action: #selector(disconnectHost), keyEquivalent: "d"))
+        hostMenu.addItem(withTitle: "Add App to Dock", action: #selector(addStreamToDock),
+                         keyEquivalent: "")
         hostMenu.addItem(.separator())
         hostMenu.addItem(withTitle: "Forget Paired PCs…",
                          action: #selector(forgetHosts), keyEquivalent: "")
@@ -1540,6 +1729,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func disconnectHost() {
+        leaveHost()
+        showConnectWindow()
+    }
+
+    /// Off this PC, from whatever was showing, with nothing put up instead.
+    private func leaveHost() {
         // Detach the close callbacks first. A window's onClose is delivered on the
         // NEXT main-loop turn — deliberately, so it cannot deallocate the window
         // inside its own delegate method — and it routes back to the picker. Left
@@ -1556,8 +1751,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent?.disconnect()
         agent = nil
         picker?.close()
+        forgetPicker()
+        if let connectWindow, connectWindow.isOpen { connectWindow.close() }
+    }
+
+    private func forgetPicker() {
         picker = nil
-        showConnectWindow()
+        pickerHost = nil
+        pickerApps = []
+        refillPicker = nil
     }
 
     /// Stop the stream and its clipboard sync, and forget what it was opened
@@ -1567,6 +1769,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session?.stop()
         session = nil
         mediaRequest = nil
+        streamLink = nil
         streamConfig = nil
         streamDisplay = nil
         streamHost = nil
@@ -1654,7 +1857,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        Self.hostMenuAllows(menuItem.action,
+        if menuItem.action == #selector(addStreamToDock) {
+            // Named, so it says what it will add.
+            menuItem.title = streamLink.map { "Add \($0.name) to Dock" } ?? "Add App to Dock"
+            return !appWindows.isEmpty && streamLink?.path != nil
+        }
+        return Self.hostMenuAllows(menuItem.action,
                             connected: agent != nil || picker != nil || session != nil,
                             streaming: !appWindows.isEmpty)
     }

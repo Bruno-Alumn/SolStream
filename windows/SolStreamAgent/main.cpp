@@ -42,6 +42,7 @@
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <shellscalingapi.h>
+#include <commoncontrols.h>
 
 #include <algorithm>
 #include <cstdarg>
@@ -1372,10 +1373,35 @@ HICON WindowIcon(HWND window) {
 }
 
 constexpr int kIconSize = 64;
+/// For a launcher in the Mac's Dock, which draws icons up to 256 points.
+constexpr int kLargeIconSize = 256;
 
-std::string IconJson(const std::string& id, HICON icon, bool destroy) {
+/// The shell's 256-pixel icon for a file -- a shortcut's target's, as
+/// Explorer shows it at its largest. An application with nothing that big
+/// comes back drawn small in the corner of the 256 square, which the Mac
+/// trims. Null when the shell has no such icon.
+HICON LargeFileIcon(const std::wstring& path) {
+    // COM for the image list, scoped to this call as in Launch: the client
+    // thread's apartment belongs to the media path's WinRT calls.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    HICON icon = nullptr;
+    SHFILEINFOW info{};
+    if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_SYSICONINDEX)) {
+        IImageList* list = nullptr;
+        if (SUCCEEDED(SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(&list))) && list) {
+            list->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon);
+            list->Release();
+        }
+    }
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
+    return icon;
+}
+
+std::string IconJson(const std::string& id, HICON icon, bool destroy, int size = kIconSize) {
     std::vector<unsigned char> bgra;
-    const bool ok = icon && IconToBgra(icon, kIconSize, bgra);
+    const bool ok = icon && IconToBgra(icon, size, bgra);
     if (destroy && icon) {
         DestroyIcon(icon);
     }
@@ -1383,7 +1409,7 @@ std::string IconJson(const std::string& id, HICON icon, bool destroy) {
         return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(id) + "\"}";
     }
     return "{\"type\":\"icon\",\"ok\":true,\"id\":\"" + JsonEscape(id) + "\",\"w\":"
-         + std::to_string(kIconSize) + ",\"h\":" + std::to_string(kIconSize)
+         + std::to_string(size) + ",\"h\":" + std::to_string(size)
          + ",\"bgra\":\"" + Base64Encode(bgra) + "\"}";
 }
 
@@ -4254,6 +4280,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         const std::wstring wide = ToWide(path);
         if (!IsAdvertisedApp(wide)) {
             return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
+        }
+        // "size" asks for more than the picker's 64: 256 for a launcher in
+        // the Mac's Dock. Anything else gets 64, as before it could be asked.
+        long long wanted = 0;
+        if (FieldNumber(line, "size", wanted) && wanted >= kLargeIconSize) {
+            if (HICON jumbo = LargeFileIcon(wide)) {
+                return IconJson(path, jumbo, true, kLargeIconSize);
+            }
         }
         HICON large = nullptr;
         // ExtractIconEx resolves a .lnk to its target on its own.

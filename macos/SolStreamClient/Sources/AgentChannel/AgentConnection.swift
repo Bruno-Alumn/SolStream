@@ -1446,11 +1446,16 @@ public final class AgentConnection {
     /// Fetched one at a time and on demand, so a picker listing hundreds of
     /// applications does not extract hundreds of icons before it can draw. The
     /// host sends raw BGRA rather than PNG, so neither end needs an image codec.
-    public func icon(windowID: UInt64? = nil, path: String? = nil,
+    ///
+    /// - Parameter size: pixels square wanted, for an application's icon. A
+    ///   host sends 64 unless asked for more and able: 256 for a launcher's
+    ///   icon in the Dock. Older hosts ignore it and send 64.
+    public func icon(windowID: UInt64? = nil, path: String? = nil, size: Int? = nil,
                      completion: @escaping (CGImage?) -> Void) {
         var request: [String: Any] = ["cmd": "icon"]
         if let windowID { request["id"] = windowID }
         if let path { request["path"] = path }
+        if let size { request["size"] = size }
         send(request) { result in
             guard case .success(let message) = result,
                   message["ok"] as? Bool == true,
@@ -1459,8 +1464,8 @@ public final class AgentConnection {
                   // overflow, and both of these come off the wire: a host
                   // answering with w = h = 2^32 does not produce a wrong icon,
                   // it kills the whole client on the spot. The agent extracts
-                  // icons at 64 pixels square, so anything past a few hundred
-                  // is not an icon whatever else it is.
+                  // icons at 64 or 256 pixels square, so anything past a few
+                  // hundred is not an icon whatever else it is.
                   width > 0, height > 0, width <= 1024, height <= 1024,
                   let base64 = message["bgra"] as? String,
                   let bytes = Data(base64Encoded: base64),

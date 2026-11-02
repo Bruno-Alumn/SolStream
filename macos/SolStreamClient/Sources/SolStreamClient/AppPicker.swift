@@ -57,6 +57,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private var requestedIcons: Set<String> = []
     /// Set by the owner so rows can ask the host for their icon.
     weak var agent: AgentConnection?
+    /// "Add to Dock" on a row's menu. Nil leaves the menu off.
+    var onAddToDock: ((Choice) -> Void)?
 
     private let onChoose: (Choice) -> Void
     private let onCancel: () -> Void
@@ -141,6 +143,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.selectionHighlightStyle = .regular
         tableView.intercellSpacing = NSSize(width: 0, height: 2)
         tableView.gridStyleMask = []
+        // Rebuilt for whichever row was right-clicked; see `menuNeedsUpdate`.
+        let rowMenu = NSMenu()
+        rowMenu.delegate = self
+        tableView.menu = rowMenu
 
         scrollView.documentView = tableView
         // Hover follows the pointer, not just its crossings: rows scrolled
@@ -267,12 +273,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             Row(title: $0.title,
                 subtitle: "Open window",
                 note: $0.hidesCaptionWhenCropped ? nil : "own window buttons",
-                key: "\($0.className)/\($0.id)",
+                key: Self.key(of: .running($0)),
                 isRunning: true,
                 choice: .running($0))
         }
         built += apps.map {
-            Row(title: $0.name, subtitle: "Installed app", key: $0.path,
+            Row(title: $0.name, subtitle: "Installed app", key: Self.key(of: .launch($0)),
                 isRunning: false, choice: .launch($0))
         }
 
@@ -287,6 +293,27 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             tableView.scrollRowToVisible(again)
         }
     }
+
+    /// Select the row `choice` opens, so an open asked for from outside --
+    /// a launcher, or the app reopened at launch -- shows its progress on
+    /// the row as one clicked here would.
+    func highlight(_ choice: Choice) {
+        let key = Self.key(of: choice)
+        if let index = rows.firstIndex(where: { $0.key == key }) {
+            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            tableView.scrollRowToVisible(index)
+        }
+    }
+
+    static func key(of choice: Choice) -> String {
+        switch choice {
+        case .running(let window): return "\(window.className)/\(window.id)"
+        case .launch(let app): return app.path
+        }
+    }
+
+    /// An open under way from this picker, which owns the list until it ends.
+    var isOpening: Bool { isBusy }
 
     func showFailure(_ message: String) {
         setSpinning(false)
@@ -726,6 +753,25 @@ private final class PickerCell: NSTableCellView {
         subtitleLabel.stringValue = (selected ? note : nil).map { "\(subtitle) · \($0)" } ?? subtitle
         actionLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
         actionLabel.stringValue = selected ? "\(action)  ↩" : (hovered ? action : "")
+    }
+}
+
+extension AppPicker: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard onAddToDock != nil, row >= 0, row < rows.count else { return }
+        let item = NSMenuItem(title: "Add to Dock", action: #selector(addToDockChosen(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = rows[row].key
+        menu.addItem(item)
+    }
+
+    @objc private func addToDockChosen(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let row = allRows.first(where: { $0.key == key }) else { return }
+        onAddToDock?(row.choice)
     }
 }
 

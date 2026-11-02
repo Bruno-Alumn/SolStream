@@ -349,6 +349,13 @@ final class StreamSettings {
         set { set(newValue, Key.clipboard, restarts: false) }
     }
 
+    /// Open the application that was on screen when SolStream last quit, the
+    /// next time it opens. On, as macOS reopens other applications' windows.
+    var reopensLastApp: Bool {
+        get { defaults.object(forKey: Key.reopensLastApp) as? Bool ?? true }
+        set { set(newValue, Key.reopensLastApp, restarts: false) }
+    }
+
     // MARK: - Applying
 
     /// Whether `host` is reached over Tailscale -- an address in
@@ -401,6 +408,7 @@ final class StreamSettings {
         static let soundQuality = "SolStream.soundQuality"
         static let soundSource = "SolStream.soundSource"
         static let clipboard = "SolStream.syncsClipboard"
+        static let reopensLastApp = "SolStream.reopensLastApp"
         static let hiddenTitleBars = "SolStream.hiddenTitleBars"
     }
 

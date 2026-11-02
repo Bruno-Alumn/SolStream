@@ -202,7 +202,7 @@ everything after the proof is encrypted (see Pairing).
 | `{"cmd":"displays"}` | `{"type":"displays","displays":[{"name","adapter","x","y","w","h","primary","captured"}]}` |
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","exStyle","captionInset","naturalW","naturalH","occluded","occludedBy"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
-| `{"cmd":"icon","id":N}` or `{"cmd":"icon","path":"…"}` | `{"type":"icon","ok":true,"id","w","h","bgra"}`, base64, 64x64 |
+| `{"cmd":"icon","id":N}` or `{"cmd":"icon","path":"…"}`, optionally `"size":256` with a path | `{"type":"icon","ok":true,"id","w","h","bgra"}`, base64, 64x64, or 256x256 when asked and the shell has one |
 | `{"cmd":"clipboard"}` or `{"cmd":"clipboard","seq":N}` | `{"type":"clipboard","ok":true,"seq","truncated","text"}`, or `"unchanged":true` when `seq` is still current |
 | `{"cmd":"clipboard","text":"…"}` | `{"type":"clipboard","ok":true,"seq"}` |
 | `{"cmd":"media","op":"open","cpub":"…","cnonce":"…","display":"\\\\.\\DISPLAY5"}` | `{"type":"media","ok":true,"ver":1,"hpub","hnonce","hcount","hauth","streaming","hport"}` |
