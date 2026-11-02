@@ -2558,8 +2558,12 @@ void NotifyWindowsChangedIfSettled() {
 /// finished download -- so its Mac window asks for attention too. From the
 /// host window's shell hook.
 void StreamedWindowFlashed(HWND window) {
+    // A dialog of the app's may be what flashes; its owner is what streams.
     if (!HeldWindow(window, nullptr)) {
-        return;
+        window = GetAncestor(window, GA_ROOTOWNER);
+        if (!window || !HeldWindow(window, nullptr)) {
+            return;
+        }
     }
     {
         std::lock_guard<std::mutex> lock(g_attention_cs);
@@ -2587,6 +2591,10 @@ void NotifyStreamedWindows() {
         std::lock_guard<std::mutex> lock(g_attention_cs);
         flashed.swap(g_attention_pending);
     }
+    // A throttle entry outlives its use by a few seconds at most.
+    for (auto it = flashed_at.begin(); it != flashed_at.end();) {
+        it = now - it->second >= 3000 ? flashed_at.erase(it) : std::next(it);
+    }
     for (HWND window : flashed) {
         ULONGLONG& last = flashed_at[window];
         if (last != 0 && now - last < 3000) {
@@ -2600,10 +2608,10 @@ void NotifyStreamedWindows() {
         return;
     }
     if (now - titles_at < 1000) {
-        // Still dirty: the next tick, a moment later, picks it up.
-        if (g_watcher_wake) {
-            SetEvent(g_watcher_wake);
-        }
+        // Still dirty: a later pass picks it up. Not woken for it: the event
+        // resets itself, so waking here returned the wait at once, over and
+        // over, a whole core for a second after every push. While a window is
+        // held the watcher looks every kWatchActiveMs anyway.
         return;
     }
     g_streamed_titles_dirty.store(false);
@@ -2625,20 +2633,24 @@ void NotifyStreamedWindows() {
         const int copied = InternalGetWindowText(windows[i], title, 1024);
         const std::string text =
             ToUtf8(std::wstring(title, static_cast<size_t>(std::max(copied, 0))));
-        current[windows[i]] = text;
         auto known = pushed_titles.find(windows[i]);
         // An empty title says nothing worth showing; the Mac keeps its own.
         if (text.empty() || (known != pushed_titles.end() && known->second == text)) {
+            if (known != pushed_titles.end()) {
+                current[windows[i]] = known->second;
+            }
             continue;
         }
-        PushLine("{\"type\":\"title\",\"id\":" + std::to_string(IdFromWindow(windows[i]))
-                 + ",\"title\":\"" + JsonEscape(text) + "\"}");
+        // Remembered only once it went: unsent, the next rename pushes again.
+        if (PushLine("{\"type\":\"title\",\"id\":" + std::to_string(IdFromWindow(windows[i]))
+                     + ",\"title\":\"" + JsonEscape(text) + "\"}")) {
+            current[windows[i]] = text;
+        } else if (known != pushed_titles.end()) {
+            current[windows[i]] = known->second;
+        }
     }
-    // Forget windows no longer streamed, so the maps never grow.
+    // Forget windows no longer streamed, so the map never grows.
     pushed_titles.swap(current);
-    for (auto it = flashed_at.begin(); it != flashed_at.end();) {
-        it = pushed_titles.count(it->first) ? std::next(it) : flashed_at.erase(it);
-    }
 }
 
 /// Windows already carried back to a real monitor. Kept so that someone who
