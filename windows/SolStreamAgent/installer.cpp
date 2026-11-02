@@ -39,11 +39,14 @@ constexpr wchar_t kInvokingUserSwitch[] = L"--invoking-user";
 constexpr wchar_t kResultTokenSwitch[] = L"--result-token";
 
 /// Who may do what in C:\ProgramData\SolStream. SYSTEM and Administrators own the
-/// place; ordinary users get read, write and delete, which is all a transient
-/// result file and a log are worth. Why it has to be written out rather than
-/// inherited is in SharedDirectory.
+/// place; ordinary users get read, write and delete on the files in it, which
+/// is all a transient result file and a log are worth -- and on the folder
+/// itself only read and add, not delete. Deletable, a standard user could
+/// remove it between the elevated half's check and its next write, and put a
+/// link where it was. Why it has to be written out rather than inherited is in
+/// SharedDirectory.
 constexpr wchar_t kSharedDacl[] =
-    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFWSD;;;BU)";
+    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FRFW;;;BU)(A;OICIIO;FRFWSD;;;BU)";
 
 /// The value following `name` on THIS process's own command line, or empty.
 ///
@@ -332,8 +335,11 @@ bool SecureExistingShared(const std::wstring& directory) {
 /// SecureExistingShared is the answer, and it runs on every path that did not
 /// just create the folder outright.
 std::wstring SharedDirectory() {
+    // From the shell, not %ProgramData%: the elevated half takes the
+    // environment of the user who started it, and they can set it.
     wchar_t root[MAX_PATH] = {0};
-    if (GetEnvironmentVariableW(L"ProgramData", root, MAX_PATH) == 0) {
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
+                                root))) {
         wcscpy_s(root, MAX_PATH, L"C:\\ProgramData");
     }
     const std::wstring directory = std::wstring(root) + L"\\SolStream";
@@ -1373,11 +1379,45 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool ma
 
 bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     InstallLog("stepping out to a temporary copy to uninstall from");
-    const std::wstring copy = TempDirectory() + L"SolStreamUninstall.exe";
-    // Best effort: a copy left behind by an earlier attempt is still running or
-    // still locked often enough that overwriting has to be allowed to fail
-    // without taking the uninstall with it.
-    DeleteFileW(copy.c_str());
+    // Elevated, into a fresh folder only SYSTEM and Administrators can write
+    // to. A fixed name in %TEMP% -- C:\\Windows\\Temp when a management tool
+    // uninstalls as SYSTEM -- was a file any user could make first, keep
+    // writable, and replace between the copy and the start: their program,
+    // run with the uninstall's rights.
+    std::wstring folder;
+    if (IsElevated()) {
+        const std::string name = RandomHex(8);
+        const std::wstring data = SystemFolder(CSIDL_COMMON_APPDATA);
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (!name.empty() && !data.empty()
+            && ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                   L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)", SDDL_REVISION_1,
+                   &descriptor, nullptr)) {
+            SECURITY_ATTRIBUTES attributes{};
+            attributes.nLength = sizeof(attributes);
+            attributes.lpSecurityDescriptor = descriptor;
+            const std::wstring candidate = data + L"\\SolStream-uninstall-" + ToWide(name);
+            // Fails if the name is taken, rather than using somebody else's.
+            if (CreateDirectoryW(candidate.c_str(), &attributes)) {
+                folder = candidate + L"\\";
+            }
+            LocalFree(descriptor);
+        }
+        if (folder.empty()) {
+            error = "Could not make a private folder to uninstall from.";
+            InstallLog(error);
+            return false;
+        }
+    } else {
+        folder = TempDirectory();
+    }
+    const std::wstring copy = folder + L"SolStreamUninstall.exe";
+    if (!IsElevated()) {
+        // Best effort: a copy left behind by an earlier attempt is still running
+        // or still locked often enough that overwriting has to be allowed to
+        // fail without taking the uninstall with it.
+        DeleteFileW(copy.c_str());
+    }
     if (!CopyFileW(ExePath().c_str(), copy.c_str(), FALSE)) {
         const DWORD code = GetLastError();
         error = "Could not make a temporary copy to uninstall from.";
@@ -1412,20 +1452,27 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     if (execute.hProcess) {
         CloseHandle(execute.hProcess);
     }
+    if (IsElevated()) {
+        // Gone at the next restart: it cannot delete itself while it runs.
+        MoveFileExW(copy.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        MoveFileExW(folder.substr(0, folder.size() - 1).c_str(), nullptr,
+                    MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
     InstallLog("temporary copy started");
     return true;
 }
 
 std::wstring InstallDirectory() {
-    // The environment variable rather than SHGetKnownFolderPath: the KNOWNFOLDERID
-    // GUIDs live in a separate import library that the mingw cross-build does not
-    // link, and this is the same answer on a 64-bit process either way.
-    wchar_t root[MAX_PATH] = {0};
-    if (GetEnvironmentVariableW(L"ProgramW6432", root, MAX_PATH) == 0
-        && GetEnvironmentVariableW(L"ProgramFiles", root, MAX_PATH) == 0) {
-        wcscpy_s(root, MAX_PATH, L"C:\\Program Files");
+    // CSIDL rather than KNOWNFOLDERID (see SystemFolder), and never the
+    // environment: an elevated install takes the environment of the user who
+    // started it, so a %ProgramW6432% they set would have the signed installer
+    // copy SolStream -- and point its uninstall entry, firewall rules and logon
+    // task -- into a folder they can write to.
+    std::wstring root = SystemFolder(CSIDL_PROGRAM_FILES);
+    if (root.empty()) {
+        root = L"C:\\Program Files";
     }
-    return std::wstring(root) + L"\\SolStream";
+    return root + L"\\SolStream";
 }
 
 std::wstring InstalledExe(const std::wstring& directory) {

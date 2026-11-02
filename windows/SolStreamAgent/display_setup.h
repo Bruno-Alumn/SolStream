@@ -70,6 +70,12 @@ constexpr wchar_t kVddSettingsBackupSuffix[] = L".solstream-backup";
 /// writes and deletes under C:\ refuse those: any user can make folders there.
 bool IsReparsePoint(const std::wstring& path);
 
+/// Whether a file or folder that exists is one an elevated process must not
+/// write through: a link, or one owned by anybody but Administrators or
+/// SYSTEM -- which a standard user can replace with a link once a check by
+/// path is done. False for a path that is not there yet.
+bool IsUnsafeForElevatedWrite(const std::wstring& path);
+
 /// The attached virtual display SolStream streams from, as \\.\DISPLAYn, or
 /// empty when there is none. The same choice ConfigureVirtualDisplay makes, so
 /// the display that was set up is the display that gets captured -- but only

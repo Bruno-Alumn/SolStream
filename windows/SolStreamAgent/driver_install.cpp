@@ -682,9 +682,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         // is kept: ConfigureVirtualDisplay below only adds to it. Never through
         // a junction or link: this runs elevated, and C:\ lets anybody make a
         // folder of that name first.
-        if (IsReparsePoint(settings_folder) || IsReparsePoint(settings)) {
-            note += "The display driver's settings folder is a link to somewhere else, so "
-                    "SolStream did not write to it.\n";
+        if (IsUnsafeForElevatedWrite(settings_folder) || IsUnsafeForElevatedWrite(settings)) {
+            note += "The display driver's settings folder is a link, or was made by "
+                    "another account, so SolStream did not write to it.\n";
         } else if (!Exists(settings)) {
             made_folder = !Exists(settings_folder) && MakeSettingsFolder(settings_folder);
             wrote_settings = CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(),
@@ -1059,8 +1059,8 @@ bool RemoveDriverSettingsFile(const std::wstring& path) {
         && name != L"vdd_settings.xml" + FoldCase(kVddSettingsBackupSuffix)) {
         return false;
     }
-    if ((slash != std::wstring::npos && IsReparsePoint(path.substr(0, slash)))
-        || IsReparsePoint(path)) {
+    if ((slash != std::wstring::npos && IsUnsafeForElevatedWrite(path.substr(0, slash)))
+        || IsUnsafeForElevatedWrite(path)) {
         return false;
     }
     DeleteFileW(path.c_str());

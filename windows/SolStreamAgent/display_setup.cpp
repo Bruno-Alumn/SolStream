@@ -1,6 +1,8 @@
 #include "display_setup.h"
 
 #include <windows.h>
+#include <aclapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -137,6 +139,35 @@ bool IsReparsePoint(const std::wstring& path) {
         && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
+bool IsUnsafeForElevatedWrite(const std::wstring& path) {
+    HANDLE handle = CreateFileW(path.c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                                nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        // Not there: it will be made by this process, and be its own.
+        return GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND;
+    }
+    bool unsafe = true;
+    BY_HANDLE_FILE_INFORMATION info{};
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetFileInformationByHandle(handle, &info)
+        && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+        && GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner,
+                           nullptr, nullptr, nullptr, &descriptor) == ERROR_SUCCESS
+        && owner) {
+        unsafe = !IsWellKnownSid(owner, WinBuiltinAdministratorsSid)
+              && !IsWellKnownSid(owner, WinLocalSystemSid);
+    }
+    if (descriptor) {
+        LocalFree(descriptor);
+    }
+    CloseHandle(handle);
+    return unsafe;
+}
+
 namespace {
 
 /// Where MikeTheTech's driver keeps its mode list: its own folder first (see
@@ -146,17 +177,20 @@ std::wstring FindVddSettings() {
         VddSettingsFolder() + L"\\vdd_settings.xml",
         L"C:\\IddSampleDriver\\vdd_settings.xml",
     };
+    // From the shell, not the environment: an elevated process started from
+    // a user's session takes their environment, which they can set.
     wchar_t root[MAX_PATH] = {0};
-    if (GetEnvironmentVariableW(L"ProgramW6432", root, MAX_PATH) != 0
-        || GetEnvironmentVariableW(L"ProgramFiles", root, MAX_PATH) != 0) {
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PROGRAM_FILES, nullptr, SHGFP_TYPE_CURRENT,
+                                   root))) {
         candidates.push_back(std::wstring(root) + L"\\VirtualDisplayDriver\\vdd_settings.xml");
     }
     for (const std::wstring& path : candidates) {
-        // Never one that is a link somewhere else: this file is rewritten with
-        // administrator rights, and C:\\ lets any user make folders.
+        // Never one that is a link somewhere else, nor one a user made: this
+        // file is rewritten with administrator rights, and C:\\ lets any user
+        // make folders -- and swap one for a link after a check by path.
         if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES
-            && !IsReparsePoint(path)
-            && !IsReparsePoint(path.substr(0, path.find_last_of(L'\\')))) {
+            && !IsUnsafeForElevatedWrite(path)
+            && !IsUnsafeForElevatedWrite(path.substr(0, path.find_last_of(L'\\')))) {
             return path;
         }
     }
