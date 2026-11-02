@@ -26,6 +26,7 @@
 
 #include <sddl.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <winioctl.h>
 #include <cfgmgr32.h>
 #include <setupapi.h>
@@ -34,11 +35,13 @@
 #include <cctype>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <cstring>
 
 #include "agent_crypto.h"
 #include "capture_display.h"
 #include "clipboard.h"
+#include "transfer.h"
 #include "driver_install.h"
 #include "foreground.h"
 #include "media/audio_reopen.h"
@@ -3482,6 +3485,65 @@ std::vector<unsigned char> SealGcm(const std::vector<unsigned char>& key,
     return out;
 }
 
+// ── Pictures and files in chunks ─────────────────────────────────────────────
+
+void TestTransferNames() {
+    using solstream::SafeFileName;
+    CHECK(SafeFileName(L"report.pdf") == L"report.pdf");
+    // A name, never a path, from either kind of slash.
+    CHECK(SafeFileName(L"..\\..\\Windows\\win.ini") == L"win.ini");
+    CHECK(SafeFileName(L"../../etc/passwd") == L"passwd");
+    CHECK(SafeFileName(L"a:b*c?.txt") == L"a_b_c_.txt");
+    CHECK(SafeFileName(L"..") == L"file");
+    CHECK(SafeFileName(L"notes. ") == L"notes");
+    CHECK(SafeFileName(L".hidden") == L"hidden");
+    CHECK(SafeFileName(L"CON.txt") == L"_CON.txt");
+    CHECK(SafeFileName(L"com1") == L"_com1");
+    CHECK(SafeFileName(L"console.txt") == L"console.txt");
+    const std::wstring longName = std::wstring(200, L'x') + L".docx";
+    const std::wstring cut = SafeFileName(longName);
+    CHECK(cut.size() == 120);
+    CHECK(cut.substr(cut.size() - 5) == L".docx");
+
+    std::set<std::wstring> taken = {L"C:\\D\\a.txt", L"C:\\D\\a (2).txt", L"C:\\D\\b"};
+    auto exists = [&](const std::wstring& path) { return taken.count(path) > 0; };
+    CHECK(solstream::UniqueFilePath(L"C:\\D", L"a.txt", exists) == L"C:\\D\\a (3).txt");
+    CHECK(solstream::UniqueFilePath(L"C:\\D", L"b", exists) == L"C:\\D\\b (2)");
+    CHECK(solstream::UniqueFilePath(L"C:\\D", L"c.txt", exists) == L"C:\\D\\c.txt");
+
+    using solstream::IsDirectlyInside;
+    const std::wstring folder = L"C:\\Users\\u\\Downloads\\SolStream";
+    CHECK(IsDirectlyInside(folder + L"\\a.pdf", folder));
+    CHECK(IsDirectlyInside(L"c:\\users\\U\\downloads\\solstream\\a.pdf", folder));
+    CHECK(!IsDirectlyInside(folder + L"\\..\\secret.txt", folder));
+    CHECK(!IsDirectlyInside(folder + L"\\sub\\a.pdf", folder));
+    CHECK(!IsDirectlyInside(folder + L"Other\\a.pdf", folder));
+    CHECK(!IsDirectlyInside(folder, folder));
+    CHECK(!IsDirectlyInside(L"C:\\Windows\\win.ini", folder));
+}
+
+void TestTransferEncoding() {
+    const std::string text = "SolStream \x01\xff";
+    const auto* bytes = reinterpret_cast<const unsigned char*>(text.data());
+    std::vector<unsigned char> back;
+    CHECK(solstream::Base64Decode(solstream::Base64Encode(bytes, text.size()), back));
+    CHECK(std::string(back.begin(), back.end()) == text);
+    CHECK(solstream::Base64Decode("", back) && back.empty());
+    CHECK(!solstream::Base64Decode("not base64!!", back));
+
+    // CF_HDROP: the header, then each wide path and its zero, then one more.
+    const std::vector<unsigned char> drop = solstream::DropFilesData({L"C:\\a", L"C:\\bc"});
+    DROPFILES header{};
+    std::memcpy(&header, drop.data(), sizeof(header));
+    CHECK(header.pFiles == sizeof(DROPFILES));
+    CHECK(header.fWide == TRUE);
+    const auto* list = reinterpret_cast<const wchar_t*>(drop.data() + sizeof(DROPFILES));
+    CHECK(std::wstring(list) == L"C:\\a");
+    CHECK(std::wstring(list + 5) == L"C:\\bc");
+    CHECK(list[11] == 0);
+    CHECK(drop.size() == sizeof(DROPFILES) + (5 + 6 + 1) * sizeof(wchar_t));
+}
+
 void TestAgentCrypto() {
     // SHA-256, FIPS 180-2's "abc".
     const std::string abc = "abc";
@@ -3674,6 +3736,8 @@ int wmain(int argc, wchar_t** argv) {
     TestOwedWindows(scratch);
     TestLeftBehind();
     TestAgentCrypto();
+    TestTransferNames();
+    TestTransferEncoding();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

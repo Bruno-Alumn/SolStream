@@ -3,6 +3,7 @@
 #include <cstring>
 #include <initializer_list>
 
+#include "transfer.h"
 #include "util.h"
 
 namespace solstream {
@@ -169,9 +170,12 @@ std::string ClipboardGetJson() {
     }
     HANDLE handle = GetClipboardData(CF_UNICODETEXT);
     if (!handle) {
-        // Not an error: the clipboard may hold an image, or nothing.
-        return "{\"type\":\"clipboard\",\"ok\":true,\"text\":\"\",\"seq\":"
-             + std::to_string(ClipboardSequence()) + "}";
+        // Not an error: the clipboard may hold an image, or nothing. Which, a
+        // Mac that fetches pictures is told; one that does not reads no text,
+        // as it always has.
+        return "{\"type\":\"clipboard\",\"ok\":true,\"text\":\"\",\"image\":"
+             + std::string(ClipboardHoldsImage() ? "true" : "false")
+             + ",\"seq\":" + std::to_string(ClipboardSequence()) + "}";
     }
     auto* wide = static_cast<const wchar_t*>(GlobalLock(handle));
     if (!wide) {

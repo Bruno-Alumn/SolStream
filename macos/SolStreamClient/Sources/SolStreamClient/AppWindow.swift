@@ -67,6 +67,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private let pill = QualityPill()
     /// Says how to get the mouse back, the first time this window takes it.
     private let captureHint = CaptureHint()
+    /// What is happening to files dropped on the window; see `filesDropped`.
+    private let transferNote = CaptureHint(text: "")
+    private var isSendingFiles = false
     private var hasExplainedCapture = false
     private var qualityTimer: Timer?
     private var lastFrameCount: UInt64 = 0
@@ -446,6 +449,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
             captureHint.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor,
                                                constant: -2 * DS.Space.x4),
         ])
+        // Low down, out of the way of the mouse note and of what the
+        // application draws along its top.
+        view.addSubview(transferNote)
+        NSLayoutConstraint.activate([
+            transferNote.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            transferNote.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -DS.Space.x4),
+            transferNote.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor,
+                                                constant: -2 * DS.Space.x4),
+        ])
+        view.onDropFiles = { [weak self] urls in self?.filesDropped(urls) ?? false }
 
         let capture = InputCapture()
         capture.attach(to: view)
@@ -917,6 +930,95 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     // MARK: - Status
 
+    // MARK: - Files dropped on the window
+
+    /// Send files dropped on the picture to the PC, and put them on its
+    /// clipboard to paste.
+    ///
+    /// Pasted by the user rather than dropped on their behalf: Windows has no
+    /// way to drop files on a window from outside short of simulating a drag,
+    /// which most applications ignore, while nearly everything that takes a
+    /// file takes a pasted one. So the note says ⌘V, which arrives as Ctrl+V.
+    /// They are kept in Downloads\SolStream on the PC either way.
+    func filesDropped(_ urls: [URL]) -> Bool {
+        guard !isSendingFiles else {
+            say("Wait for the files already on their way to the PC.", for: 3)
+            return false
+        }
+        let files = urls.filter {
+            (try? $0.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+        }
+        guard !files.isEmpty else {
+            say("Only files can be sent to the PC, not folders.", for: 3)
+            return false
+        }
+        isSendingFiles = true
+        let sizes = files.map {
+            Int64((try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+        let total = max(sizes.reduce(0, +), 1)
+        var done: Int64 = 0
+        var received: [String] = []
+        Log.info("[transfer] sending \(files.count) file\(files.count == 1 ? "" : "s"), "
+                 + "\(total) bytes, to the host")
+
+        func send(_ index: Int) {
+            guard index < files.count else { return finish() }
+            let file = files[index]
+            say(Self.sendingText(files.count, name: file.lastPathComponent, percent: 0))
+            agent.upload(file, as: file.lastPathComponent, progress: { [weak self] sent in
+                DispatchQueue.main.async {
+                    let percent = Int((done + sent) * 100 / total)
+                    self?.say(Self.sendingText(files.count, name: file.lastPathComponent,
+                                               percent: percent))
+                }
+            }) { [weak self] path in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard let path else {
+                        self.isSendingFiles = false
+                        self.say("Couldn't send \(file.lastPathComponent) to the PC. SolStream "
+                                 + "on the PC may need updating.", for: 6)
+                        return
+                    }
+                    done += sizes[index]
+                    received.append(path)
+                    send(index + 1)
+                }
+            }
+        }
+        func finish() {
+            agent.setClipboardFiles(received) { [weak self] sequence in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isSendingFiles = false
+                    let what = received.count == 1 ? "1 file" : "\(received.count) files"
+                    self.say(sequence != nil
+                             ? "\(what) copied to the PC. Press ⌘V to paste."
+                             : "\(what) saved in Downloads on the PC.", for: 6)
+                    Log.info("[transfer] \(what) on the host's clipboard: \(sequence != nil)")
+                }
+            }
+        }
+        send(0)
+        return true
+    }
+
+    static func sendingText(_ count: Int, name: String, percent: Int) -> String {
+        let what = count == 1 ? name : "\(count) files"
+        return "Sending \(what) to the PC… \(min(max(percent, 0), 100))%"
+    }
+
+    /// The note at the foot of the window: held while `seconds` is nil.
+    private func say(_ text: String, for seconds: TimeInterval? = nil) {
+        transferNote.text = text
+        if let seconds {
+            transferNote.flash(for: seconds)
+        } else {
+            transferNote.hold()
+        }
+    }
+
     func setStatus(_ title: String, detail: String? = nil) {
         metalView?.setStatus(title, detail: detail, busy: true)
     }
@@ -974,10 +1076,13 @@ final class CaptureHint: DS.Box {
     static let text = "The game has the mouse. ⌃⌥ gives it back."
 
     private var pendingDismiss: DispatchWorkItem?
+    private let label: NSTextField
 
-    init() {
+    /// - Parameter text: what it says; the same box carries the note about
+    ///   files dropped on the window, with words of its own.
+    init(text: String = CaptureHint.text) {
+        label = DS.label(text, font: DS.caption, colour: DS.textSecondary)
         super.init(fill: DS.surface, stroke: DS.edge, radius: DS.Metric.buttonRadius)
-        let label = DS.label(Self.text, font: DS.caption, colour: DS.textSecondary)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(label)
@@ -996,6 +1101,19 @@ final class CaptureHint: DS.Box {
 
     /// A note about the picture never takes a click meant for it.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    var text: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue }
+    }
+
+    /// Show the note until told otherwise: a transfer under way.
+    func hold() {
+        pendingDismiss?.cancel()
+        pendingDismiss = nil
+        isHidden = false
+        fade(to: 1)
+    }
 
     /// Show the note, and take it away again after `seconds`.
     func flash(for seconds: TimeInterval = 2.5) {

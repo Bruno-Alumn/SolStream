@@ -33,6 +33,7 @@ screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
 | --- | --- |
 | **Window per app** | Stream several apps at once, each in its own Mac window. |
 | **In the Dock** | Add a Windows app to the Dock, and find it in Spotlight and Launchpad. |
+| **Clipboard and files** | Copy and paste text and pictures both ways. Drop files on a window to send them to the PC. |
 | **Dedicated display** | Apps run on a virtual display sized to your Mac, leaving the PC's monitor untouched. |
 | **Low latency** | Hardware H.264 encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
 | **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. |
@@ -99,6 +100,9 @@ sound quality, video quality and mouse mode.
   `~/Applications/SolStream Apps`.
 - SolStream reopens the app you were streaming when you quit. Turn this off
   in Settings.
+- **Drop files** on a window to send them to the PC. They're saved in
+  `Downloads\SolStream` there and put on its clipboard: press **⌘V** to paste
+  them into the app.
 
 Other settings are in **SolStream › Settings**.
 

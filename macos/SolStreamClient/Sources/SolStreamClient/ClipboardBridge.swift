@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import SolStreamLogging
 import MediaSession
 import AgentChannel
@@ -29,16 +30,18 @@ import AgentChannel
 /// either side holds something that did not cross, it is forgotten, so that
 /// copying the old text again is a change worth sending.
 ///
+/// Pictures cross too, as PNG, when there is no text: a copy with both -- a
+/// web page's selection -- is its text. They go in chunks after the poll
+/// says there is one (`hasImage`), so the poll itself stays a few bytes. A
+/// copied file in Finder carries its icon as a picture, and that icon is not
+/// what was copied, so a copy of files sends nothing.
+///
 /// One thing it deliberately does not carry, in either direction: a clipboard
-/// that has become empty. The agent reports the host's clipboard as text, and a
-/// clipboard holding an image — or a file, or anything else that is not text —
-/// is reported as text that is empty, because the protocol has no way to say
-/// "there is something here, it is simply not text". Copying that emptiness
-/// across would therefore wipe the Mac's clipboard every time somebody copied a
-/// picture on the PC, taking with it whatever they had copied a moment before.
-/// So an empty value is left alone at both ends, and clearing one clipboard does
-/// not clear the other. Distinguishing "empty" from "not text" needs a signal
-/// the agent does not send yet.
+/// that has become empty. A host that predates pictures reports one as text
+/// that is empty, the same as nothing at all, and copying that emptiness
+/// across would wipe the Mac's clipboard every time somebody copied a picture
+/// on the PC. So an empty value is left alone at both ends, and clearing one
+/// clipboard does not clear the other.
 ///
 /// Nothing a password manager copies crosses, in either direction. On the Mac
 /// that is anything marked concealed, transient or auto-generated (the
@@ -66,16 +69,26 @@ final class ClipboardBridge {
         var read: (_ since: Int?,
                    _ completion: @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void
         var write: (_ text: String, _ completion: @escaping (Int?) -> Void) -> Void
+        /// The host's picture for a clipboard sequence, as PNG.
+        var readImage: (_ sequence: Int, _ completion: @escaping (Data?) -> Void) -> Void
+        /// A PNG onto the host's clipboard; the sequence that made.
+        var writeImage: (_ png: Data, _ completion: @escaping (Int?) -> Void) -> Void
 
         init(read: @escaping (Int?, @escaping (AgentConnection.RemoteClipboard?) -> Void) -> Void,
-             write: @escaping (String, @escaping (Int?) -> Void) -> Void) {
+             write: @escaping (String, @escaping (Int?) -> Void) -> Void,
+             readImage: @escaping (Int, @escaping (Data?) -> Void) -> Void = { $1(nil) },
+             writeImage: @escaping (Data, @escaping (Int?) -> Void) -> Void = { $1(nil) }) {
             self.read = read
             self.write = write
+            self.readImage = readImage
+            self.writeImage = writeImage
         }
 
         init(agent: AgentConnection) {
             self.init(read: { agent.clipboard(since: $0, completion: $1) },
-                      write: { agent.setClipboard($0, completion: $1) })
+                      write: { agent.setClipboard($0, completion: $1) },
+                      readImage: { agent.clipboardImage(sequence: $0, completion: $1) },
+                      writeImage: { agent.setClipboardImage($0, completion: $1) })
         }
     }
 
@@ -94,6 +107,9 @@ final class ClipboardBridge {
     /// away the same text copied again, and the paste would get what the
     /// other machine has instead.
     private var lastSyncedText: String?
+    /// The same for a picture, by its PNG's digest. At most one of the two is
+    /// set: each is what both clipboards hold.
+    private var lastSyncedImage: String?
     private var inFlight = false
     /// A sync asked for while a request was on the wire, run as soon as it is
     /// answered rather than left to the next tick.
@@ -357,6 +373,7 @@ final class ClipboardBridge {
                 }
                 let sent = local.text
                 lastSyncedText = sent
+                lastSyncedImage = nil
                 inFlight = true
                 host.write(Self.windowsLineEndings(sent)) { [weak self] sequence in
                     DispatchQueue.main.async {
@@ -381,6 +398,15 @@ final class ClipboardBridge {
                 // what crossed last.
                 lastSyncedText = nil
             }
+            if local == nil, let png = Self.png(on: pasteboard) {
+                let digest = Self.digest(png)
+                if digest != lastSyncedImage {
+                    pushImage(png, digest: digest)
+                    return
+                }
+            } else if local != nil {
+                lastSyncedImage = nil
+            }
         }
 
         guard now >= quietUntil else { return }
@@ -392,8 +418,10 @@ final class ClipboardBridge {
             DispatchQueue.main.async {
                 guard let self else { return }
                 // After the answer is applied, so a sync waiting on it starts
-                // from what it said.
-                defer { self.settle() }
+                // from what it said -- or after the picture it named, which
+                // settles for itself.
+                var handedOff = false
+                defer { if !handedOff { self.settle() } }
                 // Not with a sync waiting on this answer: that was asked for
                 // because a paste is about to depend on it.
                 if remote == nil && !self.syncAgain {
@@ -422,6 +450,13 @@ final class ClipboardBridge {
                 let text = Self.macLineEndings(remote.text)
                 guard !text.isEmpty else {
                     self.lastSyncedText = nil
+                    if remote.hasImage {
+                        // The answer is settled when the picture has come.
+                        handedOff = true
+                        self.pullImage(sequence: remote.sequence, changeCountAsked: changeCountAsked)
+                    } else {
+                        self.lastSyncedImage = nil
+                    }
                     return
                 }
                 guard text != self.lastSyncedText else { return }
@@ -433,6 +468,7 @@ final class ClipboardBridge {
                 }
 
                 self.lastSyncedText = text
+                self.lastSyncedImage = nil
                 self.pasteboard.clearContents()
                 self.pasteboard.setString(text, forType: .string)
                 // Writing bumps the local counter; record it now so this write is
@@ -442,6 +478,75 @@ final class ClipboardBridge {
                     Log.info("[clipboard] the host truncated its clipboard text to fit "
                              + "its transfer limit")
                 }
+            }
+        }
+    }
+
+    // MARK: - Pictures
+
+    /// The picture on `pasteboard` as PNG, if it holds one and is not a copy
+    /// of files -- whose icons Finder puts beside them -- and it is not too
+    /// big to send.
+    static func png(on pasteboard: NSPasteboard) -> Data? {
+        let types = pasteboard.types ?? []
+        guard !types.contains(.fileURL) else { return nil }
+        let png = pasteboard.data(forType: .png)
+            ?? pasteboard.data(forType: .tiff).flatMap {
+                NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:])
+            }
+        guard let png, !png.isEmpty, png.count <= AgentConnection.maxClipboardImageBytes else {
+            return nil
+        }
+        return png
+    }
+
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The Mac's picture to the PC.
+    private func pushImage(_ png: Data, digest: String) {
+        lastSyncedImage = digest
+        lastSyncedText = nil
+        inFlight = true
+        Log.info("[clipboard] sending a picture to the host (\(png.count) bytes)")
+        host.writeImage(png) { [weak self] sequence in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let sequence {
+                    self.lastRemoteSequence = sequence
+                } else if self.lastSyncedImage == digest {
+                    self.lastSyncedImage = nil
+                }
+                self.settle()
+            }
+        }
+    }
+
+    /// The PC's picture to the Mac, unless the Mac copied something since the
+    /// poll that named it.
+    private func pullImage(sequence: Int, changeCountAsked: Int) {
+        host.readImage(sequence) { [weak self] png in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                defer { self.settle() }
+                guard let png, self.isRunning else { return }
+                let digest = Self.digest(png)
+                guard digest != self.lastSyncedImage else { return }
+                guard self.pasteboard.changeCount == changeCountAsked else {
+                    self.lastSyncedImage = nil
+                    return
+                }
+                self.lastSyncedImage = digest
+                self.lastSyncedText = nil
+                self.pasteboard.clearContents()
+                // PNG, and TIFF beside it for what reads only that.
+                self.pasteboard.setData(png, forType: .png)
+                if let tiff = NSImage(data: png)?.tiffRepresentation {
+                    self.pasteboard.setData(tiff, forType: .tiff)
+                }
+                self.lastLocalChangeCount = self.pasteboard.changeCount
+                Log.info("[clipboard] brought a picture from the host (\(png.count) bytes)")
             }
         }
     }

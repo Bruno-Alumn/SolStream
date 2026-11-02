@@ -1352,6 +1352,9 @@ public final class AgentConnection {
         /// tools, as password managers do, so the host did not send it. The
         /// text is empty, which is all a host from before this flag says.
         public let isPrivate: Bool
+        /// No text, but a picture, to fetch with `clipboardImage`. A host from
+        /// before pictures crossed never says so.
+        public var hasImage: Bool = false
     }
 
     /// Read the host's clipboard, skipping the transfer if it has not changed.
@@ -1373,7 +1376,8 @@ public final class AgentConnection {
                                        sequence: sequence,
                                        isUnchanged: message["unchanged"] as? Bool ?? false,
                                        wasTruncated: message["truncated"] as? Bool ?? false,
-                                       isPrivate: message["private"] as? Bool ?? false))
+                                       isPrivate: message["private"] as? Bool ?? false,
+                                       hasImage: message["image"] as? Bool ?? false))
         }
     }
 
@@ -1434,6 +1438,134 @@ public final class AgentConnection {
         send(["cmd": "clipboard", "text": text]) { result in
             guard case .success(let message) = result,
                   message["ok"] as? Bool == true else {
+                completion?(nil)
+                return
+            }
+            completion?(message["seq"] as? Int)
+        }
+    }
+
+    // MARK: - Pictures and files, in chunks
+
+    /// One chunk of a picture or a file before base64, as the host's
+    /// `kTransferChunkBytes`: a third again on the wire, well inside
+    /// `maxLineBytes`. Each chunk is its own request, so a window command
+    /// waits behind one chunk at most, never the whole transfer.
+    public static let transferChunkBytes = 512 * 1024
+    /// The largest picture either side sends as PNG, as the host's
+    /// `kMaxClipboardImageBytes`.
+    public static let maxClipboardImageBytes = 32 * 1024 * 1024
+
+    /// The host's clipboard picture, as PNG, for clipboard sequence `sequence`.
+    /// Nil if it moved on meanwhile, the host could not read it, or it is from
+    /// before pictures crossed.
+    public func clipboardImage(sequence: Int, completion: @escaping (Data?) -> Void) {
+        var png = Data()
+        func next() {
+            send(["cmd": "clipboardImage", "seq": sequence, "offset": png.count]) { result in
+                guard case .success(let message) = result,
+                      message["ok"] as? Bool == true,
+                      let total = message["total"] as? Int,
+                      total > 0, total <= Self.maxClipboardImageBytes,
+                      message["offset"] as? Int == png.count,
+                      let base64 = message["data"] as? String,
+                      let chunk = Data(base64Encoded: base64), !chunk.isEmpty,
+                      png.count + chunk.count <= total else {
+                    completion(nil)
+                    return
+                }
+                png.append(chunk)
+                if png.count < total { next() } else { completion(png) }
+            }
+        }
+        next()
+    }
+
+    /// Put a PNG on the host's clipboard. The new clipboard sequence, or nil
+    /// if it was not taken.
+    public func setClipboardImage(_ png: Data, completion: ((Int?) -> Void)? = nil) {
+        guard !png.isEmpty, png.count <= Self.maxClipboardImageBytes else {
+            completion?(nil)
+            return
+        }
+        var offset = 0
+        func next() {
+            let chunk = png.subdata(in: offset..<min(offset + Self.transferChunkBytes, png.count))
+            send(["cmd": "clipboardImage", "offset": offset, "total": png.count,
+                  "data": chunk.base64EncodedString()]) { result in
+                guard case .success(let message) = result, message["ok"] as? Bool == true else {
+                    if case .success(let message) = result, let why = message["message"] as? String {
+                        Log.error("[clipboard] the host did not take the picture: \(why)")
+                    }
+                    completion?(nil)
+                    return
+                }
+                offset += chunk.count
+                if message["done"] as? Bool == true {
+                    completion?(message["seq"] as? Int)
+                } else if offset < png.count {
+                    next()
+                } else {
+                    completion?(nil)
+                }
+            }
+        }
+        next()
+    }
+
+    /// Send a file to the host, which writes it to Downloads\SolStream under
+    /// `name` -- or a free name beside it. The path it was written to, or nil.
+    ///
+    /// Read a chunk at a time, so a large file is never in memory whole.
+    /// `progress` is told the bytes sent so far after each chunk.
+    public func upload(_ file: URL, as name: String,
+                       progress: ((Int64) -> Void)? = nil,
+                       completion: @escaping (String?) -> Void) {
+        guard let handle = try? FileHandle(forReadingFrom: file),
+              let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
+            completion(nil)
+            return
+        }
+        var offset = 0
+        func finish(_ path: String?) {
+            try? handle.close()
+            completion(path)
+        }
+        func next() {
+            let chunk: Data
+            do {
+                chunk = try handle.read(upToCount: Self.transferChunkBytes) ?? Data()
+            } catch {
+                Log.error("[transfer] could not read \(file.lastPathComponent): \(error)")
+                return finish(nil)
+            }
+            send(["cmd": "upload", "name": name, "offset": offset, "total": size,
+                  "data": chunk.base64EncodedString()]) { result in
+                guard case .success(let message) = result, message["ok"] as? Bool == true else {
+                    if case .success(let message) = result, let why = message["message"] as? String {
+                        Log.error("[transfer] the host did not take \(name): \(why)")
+                    }
+                    return finish(nil)
+                }
+                offset += chunk.count
+                progress?(Int64(offset))
+                if message["done"] as? Bool == true {
+                    finish(message["path"] as? String)
+                } else if chunk.isEmpty || offset >= size {
+                    // The file shrank under us, or the host wants more than it has.
+                    finish(nil)
+                } else {
+                    next()
+                }
+            }
+        }
+        next()
+    }
+
+    /// Put files the host received from `upload` on its clipboard, to paste.
+    public func setClipboardFiles(_ paths: [String], completion: ((Int?) -> Void)? = nil) {
+        send(["cmd": "clipboardFiles", "paths": paths.joined(separator: "\n")]) { result in
+            guard case .success(let message) = result, message["ok"] as? Bool == true else {
                 completion?(nil)
                 return
             }

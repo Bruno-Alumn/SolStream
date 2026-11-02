@@ -67,6 +67,7 @@
 #include "driver_install.h"
 #include "foreground.h"
 #include "tailscale.h"
+#include "transfer.h"
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
@@ -4259,6 +4260,36 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             return solstream::ClipboardUnchangedJson();
         }
         return solstream::ClipboardGetJson();
+    }
+
+    // Pictures and files in chunks; see transfer.h.
+    if (command == "clipboardImage") {
+        long long offset = 0, total = 0, seq = -1;
+        FieldNumber(line, "offset", offset);
+        std::string data;
+        if (FieldString(line, "data", data) && FieldNumber(line, "total", total)) {
+            return solstream::ClipboardImageSetJson(offset, total, data);
+        }
+        FieldNumber(line, "seq", seq);
+        return solstream::ClipboardImageGetJson(seq, offset);
+    }
+
+    if (command == "upload") {
+        std::string name, data;
+        long long offset = 0, total = -1;
+        if (!FieldString(line, "name", name) || !FieldString(line, "data", data)
+            || !FieldNumber(line, "offset", offset) || !FieldNumber(line, "total", total)) {
+            return "{\"type\":\"error\",\"message\":\"upload needs name, offset, total, data\"}";
+        }
+        return solstream::UploadJson(name, offset, total, data);
+    }
+
+    if (command == "clipboardFiles") {
+        std::string paths;
+        if (!FieldString(line, "paths", paths)) {
+            return "{\"type\":\"error\",\"message\":\"clipboardFiles needs paths\"}";
+        }
+        return solstream::ClipboardFilesJson(paths);
     }
 
     if (command == "icon") {

@@ -12,8 +12,12 @@ final class ClipboardBridgeTests: XCTestCase {
     private final class FakeHost {
         var reads: [Int?] = []
         var writes: [String] = []
+        var imageReads: [Int] = []
+        var imageWrites: [Data] = []
         private var pendingReads: [(AgentConnection.RemoteClipboard?) -> Void] = []
         private var pendingWrites: [(Int?) -> Void] = []
+        private var pendingImageReads: [(Data?) -> Void] = []
+        private var pendingImageWrites: [(Int?) -> Void] = []
 
         var host: ClipboardBridge.Host {
             ClipboardBridge.Host(
@@ -24,17 +28,38 @@ final class ClipboardBridgeTests: XCTestCase {
                 write: { [unowned self] text, completion in
                     self.writes.append(text)
                     self.pendingWrites.append(completion)
+                },
+                readImage: { [unowned self] sequence, completion in
+                    self.imageReads.append(sequence)
+                    self.pendingImageReads.append(completion)
+                },
+                writeImage: { [unowned self] png, completion in
+                    self.imageWrites.append(png)
+                    self.pendingImageWrites.append(completion)
                 })
         }
 
-        var isWaiting: Bool { !pendingReads.isEmpty || !pendingWrites.isEmpty }
+        var isWaiting: Bool {
+            !pendingReads.isEmpty || !pendingWrites.isEmpty
+                || !pendingImageReads.isEmpty || !pendingImageWrites.isEmpty
+        }
 
         func answerRead(text: String = "", sequence: Int, unchanged: Bool = false,
-                        isPrivate: Bool = false) {
+                        isPrivate: Bool = false, hasImage: Bool = false) {
             guard !pendingReads.isEmpty else { return XCTFail("no read to answer") }
             pendingReads.removeFirst()(AgentConnection.RemoteClipboard(
                 text: text, sequence: sequence, isUnchanged: unchanged,
-                wasTruncated: false, isPrivate: isPrivate))
+                wasTruncated: false, isPrivate: isPrivate, hasImage: hasImage))
+        }
+
+        func answerImageRead(_ png: Data?) {
+            guard !pendingImageReads.isEmpty else { return XCTFail("no picture read to answer") }
+            pendingImageReads.removeFirst()(png)
+        }
+
+        func answerImageWrite(sequence: Int?) {
+            guard !pendingImageWrites.isEmpty else { return XCTFail("no picture write to answer") }
+            pendingImageWrites.removeFirst()(sequence)
         }
 
         func failRead() {
@@ -384,14 +409,118 @@ final class ClipboardBridgeTests: XCTestCase {
 
         copyAnImageOnTheMac()
         bridge.syncNow()
-        fake.answerRead(sequence: 10, unchanged: true)
+        XCTAssertEqual(fake.imageWrites.count, 1, "the picture goes to the PC as a picture")
+        fake.answerImageWrite(sequence: 11)
         settle()
 
         bridge.syncNow()
-        fake.answerRead(text: "make deploy", sequence: 11)
+        fake.answerRead(text: "make deploy", sequence: 12)
         settle()
         XCTAssertEqual(pasteboard.string(forType: .string), "make deploy")
         XCTAssertEqual(fake.writes, ["make deploy"], "the image was sent as text")
+    }
+
+    // MARK: - Pictures
+
+    /// A real PNG, small: what the Mac's own screenshots are.
+    private func png(_ side: Int = 4) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        return rep.representation(using: .png, properties: [:])!
+    }
+
+    func testAMacPictureGoesToThePCOnceAsPNG() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let picture = png()
+        pasteboard.clearContents()
+        pasteboard.setData(picture, forType: .png)
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites, [picture])
+        fake.answerImageWrite(sequence: 3)
+        settle()
+
+        // Copied again unchanged: the same picture, which the PC holds.
+        pasteboard.clearContents()
+        pasteboard.setData(picture, forType: .png)
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites.count, 1, "the same picture went twice")
+        fake.answerRead(sequence: 3, unchanged: true)
+        settle()
+    }
+
+    /// A screenshot copied by an application that offers only TIFF.
+    func testATiffOnlyPictureIsSentAsPNG() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let tiff = NSImage(data: png())!.tiffRepresentation!
+        pasteboard.clearContents()
+        pasteboard.setData(tiff, forType: .tiff)
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites.count, 1)
+        XCTAssertEqual(fake.imageWrites.first?.prefix(4), Data([0x89, 0x50, 0x4E, 0x47]))
+    }
+
+    /// Finder puts a copied file's icon beside it; the icon is not the copy.
+    func testACopyOfFilesSendsNoPicture() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString("file:///Users/someone/report.pdf", forType: .fileURL)
+        item.setData(NSImage(data: png())!.tiffRepresentation!, forType: .tiff)
+        pasteboard.writeObjects([item])
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites, [])
+    }
+
+    func testAPCPictureComesToTheMac() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(sequence: 7, hasImage: true)
+        settle()
+        XCTAssertEqual(fake.imageReads, [7])
+        let picture = png()
+        fake.answerImageRead(picture)
+        settle()
+        XCTAssertEqual(pasteboard.data(forType: .png), picture)
+        XCTAssertNotNil(pasteboard.data(forType: .tiff), "for what reads only TIFF")
+
+        // Not sent back: it is the PC's own.
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites, [])
+    }
+
+    /// Copied on the Mac while the PC's picture was on its way: the Mac's
+    /// copy is newer, and stays.
+    func testAMacCopyMadeWhileAPCPictureWasFetchedIsKept() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(sequence: 7, hasImage: true)
+        settle()
+        copyOnTheMac("newer")
+        fake.answerImageRead(png())
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "newer")
+        XCTAssertNil(pasteboard.data(forType: .png))
+    }
+
+    /// A picture the host could not send leaves the Mac's clipboard alone.
+    func testAPCPictureThatDoesNotComeChangesNothing() {
+        copyOnTheMac("kept")
+        bridge.start(resuming: true)
+        bridge.syncNow()
+        fake.answerRead(sequence: 1)
+        settle()
+        bridge.syncNow()
+        fake.answerRead(sequence: 2, hasImage: true)
+        settle()
+        fake.answerImageRead(nil)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "kept")
     }
 
     /// And once the Mac's clipboard has been emptied, here after a copy that

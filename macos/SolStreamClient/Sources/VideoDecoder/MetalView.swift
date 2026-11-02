@@ -151,6 +151,33 @@ public final class MetalView: NSView {
     /// as well and be sent twice.
     public var onInsertText: ((String) -> Void)?
 
+    /// Files dragged onto the picture, to send to the PC. True if they are
+    /// taken. Set, the view accepts file drags; nil, it accepts none.
+    public var onDropFiles: (([URL]) -> Bool)? {
+        didSet {
+            if onDropFiles == nil {
+                unregisterDraggedTypes()
+            } else {
+                registerForDraggedTypes([.fileURL])
+            }
+        }
+    }
+
+    /// The file URLs a drag carries.
+    static func fileURLs(in drag: NSDraggingInfo) -> [URL] {
+        drag.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                            options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    public override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard onDropFiles != nil, !Self.fileURLs(in: sender).isEmpty else { return [] }
+        return .copy
+    }
+
+    public override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onDropFiles?(Self.fileURLs(in: sender)) ?? false
+    }
+
     public override var acceptsFirstResponder: Bool { onInsertText != nil }
 
     /// Commands a key would have sent through the input system. None should

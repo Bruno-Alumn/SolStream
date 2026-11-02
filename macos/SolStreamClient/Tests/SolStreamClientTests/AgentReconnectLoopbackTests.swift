@@ -467,6 +467,100 @@ final class AgentReconnectLoopbackTests: XCTestCase {
     // MARK: - Helpers
 
     /// Connect, and wait for the host's first display list.
+    // MARK: - Pictures and files in chunks
+
+    /// A file goes a chunk per request, each at the offset the host has, and
+    /// what arrives is the file.
+    func testAnUploadGoesInChunksAndArrivesWhole() throws {
+        let size = AgentConnection.transferChunkBytes * 2 + 12_345
+        let bytes = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let file = folder.appendingPathComponent("report.pdf")
+        try bytes.write(to: file)
+        let seen = Observations()
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            var received = Data()
+            var offsets: [Int] = []
+            while received.count < size,
+                  let request = ScriptedHost.json(connection.readLine(timeout: 5)),
+                  request["cmd"] as? String == "upload",
+                  let offset = request["offset"] as? Int,
+                  let chunk = (request["data"] as? String).flatMap({ Data(base64Encoded: $0) }) {
+                offsets.append(offset)
+                seen.set("name", request["name"])
+                seen.set("total", request["total"])
+                guard offset == received.count else { break }
+                received.append(chunk)
+                connection.send(received.count < size
+                    ? #"{"type":"upload","ok":true,"received":\#(received.count)}"#
+                    : #"{"type":"upload","ok":true,"done":true,"path":"C:\\\\D\\\\report.pdf"}"#)
+            }
+            seen.set("offsets", offsets)
+            seen.set("received", received)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+
+        let done = expectation(description: "uploaded")
+        var path: String?
+        var progress: [Int64] = []
+        agent.upload(file, as: "report.pdf", progress: { progress.append($0) }) {
+            path = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(path, #"C:\\D\\report.pdf"#)
+        XCTAssertEqual(seen.get("offsets") as? [Int],
+                       [0, AgentConnection.transferChunkBytes, 2 * AgentConnection.transferChunkBytes])
+        XCTAssertEqual(seen.get("received") as? Data, bytes)
+        XCTAssertEqual(seen.get("name") as? String, "report.pdf")
+        XCTAssertEqual(seen.get("total") as? Int, size)
+        XCTAssertEqual(progress.last, Int64(size))
+    }
+
+    /// The host's picture comes a chunk at a time for one clipboard sequence,
+    /// and a host that refuses midway gives nothing rather than half a PNG.
+    func testAPictureIsFetchedInChunksAndAHalfOneIsNothing() throws {
+        let size = AgentConnection.transferChunkBytes + 1_000
+        let png = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 7) })
+        let host = ScriptedHost { index, connection in
+            connection.greetWithoutAuth()
+            while let request = ScriptedHost.json(connection.readLine(timeout: 3)),
+                  request["cmd"] as? String == "clipboardImage",
+                  request["seq"] as? Int == 9,
+                  let offset = request["offset"] as? Int {
+                // The second connection's host has moved on after one chunk.
+                if index == 1 && offset > 0 {
+                    connection.send(#"{"type":"clipboardImage","ok":false,"message":"changed"}"#)
+                    continue
+                }
+                let chunk = png.subdata(in: offset..<min(offset + AgentConnection.transferChunkBytes, size))
+                connection.send(#"{"type":"clipboardImage","ok":true,"seq":9,"total":\#(size),"offset":\#(offset),"data":"\#(chunk.base64EncodedString())"}"#)
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+
+        for (attempt, expected) in [png, nil].enumerated() {
+            let agent = AgentConnection(host: "::1", port: port)
+            connectAndWaitForGreeting(agent)
+            let done = expectation(description: "fetched \(attempt)")
+            var fetched: Data?
+            agent.clipboardImage(sequence: 9) {
+                fetched = $0
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 10)
+            XCTAssertEqual(fetched, expected)
+            agent.disconnect()
+        }
+    }
+
     private func connectAndWaitForGreeting(_ agent: AgentConnection) {
         let greeted = expectation(description: "first greeting")
         greeted.assertForOverFulfill = false

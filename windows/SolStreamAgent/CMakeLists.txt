@@ -80,6 +80,8 @@ add_library(SolStreamCore OBJECT
     util.cpp
     # What the clipboard's text needs between the Mac and Windows.
     clipboard.cpp
+    # Pictures on the clipboard, and files dropped on a window, in chunks.
+    transfer.cpp
     # Not media-only: the host window logs through it too, and it has no
     # dependency beyond stdio.
     media/log.cpp
