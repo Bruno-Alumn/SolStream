@@ -95,7 +95,9 @@ public struct RemoteWindow: Sendable, Equatable, Identifiable {
 /// A launchable application on the host, from its Start Menu shortcut.
 public struct RemoteApp: Sendable, Equatable, Identifiable, Hashable {
     public let name: String
-    /// The `.lnk` or `.url` path, passed straight back to the agent to launch.
+    /// The `.lnk` or `.url` path, or `shell:AppsFolder\<AppUserModelID>` for an
+    /// application from the Store: opaque here, passed straight back to the
+    /// agent to launch.
     public let path: String
 
     public var id: String { path }

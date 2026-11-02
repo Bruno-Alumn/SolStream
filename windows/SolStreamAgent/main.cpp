@@ -37,6 +37,8 @@
 #include <tlhelp32.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <objbase.h>
 #include <wincrypt.h>
 #include <winhttp.h>
@@ -1120,7 +1122,9 @@ bool ForceForeground(HWND window) {
 
 struct AppEntry {
     std::string name;
-    std::wstring path;  // the .lnk or .url itself; ShellExecute resolves it
+    // The .lnk or .url itself, or shell:AppsFolder\<AppUserModelID> for an
+    // application from the Store; ShellExecute resolves either.
+    std::wstring path;
 };
 
 /// Walk a Start Menu tree collecting shortcuts.
@@ -1178,6 +1182,106 @@ void ScanShortcuts(const std::wstring& dir, std::vector<AppEntry>& out, int dept
     FindClose(handle);
 }
 
+/// How an application from the Store is named to ShellExecute: the shell's
+/// Apps folder and the application's AppUserModelID. Nothing ScanShortcuts
+/// finds starts with it.
+constexpr wchar_t kAppsFolderPrefix[] = L"shell:AppsFolder\\";
+
+bool IsAppsFolderPath(const std::wstring& path) {
+    const size_t prefix = wcslen(kAppsFolderPrefix);
+    return path.size() > prefix && _wcsnicmp(path.c_str(), kAppsFolderPrefix, prefix) == 0;
+}
+
+/// PKEY_AppUserModel_ID, spelled out rather than taken from propkey.h: which
+/// property keys come with uuid.lib differs between mingw and the Windows SDK,
+/// and one that does not only shows up at link time, on the PC.
+constexpr PROPERTYKEY kAppUserModelIdKey = {
+    {0x9f4c2855, 0x9f79, 0x4b39, {0xa8, 0xd0, 0xe1, 0xd4, 0x2d, 0xe1, 0xd5, 0xf3}}, 5};
+
+/// Whether an AppUserModelID is a packaged application's: Package!App, the
+/// package family name, a bang, and the application's id within it.
+///
+/// Every desktop application is in the Apps folder too, with an id of its own
+/// choosing or the path to its .exe, and those are already offered by their
+/// Start Menu shortcuts, which keep the arguments the installer chose. So
+/// only this shape is taken, and taken strictly -- the characters a package
+/// name and an application id can have, and one bang -- since it ends up in a
+/// string ShellExecute parses: nothing with a path separator, a colon or a
+/// space gets through.
+bool IsPackagedAppId(const wchar_t* id) {
+    if (!id) {
+        return false;
+    }
+    size_t length = 0, bangs = 0, bang_at = 0;
+    for (const wchar_t* c = id; *c; ++c, ++length) {
+        if (*c == L'!') {
+            ++bangs;
+            bang_at = length;
+        } else if (!((*c >= L'a' && *c <= L'z') || (*c >= L'A' && *c <= L'Z')
+                     || (*c >= L'0' && *c <= L'9') || *c == L'.' || *c == L'-'
+                     || *c == L'_')) {
+            return false;
+        }
+    }
+    return length <= 256 && bangs == 1 && bang_at > 0 && bang_at + 1 < length;
+}
+
+/// The applications from the Store -- Calculator, Xbox, WhatsApp, a Game
+/// Pass game -- which have no Start Menu shortcut to find: the shell lists
+/// them in its Apps folder, the same list the Start menu's "All apps" shows.
+///
+/// Bounded twice: the folder holds every desktop application as well, so a
+/// PC with a lot installed has a long walk to its packaged ones, and the
+/// walk is on the agent's one command thread.
+void ScanPackagedApps(std::vector<AppEntry>& out) {
+    constexpr size_t kMaxItemsWalked = 2000;
+    constexpr size_t kMaxPackagedApps = 400;
+    // COM scoped to this call, as in ShellExecuteBounded: the client thread's
+    // apartment belongs to the media path's WinRT calls.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IShellItem* folder = nullptr;
+    IEnumShellItems* items = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr,
+                                       IID_PPV_ARGS(&folder)))
+        && SUCCEEDED(folder->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&items)))) {
+        size_t walked = 0, kept = 0;
+        IShellItem* item = nullptr;
+        while (walked < kMaxItemsWalked && kept < kMaxPackagedApps
+               && items->Next(1, &item, nullptr) == S_OK && item) {
+            ++walked;
+            IShellItem2* described = nullptr;
+            wchar_t* id = nullptr;
+            wchar_t* name = nullptr;
+            if (SUCCEEDED(item->QueryInterface(IID_PPV_ARGS(&described)))
+                && SUCCEEDED(described->GetString(kAppUserModelIdKey, &id))
+                && IsPackagedAppId(id)
+                && SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name))
+                && name && *name
+                // As for shortcuts: never an uninstaller by accident.
+                && FoldCase(name).find(L"uninstall") == std::wstring::npos) {
+                out.push_back(AppEntry{ToUtf8(name), kAppsFolderPrefix + std::wstring(id)});
+                ++kept;
+            }
+            CoTaskMemFree(name);
+            CoTaskMemFree(id);
+            if (described) {
+                described->Release();
+            }
+            item->Release();
+            item = nullptr;
+        }
+    }
+    if (items) {
+        items->Release();
+    }
+    if (folder) {
+        folder->Release();
+    }
+    if (SUCCEEDED(com)) {
+        CoUninitialize();
+    }
+}
+
 std::vector<AppEntry> EnumerateApps() {
     std::vector<AppEntry> apps;
     wchar_t buffer[MAX_PATH] = {};
@@ -1186,6 +1290,21 @@ std::vector<AppEntry> EnumerateApps() {
         if (GetEnvironmentVariableW(root, buffer, MAX_PATH)) {
             ScanShortcuts(std::wstring(buffer) + L"\\Microsoft\\Windows\\Start Menu\\Programs",
                           apps, 0);
+        }
+    }
+    // A Store application of the same name as a shortcut is left out, not
+    // left to the de-duplication below, which keeps whichever sorts first:
+    // the shortcut is what this list offered before, and what a launcher in
+    // the Mac's Dock may already be holding.
+    std::set<std::wstring> shortcut_names;
+    for (const AppEntry& app : apps) {
+        shortcut_names.insert(FoldCase(ToWide(app.name)));
+    }
+    std::vector<AppEntry> packaged;
+    ScanPackagedApps(packaged);
+    for (AppEntry& app : packaged) {
+        if (!shortcut_names.count(FoldCase(ToWide(app.name)))) {
+            apps.push_back(std::move(app));
         }
     }
     std::sort(apps.begin(), apps.end(), [](const AppEntry& a, const AppEntry& b) {
@@ -1242,8 +1361,17 @@ const std::vector<AppEntry>& AdvertisedApps() {
 }
 
 bool IsAdvertisedApp(const std::wstring& path) {
+    // Asked once per icon -- a picker of a few hundred rows -- and the walk
+    // now includes the shell's Apps folder, which is slower than the two
+    // Start Menu trees. A path the list already held was advertised, so it
+    // is answered from the list as it is; only one not in it walks again, in
+    // case it was installed since.
+    const std::wstring folded = FoldCase(path);
+    if (g_advertised_at != 0 && g_advertised_paths.count(folded) != 0) {
+        return true;
+    }
     AdvertisedApps();
-    return g_advertised_paths.count(FoldCase(path)) != 0;
+    return g_advertised_paths.count(folded) != 0;
 }
 
 /// Start an application and return the window it opens.
@@ -1537,19 +1665,34 @@ constexpr int kIconSize = 64;
 /// For a launcher in the Mac's Dock, which draws icons up to 256 points.
 constexpr int kLargeIconSize = 256;
 
-/// The shell's 256-pixel icon for a file -- a shortcut's target's, as
-/// Explorer shows it at its largest. An application with nothing that big
-/// comes back drawn small in the corner of the 256 square, which the Mac
-/// trims. Null when the shell has no such icon.
-HICON LargeFileIcon(const std::wstring& path) {
+/// The shell's icon for a file from one of its image lists -- SHIL_JUMBO is
+/// 256 pixels, a shortcut's target's as Explorer shows it at its largest. An
+/// application with nothing that big comes back drawn small in the corner of
+/// the 256 square, which the Mac trims. Null when the shell has no such icon.
+///
+/// A Store application's shell:AppsFolder path is no file, so it is parsed
+/// into the shell's own name for the item first, and its icon is the one the
+/// Start menu shows.
+HICON ShellImageListIcon(const std::wstring& path, int image_list) {
     // COM for the image list, scoped to this call as in Launch: the client
     // thread's apartment belongs to the media path's WinRT calls.
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     HICON icon = nullptr;
     SHFILEINFOW info{};
-    if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_SYSICONINDEX)) {
+    bool indexed = false;
+    if (IsAppsFolderPath(path)) {
+        PIDLIST_ABSOLUTE item = nullptr;
+        if (SUCCEEDED(SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr)) && item) {
+            indexed = SHGetFileInfoW(reinterpret_cast<const wchar_t*>(item), 0, &info,
+                                     sizeof(info), SHGFI_PIDL | SHGFI_SYSICONINDEX) != 0;
+            CoTaskMemFree(item);
+        }
+    } else {
+        indexed = SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_SYSICONINDEX) != 0;
+    }
+    if (indexed) {
         IImageList* list = nullptr;
-        if (SUCCEEDED(SHGetImageList(SHIL_JUMBO, IID_PPV_ARGS(&list))) && list) {
+        if (SUCCEEDED(SHGetImageList(image_list, IID_PPV_ARGS(&list))) && list) {
             list->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon);
             list->Release();
         }
@@ -4492,8 +4635,21 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // "size" asks for more than the picker's 64: 256 for a launcher in
         // the Mac's Dock. Anything else gets 64, as before it could be asked.
         long long wanted = 0;
-        if (FieldNumber(line, "size", wanted) && wanted >= kLargeIconSize) {
-            if (HICON jumbo = LargeFileIcon(wide)) {
+        const bool large_wanted = FieldNumber(line, "size", wanted) && wanted >= kLargeIconSize;
+        if (IsAppsFolderPath(wide)) {
+            // A Store application has no file for ExtractIconEx to read; the
+            // shell's image lists are the only way to its icon. 48 pixels
+            // for the picker's 64 rather than the 256 drawn down: a Store
+            // application's 256 is often its 48 small in the corner, which
+            // drawn at 64 would be a speck.
+            HICON icon = ShellImageListIcon(wide, large_wanted ? SHIL_JUMBO : SHIL_EXTRALARGE);
+            if (!icon) {
+                return "{\"type\":\"icon\",\"ok\":false,\"id\":\"" + JsonEscape(path) + "\"}";
+            }
+            return IconJson(path, icon, true, large_wanted ? kLargeIconSize : kIconSize);
+        }
+        if (large_wanted) {
+            if (HICON jumbo = ShellImageListIcon(wide, SHIL_JUMBO)) {
                 return IconJson(path, jumbo, true, kLargeIconSize);
             }
         }
@@ -4502,7 +4658,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // a file it can read icons from; the shell knows its icon instead.
         if (ExtractIconExW(wide.c_str(), 0, &large, nullptr, 1) == 0 || !large) {
             large = nullptr;
-            // COM scoped to the call, as in LargeFileIcon.
+            // COM scoped to the call, as in ShellImageListIcon.
             const HRESULT com =
                 CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             SHFILEINFOW info{};
