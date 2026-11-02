@@ -37,6 +37,12 @@ public final class MetalView: NSView {
     private let pendingLock = NSLock()
     private var pendingPixelBuffer: CVPixelBuffer?
     private var presentScheduled = false
+    /// Bumped each time a card goes up, and taken with each frame: a frame
+    /// handed over before the card does not take it down. Under pendingLock.
+    private var statusEpoch = 0
+    private var pendingEpoch = 0
+    /// When the texture cache was last flushed; see `present`.
+    private var lastFlush = Date.distantPast
 
     public override init(frame frameRect: NSRect) {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -200,11 +206,19 @@ public final class MetalView: NSView {
 
     /// Update the overlay.
     public func setStatus(_ title: String, detail: String? = nil, busy: Bool = true) {
+        bumpStatusEpoch()
         overlay.update(title: title, detail: detail, busy: busy, isError: false)
+    }
+
+    private func bumpStatusEpoch() {
+        pendingLock.lock()
+        statusEpoch += 1
+        pendingLock.unlock()
     }
 
     /// Show a terminal error, with a Retry button if a handler is provided.
     public func setError(_ title: String, detail: String? = nil) {
+        bumpStatusEpoch()
         overlay.update(title: title, detail: detail, busy: false, isError: true)
     }
 
@@ -217,12 +231,22 @@ public final class MetalView: NSView {
         overlay.setHidden(true)
     }
 
+    /// Let go of the decoder's pictures the texture cache still holds: the
+    /// stream feeding this view has ended. What is on screen stays.
+    public func releasePictures() {
+        if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) }
+    }
+
+    /// Whether a status or error card is up.
+    public var isShowingStatus: Bool { !overlay.isHidden }
+
     // MARK: - Presentation
 
     /// Present a decoded frame. Safe to call from any thread.
     public func displayFrame(_ pixelBuffer: CVPixelBuffer) {
         pendingLock.lock()
         pendingPixelBuffer = pixelBuffer
+        pendingEpoch = statusEpoch
         let alreadyScheduled = presentScheduled
         presentScheduled = true
         pendingLock.unlock()
@@ -235,16 +259,34 @@ public final class MetalView: NSView {
             let next = self.pendingPixelBuffer
             self.pendingPixelBuffer = nil
             self.presentScheduled = false
+            // A frame from before the card went up is drawn under it, and the
+            // card stays: it says why that picture is the last one.
+            let afterCard = self.pendingEpoch == self.statusEpoch
             self.pendingLock.unlock()
 
-            if let next { self.present(next) }
+            if let next { self.present(next, hidesStatus: afterCard) }
         }
     }
 
-    private func present(_ pixelBuffer: CVPixelBuffer) {
-        overlay.setHidden(true)
+    private func present(_ pixelBuffer: CVPixelBuffer, hidesStatus: Bool) {
+        if hidesStatus { overlay.setHidden(true) }
 
         guard let metalLayer = layer as? CAMetalLayer, let textureCache else { return }
+        // Nothing to see: minimised, on another Space, or covered. The newest
+        // frame is the only one kept, so the first one after it shows again
+        // is current, and none of the copies meanwhile cost anything.
+        if let window, !window.occlusionState.contains(.visible) { return }
+
+        // The cache keeps the surfaces of textures made from it until it is
+        // flushed, which nothing did: a rebuilt decoder's pictures -- some tens
+        // of megabytes at 4K -- stayed until later frames happened to age
+        // them out. Once a second is plenty. A stream that ends is flushed by
+        // `releasePictures`, since no frame comes to do it here.
+        let now = Date()
+        if now.timeIntervalSince(lastFlush) >= 1 {
+            CVMetalTextureCacheFlush(textureCache, 0)
+            lastFlush = now
+        }
 
         let frameWidth = CVPixelBufferGetWidth(pixelBuffer)
         let frameHeight = CVPixelBufferGetHeight(pixelBuffer)

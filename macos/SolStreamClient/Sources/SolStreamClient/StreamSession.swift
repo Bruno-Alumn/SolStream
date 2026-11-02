@@ -161,6 +161,14 @@ final class StreamSession {
     private var counters = MediaCounters()
     private let counterLock = NSLock()
 
+    /// Pictures the decoder has produced: what the windows can show, which
+    /// is not what has arrived while frames wait on a keyframe.
+    var framesDecoded: UInt64 {
+        frameCountLock.lock()
+        defer { frameCountLock.unlock() }
+        return framesDelivered
+    }
+
     var mediaCounters: MediaCounters {
         counterLock.lock()
         defer { counterLock.unlock() }
@@ -372,18 +380,27 @@ final class StreamSession {
         isRunning = false
         watchdog?.cancel()
         watchdog = nil
+        // The windows go first of all. Whatever this session decodes from here
+        // on -- the frames still inside the decoder, which keeps producing
+        // them through the second `media.stop()` may wait, and its drain below
+        // -- came after the windows put up "Applying settings…" or "Lost the
+        // connection", and drawn, took the card down, Try Again with it, over
+        // a frozen picture. The callback reads the list under the lock, so an
+        // empty list is simply nobody to draw for.
+        sinkLock.lock()
+        let leaving = sinks
+        sinks.removeAll()
+        sinkLock.unlock()
+        // And they let go of this session's pictures, which their texture
+        // caches would otherwise hold for as long as they stay open.
+        leaving.forEach { $0.releasePictures() }
         // Silence the socket before releasing anything its callbacks touch. The
         // audio callback runs on the receive thread roughly 200 times a second
         // and dereferences `audioRenderer`; stopping the client first is what
         // makes releasing it afterwards safe rather than probably safe.
         media.stop()
-        // Drain the decoder before dropping the sinks: its callback runs on a
-        // VideoToolbox thread and is what hands frames to the views.
         decoder?.shutdown()
         decoder = nil
-        sinkLock.lock()
-        sinks.removeAll()
-        sinkLock.unlock()
         releaseAudioRenderer()
         // The pointer numbers were collected all along and never once read, so
         // "my clicks stopped working" left no trace on this side at all — the

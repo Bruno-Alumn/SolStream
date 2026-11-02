@@ -140,9 +140,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
             guard elapsed > 0.2 else { return }
 
             let snapshot = self.session.mediaCounters
-            let frames = snapshot.frames &- self.lastFrameCount
+            // Decoded, not arrived: frames held for a keyframe, or that the
+            // decoder failed on, arrive at full rate while the picture is
+            // frozen, and the pill said "60" beside a stall card.
+            let decoded = self.session.framesDecoded
+            let frames = decoded &- self.lastFrameCount
             let bytes = snapshot.bytes &- self.lastByteCount
-            self.lastFrameCount = snapshot.frames
+            self.lastFrameCount = decoded
             self.lastByteCount = snapshot.bytes
             self.lastSample = now
 
