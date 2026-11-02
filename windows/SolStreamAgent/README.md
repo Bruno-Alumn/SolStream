@@ -20,6 +20,7 @@ shortcuts are COM. mingw has none of that, so only MSVC builds the real thing.
 On Windows (what you actually run):
 
 ```
+cmake -S . -B build -DBUILD_TESTING=OFF
 cmake --build build --target SolStreamAgent --config Release
 ```
 

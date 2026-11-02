@@ -14,7 +14,7 @@ final class LaunchTroubleTests: XCTestCase {
 
     func testTheWordsSayWhatToDo() {
         let waiting = AppDelegate.launchTroubleText(.needsApproval, app: "Game", host: "pc")
-        XCTAssertTrue(waiting.contains("Open windows"))
+        XCTAssertTrue(waiting.contains("Open window row"))
         XCTAssertTrue(waiting.contains("Run as administrator"))
         let declined = AppDelegate.launchTroubleText(.declined, app: "Game", host: "pc")
         XCTAssertTrue(declined.contains("declined"))

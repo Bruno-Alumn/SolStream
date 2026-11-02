@@ -775,7 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             guard let existing = LaunchMatch.afterLaunch(
                                 app.name, in: windows, knownPIDs: knownPIDs) else {
                                 self.failOpen("\(app.name) didn't open a window. If it opened on the PC's own "
-                                              + "screen, pick it under Open windows; otherwise try again.",
+                                              + "screen, pick its Open window row; otherwise try again.",
                                               for: agent)
                                 return
                             }
@@ -832,7 +832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // second launch of one that needs administrator rights asks again.
             return "\(app) is waiting for an answer on \(host)'s own screen — usually "
                 + "Windows asking for administrator permission, which can't be given from "
-                + "here. Answer it at the PC, then pick \(app) under Open windows. To avoid "
+                + "here. Answer it at the PC, then pick \(app)'s Open window row. To avoid "
                 + "this, turn off \"Run as administrator\" for the app on the PC."
         case .declined:
             return "\(app) needs administrator permission, and it was declined on \(host)."

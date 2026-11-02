@@ -28,19 +28,20 @@ PC. Not a remote desktop or a second screen to squint at: only the app, right
 where you’re working.
 
 <div align="center">
-  <img src="docs/media/demo.gif" width="860" alt="Calculator and a command prompt from a Windows PC, each in its own window on a Mac. Calculator works out 12 × 3 and the prompt prints a line typed on the Mac.">
+  <img src="docs/media/demo.gif" width="860" alt="Apps from a Windows PC in their own windows on a Mac: Calculator works out 12 × 3, and a command prompt prints a line typed on the Mac.">
 </div>
 
 ## Features
 
 **Feels like a Mac app**
 
-- Stream several apps at once, each in its own window.
+- Stream any Windows app in its own window; switch to another with
+  **Host › Switch App…** (<kbd>⌘</kbd><kbd>O</kbd>).
 - Resize a window and the app re-lays itself out on the PC instead of being
   scaled.
-- Add a Windows app to the Dock, Spotlight and Launchpad.
-- Copy and paste text and pictures both ways; drop files on a window to send
-  them to the PC.
+- Add a Windows app to the Dock and Spotlight.
+- Copy and paste text and pictures both ways; drop files on a window to save
+  them on the PC and paste them there.
 - Your keyboard layout, Caps Lock and input methods work as usual.
 - Apps run on a virtual display, leaving the PC’s own monitor untouched.
 
@@ -63,7 +64,8 @@ where you’re working.
 
 ## Install
 
-You need a Mac with macOS 14 or later and a PC with Windows 10 or 11 (ideally
+You need a Mac with macOS 14 or later and a PC with Windows 10 (version 1903 or
+later) or 11 (ideally
 with a GPU video encoder), on the same network or both on
 [Tailscale](https://tailscale.com/download).
 
@@ -88,19 +90,20 @@ with a GPU video encoder), on the same network or both on
 2. **Pair, once per PC.** Click SolStream in the PC’s system tray and enter
    the pairing token it shows.
 3. **Choose an app.** Pick an open window or anything from the Start menu,
-   Steam and Epic games included.
+   Store apps and Steam and Epic games included.
 
 <img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, and video quality.">
 
 | Action | What it does |
 |:--|:--|
 | Click the frame rate in the title bar | Open the stream controls: volume, quality, mouse mode |
-| Choose **Gaming mouse** | Give a game raw mouse input |
+| Set **Mouse** to **Gaming** | Give a game raw mouse input |
 | <kbd>⌃</kbd><kbd>⌥</kbd> | Release the mouse from a game |
 | Pinch on the trackpad | Zoom in the app |
-| Drop files on a window | Send them to the PC’s clipboard; paste with <kbd>⌘</kbd><kbd>V</kbd> |
-| Right-click an app › **Add to Dock** | Open it from the Dock, Spotlight or Launchpad |
-| **Title bar › Hide** | Remove the app’s own title bar |
+| Drop files on a window | Save them in `Downloads\SolStream` on the PC and put them on its clipboard; paste with <kbd>⌘</kbd><kbd>V</kbd> |
+| Right-click an app › **Add to Dock** | Open it from the Dock or Spotlight |
+| **Title bar › Hide** | Remove the title bar an app draws itself |
+| **Host › Switch App…** (<kbd>⌘</kbd><kbd>O</kbd>) | Stream a different app; **Host › Disconnect** (<kbd>⌘</kbd><kbd>D</kbd>) leaves the PC |
 
 SolStream reopens the app you were streaming when you quit, and keeps the
 Mac’s display awake during a stream. Everything else is in
@@ -130,15 +133,16 @@ rights.
 
 An app set to run as administrator stops at Windows' prompt on the PC when
 it's opened from the Mac, and SolStream says so. Answer the prompt at the PC,
-then pick the app under *Open windows*; or turn off *Run as administrator* for
-it.
+then pick its *Open window* row in the list; or turn off *Run as administrator*
+for it.
 </details>
 
 <details>
 <summary><strong>I hear the whole PC instead of the app</strong></summary>
 
 Per-app audio requires Windows 11. On Windows 10, SolStream sends all of the
-PC's audio.
+PC's audio. On Windows 11, check **Settings › Sound › From** is set to
+*Streamed apps*.
 </details>
 
 <details>
@@ -164,8 +168,12 @@ starts again when you sign back in. Locking the PC doesn't stop it.
 
 - **Mac:** quit SolStream and move it to the Trash. Pairings are stored in
   `~/Library/Application Support/SolStream`; delete that folder to remove them.
+  Apps added to the Dock are in `~/Applications/SolStream Apps`; delete that
+  folder too.
 - **PC:** Settings › Apps › SolStream › **Uninstall**. This removes the host,
   its firewall rules, its sign-in task and the virtual display it installed.
+  It keeps the pairing token, so a reinstall pairs with the same Macs, and
+  files sent from the Mac stay in `Downloads\SolStream`.
 </details>
 
 ## Privacy
@@ -178,8 +186,10 @@ command; after that, the control channel and all media are encrypted with
 AES-256-GCM. Run the host on a trusted network, or reach it over a VPN such
 as Tailscale.
 
-The only other network requests are update checks to GitHub: the Mac app when
-it opens and the PC host shortly after it starts, then once a day. Nothing is
+The only other network requests go to GitHub: update checks, from the Mac app
+when it opens and the PC host shortly after it starts, then once a day (the
+Mac's can be turned off in **Settings › Updates**); and, when the PC sets up its virtual
+display, a one-time download of the display driver. Nothing is
 installed without your confirmation, never during a stream, and a download
 that doesn’t verify against the signing key built into both apps is discarded
 ([details](docs/updates.md)).
@@ -220,6 +230,7 @@ cd macos/SolStreamClient && swift build && swift test
 **Windows host** (CMake and Visual Studio's C++ tools):
 
 ```
+cmake -S . -B build -DBUILD_TESTING=OFF
 cmake --build build --target SolStreamAgent --config Release
 ```
 
@@ -257,7 +268,7 @@ Releases are published by pushing a version tag; see
    │                   │                  │                        │
    │                   │  SMT/1, UDP      │  Windows.Graphics      │
    │                   │◄────47631───────►│   .Capture             │
-   │                   │  AES-256-GCM     │  hardware H.264        │
+   │                   │  AES-256-GCM     │  hardware H.264/HEVC   │
    └───────────────────┘                  │  per-app sound, Opus   │
                                           └───────────┬────────────┘
                                                       │ captures
