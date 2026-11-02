@@ -944,8 +944,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         return canWake
             ? "Not answering. The PC may be asleep, or nobody is signed in to Windows."
-            : "Not answering on port \(StreamPorts.agent). "
-                + "Check the PC is awake and SolStream is running."
+            : "Not answering. Check the PC is awake, someone is signed in to Windows, "
+                + "and SolStream is running there."
     }
 
     /// How long a PC is given to wake before the hint says it has not.

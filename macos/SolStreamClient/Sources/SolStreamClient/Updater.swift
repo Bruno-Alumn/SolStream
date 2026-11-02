@@ -759,8 +759,8 @@ enum UpdateError: Error, Equatable {
 
     var reason: String {
         switch self {
-        case .transport(.offline), .transport(.network): return "Couldn't reach GitHub."
-        case .transport(.timedOut): return "GitHub didn't answer in time."
+        case .transport(.offline), .transport(.network): return "Couldn't reach GitHub. Check the internet."
+        case .transport(.timedOut): return "GitHub didn't answer. Check the internet."
         case .transport(.refusedAddress): return "The download left GitHub, so it was stopped."
         case .transport(.cannotWrite): return "Couldn't save the download."
         case .transport(.cancelled): return "The download was stopped."
@@ -773,7 +773,15 @@ enum UpdateError: Error, Equatable {
         case .malformedSums, .notInSums: return "The update's checksums didn't verify."
         case .checksumMismatch, .install(.checksumMismatch): return "The download didn't match its checksum."
         case .install(.notNewer): return "This copy is already up to date."
-        case .install(.notWritable): return "SolStream can't replace itself here."
+        case .install(.notWritable(let place)):
+            // "Move it" only where moving would help: in Applications already,
+            // the folder is closed to this account or to SolStream, and the
+            // download is the way.
+            let path = place.standardizedFileURL.path
+            let inApplications = path.hasPrefix("/Applications")
+                || path.hasPrefix(NSHomeDirectory() + "/Applications")
+            return inApplications ? "This copy can't replace itself. Use the download."
+                                  : "Move SolStream to Applications to update it."
         case .install(.wrongIdentifier): return "The download isn't SolStream."
         case .install(.wrongVersion): return "The download is the wrong version."
         case .install(.signatureRejected): return "The new copy's signature didn't verify."

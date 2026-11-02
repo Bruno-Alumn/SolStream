@@ -823,7 +823,10 @@ public final class AgentConnection {
                 }
             case .failed(let error):
                 Log.error("[agent] connection failed: \(error)")
-                self.report(.failed(error.localizedDescription))
+                // Not the error's own words, which are a socket's; and it is
+                // coming back by itself, which they did not say.
+                self.report(.failed("The connection to \(self.host) dropped. "
+                                    + "SolStream is reconnecting."))
                 self.failPending(error)
                 self.noteConnectionLost()
                 // Nil it, or `connect()` early-returns on a dead NWConnection
@@ -942,11 +945,22 @@ public final class AgentConnection {
     private static func explain(_ error: NWError, host: String, port: UInt16) -> String {
         switch error {
         case .posix(.ECONNREFUSED):
-            return "\(host) is there, but SolStream is not running on it."
-        case .posix(.ETIMEDOUT), .posix(.EHOSTUNREACH), .posix(.ENETUNREACH):
-            return "No answer from \(host). Check SolStream is running on that PC."
+            return "\(host) is on, but SolStream isn't running there. Open SolStream on the "
+                + "PC, or sign in to Windows."
+        case .posix(.EHOSTUNREACH), .posix(.ENETUNREACH):
+            // This Mac's side: no route, or macOS keeping SolStream off the
+            // local network.
+            return "This Mac has no way to \(host). Check its Wi-Fi or Tailscale, and that "
+                + "SolStream is allowed under Privacy & Security > Local Network."
+        case .posix(.ETIMEDOUT):
+            return "No answer from \(host). Check the PC is awake, someone is signed in to "
+                + "Windows, and SolStream is running."
+        case .dns:
+            return "Couldn't find a PC called \(host). Check the name, or use the address "
+                + "shown on SolStream's window on the PC."
         default:
-            return "Can't reach \(host): \(error.localizedDescription)"
+            return "Can't reach \(host) from this Mac. Check both are on the same network, "
+                + "or on Tailscale."
         }
     }
 

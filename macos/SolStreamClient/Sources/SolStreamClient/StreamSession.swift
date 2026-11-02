@@ -267,7 +267,8 @@ final class StreamSession {
         }
         media.onEnded = { [weak self] in
             DispatchQueue.main.async {
-                self?.onPhase?(.failed("The host stopped answering."))
+                self?.onPhase?(.failed("The PC stopped sending the picture. Try Again to go back and "
+                                          + "open the app again."))
             }
         }
         // Holding as well as asking: until the IDR, every P-frame would only
@@ -303,7 +304,8 @@ final class StreamSession {
 
         onPhase?(.waitingForVideo)
         guard media.start() else {
-            onPhase?(.failed("Could not open the media socket."))
+            onPhase?(.failed("This Mac couldn't open the stream. Try Again; if it keeps "
+                               + "happening, quit and reopen SolStream."))
             isRunning = false
             // Hand the output device back here, because nothing else ever will.
             // `stop()` returns immediately while `isRunning` is false — which it

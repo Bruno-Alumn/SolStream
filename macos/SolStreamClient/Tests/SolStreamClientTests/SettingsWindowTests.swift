@@ -671,8 +671,8 @@ final class SettingsWindowTests: XCTestCase {
         updater.isStreaming = false
         expect(.installing("1.1.0"), status: "Installing 1.1.0…", action: "Install and relaunch",
                enabled: false)
-        expect(.manualInstall("1.1.0", reason: "SolStream can't replace itself here."),
-               status: "SolStream can't replace itself here.", action: "Show download")
+        expect(.manualInstall("1.1.0", reason: "Move SolStream to Applications to update it."),
+               status: "Move SolStream to Applications to update it.", action: "Show download")
         expect(.failed("The update's signature didn't verify."),
                status: "The update's signature didn't verify.", action: nil)
 

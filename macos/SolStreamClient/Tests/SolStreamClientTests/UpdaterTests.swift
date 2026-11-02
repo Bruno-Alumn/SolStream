@@ -421,7 +421,7 @@ final class UpdaterTests: XCTestCase {
         let updater = makeUpdater(version: "1.0.0")
         // No stub for the address: the stub answers as an unreachable host.
         await updater.check()
-        XCTAssertEqual(updater.state, .failed("Couldn't reach GitHub."))
+        XCTAssertEqual(updater.state, .failed("Couldn't reach GitHub. Check the internet."))
         XCTAssertEqual(updater.lastResult, "failed")
 
         StubProtocol.serve(UpdateSource.latestRelease.absoluteString, status: 403, body: Data())
@@ -696,7 +696,7 @@ final class UpdaterTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o555],
                                               ofItemAtPath: target.deletingLastPathComponent().path)
         await updater.check()
-        XCTAssertEqual(updater.state, .manualInstall("1.1.0", reason: "SolStream can't replace itself here."))
+        XCTAssertEqual(updater.state, .manualInstall("1.1.0", reason: "Move SolStream to Applications to update it."))
 
         try FileManager.default.createDirectory(at: revealFolder, withIntermediateDirectories: true)
         var shown: [URL] = []
@@ -951,7 +951,7 @@ final class UpdaterTests: XCTestCase {
         defer { NotificationCenter.default.removeObserver(observer) }
         updater.installAndRelaunch()
         await fulfillment(of: [settled], timeout: 30)
-        XCTAssertEqual(updater.state, .manualInstall("1.1.0", reason: "SolStream can't replace itself here."))
+        XCTAssertEqual(updater.state, .manualInstall("1.1.0", reason: "Move SolStream to Applications to update it."))
         XCTAssertNotNil(updater.downloaded, "the download is kept, to be shown")
         XCTAssertEqual(try installedVersion(target), "1.0.0")
     }

@@ -650,7 +650,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 onRefused: @escaping (String) -> Void) {
         TokenPrompt.present(host: host, rejected: rejected, over: parent) { token in
             guard let token else {
-                onRefused("\(host) needs a pairing token to go any further.")
+                onRefused("\(host) needs its pairing token. It's on SolStream's window on "
+                          + "the PC, under \"Pairing token\". Connect again to enter it.")
                 return
             }
             agent?.supplyToken(token)
@@ -1059,15 +1060,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let alert = NSAlert()
         alert.alertStyle = .critical
-        alert.messageText = "Streaming this would send the whole of \(display.name)"
+        // Not `display.name`, which is Windows' device name, \\.\DISPLAY1.
+        alert.messageText = "Streaming this would send everything on \(host)'s monitor"
         alert.informativeText = """
             \(host) has no virtual display for SolStream to put \(names) on, so it will \
             capture that whole monitor and show you a piece of the picture. Everything \
             else on the monitor is captured with it — every other window, and anything \
             that opens there while you are connected — and all of it crosses the network.
 
-            Installing the virtual display driver on \(host) is what makes streaming one \
-            application send one application.
+            SolStream's own virtual display on \(host) is what lets it send just the \
+            app. Set it up from SolStream on the PC.
             """
         // "Don't Stream" first, so it is the default and Return is the safe
         // answer to a question about somebody's desktop.
@@ -1087,9 +1089,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The host encodes the whole display and each window shows a crop, so
         // on a real monitor everything on it is sent; asked before any of it is.
         guard confirmWholeDisplayCapture(host: host, display: display, targets: targets) else {
-            failOpen("Nothing was streamed. \(display.name) on \(host) is a real "
-                     + "monitor, so everything on it would have been sent, not "
-                     + "just \(targets.count == 1 ? "this window" : "these windows").",
+            failOpen("Nothing was streamed. Set up SolStream's virtual display on \(host) "
+                     + "to send one app on its own.",
                      for: agent)
             return
         }

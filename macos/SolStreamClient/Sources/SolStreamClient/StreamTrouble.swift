@@ -64,7 +64,8 @@ extension AppDelegate {
         case (.gone, _):
             if finalErrorShown { return .keep }
             return .error(title: "Lost the connection",
-                          detail: "\(host) is no longer connected. Try Again, then Back to connect again.")
+                          detail: "The connection to \(host) has ended. Try Again goes back to "
+                              + "the app list; choose Back there to connect again.")
         case (_, .stalled(let seconds)):
             return .status(title: "Reconnecting…",
                            detail: "No picture for \(seconds)s — asking \(host) for a new frame")
