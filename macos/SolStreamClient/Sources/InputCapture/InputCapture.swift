@@ -268,6 +268,9 @@ public final class InputCapture {
 
     /// The device bits of the two ⌘ keys.
     private static let commandBits = modifierFamilies[3].left | modifierFamilies[3].right
+    /// Either key the PC has as Ctrl.
+    private static let controlOrCommandBits = modifierFamilies[1].left | modifierFamilies[1].right
+        | commandBits
 
     /// Which modifier keys an event's flags say are down, as device bits.
     ///
@@ -352,6 +355,8 @@ public final class InputCapture {
     /// axis. A trackpad reports fractions of a point, and rounding each event
     /// on its own threw slow scrolls away entirely.
     private var scrollResidual = CGPoint.zero
+    /// What a pinch has moved since its last whole notch; see `pinchUnits`.
+    private var pinchResidual: CGFloat = 0
 
     /// Non-modifier keys currently held, so they can be released on focus loss.
     /// The host hands key-down straight to SendInput, and Windows auto-repeats a
@@ -471,7 +476,7 @@ public final class InputCapture {
             matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
                        .otherMouseDown, .otherMouseUp,
                        .mouseMoved, .leftMouseDragged, .rightMouseDragged,
-                       .otherMouseDragged, .scrollWheel]
+                       .otherMouseDragged, .scrollWheel, .magnify]
         ) { [weak self] event in
             self?.handleMonitoredEvent(event)
             return event
@@ -1307,9 +1312,45 @@ public final class InputCapture {
             guard sendPosition(for: event, in: view) else { return }
             sendWheel(event)
 
+        case .magnify:
+            // Over the picture, like the wheel, and there for the same reason:
+            // the zoom goes to the window under the pointer.
+            guard sendPosition(for: event, in: view) else { return }
+            sendPinch(event)
+
         default:
             break
         }
+    }
+
+    /// A trackpad pinch, as Windows applications zoom: the wheel with Ctrl
+    /// held. Browsers, Office, Explorer, image viewers and maps all take it.
+    /// Ctrl is pressed around the wheel only if it is not held already -- by
+    /// ⌃ or by ⌘, which the PC has as Ctrl -- and let go straight after, so
+    /// nothing else typed meanwhile is a Ctrl chord.
+    private func sendPinch(_ event: NSEvent) {
+        let pinch = Self.pinchUnits(magnification: event.magnification, residual: pinchResidual)
+        pinchResidual = event.phase.contains(.ended) || event.phase.contains(.cancelled)
+            ? 0 : pinch.residual
+        guard pinch.units != 0 else { return }
+        let control = Self.modifierKeys[2].hostKey
+        let held = lastDeviceFlags & Self.controlOrCommandBits != 0
+        if !held { emit(keyPacket(control, pressed: true, modifiers: [.control])) }
+        emit(SMTInput.scroll(amount: pinch.units))
+        if !held { emit(keyPacket(control, pressed: false, modifiers: [])) }
+    }
+
+    /// A pinch's magnification in Windows wheel units, in whole notches, with
+    /// what rounding left over. A pinch to twice the size is a magnification
+    /// of about 1; one notch for every 0.12 of it is the step most Windows
+    /// applications zoom by, so the zoom keeps up with the fingers. Whole
+    /// notches, because some applications zoom a step per wheel message
+    /// whatever its size, and a stream of small ones zoomed far too fast.
+    static func pinchUnits(magnification: CGFloat, residual: CGFloat)
+        -> (units: Int, residual: CGFloat) {
+        let total = magnification * 1000 + residual
+        let notches = (total / 120).rounded(.towardZero)
+        return (Int(notches) * 120, total - notches * 120)
     }
 
     /// Press a button on the host, with the modifiers it was pressed with: a

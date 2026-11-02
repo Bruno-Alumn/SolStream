@@ -94,6 +94,8 @@ sound quality, video quality and mouse mode.
   release it automatically.
 - **Title bar → Hide** removes the app's own title bar for apps that draw one,
   such as Chrome, Discord and File Explorer.
+- **Pinch** on the trackpad to zoom: it reaches the app as Ctrl and the scroll
+  wheel, which browsers, Office, maps and image viewers zoom with.
 - **Add to Dock**: right-click an app in the list, or choose
   **Add … to Dock** from the Host menu while it's open. Clicking it in the Dock, Spotlight or
   Launchpad connects to the PC and opens it. The launchers are kept in
