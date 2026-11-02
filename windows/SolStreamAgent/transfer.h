@@ -63,6 +63,10 @@ std::string ClipboardImageSetJson(long long offset, long long total, const std::
 std::string UploadJson(const std::string& name, long long offset, long long total,
                        const std::string& base64);
 
+/// A clipboard DIB as a BMP file: the DIB with a file header in front, saying
+/// where its pixels start. Empty when they would start past its end.
+std::vector<unsigned char> DibAsBmp(const unsigned char* dib, size_t size);
+
 /// Drop an upload that has not finished, deleting the part written: the Mac
 /// gave up on it (`{"cmd":"upload","abort":1}`) or went away.
 void AbandonUpload();

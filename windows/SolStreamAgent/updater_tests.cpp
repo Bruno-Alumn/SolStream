@@ -3530,6 +3530,52 @@ void TestAppIds() {
 
 // ── Pictures and files in chunks ─────────────────────────────────────────────
 
+/// Where a clipboard DIB's pixels start, once it is a BMP file.
+DWORD BmpPixelOffset(BITMAPINFOHEADER header, size_t pixels) {
+    std::vector<unsigned char> dib(sizeof(BITMAPINFOHEADER) + 1024 + pixels);
+    header.biSize = sizeof(BITMAPINFOHEADER);
+    std::memcpy(dib.data(), &header, sizeof(header));
+    const std::vector<unsigned char> bmp = solstream::DibAsBmp(dib.data(), dib.size());
+    if (bmp.size() < sizeof(BITMAPFILEHEADER)) {
+        return 0;
+    }
+    BITMAPFILEHEADER file{};
+    std::memcpy(&file, bmp.data(), sizeof(file));
+    return file.bfOffBits;
+}
+
+void TestDibAsBmp() {
+    const DWORD base = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    BITMAPINFOHEADER header{};
+    header.biWidth = 4;
+    header.biHeight = 4;
+    header.biPlanes = 1;
+
+    header.biBitCount = 32;
+    header.biCompression = BI_RGB;
+    CHECK(BmpPixelOffset(header, 64) == base);
+    // Three masks after a plain header.
+    header.biCompression = BI_BITFIELDS;
+    CHECK(BmpPixelOffset(header, 64) == base + 12);
+    // An optional colour table at 24 or 32 bits is skipped too.
+    header.biCompression = BI_RGB;
+    header.biClrUsed = 16;
+    CHECK(BmpPixelOffset(header, 64) == base + 64);
+    // 8 bits with no count: a full table.
+    header.biBitCount = 8;
+    header.biClrUsed = 0;
+    CHECK(BmpPixelOffset(header, 16) == base + 1024);
+    // JPEG or PNG inside: no table.
+    header.biBitCount = 0;
+    header.biCompression = BI_PNG;
+    CHECK(BmpPixelOffset(header, 64) == base);
+    // A count that would put the pixels past the end is no picture.
+    header.biBitCount = 32;
+    header.biCompression = BI_RGB;
+    header.biClrUsed = 0x40000000;
+    CHECK(BmpPixelOffset(header, 64) == 0);
+}
+
 void TestTransferNames() {
     using solstream::SafeFileName;
     CHECK(SafeFileName(L"report.pdf") == L"report.pdf");
@@ -3751,6 +3797,7 @@ int wmain(int argc, wchar_t** argv) {
 
     TestVersions();
     TestAppIds();
+    TestDibAsBmp();
     TestBase64();
     TestSignature(vector);
     TestVouch(vector);

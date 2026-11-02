@@ -224,34 +224,6 @@ bool PngToDib(const std::vector<unsigned char>& png, std::vector<unsigned char>&
     return true;
 }
 
-/// A DIB as a BMP file, which the Imaging Component reads: the DIB with the
-/// file header in front, saying where its pixels start.
-std::vector<unsigned char> DibAsBmp(const unsigned char* dib, size_t size) {
-    std::vector<unsigned char> bmp;
-    if (size < sizeof(BITMAPINFOHEADER)) {
-        return bmp;
-    }
-    BITMAPINFOHEADER header{};
-    std::memcpy(&header, dib, sizeof(header));
-    if (header.biSize < sizeof(BITMAPINFOHEADER) || header.biSize > size) {
-        return bmp;
-    }
-    size_t palette = 0;
-    if (header.biBitCount <= 8) {
-        palette = (header.biClrUsed ? header.biClrUsed : (1u << header.biBitCount)) * 4;
-    } else if (header.biCompression == BI_BITFIELDS && header.biSize == sizeof(BITMAPINFOHEADER)) {
-        palette = 12;  // three masks after a plain header
-    }
-    BITMAPFILEHEADER file{};
-    file.bfType = 0x4D42;  // "BM"
-    file.bfSize = static_cast<DWORD>(sizeof(file) + size);
-    file.bfOffBits = static_cast<DWORD>(sizeof(file) + header.biSize + palette);
-    bmp.resize(sizeof(file) + size);
-    std::memcpy(bmp.data(), &file, sizeof(file));
-    std::memcpy(bmp.data() + sizeof(file), dib, size);
-    return bmp;
-}
-
 /// The bytes a clipboard format holds. The caller has the clipboard open.
 std::vector<unsigned char> FormatBytes(UINT format) {
     std::vector<unsigned char> bytes;
@@ -343,6 +315,52 @@ std::wstring Lower(std::wstring text) {
 }
 
 }  // namespace
+
+/// A DIB as a BMP file, which the Imaging Component reads: the DIB with the
+/// file header in front, saying where its pixels start.
+std::vector<unsigned char> DibAsBmp(const unsigned char* dib, size_t size) {
+    std::vector<unsigned char> bmp;
+    if (size < sizeof(BITMAPINFOHEADER)) {
+        return bmp;
+    }
+    BITMAPINFOHEADER header{};
+    std::memcpy(&header, dib, sizeof(header));
+    if (header.biSize < sizeof(BITMAPINFOHEADER) || header.biSize > size) {
+        return bmp;
+    }
+    // What sits between the header and the pixels. Masks, after a plain
+    // header only -- a V4 or V5 header carries them inside itself. Then a
+    // colour table: as many entries as biClrUsed says, at any depth, since an
+    // encoder may write an optional one even for 24 or 32 bits; otherwise a
+    // full one for 8 bits or fewer, and none for JPEG or PNG inside (a bit
+    // count of 0). Counted only by biBitCount, a table nobody needed shifted
+    // every pixel and the picture came out garbled.
+    size_t extra = 0;
+    if (header.biSize == sizeof(BITMAPINFOHEADER)) {
+        if (header.biCompression == BI_BITFIELDS) {
+            extra = 12;
+        } else if (header.biCompression == 6 /* BI_ALPHABITFIELDS */) {
+            extra = 16;
+        }
+    }
+    if (header.biClrUsed != 0) {
+        extra += static_cast<size_t>(header.biClrUsed) * 4;
+    } else if (header.biBitCount > 0 && header.biBitCount <= 8) {
+        extra += (size_t{1} << header.biBitCount) * 4;
+    }
+    // Pixels that would start past the end are not a picture.
+    if (extra > size || header.biSize + extra > size) {
+        return bmp;
+    }
+    BITMAPFILEHEADER file{};
+    file.bfType = 0x4D42;  // "BM"
+    file.bfSize = static_cast<DWORD>(sizeof(file) + size);
+    file.bfOffBits = static_cast<DWORD>(sizeof(file) + header.biSize + extra);
+    bmp.resize(sizeof(file) + size);
+    std::memcpy(bmp.data(), &file, sizeof(file));
+    std::memcpy(bmp.data() + sizeof(file), dib, size);
+    return bmp;
+}
 
 void AbandonUpload() {
     std::lock_guard<std::mutex> guard(g_transfer_mutex);
