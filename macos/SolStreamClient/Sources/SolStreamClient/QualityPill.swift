@@ -27,6 +27,8 @@ final class QualityPill: DS.Box {
         /// The host answered a request for the streamed apps' sound with the
         /// whole PC's, as one on Windows 10 does, and said so; see StreamSession.
         var hostSendsWholePC: Bool = false
+        /// Why this Mac cannot play the sound, while it cannot.
+        var soundUnavailable: String?
         var hostDisplay: String = ""
         /// The host reports its cursor going away -- declared on its pushes,
         /// or learned from seeing it hide and show one -- so in gaming mode the
@@ -511,7 +513,8 @@ final class QualityPill: DS.Box {
         let wasHidden = soundQualityNote?.isHidden ?? true
         soundQualityNote?.isHidden = off
         let soundMoved = Self.show(Self.soundNote(audioActive: stats.audioActive, muted: muted,
-                                                  wholePC: stats.hostSendsWholePC),
+                                                  wholePC: stats.hostSendsWholePC,
+                                                  unavailable: stats.soundUnavailable),
                                    in: soundNote)
         return soundMoved || qualityMoved || wasHidden != off
     }
@@ -560,11 +563,17 @@ final class QualityPill: DS.Box {
 
     /// - Parameter wholePC: the host sends all its sound though only the
     ///   streamed apps' was asked for, which Settings says is what you get.
-    private static func soundNote(audioActive: Bool, muted: Bool, wholePC: Bool) -> String {
+    private static func soundNote(audioActive: Bool, muted: Bool, wholePC: Bool,
+                                  unavailable: String? = nil) -> String {
         switch soundOff(audioActive: audioActive) {
         case .byFlag: return "Off for this run, by --no-audio."
         case .inSettings: return "Off in Settings, so the PC sends none."
         case nil: break
+        }
+        // This Mac's side, not the PC's: "nothing playing on the PC" sent
+        // people to the PC for sound the Mac could not open its speakers for.
+        if unavailable != nil {
+            return "This Mac couldn't start its sound output. SolStream keeps trying."
         }
         if muted { return audioActive ? "Muted on this Mac. The PC is still playing." : "Muted on this Mac." }
         if wholePC {

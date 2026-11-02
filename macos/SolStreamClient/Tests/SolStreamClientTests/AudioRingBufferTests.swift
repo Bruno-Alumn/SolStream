@@ -157,6 +157,33 @@ final class AudioRingBufferTests: XCTestCase {
         XCTAssertLessThan(afterMs, 123)
     }
 
+    /// Past the ceiling once, the backlog comes all the way back to the
+    /// target while the Mac plays as fast as the PC sends -- it used to stop
+    /// a trim under the ceiling and stay there, 120 ms behind the picture.
+    func testABacklogIsTrimmedBackToTheTarget() {
+        let ring = AudioRingBuffer(capacityMilliseconds: 500, targetMilliseconds: 50,
+                                   ceilingMilliseconds: 120, prefillMilliseconds: 0)
+        write(stereo(frames: 48000 * 125 / 1000), to: ring)
+        for _ in 0..<200 {
+            write(stereo(frames: 240), to: ring)
+            _ = read(480, from: ring)
+        }
+        let settledMs = Double(ring.available / 2) / 48.0
+        XCTAssertLessThan(settledMs, 55, "the backlog stayed at the ceiling")
+        XCTAssertGreaterThanOrEqual(settledMs, 44, "measured after a read, so one packet under the target")
+    }
+
+    /// Sound written but never read out -- the device's callback stopped --
+    /// was never played.
+    func testSoundNotReadOutWasNotPlayed() {
+        let ring = AudioRingBuffer(capacityMilliseconds: 500, targetMilliseconds: 50,
+                                   ceilingMilliseconds: 120, prefillMilliseconds: 0)
+        write(stereo(frames: 480), to: ring)
+        XCTAssertFalse(ring.wasPlayed(within: 2))
+        _ = read(480, from: ring)
+        XCTAssertTrue(ring.wasPlayed(within: 2))
+    }
+
     func testEmptyWriteIsIgnored() {
         let ring = AudioRingBuffer()
         write([], to: ring)

@@ -119,6 +119,17 @@ final class StreamSession {
 
     /// Whether the PC's sound has been above silence in the last two seconds:
     /// what "Playing from the PC" means.
+    /// Sound packets in order, once each; the receive thread's alone.
+    private var audioSequencer = AudioSequencer()
+
+    /// Why this Mac cannot play the sound, while it cannot.
+    var soundUnavailable: String? {
+        audioLock.lock()
+        let renderer = audioRenderer
+        audioLock.unlock()
+        return renderer?.failure
+    }
+
     var soundIsAudible: Bool {
         audioLock.lock()
         let renderer = audioRenderer
@@ -239,6 +250,12 @@ final class StreamSession {
             let renderer = self.audioRenderer
             self.audioLock.unlock()
             guard let renderer else { return }
+            // In order, once each, with silence for what was lost; see
+            // AudioSequencer. The receive thread is its only user.
+            switch self.audioSequencer.admit(packet.sequence) {
+            case .drop: return
+            case .play(let missing): renderer.fillGap(packets: missing)
+            }
             // By the packet's own format, never by what was asked for: a host
             // that predates Opus sends PCM whatever it is asked.
             switch packet.format {

@@ -12,7 +12,18 @@ import SolStreamLogging
 /// and are queued in a ring buffer for the AudioUnit's render callback.
 public final class AudioRenderer {
     private var audioUnit: AudioUnit?
-    private var isRunning = false
+    /// Whether the unit is playing, and whether `stop()` has been called;
+    /// written by the main thread's stop() and the receive thread's retry,
+    /// read by both.
+    private let state = OSAllocatedUnfairLock(initialState: (running: false, stopped: false))
+    private var isRunning: Bool { state.withLock { $0.running } }
+
+    /// Why the sound could not be started, while it cannot: the step that
+    /// failed and its status. Nil while playing, and before the first try.
+    public var failure: String? { failureLock.withLock { $0 } }
+    private let failureLock = OSAllocatedUnfairLock<String?>(initialState: nil)
+    /// When a failed start was last retried, in uptime nanoseconds.
+    private var lastAttempt: UInt64 = 0
 
     // Audio format: 16-bit signed PCM, 48kHz, stereo
     private let sampleRate: Double = 48000
@@ -106,7 +117,7 @@ public final class AudioRenderer {
     /// Play one packet of 16-bit PCM, 48 kHz stereo, interleaved. Called from
     /// the stream connection's receive thread.
     public func playAudio(_ data: Data) {
-        guard !data.isEmpty, isRunning else { return }
+        guard !data.isEmpty, isRunningOrRetried() else { return }
 
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
@@ -118,6 +129,7 @@ public final class AudioRenderer {
             let samples = UnsafeBufferPointer(start: base.assumingMemoryBound(to: Int16.self),
                                               count: usable)
             noteLevel(samples)
+            lastPacketSamples = usable
             ringBuffer.write(samples)
         }
     }
@@ -129,14 +141,47 @@ public final class AudioRenderer {
     /// - Returns: false when the packet could not be decoded.
     @discardableResult
     public func playOpus(_ packet: Data) -> Bool {
-        guard !packet.isEmpty, isRunning else { return false }
+        guard !packet.isEmpty, isRunningOrRetried() else { return false }
         return opus.decode(packet) { samples in
             let usable = samples.count - (samples.count % 2)
             guard usable > 0 else { return }
             let whole = UnsafeBufferPointer(rebasing: samples[0..<usable])
             noteLevel(whole)
+            lastPacketSamples = usable
             ringBuffer.write(whole)
         }
+    }
+
+    /// Silence in place of `packets` that never came, each as long as the
+    /// last one that did, up to 60 ms in all. Without it the timeline closed
+    /// up over the hole: the sound jumped, and the next underrun came sooner.
+    /// Receive thread only, as playAudio is.
+    public func fillGap(packets: Int) {
+        guard packets > 0, lastPacketSamples > 0, isRunning else { return }
+        let cap = Int(sampleRate) * Int(channelCount) * 60 / 1000
+        let count = min(packets * lastPacketSamples, cap)
+        let silence = [Int16](repeating: 0, count: count - count % 2)
+        silence.withUnsafeBufferPointer { ringBuffer.write($0) }
+    }
+
+    /// Samples in the last packet played, for `fillGap`. Receive thread only.
+    private var lastPacketSamples = 0
+
+    /// Running, or -- after a start that failed -- started now, at most every
+    /// two seconds. A failure was final for the session: every packet was
+    /// dropped while the pill said the PC was quiet. What stopped it (no output
+    /// device yet, another app holding one) usually passes. Receive thread.
+    private func isRunningOrRetried() -> Bool {
+        let now = state.withLock { $0 }
+        if now.running { return true }
+        if now.stopped { return false }
+        let tick = DispatchTime.now().uptimeNanoseconds
+        guard tick - lastAttempt >= 2_000_000_000 else { return false }
+        lastAttempt = tick
+        tearDownUnit()
+        setupAudio()
+        if isRunning { Log.info("[audio] sound started on a later try") }
+        return isRunning
     }
 
     // MARK: - Whether anything can be heard
@@ -162,7 +207,10 @@ public final class AudioRenderer {
     public func wasAudible(within seconds: Double) -> Bool {
         let last = audibleLock.withLock { $0 }
         guard last > 0 else { return false }
+        // And played: sound that arrived but that the device never took --
+        // its callback stopped -- is not heard, however loud it was.
         return Double(DispatchTime.now().uptimeNanoseconds - last) / 1e9 < seconds
+            && ringBuffer.wasPlayed(within: seconds)
     }
 
     /// Built on the first Opus packet, so a stream of PCM -- from a host that
@@ -171,10 +219,25 @@ public final class AudioRenderer {
 
     /// Stop audio playback.
     public func stop() {
-        isRunning = false
+        state.withLock { $0 = (running: false, stopped: true) }
         if let audioUnit {
             AudioOutputUnitStop(audioUnit)
         }
+    }
+
+    /// Let go of a unit built by a start that failed part way, before trying
+    /// again.
+    private func tearDownUnit() {
+        guard let audioUnit else { return }
+        AudioOutputUnitStop(audioUnit)
+        AudioUnitUninitialize(audioUnit)
+        AudioComponentInstanceDispose(audioUnit)
+        self.audioUnit = nil
+    }
+
+    private func fail(_ step: String, _ status: OSStatus) {
+        Log.error("[audio] \(step) failed: \(status)")
+        failureLock.withLock { $0 = "\(step) (code \(status))" }
     }
 
     // MARK: - Private
@@ -202,14 +265,14 @@ public final class AudioRenderer {
         )
 
         guard let component = AudioComponentFindNext(nil, &componentDesc) else {
-            Log.error("Failed to find audio component")
+            fail("finding the output unit", -1)
             return
         }
 
         var unit: AudioUnit?
         let instanceStatus = AudioComponentInstanceNew(component, &unit)
         guard instanceStatus == noErr, let audioUnit = unit else {
-            Log.error("[audio] AudioComponentInstanceNew failed: \(instanceStatus)")
+            fail("AudioComponentInstanceNew", instanceStatus)
             return
         }
         self.audioUnit = audioUnit
@@ -227,7 +290,7 @@ public final class AudioRenderer {
             UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         )
         guard formatStatus == noErr else {
-            Log.error("[audio] the output unit refused 48 kHz 16-bit stereo: \(formatStatus)")
+            fail("setting 48 kHz 16-bit stereo", formatStatus)
             return
         }
 
@@ -246,26 +309,27 @@ public final class AudioRenderer {
             UInt32(MemoryLayout<AURenderCallbackStruct>.size)
         )
         guard callbackStatus == noErr else {
-            Log.error("[audio] could not install the render callback: \(callbackStatus)")
+            fail("installing the render callback", callbackStatus)
             return
         }
 
         // Initialize and start.
         let initStatus = AudioUnitInitialize(audioUnit)
         guard initStatus == noErr else {
-            Log.error("[audio] AudioUnitInitialize failed: \(initStatus)")
+            fail("AudioUnitInitialize", initStatus)
             return
         }
 
         let startStatus = AudioOutputUnitStart(audioUnit)
         guard startStatus == noErr else {
-            Log.error("[audio] AudioOutputUnitStart failed: \(startStatus)")
+            fail("AudioOutputUnitStart", startStatus)
             return
         }
 
         // Only now: `playAudio` gates on this, and everything it lets through
         // goes to a buffer the render callback is the sole reader of.
-        isRunning = true
+        state.withLock { if !$0.stopped { $0.running = true } }
+        failureLock.withLock { $0 = nil }
         Log.info("[audio] output unit running at 48 kHz, 16-bit stereo")
     }
 }
@@ -538,6 +602,13 @@ final class AudioRingBuffer {
         return frames * channels
     }
 
+    /// Trimming back towards the target, from crossing the ceiling until it
+    /// is reached. Under `lock`.
+    private var trimming = false
+    /// When samples were last read out to the device, in mach time; 0 before.
+    /// Under `lock`.
+    private var lastPlayed: UInt64 = 0
+
     /// Swap the three levels on a live stream.
     ///
     /// Nothing is dropped or held here. The next `write` trims towards a lower
@@ -554,6 +625,22 @@ final class AudioRingBuffer {
         ceiling = newCeiling
         prefill = newPrefill
         os_unfair_lock_unlock(lock)
+    }
+
+    /// Whether the sound was being played -- read out to the device, not
+    /// merely written in -- within the last `seconds`. CoreAudio stopping the
+    /// callback (a sound server restart, a device gone with nothing to fall back
+    /// on) leaves writes arriving and nothing read.
+    func wasPlayed(within seconds: Double) -> Bool {
+        os_unfair_lock_lock(lock)
+        let last = lastPlayed
+        os_unfair_lock_unlock(lock)
+        guard last > 0 else { return false }
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let elapsed = Double(mach_absolute_time() - last) * Double(timebase.numer)
+            / Double(timebase.denom) / 1e9
+        return elapsed < seconds
     }
 
     /// The levels in force, in samples, for tests.
@@ -603,18 +690,28 @@ final class AudioRingBuffer {
         filled += count
 
         // Correct drift continuously rather than only at saturation, and
-        // gently: a couple of milliseconds per packet until back at target. A
-        // backlog past twice the ceiling is not drift -- the Mac stalled, or a
-        // burst arrived at once -- and goes straight back to the target.
-        if filled > ceiling {
-            discardOldest(filled > 2 * ceiling ? filled - target
-                                               : min(filled - target, trimStep))
+        // gently: a couple of milliseconds per packet until back at target --
+        // all the way back. Trimmed only while over the ceiling, it stopped a
+        // trim below it, and with the Mac playing as fast as the PC sends,
+        // stayed there: one clump of Wi-Fi left the sound 120 ms behind the
+        // picture for the rest of the stream. A backlog past twice the ceiling
+        // is not drift -- the Mac stalled, or a burst arrived at once -- and
+        // goes straight back to the target.
+        if filled > ceiling { trimming = true }
+        if trimming {
+            if filled > 2 * ceiling {
+                discardOldest(filled - target)
+            } else if filled > target {
+                discardOldest(min(filled - target, trimStep))
+            }
+            if filled <= target { trimming = false }
         }
     }
 
     /// Fill `destination`, padding with silence on underrun.
     func read(into destination: UnsafeMutablePointer<Int16>, count: Int) {
         guard count > 0 else { return }
+        let now = mach_absolute_time()
         os_unfair_lock_lock(lock)
         if priming && filled >= prefill { priming = false }
         let take = priming ? 0 : min(count, filled)
@@ -627,6 +724,7 @@ final class AudioRingBuffer {
             }
             tail = (tail + take) % capacity
             filled -= take
+            lastPlayed = now
         }
         os_unfair_lock_unlock(lock)
 

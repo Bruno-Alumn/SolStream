@@ -159,6 +159,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             // What can be heard, not what has arrived: per-app sound arrives
             // as silence whenever the app makes none.
             stats.audioActive = self.session.soundIsAudible
+            stats.soundUnavailable = self.session.soundUnavailable
             stats.hostIgnoresSoundQuality = self.session.hostIgnoresSoundQuality
             stats.hostSendsWholePC = self.session.hostSendsWholePC
             stats.hostDisplay = self.hostDisplay
