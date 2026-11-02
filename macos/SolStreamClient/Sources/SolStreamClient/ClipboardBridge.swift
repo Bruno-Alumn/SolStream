@@ -585,6 +585,9 @@ final class ClipboardBridge {
         lastRemoteSequence = sequence
         adoptsRemoteBaseline = false
         lastLocalChangeCount = pasteboard.changeCount
+        // A write of the Mac's copy that fails after this must not send it
+        // over what was just put on the PC's clipboard.
+        retriedChangeCount = pasteboard.changeCount
         unsettledCopy = nil
         lastSyncedText = nil
         lastSyncedImage = nil
@@ -663,12 +666,16 @@ final class ClipboardBridge {
     /// it never went again, and a paste on the PC got what was there before.
     /// Once: one the host cannot take at all is not sent every second.
     private func sendAgainOnce(_ changeCount: Int) {
-        guard pasteboard.changeCount == changeCount, lastLocalChangeCount == changeCount,
-              retriedChangeCount != changeCount else { return }
+        guard isRunning, pasteboard.changeCount == changeCount,
+              lastLocalChangeCount == changeCount, retriedChangeCount != changeCount
+        else { return }
         retriedChangeCount = changeCount
         Log.info("[clipboard] the PC did not take the copy; sending it once more")
         // Anything but this count: the next tick sees it as unhandled.
         lastLocalChangeCount = changeCount - 1
+        // Not at once: whatever held the PC's clipboard most likely still does.
+        // The copy settles again first, as a new one would.
+        unsettledCopy = (changeCount, Date())
     }
 
     /// The PC's picture to the Mac, unless the Mac copied something since the

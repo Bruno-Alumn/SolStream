@@ -806,8 +806,39 @@ final class ClipboardBridgeTests: XCTestCase {
 
         bridge.syncNow()
         XCTAssertEqual(fake.imageWrites, [picture, picture])
-        fake.answerImageWrite(sequence: 4)
+        fake.answerImageWrite(sequence: nil)
         settle()
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites.count, 2, "sent a third time")
+    }
+
+    /// A new copy made before the retry goes instead; the failed one is not
+    /// sent over it.
+    func testANewCopyWinsOverARetry() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("first")
+        bridge.syncNow()
+        fake.answerWrite(sequence: nil)
+        copyOnTheMac("second")
+        settle()
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["first", "second"])
+    }
+
+    /// Sync turned off while a write was on its way: its failure afterwards
+    /// sends nothing, and stops nothing being forgotten.
+    func testAFailureAfterStopSendsNothing() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("on its way")
+        bridge.syncNow()
+        bridge.stop()
+        fake.answerWrite(sequence: nil)
+        settle()
+        XCTAssertEqual(fake.writes, ["on its way"])
     }
 
     /// Turned on mid-stream, sync starts from nothing having crossed: either

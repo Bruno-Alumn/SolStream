@@ -297,11 +297,13 @@ struct Upload {
 Upload g_upload;
 
 /// Whether Windows deletes the file when its handle closes. Set on an upload
-/// from its first byte and cleared after its last, so a host that dies
-/// mid-way -- killed, crashed, the PC switched off -- leaves no half file
-/// behind under the whole one's name, which DropUpload alone could not see to.
+/// from its first byte and cleared after its last, so a host that stops
+/// mid-way -- killed, crashed, the user signing out or shutting down -- leaves
+/// no half file behind under the whole one's name, which DropUpload alone could
+/// not see to. Not a power cut: the mark lives in memory until the handle closes.
 bool DeleteWhenClosed(HANDLE file, bool remove) {
-    FILE_DISPOSITION_INFO disposition{remove ? TRUE : FALSE};
+    FILE_DISPOSITION_INFO disposition{};
+    disposition.DeleteFile = remove ? TRUE : FALSE;
     return SetFileInformationByHandle(file, FileDispositionInfo, &disposition,
                                       sizeof(disposition)) != FALSE;
 }
@@ -710,7 +712,14 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         }
         const std::wstring path = UniqueFilePath(folder, SafeFileName(ToWide(name)),
             [](const std::wstring& candidate) {
-                return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES;
+                // Taken unless plainly absent: a name still being deleted --
+                // the last upload's, held a moment by a scanner -- answers
+                // access denied, and CREATE_NEW on it would fail.
+                if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    return true;
+                }
+                const DWORD error = GetLastError();
+                return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
             });
         if (folder.empty() || path.empty()) {
             return Error("upload", "no folder to write to");
