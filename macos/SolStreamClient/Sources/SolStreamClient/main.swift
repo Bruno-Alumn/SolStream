@@ -713,9 +713,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         knownPIDs: Set<Int>) {
         guard isCurrent(agent) else { return }
         picker?.showBusy("Starting \(app.name) on \(host)…")
-        agent.launch(path: app.path) { [weak self] id in
+        agent.launch(path: app.path) { [weak self] id, trouble in
             DispatchQueue.main.async {
                 guard let self else { return }
+                if let trouble {
+                    // Nothing to look for: no window can have come of it yet.
+                    self.failOpen(Self.launchTroubleText(trouble, app: app.name, host: host),
+                                  for: agent)
+                    return
+                }
                 guard let id else {
                     // Still not necessarily a failure: an application can open its
                     // window under a title that does not contain the name we
@@ -770,6 +776,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             picker?.showFailure(Self.openFailedOffline(host: agent.hostName,
                                                        reconnecting: agent.willReconnect),
                                 isConnection: true)
+        }
+    }
+
+    /// What a launch held up by Windows' administrator prompt says.
+    static func launchTroubleText(_ trouble: AgentConnection.LaunchTrouble, app: String,
+                                  host: String) -> String {
+        switch trouble {
+        case .needsApproval:
+            // Not "try again": once approved the app is already running, and a
+            // second launch of one that needs administrator rights asks again.
+            return "\(app) is waiting for an answer on \(host)'s own screen — usually "
+                + "Windows asking for administrator permission, which can't be given from "
+                + "here. Answer it at the PC, then pick \(app) under Open windows. To avoid "
+                + "this, turn off \"Run as administrator\" for the app on the PC."
+        case .declined:
+            return "\(app) needs administrator permission, and it was declined on \(host)."
         }
     }
 

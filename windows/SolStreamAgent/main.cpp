@@ -54,6 +54,8 @@
 #include <cstring>
 #include <cwctype>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <set>
 #include <string>
@@ -1246,42 +1248,114 @@ std::vector<OpenWindow> OpenUserWindows() {
     return found;
 }
 
-uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms) {
+/// Why a launch produced no window, when the reason is worth telling the Mac.
+enum class LaunchTrouble {
+    None,
+    /// Still waiting on an administrator prompt on the PC's secure desktop,
+    /// which is not streamed and which nobody at the Mac can answer.
+    NeedsApproval,
+    /// The administrator prompt was answered No.
+    Declined,
+};
+
+/// ShellExecuteEx, on a thread of its own, given `wait_ms` to return.
+///
+/// It does not return while Windows asks for an administrator's approval -- a
+/// shortcut set to run as administrator, or a program whose manifest needs it,
+/// which game launchers often have. That prompt is on the secure desktop, so
+/// the Mac neither sees it nor can answer it, and the command thread was held
+/// until somebody at the PC did: the Mac gave up after its timeout and dropped
+/// the connection, with the prompt still waiting on the PC. Now the command
+/// thread answers after `wait_ms`, and the call finishes on its own thread
+/// whenever the prompt is answered.
+bool ShellExecuteBounded(const std::wstring& path, DWORD wait_ms, DWORD& launched_pid,
+                         LaunchTrouble& trouble) {
+    struct State {
+        std::mutex lock;
+        std::condition_variable done_cv;
+        bool done = false;
+        bool abandoned = false;
+        BOOL executed = FALSE;
+        DWORD error = 0;
+        DWORD pid = 0;
+    };
+    auto state = std::make_shared<State>();
+    std::thread([path, state] {
+        SHELLEXECUTEINFOW request{};
+        request.cbSize = sizeof(request);
+        // NOASYNC: this thread ends as soon as the call returns, and Windows
+        // says a hand-off to another program -- a steam:// link's -- may be
+        // dropped otherwise. The thread is only here to block.
+        request.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+        request.lpVerb = L"open";
+        request.lpFile = path.c_str();
+        request.nShow = SW_SHOWNORMAL;
+        // ShellExecuteEx may hand a shortcut to a shell extension, which is
+        // COM, and Windows documents it as needing COM initialised on the
+        // calling thread.
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED
+                                                    | COINIT_DISABLE_OLE1DDE);
+        const BOOL executed = ShellExecuteExW(&request);
+        const DWORD error = GetLastError();
+        if (SUCCEEDED(com)) {
+            CoUninitialize();
+        }
+        DWORD pid = 0;
+        if (request.hProcess) {
+            pid = GetProcessId(request.hProcess);
+            CloseHandle(request.hProcess);
+        }
+        std::lock_guard<std::mutex> guard(state->lock);
+        if (state->abandoned) {
+            Log("[agent] a launch left waiting on an administrator prompt %s",
+                executed ? "was approved" : "did not go ahead");
+        }
+        state->executed = executed;
+        state->error = error;
+        state->pid = pid;
+        state->done = true;
+        state->done_cv.notify_one();
+    }).detach();
+
+    std::unique_lock<std::mutex> guard(state->lock);
+    if (!state->done_cv.wait_for(guard, std::chrono::milliseconds(wait_ms),
+                                 [&state] { return state->done; })) {
+        state->abandoned = true;
+        Log("[agent] the launch is waiting on an administrator prompt on the PC");
+        trouble = LaunchTrouble::NeedsApproval;
+        return false;
+    }
+    if (!state->executed) {
+        Log("[agent] ShellExecuteEx failed: %lu", state->error);
+        if (state->error == ERROR_CANCELLED) {
+            trouble = LaunchTrouble::Declined;
+        }
+        return false;
+    }
+    launched_pid = state->pid;
+    return true;
+}
+
+uint64_t LaunchAndWaitForWindow(const std::wstring& path, DWORD timeout_ms,
+                                LaunchTrouble& trouble) {
     std::set<HWND> before;
     for (const OpenWindow& window : OpenUserWindows()) {
         before.insert(window.handle);
     }
     const HWND foreground_before = GetForegroundWindow();
+    const ULONGLONG asked_at = GetTickCount64();
 
-    SHELLEXECUTEINFOW request{};
-    request.cbSize = sizeof(request);
-    request.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    request.lpVerb = L"open";
-    request.lpFile = path.c_str();
-    request.nShow = SW_SHOWNORMAL;
-    // ShellExecuteEx may hand a shortcut to a shell extension, which is COM, and
-    // Windows documents it as needing COM initialised on the calling thread.
-    // Scoped to this call rather than the whole client thread, whose apartment
-    // the media path's WinRT calls would otherwise inherit.
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED
-                                                | COINIT_DISABLE_OLE1DDE);
-    const BOOL executed = ShellExecuteExW(&request);
-    const DWORD execute_error = GetLastError();
-    if (SUCCEEDED(com)) {
-        CoUninitialize();
-    }
-    if (!executed) {
-        Log("[agent] ShellExecuteEx failed: %lu", execute_error);
+    // Ten seconds: an ordinary launch returns from ShellExecuteEx in well under
+    // one, and a prompt nobody is there to answer waits for ever.
+    DWORD launched_pid = 0;
+    if (!ShellExecuteBounded(path, std::min<DWORD>(timeout_ms, 10000), launched_pid, trouble)) {
         return 0;
     }
-    DWORD launched_pid = 0;
-    if (request.hProcess) {
-        launched_pid = GetProcessId(request.hProcess);
-        CloseHandle(request.hProcess);
-    }
 
+    // From the request, not from here: the launch above can take seconds, and
+    // the Mac allows timeout_ms and a few seconds more for the whole answer.
     const ULONGLONG start = GetTickCount64();
-    const ULONGLONG deadline = start + timeout_ms;
+    const ULONGLONG deadline = asked_at + timeout_ms;
     HWND fallback = nullptr;
     ULONGLONG fallback_seen = 0;
     while (GetTickCount64() < deadline) {
@@ -4493,7 +4567,16 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // client at a time, so nothing else is waiting on it, and the alternative
         // — returning immediately and making the Mac poll for an unidentified
         // new window — just moves the same matching problem across the wire.
-        const uint64_t id = LaunchAndWaitForWindow(ToWide(path), (DWORD) timeout);
+        LaunchTrouble trouble = LaunchTrouble::None;
+        const uint64_t id = LaunchAndWaitForWindow(ToWide(path), (DWORD) timeout, trouble);
+        if (trouble == LaunchTrouble::NeedsApproval) {
+            return "{\"type\":\"error\",\"reason\":\"approval\",\"message\":\"waiting for an "
+                   "answer on the PC's own screen, most likely an administrator prompt\"}";
+        }
+        if (trouble == LaunchTrouble::Declined) {
+            return "{\"type\":\"error\",\"reason\":\"declined\",\"message\":\"the "
+                   "administrator prompt was declined on the PC\"}";
+        }
         if (id == 0) {
             return "{\"type\":\"error\",\"message\":\"launched, but no window appeared\"}";
         }

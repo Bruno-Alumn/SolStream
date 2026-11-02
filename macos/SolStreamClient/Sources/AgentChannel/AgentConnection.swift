@@ -1731,26 +1731,47 @@ public final class AgentConnection {
         }
     }
 
+    /// Why a launch came to nothing, when the host can say.
+    public enum LaunchTrouble: Equatable, Sendable {
+        /// Windows did not finish starting it within ten seconds: most often an
+        /// administrator prompt on the PC's own screen, sometimes a security
+        /// warning or an unreachable network drive.
+        case needsApproval
+        /// The administrator prompt was answered No on the PC.
+        case declined
+
+        init?(reason: String?) {
+            switch reason {
+            case "approval": self = .needsApproval
+            case "declined": self = .declined
+            default: return nil
+            }
+        }
+    }
+
     /// Start an application and wait for the window it opens.
     ///
     /// The agent blocks until a window appears, so this reply is slow by design
     /// — a cold application start can take many seconds, and the alternative is
     /// making the Mac guess which new window belongs to what it just launched.
     public func launch(path: String, timeout: TimeInterval = 25,
-                       completion: @escaping (UInt64?) -> Void) {
+                       completion: @escaping (UInt64?, LaunchTrouble?) -> Void) {
         send(["cmd": "launch", "path": path,
               "timeoutMs": Int(timeout * 1000)]) { result in
             guard case .success(let message) = result,
                   message["alive"] as? Bool == true,
                   let id = (message["id"] as? NSNumber)?.uint64Value else {
-                if case .success(let message) = result,
-                   let error = message["message"] as? String {
-                    Log.error("[agent] launch failed: \(error)")
+                var trouble: LaunchTrouble?
+                if case .success(let message) = result {
+                    if let error = message["message"] as? String {
+                        Log.error("[agent] launch failed: \(error)")
+                    }
+                    trouble = LaunchTrouble(reason: message["reason"] as? String)
                 }
-                completion(nil)
+                completion(nil, trouble)
                 return
             }
-            completion(id)
+            completion(id, nil)
         }
     }
 
