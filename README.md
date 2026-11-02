@@ -1,22 +1,29 @@
-<p align="center">
-  <img src="docs/media/logo.png" width="128" alt="SolStream logo">
-</p>
+<div align="center">
 
-<h1 align="center">SolStream</h1>
+<img src="docs/media/logo.png" width="128" height="128" alt="SolStream app icon">
 
-<p align="center">
-  Windows apps on your Mac, each in a native window.
-</p>
+# SolStream
 
-<p align="center">
-  <a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/github/v/release/Bruno-Alumn/SolStream?label=release&color=2A64F5" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/macOS-14%2B-555" alt="macOS 14 or later">
-  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-555" alt="Windows 10 or 11">
-</p>
+**Windows apps on your Mac.**
 
-<p align="center">
+Each app from your PC opens in its own native Mac window.
+
+<a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/badge/Download_for_Mac_%26_PC-2A64F5?style=for-the-badge&logo=apple&logoColor=white" alt="Download SolStream for Mac and PC" height="36"></a>
+
+<a href="https://github.com/Bruno-Alumn/SolStream/releases/latest"><img src="https://img.shields.io/github/v/release/Bruno-Alumn/SolStream?style=flat-square&color=2A64F5&label=release" alt="Latest release"></a>
+<img src="https://img.shields.io/badge/macOS-14%2B-1f2937?style=flat-square&logo=apple&logoColor=white" alt="macOS 14 or later">
+<img src="https://img.shields.io/badge/Windows-10_%7C_11-1f2937?style=flat-square" alt="Windows 10 or 11">
+<img src="https://img.shields.io/badge/license-All_rights_reserved-6b7280?style=flat-square" alt="All rights reserved">
+
+[Features](#features) · [Install](#install) · [Using SolStream](#using-solstream) · [Troubleshooting](#troubleshooting) · [Security](#updates-and-security) · [Contribute](#contribute)
+
+</div>
+
+---
+
+<div align="center">
   <img src="docs/media/demo.gif" width="860" alt="Calculator and a command prompt from a Windows PC, each in its own window on a Mac. Calculator works out 12 × 3 and the prompt prints a line typed on the Mac.">
-</p>
+</div>
 
 SolStream streams individual applications from a Windows PC to a Mac. Each
 app appears as a regular macOS window that you can move, resize, put in full
@@ -43,14 +50,14 @@ screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
 | **Encrypted** | Pairing token authentication; AES-256-GCM on every packet. |
 | **Signed updates** | Both apps check for new releases, verify the signature and ask before installing. |
 
-## Requirements
+## Install
+
+You need:
 
 - A Mac with **macOS 14** or later
 - A PC with **Windows 10 or 11**; a GPU with a hardware video encoder is strongly
   recommended
 - Both on the same network, or both on [Tailscale](https://tailscale.com/download)
-
-## Installation
 
 Download both installers from the
 [latest release](https://github.com/Bruno-Alumn/SolStream/releases/latest).
@@ -60,18 +67,18 @@ Download both installers from the
 | **Mac** | `SolStream-X.Y.Z-macOS.dmg` | Drag SolStream into Applications. |
 | **PC** | `SolStreamSetup-X.Y.Z.exe` | Run it and keep *Set up a virtual display* selected. |
 
-The installers are not yet signed with a paid certificate, so each system
-shows a warning the first time:
-
-- **Mac:** open SolStream, dismiss the warning, then choose *Open Anyway* in
-  System Settings → Privacy & Security.
-- **PC:** on the "Windows protected your PC" screen, choose *More info* →
-  *Run anyway*.
+> **A note about signing:** the installers are not yet signed with a paid
+> certificate, so each system shows a warning the first time.
+>
+> - **Mac:** open SolStream, dismiss the warning, then choose **Open Anyway** in
+>   System Settings › Privacy & Security.
+> - **PC:** on the "Windows protected your PC" screen, choose **More info** ›
+>   **Run anyway**.
 
 Setup installs the host, adds its firewall rules and starts it in the system
 tray at sign-in.
 
-## Getting started
+## Using SolStream
 
 1. **Open SolStream on the Mac.** It discovers the PC on the local network. If
    the PC isn't listed, enter its name or IP address in the host list.
@@ -79,8 +86,6 @@ tray at sign-in.
    pairing token it shows. This is needed once per PC.
 3. **Choose an app.** Pick an open window or any app from the Start menu,
    Steam and Epic games included. It opens in its own window on the Mac.
-
-## Using SolStream
 
 <img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, and video quality.">
 
@@ -215,8 +220,20 @@ keyboard and mouse input back. The two communicate over an encrypted TCP
 control channel and SMT/1, SolStream's UDP media transport
 ([specification](docs/transport-smt1.md)).
 
+## Contribute
+
+- **Found something broken?** [Open an issue](https://github.com/Bruno-Alumn/SolStream/issues/new)
+  with what you did, what happened, and your macOS and Windows versions.
+- **Security problem?** Report it privately as described in [SECURITY.md](SECURITY.md).
+
+SolStream isn't open source, so pull requests can't be merged as they are,
+but bug reports and ideas are always welcome. Much of SolStream was built
+with AI coding agents, then compiled, tested and exercised on a real Mac and
+PC before merging.
+
 <details>
-<summary><strong>Building from source</strong></summary>
+<summary><strong>Build from source</strong></summary>
+<br>
 
 **Mac client** (Xcode command-line tools, macOS 14 or later):
 
@@ -253,11 +270,7 @@ Releases are published by pushing a version tag; see
 
 </details>
 
-## License
-
-All rights reserved. There is no open-source license: the code may be read
-here, but not copied, modified or redistributed without the owner's
-permission.
+---
 
 The Windows host includes [libopus](https://opus-codec.org) 1.6.1 (BSD
 3-clause) for audio ([notes](third_party/opus/SOLSTREAM.md); run
@@ -266,3 +279,9 @@ The Windows host includes [libopus](https://opus-codec.org) 1.6.1 (BSD
 (MIT) is not bundled: setup downloads a pinned, hash-verified release, and
 uninstalling removes it ([details](installer/README.md)). Everything else is
 part of macOS and Windows.
+
+**All rights reserved:** © 2026 Bruno-Alumn. There is no open-source license:
+the code may be read here, but not copied, modified or redistributed without
+the owner's permission.
+
+<sub>More Mac apps by Bruno-Alumn: [Tuckaway](https://github.com/Bruno-Alumn/Tuckaway) · [ThockBox](https://github.com/Bruno-Alumn/ThockBox)</sub>
