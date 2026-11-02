@@ -96,7 +96,13 @@ final class ClipboardBridge {
     private let pasteboard: NSPasteboard
 
     private var timer: Timer?
-    private var lastLocalChangeCount: Int
+    private var lastLocalChangeCount: Int {
+        didSet { Self.handledChangeCounts[pasteboard.name] = lastLocalChangeCount }
+    }
+    /// The Mac copy the last bridge on each pasteboard had dealt with. A
+    /// bridge is built for every stream, every Switch App and every Retry;
+    /// see `init`.
+    private static var handledChangeCounts: [NSPasteboard.Name: Int] = [:]
     private var lastRemoteSequence: Int?
     /// The last value this bridge put on either clipboard, while both still
     /// hold it. An echo of it is ours, not the user's. Kept in the Mac's line
@@ -221,7 +227,22 @@ final class ClipboardBridge {
         self.pasteboard = pasteboard
         self.settleTime = settleTime
         self.mayPush = mayPush
-        self.lastLocalChangeCount = pasteboard.changeCount
+        // Something copied on the Mac since the last bridge dealt with the
+        // clipboard is a copy waiting to cross, not a baseline. Taken as the
+        // baseline, the first read brought the PC's clipboard over it: copy a
+        // link, open the stream or Switch App, and the link was gone from both
+        // machines. So it goes to the PC once the stream has the keyboard, and
+        // the PC's is only adopted. With no bridge before it there is nothing
+        // to tell an old copy from a new one, and the PC's comes over as it
+        // always has.
+        if let handled = Self.handledChangeCounts[pasteboard.name],
+           handled != pasteboard.changeCount {
+            self.lastLocalChangeCount = handled
+            self.adoptsRemoteBaseline = true
+        } else {
+            self.lastLocalChangeCount = pasteboard.changeCount
+        }
+        Self.handledChangeCounts[pasteboard.name] = self.lastLocalChangeCount
     }
 
     deinit {
@@ -256,6 +277,14 @@ final class ClipboardBridge {
         }
         schedule(every: Self.idleInterval)
         Log.info("[clipboard] syncing with the host")
+    }
+
+    /// Sync is off: whatever is copied on the Mac from now until a bridge
+    /// next starts is not a copy waiting to cross, so the next bridge must not
+    /// treat it as one. Called when sync is turned off, and for a bridge built
+    /// with it off.
+    func forgetHandledCopies() {
+        Self.handledChangeCounts[pasteboard.name] = nil
     }
 
     func stop() {
@@ -358,7 +387,12 @@ final class ClipboardBridge {
             // Cut to the host's budget while the lines are still the Mac's.
             // Windows' are a byte longer each, and cut after converting, a copy
             // that fits would lose its tail.
-            let local = pasteboard.string(forType: .string)
+            //
+            // A copy of files is not text, though Finder puts their names on
+            // the clipboard as a string too: sent, the PC's clipboard became
+            // "report.pdf" in place of whatever it held.
+            let isFiles = pasteboard.types?.contains(.fileURL) ?? false
+            let local = isFiles ? nil : pasteboard.string(forType: .string)
                 .map { AgentConnection.clipboardPayload(Self.macLineEndings($0)) }
             // Looked at once more, after the text: sent only while it is still
             // the copy that settled, and still not private. Otherwise the next
@@ -387,6 +421,9 @@ final class ClipboardBridge {
                             // Adopt the sequence our own write produced, so it is
                             // not read back as a remote change on the next tick.
                             self.lastRemoteSequence = sequence
+                            // A sequence of our own is a baseline already; the next read is a
+                            // real answer, and a copy made on the PC since must come over.
+                            self.adoptsRemoteBaseline = false
                         } else if self.lastSyncedText == sent {
                             // Not taken — most often another program holding
                             // the PC's clipboard open — so the PC does not hold
@@ -497,6 +534,7 @@ final class ClipboardBridge {
     /// the keyboard, and ⌘V would paste the URL.
     func adopt(remoteSequence sequence: Int) {
         lastRemoteSequence = sequence
+        adoptsRemoteBaseline = false
         lastLocalChangeCount = pasteboard.changeCount
         unsettledCopy = nil
         lastSyncedText = nil
@@ -536,6 +574,9 @@ final class ClipboardBridge {
                 guard let self else { return }
                 if let sequence {
                     self.lastRemoteSequence = sequence
+                    // A sequence of our own is a baseline already; the next read is a
+                    // real answer, and a copy made on the PC since must come over.
+                    self.adoptsRemoteBaseline = false
                 } else if self.lastSyncedImage == digest {
                     self.lastSyncedImage = nil
                 }

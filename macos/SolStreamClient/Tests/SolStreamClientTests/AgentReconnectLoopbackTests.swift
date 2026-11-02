@@ -513,6 +513,52 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(progress.last, Int64(size))
     }
 
+    /// A cancelled upload sends no more chunks, and tells the host to delete
+    /// the part it has: the window it was dropped on has closed.
+    func testACancelledUploadStopsAndAbortsOnTheHost() throws {
+        let size = AgentConnection.transferChunkBytes * 3
+        let file = folder.appendingPathComponent("big.bin")
+        try Data(count: size).write(to: file)
+        let seen = Observations()
+        let cancellation = AgentConnection.UploadCancellation()
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            var requests: [String] = []
+            while let request = ScriptedHost.json(connection.readLine(timeout: 2)),
+                  request["cmd"] as? String == "upload" {
+                if request["abort"] != nil {
+                    requests.append("abort")
+                    break
+                }
+                requests.append("chunk")
+                // The window closes while the first chunk is on its way.
+                cancellation.cancel()
+                connection.send(#"{"type":"upload","ok":true}"#)
+            }
+            seen.set("requests", requests)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+
+        let done = expectation(description: "stopped")
+        var path: String? = "unset"
+        agent.upload(file, as: "big.bin", cancellation: cancellation) {
+            path = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        XCTAssertNil(path)
+        let deadline = Date().addingTimeInterval(3)
+        while seen.get("requests") == nil && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(seen.get("requests") as? [String], ["chunk", "abort"])
+    }
+
     /// The host's picture comes a chunk at a time for one clipboard sequence,
     /// and a host that refuses midway gives nothing rather than half a PNG.
     func testAPictureIsFetchedInChunksAndAHalfOneIsNothing() throws {

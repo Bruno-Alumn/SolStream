@@ -1550,12 +1550,22 @@ public final class AgentConnection {
         next()
     }
 
+    /// A way to stop an `upload` between chunks, from any thread.
+    public final class UploadCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        public init() {}
+        public func cancel() { lock.withLock { cancelled = true } }
+        public var isCancelled: Bool { lock.withLock { cancelled } }
+    }
+
     /// Send a file to the host, which writes it to Downloads\SolStream under
     /// `name` -- or a free name beside it. The path it was written to, or nil.
     ///
     /// Read a chunk at a time, so a large file is never in memory whole.
     /// `progress` is told the bytes sent so far after each chunk.
     public func upload(_ file: URL, as name: String,
+                       cancellation: UploadCancellation? = nil,
                        progress: ((Int64) -> Void)? = nil,
                        completion: @escaping (String?) -> Void) {
         guard let handle = try? FileHandle(forReadingFrom: file),
@@ -1569,6 +1579,14 @@ public final class AgentConnection {
             completion(path)
         }
         func next() {
+            // Before each chunk: the window it was dropped on has closed, and
+            // the rest of a large file would otherwise go on crossing, one
+            // chunk at a time in front of every request the picker makes.
+            if cancellation?.isCancelled == true {
+                Log.info("[transfer] stopped sending \(name)")
+                if offset > 0 { abortUpload() }
+                return finish(nil)
+            }
             let chunk: Data
             do {
                 chunk = try handle.read(upToCount: Self.transferChunkBytes) ?? Data()

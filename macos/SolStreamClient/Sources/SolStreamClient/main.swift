@@ -1114,6 +1114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if StreamSettings.shared.syncsClipboard {
             bridge.start(resuming: false)
         } else {
+            bridge.forgetHandledCopies()
             Log.info("[clipboard] sync is off in Settings")
         }
 
@@ -1539,6 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             clipboard.start(resuming: true)
         } else {
             clipboard.stop()
+            clipboard.forgetHandledCopies()
             Log.info("[clipboard] sync turned off in Settings")
         }
     }

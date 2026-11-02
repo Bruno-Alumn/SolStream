@@ -74,6 +74,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// One sending at a time across every window: they share one connection,
     /// and the host keeps one upload at a time.
     private static var isSendingFiles = false
+    /// Stops this window's files on their way to the PC when it closes.
+    private var sendingFiles: AgentConnection.UploadCancellation?
     /// Told the host clipboard's new sequence once dropped files are on it,
     /// so the clipboard sync does not put an older Mac copy over them.
     var onHostClipboardSet: ((Int) -> Void)?
@@ -933,6 +935,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         isClosing = true
+        sendingFiles?.cancel()
         lifeTimer?.invalidate()
         lifeTimer = nil
         // RunLoop.main keeps a repeating timer until it is invalidated.
@@ -1003,6 +1006,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
             return false
         }
         Self.isSendingFiles = true
+        let cancellation = AgentConnection.UploadCancellation()
+        sendingFiles = cancellation
         let sizes = files.map {
             Int64((try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
@@ -1016,7 +1021,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
             guard index < files.count else { return finish() }
             let file = files[index]
             say(Self.sendingText(files.count, name: file.lastPathComponent, percent: 0))
-            agent.upload(file, as: file.lastPathComponent, progress: { [weak self] sent in
+            agent.upload(file, as: file.lastPathComponent, cancellation: cancellation,
+                         progress: { [weak self] sent in
                 DispatchQueue.main.async {
                     let percent = Int((done + sent) * 100 / total)
                     self?.say(Self.sendingText(files.count, name: file.lastPathComponent,
@@ -1035,8 +1041,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     }
                     guard let path else {
                         Self.isSendingFiles = false
-                        self.say("Couldn't send \(file.lastPathComponent) to the PC. SolStream "
-                                 + "on the PC may need updating.", for: 6)
+                        // Not only an old host: a full disk or a timeout end
+                        // here too. The files already across are on the PC, and
+                        // the note says so rather than leaving them forgotten.
+                        let kept = received.isEmpty ? ""
+                            : " The \(received.count == 1 ? "file" : "\(received.count) files") "
+                              + "before it \(received.count == 1 ? "is" : "are") in "
+                              + "Downloads\\SolStream on the PC."
+                        self.say("Couldn't send \(file.lastPathComponent) to the PC. Check that "
+                                 + "the PC has room and SolStream there is up to date." + kept,
+                                 for: 8)
                         return
                     }
                     done += sizes[index]

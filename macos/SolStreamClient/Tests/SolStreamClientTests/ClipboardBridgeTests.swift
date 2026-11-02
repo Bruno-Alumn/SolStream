@@ -476,6 +476,81 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(fake.imageWrites, [])
     }
 
+    /// Finder puts the files' names on the clipboard as text too; that text
+    /// is not the copy either.
+    func testACopyOfFilesSendsNoText() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString("file:///Users/someone/report.pdf", forType: .fileURL)
+        item.setString("report.pdf", forType: .string)
+        pasteboard.writeObjects([item])
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, [])
+    }
+
+    /// Copy a link, then open the stream or Switch App: a new bridge is built,
+    /// and it used to take the link as its baseline and bring the PC's
+    /// clipboard over it.
+    func testAMacCopyMadeBetweenBridgesGoesToThePCInsteadOfBeingOverwritten() {
+        bridge.start(resuming: false)
+        bridge.stop()
+        copyOnTheMac("https://example.com/link")
+
+        bridge = makeBridge(settleTime: 0)
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads, [], "the PC's clipboard was asked for over a copy still to send")
+
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["https://example.com/link"])
+        fake.answerWrite(sequence: 4)
+        settle()
+
+        // Asked from the write's own sequence, so what the PC had before is
+        // never brought over the link.
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.last, 4)
+        fake.answerRead(sequence: 4, unchanged: true)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "https://example.com/link")
+
+        // And a copy made on the PC after that comes over as usual.
+        bridge.syncNow()
+        fake.answerRead(text: "copied on the PC later", sequence: 5)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "copied on the PC later")
+    }
+
+    /// Copies made while sync was off never cross, even when sync is back on
+    /// by the time the next stream opens.
+    func testAMacCopyMadeWhileSyncWasOffIsNotSentByTheNextBridge() {
+        bridge.forgetHandledCopies()   // built with sync off
+        copyOnTheMac("copied while sync was off")
+
+        bridge = makeBridge(settleTime: 0)
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, [])
+    }
+
+    /// With nothing copied on the Mac since, a new bridge brings the PC's
+    /// clipboard over as a first one does.
+    func testANewBridgeWithNoMacCopySinceBringsThePCsClipboard() {
+        bridge.start(resuming: false)
+        bridge.stop()
+
+        bridge = makeBridge(settleTime: 0)
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(text: "copied on the PC", sequence: 9)
+        settle()
+        XCTAssertEqual(pasteboard.string(forType: .string), "copied on the PC")
+    }
+
     func testAPCPictureComesToTheMac() {
         bridge.start(resuming: false)
         bridge.syncNow()
