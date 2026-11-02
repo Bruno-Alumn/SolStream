@@ -3539,6 +3539,23 @@ void TestTransferNames() {
     CHECK(SafeFileName(L".hidden") == L"hidden");
     CHECK(SafeFileName(L"CON.txt") == L"_CON.txt");
     CHECK(SafeFileName(L"com1") == L"_com1");
+    {
+        // A long name is not cut through the middle of an emoji: half of one
+        // does not survive the path's trip to the Mac and back.
+        std::wstring name(115, L'a');
+        name += L"\U0001F600\U0001F600.txt";
+        const std::wstring safe = SafeFileName(name);
+        CHECK(safe.size() <= 120);
+        bool lone = false;
+        for (size_t i = 0; i < safe.size(); ++i) {
+            const wchar_t c = safe[i];
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                lone = lone || i + 1 >= safe.size() || safe[i + 1] < 0xDC00 || safe[i + 1] > 0xDFFF;
+            }
+        }
+        CHECK(!lone);
+        CHECK(safe.substr(safe.size() - 4) == L".txt");
+    }
     CHECK(SafeFileName(L"console.txt") == L"console.txt");
     CHECK(SafeFileName(L"nul .txt") == L"_nul .txt");
     CHECK(SafeFileName(L"COM0.log") == L"_COM0.log");

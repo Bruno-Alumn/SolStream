@@ -67,6 +67,10 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
 /// gave up on it (`{"cmd":"upload","abort":1}`) or went away.
 void AbandonUpload();
 
+/// The Mac has gone: the upload, as AbandonUpload, and a clipboard picture
+/// it was part way through sending.
+void AbandonTransfers();
+
 /// The reply to `{"cmd":"clipboardFiles","paths":"a\nb"}`: those files on the
 /// clipboard, to paste, if every one is in UploadFolder().
 std::string ClipboardFilesJson(const std::string& paths);

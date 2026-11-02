@@ -200,7 +200,8 @@ final class SettingsPane: NSView {
     /// The heading and card together, for the test that photographs them.
     private(set) var updatesSection: NSView?
     let footnote = SettingsPane.caption(
-        "Quality, frame rate and the PC's sound apply by restarting the picture for a moment.")
+        "Quality, frame rate, codec and the PC's sound apply by restarting the picture "
+        + "for a moment.")
 
     /// The words on the rows that only mean something with sound on, and with
     /// the mouse in gaming mode. Dimmed with their controls when they do not.
@@ -721,6 +722,8 @@ final class SettingsPane: NSView {
                                                       accessibilityDescription: nil) ?? NSImage())
         restartGlyph.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
         restartGlyph.contentTintColor = DS.textMuted
+        // The footnote beside it says it all; VoiceOver read it as "image".
+        restartGlyph.setAccessibilityElement(false)
         restartGlyph.setContentHuggingPriority(.required, for: .horizontal)
         footnote.preferredMaxLayoutWidth = Self.columnWidth * 2
         let foot = Self.line([restartGlyph, footnote], spacing: DS.Space.x2)

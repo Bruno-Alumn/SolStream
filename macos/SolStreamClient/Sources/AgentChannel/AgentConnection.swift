@@ -1607,6 +1607,12 @@ public final class AgentConnection {
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[transfer] the host did not take \(name): \(why)")
                     }
+                    // The part already there is deleted, not left in
+                    // Downloads under the file's own name looking whole --
+                    // and locked until the next upload or the next
+                    // disconnect. A host whose connection is gone has
+                    // dropped it already.
+                    if offset > 0 || chunk.count > 0 { self.abortUpload() }
                     return finish(nil)
                 }
                 offset += chunk.count

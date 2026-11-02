@@ -1,6 +1,8 @@
 #include "clipboard.h"
 
+#include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <initializer_list>
 
 #include "transfer.h"
@@ -181,14 +183,28 @@ std::string ClipboardGetJson() {
     if (!wide) {
         return "{\"type\":\"clipboard\",\"ok\":false,\"message\":\"could not lock\"}";
     }
+    // Read within the block and no further than this channel could send.
+    // Windows does not promise the text ends in a NUL, and reading to one ran
+    // past the block; and a 100 MB log was converted whole, with the clipboard
+    // held -- every other program's copy and paste failing meanwhile -- for
+    // all but the first 256 KB to be thrown away. Twice the budget, since the
+    // CRLFs taken out below can halve it.
+    const size_t cap = kMaxClipboardBytes * 2 + 2;
+    const size_t units = (std::min)(GlobalSize(handle) / sizeof(wchar_t), cap);
+    size_t length = wcsnlen(wide, units);
+    bool truncated = length == cap;
+    // Not half a character at the cut.
+    if (truncated && length > 0 && wide[length - 1] >= 0xD800 && wide[length - 1] <= 0xDBFF) {
+        --length;
+    }
+    const std::wstring read(wide, length);
+    GlobalUnlock(handle);
     // In the Mac's line endings, so every Mac gets them whatever its version.
     // Before the size check, which then counts what is actually sent.
-    std::string text = ToMacLineEndings(ToUtf8(wide));
-    GlobalUnlock(handle);
+    std::string text = ToMacLineEndings(ToUtf8(read));
 
     // A clipboard can hold a whole document; this channel is for text people
     // copy, not for bulk transfer.
-    bool truncated = false;
     if (text.size() > kMaxClipboardBytes) {
         // Cut between codepoints, not at a byte offset. resize() alone can slice
         // a multi-byte character in half, and the Mac rejects the whole line as

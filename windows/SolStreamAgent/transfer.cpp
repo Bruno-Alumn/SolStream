@@ -313,6 +313,7 @@ OutgoingImage g_outgoing;
 
 /// A PNG from the Mac, chunk by chunk.
 std::vector<unsigned char> g_incoming;
+long long g_incoming_total = 0;  ///< the total its first chunk said
 
 /// A file from the Mac, chunk by chunk.
 struct Upload {
@@ -346,6 +347,15 @@ std::wstring Lower(std::wstring text) {
 void AbandonUpload() {
     std::lock_guard<std::mutex> guard(g_transfer_mutex);
     DropUpload();
+}
+
+void AbandonTransfers() {
+    std::lock_guard<std::mutex> guard(g_transfer_mutex);
+    DropUpload();
+    // And a picture on its way in: up to 32 MB otherwise held for the rest of
+    // the host's life after the Mac that was sending it left.
+    std::vector<unsigned char>().swap(g_incoming);
+    g_incoming_total = 0;
 }
 
 std::string Base64Encode(const unsigned char* bytes, size_t size) {
@@ -452,9 +462,13 @@ std::string ClipboardImageSetJson(long long offset, long long total, const std::
     }
     if (offset == 0) {
         g_incoming.clear();
+        g_incoming_total = total;
     }
     std::vector<unsigned char> chunk;
-    if (static_cast<unsigned long long>(offset) != g_incoming.size()
+    // The same total throughout: a smaller one part way would finish early
+    // with the front of a picture.
+    if (total != g_incoming_total
+        || static_cast<unsigned long long>(offset) != g_incoming.size()
         || !Base64Decode(base64, chunk) || chunk.size() > kTransferChunkBytes
         || g_incoming.size() + chunk.size() > static_cast<size_t>(total)) {
         g_incoming.clear();
@@ -552,7 +566,14 @@ std::wstring SafeFileName(const std::wstring& name) {
         const size_t dot = cleaned.find_last_of(L'.');
         std::wstring extension = dot != std::wstring::npos && cleaned.size() - dot <= 16
             ? cleaned.substr(dot) : L"";
-        cleaned = cleaned.substr(0, kMaxName - extension.size()) + extension;
+        size_t keep = kMaxName - extension.size();
+        // Not through the middle of an emoji: half of one is a name NTFS takes
+        // but the path sent back to the Mac cannot carry, and the file could
+        // then not be put on the PC's clipboard.
+        if (keep > 0 && cleaned[keep - 1] >= 0xD800 && cleaned[keep - 1] <= 0xDBFF) {
+            --keep;
+        }
+        cleaned = cleaned.substr(0, keep) + extension;
     }
     return cleaned;
 }

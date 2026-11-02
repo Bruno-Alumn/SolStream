@@ -5650,7 +5650,7 @@ void ServeAndRetire(SOCKET client) {
     // A file the Mac was sending when it went is not left half written --
     // and dropped before the slot is freed, so a Mac that takes the slot next
     // cannot have its own upload dropped by this cleanup.
-    solstream::AbandonUpload();
+    solstream::AbandonTransfers();
     // Counted before the slot is freed, so nobody who claims the slot and
     // then reads this count can find it zero while the windows are being
     // moved. That holds only for a reader that claims first: see
