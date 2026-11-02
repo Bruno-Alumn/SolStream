@@ -15,6 +15,8 @@ constexpr unsigned char kScanLang2 = 0xF1;  // Eisu
 
 /// Control's place, left and, behind 0xE0, right.
 constexpr unsigned char kScanControl = 0x1D;
+/// Alt's place; behind 0xE0, right Alt (AltGr).
+constexpr unsigned char kScanAlt = 0x38;
 
 /// The keypad's digits and point, as the virtual keys they always mean on a
 /// Mac. Zero for any other code.
@@ -53,6 +55,17 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out) {
         input.ki.wVk = right ? VK_RCONTROL : VK_LCONTROL;
         input.ki.wScan = scan;
         input.ki.dwFlags = up | (right ? KEYEVENTF_EXTENDEDKEY : 0);
+        *out = input;
+        return true;
+    }
+    // Right Alt by virtual key too, for the same reason: Korean's Type 1 puts
+    // Hangul/English at its place, so right-Option-F4 switched the input
+    // language instead of closing a window. VK_RMENU is still AltGr on the
+    // layouts that have one.
+    if (scan == kScanAlt && prefix == 0xE0) {
+        input.ki.wVk = VK_RMENU;
+        input.ki.wScan = scan;
+        input.ki.dwFlags = up | KEYEVENTF_EXTENDEDKEY;
         *out = input;
         return true;
     }

@@ -341,12 +341,23 @@ public final class InputCapture {
     /// anything with ⌃⌘, which is SolStream's own prefix. Control and Command
     /// both being Windows Control means ⌃⌘ costs the host nothing: it collapses
     /// to a Control the application never sees a letter for.
-    static func isReserved(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
+    ///
+    /// Q by the letter the key types with ⌘ held, `characters`, not by where
+    /// it sits: on a French keyboard the key at US Q's place is A, so ⌘A was
+    /// kept from the PC and ⌘Q went to it as Ctrl+Q, closing the Windows app
+    /// rather than this one. With ⌘ held, not without it: Russian, Greek and
+    /// Dvorak – QWERTY ⌘ type a Latin q under Command at a key whose own
+    /// letter is something else, and that is the ⌘Q AppKit sees. With no
+    /// characters to go by, or none at all, the US position stands.
+    static func isReserved(keyCode: UInt16, flags: NSEvent.ModifierFlags,
+                           characters: String? = nil) -> Bool {
         guard flags.contains(.command) else { return false }
         if flags.contains(.control) { return true }
         // ⌘Q, and only on its own — ⇧⌘Q and ⌥⌘Q mean nothing here and belong to
         // whatever is being streamed.
-        return keyCode == 0x0C && !flags.contains(.shift) && !flags.contains(.option)
+        let isQ = characters.flatMap { $0.isEmpty ? nil : $0.lowercased() == "q" }
+            ?? (keyCode == 0x0C)
+        return isQ && !flags.contains(.shift) && !flags.contains(.option)
     }
 
     /// Counters that separate "AppKit never delivered the event" from
@@ -634,7 +645,8 @@ public final class InputCapture {
             // closes the window.
             let held = heldKeys[event.keyCode]
             guard held != nil
-                    || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
+                    || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags,
+                                        characters: event.characters) else {
                 if event.type == .keyDown {
                     shortcutKeys.insert(event.keyCode)
                 } else {

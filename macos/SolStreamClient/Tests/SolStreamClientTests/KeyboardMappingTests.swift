@@ -606,4 +606,15 @@ final class KeyboardMappingTests: XCTestCase {
         XCTAssertTrue(InputCapture.modifiers(from: [.capsLock]).contains(.capsLock))
         XCTAssertEqual(InputCapture.modifiers(from: [.capsLock, .shift]).rawValue, 0x11)
     }
+
+    /// ⌘Q by the letter typed: on AZERTY Q is at US A's place, and A at Q's.
+    func testCommandQIsReservedByItsLetterNotItsPlace() {
+        XCTAssertTrue(InputCapture.isReserved(keyCode: 0x00, flags: [.command], characters: "q"))
+        XCTAssertFalse(InputCapture.isReserved(keyCode: 0x0C, flags: [.command], characters: "a"))
+        XCTAssertTrue(InputCapture.isReserved(keyCode: 0x0C, flags: [.command], characters: "Q"))
+        // Russian's Command layer: the key at US Q's place types й alone and q
+        // under ⌘, and it is the latter that arrives with ⌘ held.
+        XCTAssertTrue(InputCapture.isReserved(keyCode: 0x0C, flags: [.command], characters: "q"))
+        XCTAssertFalse(InputCapture.isReserved(keyCode: 0x0C, flags: [.command], characters: "й"))
+    }
 }

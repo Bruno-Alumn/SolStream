@@ -2326,8 +2326,13 @@ void TestScanKeys() {
     CHECK(BuildScanKeyInput(0xE04B, true, &in));
     CHECK(in.ki.wScan == 0x4B && in.ki.wVk == 0);
     CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY));
+    // Right Alt by virtual key, as Control is: Korean's Type 1 has
+    // Hangul/English at its place. Left Alt stays a scan code.
     CHECK(BuildScanKeyInput(0xE038, false, &in));
-    CHECK(in.ki.dwFlags == (KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+    CHECK(in.ki.wVk == VK_RMENU && in.ki.wScan == 0x38
+          && in.ki.dwFlags == (KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP));
+    CHECK(BuildScanKeyInput(0x0038, true, &in) && in.ki.wVk == 0
+          && in.ki.dwFlags == KEYEVENTF_SCANCODE);
     CHECK(BuildScanKeyInput(0xE01C, true, &in) && in.ki.wScan == 0x1C
           && (in.ki.dwFlags & KEYEVENTF_EXTENDEDKEY));
 
