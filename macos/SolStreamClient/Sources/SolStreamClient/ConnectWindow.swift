@@ -635,20 +635,26 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// from no answer at all: one is a PC that is on, the other may be asleep.
     private static func canReach(host: String, port: UInt16,
                                  timeoutMs: Int32 = 3000) -> Reach {
-        // IPv4 first: the PC listens on IPv4 only, and macOS puts a .local
-        // name's link-local IPv6 address ahead of it, so a working PC was
-        // probed where it is not listening and shown as not answering. Any
-        // family only for what has no IPv4 address at all.
-        var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
         var info: UnsafeMutablePointer<addrinfo>?
-        if getaddrinfo(host, String(port), &hints, &info) != 0 {
-            hints.ai_family = AF_UNSPEC
-            info = nil
-            guard getaddrinfo(host, String(port), &hints, &info) == 0 else { return .silent }
+        guard getaddrinfo(host, String(port), &hints, &info) == 0, let head = info else {
+            return .silent
         }
-        guard let first = info else { return .silent }
+        // The IPv4 address when there is one: the PC listens on IPv4 only, and
+        // macOS puts a .local name's link-local IPv6 address first, so a working
+        // PC was probed where it is not listening and shown as not answering.
+        // One lookup, so a name that does not resolve costs one timeout.
+        var first = head
+        var entry: UnsafeMutablePointer<addrinfo>? = head
+        while let candidate = entry {
+            if candidate.pointee.ai_family == AF_INET {
+                first = candidate
+                break
+            }
+            entry = candidate.pointee.ai_next
+        }
         defer { freeaddrinfo(info) }
 
         let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
@@ -669,9 +675,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     private func startDiscovery() {
         browser.onChange = { [weak self] hosts in
-            // An answer queued before the window closed: Connect has the PC
-            // now, and probing it again here would race the picker.
-            guard let self, self.browser.isRunning, self.isOpen else { return }
+            // An answer queued before the window closed (`tearDown` stops the
+            // browser): Connect has the PC now, and probing it again here would
+            // race the picker.
+            guard let self, self.browser.isRunning else { return }
             self.discovered = hosts
 
             // Offer the one obvious choice rather than making them open the list,
@@ -698,11 +705,6 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// as DESKTOP-EXAMPLE at 192.168.1.20 today. The window then sat on the
     /// stale address saying "Checking…", and then "Not answering", while the
     /// PC it meant was in the list one click away.
-    ///
-    /// "Not answering" includes "has not answered yet". A discovered host has
-    /// just answered — that is how it was discovered — while the remembered
-    /// one is unproven, and waiting out its probe's timeout first would show
-    /// the wrong host for the two seconds anybody spends looking at this.
     ///
     /// Only before anybody has chosen a host here, and only for a paired host:
     /// a choice is never overridden, and a host that would ask for a token is

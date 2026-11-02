@@ -284,9 +284,14 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
         allRows = built
         setSpinning(false)
-        statusLabel.stringValue = "\(windows.count) window\(windows.count == 1 ? "" : "s") open"
-            + " · \(apps.count) app\(apps.count == 1 ? "" : "s")"
-        statusLabel.textColor = DS.textMuted
+        // A failure stays said until somebody does something: a refresh of
+        // the lists -- which follows a failed open -- would otherwise put the
+        // counts over the reason a moment after it appeared.
+        if !showsFailure {
+            statusLabel.stringValue = "\(windows.count) window\(windows.count == 1 ? "" : "s") open"
+                + " · \(apps.count) app\(apps.count == 1 ? "" : "s")"
+            statusLabel.textColor = DS.textMuted
+        }
         applyFilter()
         if let keepKey, let again = rows.firstIndex(where: { $0.key == keepKey }) {
             tableView.selectRowIndexes(IndexSet(integer: again), byExtendingSelection: false)
@@ -315,7 +320,11 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// An open under way from this picker, which owns the list until it ends.
     var isOpening: Bool { isBusy }
 
+    /// A failure is on the status line; see `present`.
+    private var showsFailure = false
+
     func showFailure(_ message: String) {
+        showsFailure = true
         setSpinning(false)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.danger
@@ -324,6 +333,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// Something is being waited for and will resolve by itself -- the PC
     /// letting go of this Mac's last connection -- so a spinner, not red.
     func showWaiting(_ message: String) {
+        showsFailure = false
         setSpinning(true)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.textMuted
@@ -333,6 +343,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// progress line in place rather than a modal taking the window over. The
     /// list stays interactive; nothing about it moves.
     func showBusy(_ message: String) {
+        showsFailure = false
         setSpinning(true)
         statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
@@ -372,7 +383,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
 
     // MARK: - Ranking
 
-    @objc private func searchChanged() { applyFilter() }
+    @objc private func searchChanged() {
+        showsFailure = false
+        applyFilter()
+    }
 
     private func applyFilter() {
         let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
