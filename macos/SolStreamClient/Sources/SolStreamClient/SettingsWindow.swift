@@ -260,6 +260,11 @@ final class SettingsPane: NSView {
 
         let streamsAudio = settings.streamsAudio
         soundSwitch.isOn = streamsAudio
+        // What this run does, which `--no-audio` decides over the setting: the
+        // controls that only mean something with sound are off under it, as
+        // they are in the stream window's popover.
+        let soundLive = streamsAudio
+            && !QualityPill.commandLineOverrides.contains(.audio)
         let soundSource = settings.soundSource
         soundSourceControl.selectedSegment = StreamSettings.SoundSource.allCases.firstIndex(of: soundSource) ?? 0
         soundSourceDetail.stringValue = soundSource.detail
@@ -271,11 +276,11 @@ final class SettingsPane: NSView {
         bufferingDetail.stringValue = buffering.detail
         for control in [soundSourceControl, soundQualityPopUp, muteButton, volumeSlider,
                         bufferingPopUp] as [NSControl] {
-            control.isEnabled = streamsAudio
+            control.isEnabled = soundLive
         }
         // After the enabling, which decides whether the speaker keeps its blue.
         showVolume(movingSlider: true)
-        Self.dim(soundDependentLabels, !streamsAudio)
+        Self.dim(soundDependentLabels, !soundLive)
 
         let mode = settings.pointerMode
         let gaming = mode == .gaming
@@ -290,7 +295,33 @@ final class SettingsPane: NSView {
 
         clipboardSwitch.isOn = settings.syncsClipboard
         reopenSwitch.isOn = settings.reopensLastApp
+        showOverrides(QualityPill.commandLineOverrides)
         refreshUpdates()
+    }
+
+    /// Controls a command-line flag has decided, made to say so. They showed
+    /// the stored value and took changes that did nothing: Settings said 60
+    /// fps under `--fps 30`, and choosing either changed nothing at all.
+    func showOverrides(_ overrides: Set<StreamSettings.Override>) {
+        let pinned: [(StreamSettings.Override, NSControl, String)] = [
+            (.bitrate, qualityPopUp, "--bitrate"),
+            (.frameRate, frameRateControl, "--fps"),
+            (.videoCodec, codecPopUp, "--video-codec"),
+            (.soundQuality, soundQualityPopUp, "--sound-quality"),
+            (.soundSource, soundSourceControl, "--sound-from"),
+        ]
+        let why = { (flag: String) in
+            "Set for this run by \(flag) on the command line; what is shown here is for "
+                + "runs without it."
+        }
+        for (override, control, flag) in pinned where overrides.contains(override) {
+            control.isEnabled = false
+            control.toolTip = why(flag)
+        }
+        if overrides.contains(.audio) {
+            soundSwitch.isEnabled = false
+            soundSwitch.toolTip = why("--no-audio")
+        }
     }
 
     /// The Updates card from the updater's state.

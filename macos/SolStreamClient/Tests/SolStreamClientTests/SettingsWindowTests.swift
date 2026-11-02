@@ -832,4 +832,17 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertNotNil(control.action, "\(type(of: control)) has no action")
         control.sendAction(control.action, to: control.target)
     }
+
+    /// What a command-line flag decided is shown as decided: the control is
+    /// off and says which flag, rather than taking changes that do nothing.
+    @MainActor
+    func testAFlagsSettingIsShownAsTheFlags() {
+        let pane = SettingsPane(updater: makeUpdater())
+        pane.showOverrides([.frameRate, .audio])
+        XCTAssertFalse(pane.frameRateControl.isEnabled)
+        XCTAssertEqual(pane.frameRateControl.toolTip?.contains("--fps"), true)
+        XCTAssertFalse(pane.soundSwitch.isEnabled)
+        XCTAssertEqual(pane.soundSwitch.toolTip?.contains("--no-audio"), true)
+        XCTAssertTrue(pane.qualityPopUp.isEnabled, "only what a flag set")
+    }
 }
