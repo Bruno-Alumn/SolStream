@@ -108,7 +108,17 @@ uint64_t BootSecond(uint64_t filetime_now, uint64_t tick_ms);
 
 /// How far two workings-out of the same start may differ: rounding, and the
 /// clock being set while the PC runs.
-constexpr uint64_t kBootSlackSeconds = 60;
+///
+/// A day and a half, not a minute. A clock set by more than a minute while
+/// the PC ran -- a time sync after a dual-boot that left it out by the
+/// timezone, a bad clock battery -- made a record from this very run look
+/// like another's, and the windows it owed stayed stripped on the capture
+/// display. Nothing is lost by the width: every window in a record carries
+/// its process's start time, and none is restored unless a live process
+/// with that id started at that time, which no window from another run can
+/// match. A record left from before a restart is still mostly turned away,
+/// by `written` against the time since start; the start time is the guard.
+constexpr uint64_t kBootSlackSeconds = 36 * 60 * 60;
 
 /// Whether `record` was written since this PC last started. Window handles and
 /// pids start again with Windows, so a record from before a restart names
