@@ -26,6 +26,7 @@ namespace solstream::media {
 /// Winsock's numbers, which session.cpp checks against its headers.
 constexpr int kWsaMessageTooBig = 10040;   // WSAEMSGSIZE
 constexpr int kWsaConnectionReset = 10054; // WSAECONNRESET
+constexpr int kWsaNetReset = 10052;        // WSAENETRESET: ICMP time exceeded
 constexpr int kWsaTimedOut = 10060;        // WSAETIMEDOUT
 
 enum class ReceiveFailure {
@@ -45,6 +46,7 @@ constexpr ReceiveFailure ClassifyReceiveFailure(int error) {
     return error == 0 || error == kWsaTimedOut ? ReceiveFailure::None
          : error == kWsaMessageTooBig          ? ReceiveFailure::Oversized
          : error == kWsaConnectionReset        ? ReceiveFailure::Reset
+         : error == kWsaNetReset               ? ReceiveFailure::Reset
                                                : ReceiveFailure::Persistent;
 }
 

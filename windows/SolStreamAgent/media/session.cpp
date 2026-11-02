@@ -18,8 +18,12 @@
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 #endif
+#ifndef SIO_UDP_NETRESET
+#define SIO_UDP_NETRESET _WSAIOW(IOC_VENDOR, 15)
+#endif
 static_assert(solstream::media::kWsaMessageTooBig == WSAEMSGSIZE);
 static_assert(solstream::media::kWsaConnectionReset == WSAECONNRESET);
+static_assert(solstream::media::kWsaNetReset == WSAENETRESET);
 static_assert(solstream::media::kWsaTimedOut == WSAETIMEDOUT);
 
 #include <mfapi.h>
@@ -184,6 +188,12 @@ struct MediaSession::Impl {
     std::atomic<double> sumGlassToWireMs{0.0};
 
     std::atomic<bool> retargetWanted{false};
+    /// The highest counter yet from the client, which alone may move the
+    /// peer; see ReceiveLoop. Receive thread only, reset with `replay`.
+    uint64_t highestCounter = 0;
+    bool haveHighestCounter = false;
+    /// The client ended the session itself, so it is not told goodbye.
+    std::atomic<bool> clientSaidBye{false};
     std::mutex configLock;
 
     // How the capture thread tells Start whether the session really opened.
@@ -364,6 +374,9 @@ void MediaSession::Impl::SendPicture(const Picture& picture) {
         smt::PutBE(plaintext + 12, captureUs, 4);
         memcpy(plaintext + kVideoHeader, picture.bytes.data() + offset, chunk);
 
+        // A keyframe at a low rate takes most of a second to pace out, and a
+        // session ending meanwhile waited for all of it -- Stop's join with it.
+        if (!running.load()) { return; }
         WaitUntil(nextSlot);
         SendSealed(plaintext, kVideoHeader + chunk);
         // The wire cost of this datagram INCLUDING the IPv4 and UDP headers the
@@ -839,6 +852,7 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
         }
         case smt::kTypeBye:
             Log("[media] the client said goodbye");
+            clientSaidBye.store(true);
             running.store(false);
             break;
         default:
@@ -896,14 +910,25 @@ void MediaSession::Impl::ReceiveLoop() {
             rejected.fetch_add(1);
             continue;
         }
+        // Only the newest packet yet may move the stream to a new address.
+        // An older one -- a copy sent first from somewhere else by anyone who
+        // can see the Mac's traffic, or a straggler from the address a NAT
+        // has just left -- authenticated too, and moved ~40 Mbit/s of video
+        // to wherever it came from, the Mac's own copy then refused as a
+        // replay. QUIC moves the same way.
+        const bool newest = !haveHighestCounter || counter > highestCounter;
+        if (newest) {
+            highestCounter = counter;
+            haveHighestCounter = true;
+        }
         // The peer is learned from a packet that AUTHENTICATED, never from one
         // that merely arrived. A host that starts sending video to whatever
         // address spoke to it first is a reflector.
         bool firstContact = false;
         {
             std::lock_guard<std::mutex> guard(peerLock);
-            if (!havePeer || from.sin_addr.s_addr != peer.sin_addr.s_addr
-                || from.sin_port != peer.sin_port) {
+            if (!havePeer || (newest && (from.sin_addr.s_addr != peer.sin_addr.s_addr
+                                         || from.sin_port != peer.sin_port))) {
                 firstContact = !havePeer;
                 peer = from;
                 havePeer = true;
@@ -936,6 +961,21 @@ void MediaSession::Impl::ReceiveLoop() {
     // input, so releasing here cannot race an Apply; Stop() releases again
     // after joining it, which finds nothing held and does nothing.
     input.ReleaseAll();
+    // Said either way, as the protocol has it: a session this end stopped --
+    // silence, the captured window closing, the host asked to stop -- left
+    // the Mac on a frozen picture until its own silence timeout, five
+    // seconds later. Sent before the socket closes; once is enough, since a
+    // Mac that misses it still times out as before.
+    bool told = false;
+    {
+        std::lock_guard<std::mutex> guard(peerLock);
+        told = havePeer;
+    }
+    if (told && !clientSaidBye.load()) {
+        const unsigned char bye[1] = {smt::kTypeBye};
+        SendSealed(bye, sizeof(bye));
+        Log("[media] told the client the session has ended");
+    }
 }
 
 // ── Lifetime ─────────────────────────────────────────────────────────────────
@@ -982,6 +1022,9 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.toClient.counter = 0;
     s.fromClient.counter = 0;
     s.replay = smt::ReplayWindow{};
+    s.highestCounter = 0;
+    s.haveHighestCounter = false;
+    s.clientSaidBye.store(false);
     s.sessTag = okm[79];   // low byte of the 32-bit session id at 76..80
     // Two BCrypt key handles now exist, and every failure path from here down
     // has to destroy them itself. Stop() cannot do it: its guard turns Stop into
@@ -1014,6 +1057,10 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     BOOL reportResets = FALSE;
     DWORD returned = 0;
     WSAIoctl(s.socket, SIO_UDP_CONNRESET, &reportResets, sizeof(reportResets), nullptr, 0,
+             &returned, nullptr, nullptr);
+    // And ICMP "time exceeded", which anyone can send and which Windows also
+    // reports through recvfrom: each one cost the receive loop a pause.
+    WSAIoctl(s.socket, SIO_UDP_NETRESET, &reportResets, sizeof(reportResets), nullptr, 0,
              &returned, nullptr, nullptr);
     // Exclusive, as the agent's TCP port is and for the same reason: without it
     // Windows lets another process that asks for SO_REUSEADDR bind this port on

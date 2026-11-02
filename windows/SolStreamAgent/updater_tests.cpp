@@ -2883,6 +2883,9 @@ void TestReceiveFailures() {
     // One datagram's trouble is passed over at once.
     CHECK(ClassifyReceiveFailure(WSAEMSGSIZE) == ReceiveFailure::Oversized);
     CHECK(ClassifyReceiveFailure(WSAECONNRESET) == ReceiveFailure::Reset);
+    // ICMP "time exceeded", which anyone can send, is one datagram's too.
+    static_assert(kWsaNetReset == WSAENETRESET);
+    CHECK(ClassifyReceiveFailure(WSAENETRESET) == ReceiveFailure::Reset);
     // The socket's is not.
     CHECK(ClassifyReceiveFailure(WSAENOBUFS) == ReceiveFailure::Persistent);
     CHECK(ClassifyReceiveFailure(WSAENOTSOCK) == ReceiveFailure::Persistent);

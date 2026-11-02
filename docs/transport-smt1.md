@@ -105,6 +105,18 @@ means shipping a constant-time stream cipher on Windows to run software crypto o
 a machine with AES-NI. The only thing it buys is a nonce wide enough to randomise,
 which is the property this construction is designed not to need.
 
+## Where the stream goes, and how it ends
+
+The host learns the Mac's address from the first packet that authenticates,
+and moves the stream to a new one only for a packet whose counter is higher
+than every earlier one: a NAT rebinding follows, while an older copy sent from
+elsewhere first, or a straggler from the address just left, does not. Every
+Mac packet type shares the one counter, so its order is the order of sending.
+
+BYE goes either way. The Mac sends one when it closes the stream; the host
+sends one when it ends a session itself -- silence, or `Stop` -- so the Mac
+stops at once rather than after its own five-second silence timeout.
+
 ## Six critical defects, found by attacking the design, and their fixes
 
 Three independent adversarial passes — a cryptographer, a performance engineer
