@@ -6657,6 +6657,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     const int code = solstream::RunHostWindowLoop();
+    Log("[agent] the window has closed; stopping (exit code %d)", code);
     if (name_hook) { UnhookWinEvent(name_hook); }
     if (window_set_hook) { UnhookWinEvent(window_set_hook); }
     // Closing the window takes the host down with it. A capture still holding

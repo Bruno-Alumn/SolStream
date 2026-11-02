@@ -2698,6 +2698,9 @@ void ShowTrayMenu(HWND window) {
             StartDisplayJob(window);
             break;
         case kTrayQuit:
+            // Said in the log: a host that is not there afterwards should be
+            // told apart from one that crashed or was ended.
+            media::Log("[window] Quit chosen from the tray");
             g_quitting = true;
             PostMessageW(window, WM_CLOSE, 0, 0);
             break;
@@ -2726,6 +2729,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         // kept the style and the placement the stream gave it. Answered at
         // once and done from the queue, so the install is not left waiting
         // inside this call while the session winds down.
+        media::Log("[window] setup asked this copy to quit");
         g_quitting = true;
         g_quit_requested = true;
         PostMessageW(window, WM_CLOSE, 0, 0);
@@ -3142,6 +3146,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 g_closed = true;
             }
             DestroyWindow(window);
+            return 0;
+
+        case WM_ENDSESSION:
+            // Signing out, restarting or shutting down: Windows ends this
+            // process once this returns, without WM_DESTROY. The log is the
+            // only place that can say so -- otherwise a host that vanished
+            // at sign-out looks like one that crashed.
+            if (wparam) {
+                media::Log("[window] Windows is ending the session (%s); the host stops with it",
+                           (lparam & ENDSESSION_LOGOFF) ? "sign-out" : "restart or shut down");
+            }
             return 0;
 
         case WM_DESTROY:
