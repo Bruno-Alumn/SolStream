@@ -209,8 +209,8 @@ Each step is measurable before the next exists.
      sent in that gap arrives in the clear at a host that has switched, fails its
      tag and drops the connection — correctly. A first connection never notices;
      a reconnect does, because re-applying window placement fires the moment the
-     socket is ready. The Mac holds outbound requests while the proof is in
-     flight.
+     socket is ready. The Mac holds every request but a ping until the
+     connection is authenticated and, with a host that offers it, sealed.
   2. *The keys belong to a socket, not to the process.* Refusing a second Mac
      with `busy` used to seal that line with the connected Mac's keys and send it
      down someone else's socket, skipping a counter the paired Mac never

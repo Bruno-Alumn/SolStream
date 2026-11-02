@@ -33,9 +33,10 @@ Three ports. Nothing else listens.
 
 ## The agent channel — TCP 47630
 
-Newline-delimited JSON, sixteen commands: window and application enumeration,
-launch, focus, placement, geometry locking, the clipboard, the cursor shape, the
-display list, and the media session.
+Newline-delimited JSON, twenty commands: window and application enumeration,
+launch, focus, placement, geometry locking, the clipboard and its pictures, file
+uploads, the cursor shape, the display list, Wake-on-LAN addresses, and the
+media session.
 
 Authentication is **v2 only**. The host sends a challenge in its `hello`; the Mac
 answers `HMAC-SHA256(token, "SolStream agent auth v2" || challenge || cnonce)`.
@@ -98,7 +99,7 @@ On the host:
   only when something changes. The last frame is retained and re-encoded on a
   250 ms heartbeat, because a still window otherwise has no next frame in which
   to repair damage.
-- **Encode** is a hardware H.264 MFT fed an `ID3D11Texture2D`. BGRA→NV12 happens
+- **Encode** is a hardware H.264 or HEVC MFT fed an `ID3D11Texture2D`. BGRA→NV12 happens
   on the GPU through `ID3D11VideoProcessor`, which does the scaling too. The
   frame never touches the CPU.
 - **Pacing** meters to a rate with no frame-period cap. Spreading a keyframe

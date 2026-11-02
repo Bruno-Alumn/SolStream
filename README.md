@@ -35,7 +35,7 @@ screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
 | **In the Dock** | Add a Windows app to the Dock, and find it in Spotlight and Launchpad. |
 | **Clipboard and files** | Copy and paste text and pictures both ways. Drop files on a window to send them to the PC. |
 | **Dedicated display** | Apps run on a virtual display sized to your Mac, leaving the PC's monitor untouched. |
-| **Low latency** | Hardware H.264 encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
+| **Low latency** | Hardware H.264 or HEVC encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
 | **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. Japanese, Chinese and Korean input methods on the Mac compose as usual. |
 | **Per-app sound** | Audio from the streamed apps only on Windows 11, or the whole PC on Windows 10. Opus or lossless. |
 | **Gaming mode** | Raw mouse input for games. Press ⌃⌥ to release the mouse. |
@@ -77,8 +77,8 @@ tray at sign-in.
    the PC isn't listed, enter its name or IP address in the host list.
 2. **Pair.** Click the SolStream icon in the PC's system tray and enter the
    pairing token it shows. This is needed once per PC.
-3. **Choose an app.** Pick an open window or any app from the Start menu. It
-   opens in its own window on the Mac.
+3. **Choose an app.** Pick an open window or any app from the Start menu,
+   Steam and Epic games included. It opens in its own window on the Mac.
 
 ## Using SolStream
 
@@ -96,17 +96,20 @@ sound quality, video quality and mouse mode.
   such as Chrome, Discord and File Explorer.
 - **Pinch** on the trackpad to zoom: it reaches the app as Ctrl and the scroll
   wheel, which browsers, Office, maps and image viewers zoom with.
-- **Add to Dock**: right-click an app in the list, or choose
-  **Add … to Dock** from the Host menu while it's open. Clicking it in the Dock, Spotlight or
+- **Add to Dock**: right-click an app in the list, or choose **Add … to Dock**
+  from the Host menu while it's open. Clicking it in the Dock, Spotlight or
   Launchpad connects to the PC and opens it. The launchers are kept in
   `~/Applications/SolStream Apps`.
-- SolStream reopens the app you were streaming when you quit. Turn this off
-  in Settings.
+- SolStream reopens the app you were streaming when you quit. Turn off
+  *Reopen the last app* in Settings to stop it.
 - **Drop files** on a window to send them to the PC. They're saved in
   `Downloads\SolStream` there and put on its clipboard: press **⌘V** to paste
   them into the app.
+- The Mac's display stays on while a stream is open, as it does for a video.
+  Closing the lid still puts the Mac to sleep.
 
-Other settings are in **SolStream › Settings**.
+Other settings are in **SolStream › Settings**, or behind the gear on the
+connect window.
 
 <br clear="right">
 
@@ -129,6 +132,11 @@ The host runs without administrator rights, and Windows blocks it from
 controlling apps that run as administrator, including Windows' own UAC
 prompts. Respond to those at the PC, or run the app without administrator
 rights.
+
+An app set to run as administrator stops at Windows' prompt on the PC when
+it's opened from the Mac, and SolStream says so. Answer the prompt at the PC,
+then pick the app under *Open windows*; or turn off *Run as administrator* for
+it.
 </details>
 
 <details>

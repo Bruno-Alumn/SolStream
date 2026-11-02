@@ -98,14 +98,19 @@ GitHub API allows 60 requests an hour per address, which this never comes near.
 ## Installing
 
 Never on its own, and never in the middle of a stream: an update found is
-announced, and installed only when the person says so.
+announced, and installed only when the person says so. On the Mac the session
+lasts until the picker a stream went back to is left (Back, Disconnect), so
+Switch App and Retry do not count as the stream closing.
 
 - **Mac.** Unzip into a temporary directory with `ditto -x -k`; check the
   bundle is `com.solstream.macclient` at exactly the release's version and that
   `codesign --verify --deep --strict` accepts it; move the running bundle aside,
-  move the new one into its place (same volume, so a rename), relaunch, and
-  delete the old one only once the new one has started. If the bundle's folder
-  is not writable, say so rather than asking for an administrator password.
+  move the new one into its place (same volume, so a rename), and relaunch:
+  wait up to thirty seconds for the old process to go, then open the new
+  bundle, and not at all if the old one is still running. The new one deletes
+  the copy set aside, and forgets it only once it is gone. If the bundle's
+  folder is not writable, say so rather than asking for an administrator
+  password.
 - **Windows.** Download into `%LOCALAPPDATA%\SolStream\Updates`, keep the file
   open without write or delete sharing from the hash check until the installer
   has started -- so nothing can swap it between being verified and being run
