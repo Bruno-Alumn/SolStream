@@ -385,6 +385,9 @@ public final class InputCapture {
     /// Whether a composing input method is selected; `inputMethodSelected`,
     /// other than in the tests, which cannot select one.
     var inputMethodIsSelected: () -> Bool = InputCapture.inputMethodSelected
+    /// Keys whose press went to AppKit as a SolStream shortcut, until they
+    /// come up; see `handleKeyEvent`.
+    private var shortcutKeys: Set<UInt16> = []
     /// Keys whose press went to the input method: their release does too,
     /// not to the PC, which never saw them go down.
     private var keysAtInputMethod: Set<UInt16> = []
@@ -626,12 +629,22 @@ public final class InputCapture {
             let held = heldKeys[event.keyCode]
             guard held != nil
                     || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
+                if event.type == .keyDown {
+                    shortcutKeys.insert(event.keyCode)
+                } else {
+                    shortcutKeys.remove(event.keyCode)
+                }
                 return false
             }
-            // A repeat of a key the PC never had pressed is the tail of a
-            // SolStream shortcut whose ⌃⌘ went up first -- ⌃⌘F, F still
-            // held -- and would type "fff" into the app. Dropped.
-            if held == nil, event.type == .keyDown, event.isARepeat { return true }
+            // The tail of a SolStream shortcut whose ⌃⌘ went up first -- ⌃⌘F,
+            // F still held -- repeats with no modifiers, and would type "fff"
+            // into the app. Only that key's repeats are dropped: every other
+            // repeat of a key the PC does not hold is how it gets there.
+            if held == nil, shortcutKeys.contains(event.keyCode) {
+                if event.type == .keyUp { shortcutKeys.remove(event.keyCode) }
+                if event.isARepeat || event.type == .keyUp { return true }
+                shortcutKeys.remove(event.keyCode)
+            }
             if held == nil, routeToInputMethod(event) { return true }
             // A key already down on the host is let go of as it was pressed.
             // Anything else is first asked whether a key typed it at all --
