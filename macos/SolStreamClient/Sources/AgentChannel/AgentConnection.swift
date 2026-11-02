@@ -2474,6 +2474,9 @@ public final class AgentConnection {
                 guard message["channelCrypto"] as? Int == 2 else {
                     Log.error("[agent] \(host) asks for a token but offers no encrypted "
                               + "channel -- not proving the token to it")
+                    // Before the report, so whoever reads `willReconnect` on hearing it
+                    // knows this is final.
+                    wantsConnection = false
                     report(.failed("\(host) would not encrypt the connection. Update "
                                    + "SolStream on that PC; if it is already up to "
                                    + "date, something may be impersonating it."))
@@ -2487,6 +2490,7 @@ public final class AgentConnection {
                 // token would hand it to whichever of the two it was.
                 guard authenticate(with: token) else {
                     Log.error("[agent] \(host) did not offer an auth challenge")
+                    wantsConnection = false
                     report(.failed("\(host) is running an older version of SolStream, "
                                    + "or something is impersonating it. Update SolStream "
                                    + "on that PC."))
@@ -2500,6 +2504,7 @@ public final class AgentConnection {
                 // will just carry on in the clear, with every window title,
                 // application name and clipboard transfer readable to it.
                 Log.error("[agent] \(host) did not ask for the token this Mac holds for it")
+                wantsConnection = false
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
@@ -2575,6 +2580,7 @@ public final class AgentConnection {
                 if channel == nil, token != nil {
                     Log.error("[agent] \(host) took the token but the channel is not "
                               + "encrypted — refusing to carry on in the clear")
+                    wantsConnection = false
                     report(.failed("\(host) would not encrypt the connection. Update "
                                    + "SolStream on that PC; if it is already up to "
                                    + "date, something may be impersonating it."))

@@ -20,11 +20,11 @@ final class LaunchWake {
 
     /// What to do on tick `tick` (from 1), `elapsed` seconds after the wake
     /// went out, `saidSo` once the picker has said the PC didn't wake.
-    enum Step: Equatable { case retry, giveUp, rest }
+    enum Step: Equatable { case retry, sayNotWoken, rest }
 
     static func step(elapsed: TimeInterval, saidSo: Bool, tick: Int) -> Step {
         if elapsed < wait { return .retry }
-        if !saidSo { return .giveUp }
+        if !saidSo { return .sayNotWoken }
         return tick % slowTicks == 0 ? .retry : .rest
     }
 
@@ -34,7 +34,7 @@ final class LaunchWake {
     }
 
     /// What it says when the minute is up.
-    static func gaveUp(_ host: String) -> String {
+    static func notWoken(_ host: String) -> String {
         "\(host) hasn't woken. Wake-on-LAN may be off on it, or it's on another network, "
             + "or nobody is signed in to Windows. SolStream keeps trying while this is open."
     }
@@ -44,9 +44,9 @@ final class LaunchWake {
     private var tick = 0
     private var saidSo = false
 
-    /// Starts retrying at once; `retry` and `gaveUp` run on the main thread.
+    /// Starts retrying at once; `retry` and `notWoken` run on the main thread.
     /// Runs until stopped: when the PC answers, or the picker goes.
-    init(retry: @escaping () -> Void, gaveUp: @escaping () -> Void) {
+    init(retry: @escaping () -> Void, notWoken: @escaping () -> Void) {
         startedAt = Date()
         let timer = Timer(timeInterval: Self.retryEvery, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -55,9 +55,9 @@ final class LaunchWake {
                              saidSo: self.saidSo, tick: self.tick) {
             case .retry:
                 retry()
-            case .giveUp:
+            case .sayNotWoken:
                 self.saidSo = true
-                gaveUp()
+                notWoken()
             case .rest:
                 break
             }

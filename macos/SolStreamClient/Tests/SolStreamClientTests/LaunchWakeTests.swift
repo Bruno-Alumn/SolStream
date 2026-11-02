@@ -2,30 +2,30 @@ import XCTest
 @testable import SolStreamClient
 
 /// A launcher clicked while the PC sleeps wakes it, tries the connection again
-/// every few seconds, and gives up after a minute.
+/// every few seconds, says so after a minute, and keeps trying slowly.
 final class LaunchWakeTests: XCTestCase {
     func testRetriesForAMinuteThenSaysSoThenKeepsTryingSlowly() {
         XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.retryEvery, saidSo: false, tick: 1), .retry)
         XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait - 1, saidSo: false, tick: 11), .retry)
-        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait, saidSo: false, tick: 12), .giveUp)
+        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait, saidSo: false, tick: 12), .sayNotWoken)
         XCTAssertLessThan(LaunchWake.retryEvery, LaunchWake.wait)
         // Said once; then every half minute, so a PC that wakes late is found.
         let later = (13...24).map { LaunchWake.step(elapsed: LaunchWake.wait + 5, saidSo: true, tick: $0) }
         XCTAssertEqual(later.filter { $0 == .retry }.count, 2)
-        XCTAssertFalse(later.contains(.giveUp))
+        XCTAssertFalse(later.contains(.sayNotWoken))
     }
 
     func testSaysWhatIsHappeningAndWhatToCheck() {
         let waking = LaunchWake.waking("gaming-pc", app: "Excel")
         XCTAssertTrue(waking.contains("Waking gaming-pc"))
         XCTAssertTrue(waking.contains("Excel"))
-        let gaveUp = LaunchWake.gaveUp("gaming-pc")
-        XCTAssertTrue(gaveUp.contains("Wake-on-LAN"))
-        XCTAssertTrue(gaveUp.contains("signed in"))
+        let notWoken = LaunchWake.notWoken("gaming-pc")
+        XCTAssertTrue(notWoken.contains("Wake-on-LAN"))
+        XCTAssertTrue(notWoken.contains("signed in"))
     }
 
     func testStopsWhenTold() {
-        let wake = LaunchWake(retry: {}, gaveUp: {})
+        let wake = LaunchWake(retry: {}, notWoken: {})
         XCTAssertTrue(wake.isRunning)
         wake.stop()
         XCTAssertFalse(wake.isRunning)

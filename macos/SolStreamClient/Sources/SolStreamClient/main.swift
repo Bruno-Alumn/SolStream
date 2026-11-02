@@ -429,10 +429,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker.showWaiting(LaunchWake.waking(host, app: link.name))
         launchWake = LaunchWake(retry: { [weak agent] in
             agent?.retryUnanswered()
-        }, gaveUp: { [weak picker] in
+        }, notWoken: { [weak picker] in
             Log.error("[app] \(host) did not answer within a minute of the wake; "
                       + "trying every half minute")
-            picker?.showFailure(LaunchWake.gaveUp(host), isConnection: true)
+            picker?.showFailure(LaunchWake.notWoken(host), isConnection: true)
         })
         return true
     }
@@ -594,10 +594,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 if self.launchWake?.isRunning == true {
-                    // A refusal no retry can fix -- another Mac streaming --
-                    // is not the PC still waking.
-                    if agent?.willReconnect == true { return }
-                    self.launchWake?.stop()
+                    if agent?.willReconnect == true {
+                        // Still no answer is the PC still waking; anything
+                        // else -- refused, no such name, no route -- is said,
+                        // and the tries go on.
+                        if agent?.lastFailureMightBeAsleep == true { return }
+                    } else {
+                        // A refusal no retry can fix -- another Mac
+                        // streaming -- ends the wait.
+                        self.launchWake?.stop()
+                    }
                 }
                 // `explain` already names the host and says what to do.
                 picker?.showFailure(message, isConnection: true)
