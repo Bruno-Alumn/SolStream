@@ -1895,30 +1895,34 @@ volatile LONG g_cursor_generation = 0;
 /// `generation` is the cursor watcher's own, or 0 for any other push. Checked
 /// inside the lock as well: a watcher that waited there past
 /// StopCursorWatcher's timeout belongs to nobody.
-/// A push only some Macs understand: sent, and said to be, only to a Mac
-/// that listed `feature`. False to one that didn't, as to nobody at all.
-bool PushLine(const std::string& line, LONG generation);
-bool PushFeature(long feature, const std::string& line) {
-    if ((InterlockedCompareExchange(&g_push_features, 0, 0) & feature) == 0) {
-        return false;
-    }
-    return PushLine(line, 0);
-}
-
-bool PushLine(const std::string& line, LONG generation = 0) {
+///
+/// `feature`, when given, is a push only some Macs understand (see
+/// PushFeaturesFrom): sent only to a Mac that listed it, checked under the
+/// same lock as the socket so it is that Mac's list, and false to one that
+/// didn't, as to nobody at all.
+bool PushLine(const std::string& line, LONG generation = 0, long feature = 0) {
     if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
-        return true;
+        return feature == 0;
     }
     bool sent = true;
     EnterCriticalSection(&g_send_cs);
     const SOCKET client = g_push_client;
-    if (client != INVALID_SOCKET
-        && (generation == 0
-            || InterlockedCompareExchange(&g_cursor_generation, 0, 0) == generation)) {
+    if (feature != 0 && (InterlockedCompareExchange(&g_push_features, 0, 0) & feature) == 0) {
+        sent = false;
+    } else if (client != INVALID_SOCKET
+               && (generation == 0
+                   || InterlockedCompareExchange(&g_cursor_generation, 0, 0) == generation)) {
         sent = SendLine(client, line);
+    } else if (feature != 0) {
+        sent = false;
     }
     LeaveCriticalSection(&g_send_cs);
     return sent;
+}
+
+/// A push only some Macs understand; see PushLine's `feature`.
+bool PushFeature(long feature, const std::string& line) {
+    return PushLine(line, 0, feature);
 }
 
 /// The frame bits a geometry lock takes away, and the only style bits the agent

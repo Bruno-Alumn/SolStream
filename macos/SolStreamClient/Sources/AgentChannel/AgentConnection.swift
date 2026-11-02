@@ -2623,12 +2623,12 @@ public final class AgentConnection {
     /// Not `hello` or `auth`, which carry the handshake; not `displays`, which
     /// is a reply as often as it is the greeting's push; and not `busy`, which
     /// decides whether this Mac gives up, waits, or asks for its session back.
+    static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
+                                               "title", "attention"]
+
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
     static let understoodPushes = "title attention"
-
-    static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
-                                               "title", "attention"]
 
     static func read(line: Data) -> LineReading {
         if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
