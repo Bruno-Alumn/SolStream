@@ -359,6 +359,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                           width: shown.width, height: shown.height)
         metalView?.sourceRect = crop
         inputCapture?.sourceRect = crop
+        inputCapture?.guardsTopEdge = picture(of: rect).minY == rect.minY
         inputCapture?.canvasSize = session.canvasSize
         // Deliberately NO contentAspectRatio. The remote window resizes to match
         // whatever shape we are dragged into, so locking the aspect would stop

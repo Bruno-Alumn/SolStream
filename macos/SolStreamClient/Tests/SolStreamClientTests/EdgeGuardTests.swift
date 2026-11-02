@@ -53,4 +53,20 @@ final class EdgeGuardTests: XCTestCase {
         let right = InputCapture.canvasPoint(unit: CGPoint(x: 1, y: 0.5), source: tiny, edgeGuard: 40)
         XCTAssertLessThanOrEqual(left.x, right.x)
     }
+
+    /// With the application's title bar left out of the picture, the crop's
+    /// top is inside the window and is not kept clear: a tab strip there is
+    /// clicked where aimed.
+    func testTheTopIsNotGuardedBelowAHiddenTitleBar() {
+        let source = CGRect(x: 100, y: 40, width: 800, height: 600)
+        let top = InputCapture.canvasPoint(unit: CGPoint(x: 0.5, y: 0), source: source,
+                                           edgeGuard: 8, guardsTop: false)
+        XCTAssertEqual(top.y, 40, accuracy: 0.5)
+        let bottom = InputCapture.canvasPoint(unit: CGPoint(x: 0.5, y: 1), source: source,
+                                              edgeGuard: 8, guardsTop: false)
+        XCTAssertEqual(bottom.y, 632, accuracy: 0.5, "the bottom is still the window's edge")
+        let side = InputCapture.canvasPoint(unit: CGPoint(x: 0, y: 0), source: source,
+                                            edgeGuard: 8, guardsTop: false)
+        XCTAssertEqual(side.x, 108, accuracy: 0.5)
+    }
 }

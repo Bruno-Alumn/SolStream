@@ -39,6 +39,12 @@ public final class InputCapture {
     /// edge of the usable area; it simply never lands on the border itself, and
     /// so never turns into a resize arrow or starts a drag there.
     public var edgeGuard: CGFloat = 0
+    /// Whether the crop's top is the host window's own top edge. With the
+    /// application's title bar left out of the picture it is not -- it is
+    /// inside the window, below the strip -- and has no resize border to keep
+    /// off: guarded, clicks on a tab strip there landed the guard's width lower
+    /// than aimed.
+    public var guardsTopEdge = true
 
     private weak var targetView: NSView?
     private var keyboardMonitor: Any?
@@ -1952,7 +1958,8 @@ public final class InputCapture {
     /// Send a unit point within the crop as an absolute position on the
     /// canvas, kept clear of its edges by `edgeGuard`.
     private func sendCanvasPoint(unit: CGPoint, source: CGRect, canvas: CGSize) {
-        let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard)
+        let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard,
+                                      guardsTop: guardsTopEdge)
         positionsSent += 1
         emit(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
                                             y: Int(target.y.rounded()),
@@ -2016,12 +2023,17 @@ public final class InputCapture {
     /// frame, not to the picture. Pinned rather than dropped, so the pointer
     /// still tracks to the edge of the usable area instead of freezing short of
     /// it.
-    static func canvasPoint(unit: CGPoint, source: CGRect, edgeGuard: CGFloat) -> CGPoint {
+    static func canvasPoint(unit: CGPoint, source: CGRect, edgeGuard: CGFloat,
+                            guardsTop: Bool = true) -> CGPoint {
         // A crop narrower than two guards would invert the safe rectangle, so
         // the guard gives way rather than the geometry.
         let insetX = min(edgeGuard, max(0, (source.width - 1) / 2))
         let insetY = min(edgeGuard, max(0, (source.height - 1) / 2))
-        let safe = source.insetBy(dx: insetX, dy: insetY)
+        var safe = source.insetBy(dx: insetX, dy: insetY)
+        if !guardsTop {
+            safe = CGRect(x: safe.minX, y: source.minY, width: safe.width,
+                          height: safe.maxY - source.minY)
+        }
         // The last pixel inside, not the edge past it: maxX is the first pixel
         // of whatever is to the right, and a drag held off the edge ended a
         // pixel into the neighbouring window.
