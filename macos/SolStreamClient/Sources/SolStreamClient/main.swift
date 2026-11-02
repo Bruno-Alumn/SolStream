@@ -430,7 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launchWake = LaunchWake(retry: { [weak agent] in
             agent?.retryUnanswered()
         }, gaveUp: { [weak picker] in
-            Log.error("[app] \(host) did not answer within a minute of the wake")
+            Log.error("[app] \(host) did not answer within a minute of the wake; "
+                      + "trying every half minute")
             picker?.showFailure(LaunchWake.gaveUp(host), isConnection: true)
         })
         return true

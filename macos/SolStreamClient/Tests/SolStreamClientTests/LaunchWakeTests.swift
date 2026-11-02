@@ -4,11 +4,15 @@ import XCTest
 /// A launcher clicked while the PC sleeps wakes it, tries the connection again
 /// every few seconds, and gives up after a minute.
 final class LaunchWakeTests: XCTestCase {
-    func testRetriesForAMinuteThenGivesUp() {
-        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.retryEvery), .retry)
-        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait - 1), .retry)
-        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait), .giveUp)
+    func testRetriesForAMinuteThenSaysSoThenKeepsTryingSlowly() {
+        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.retryEvery, saidSo: false, tick: 1), .retry)
+        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait - 1, saidSo: false, tick: 11), .retry)
+        XCTAssertEqual(LaunchWake.step(elapsed: LaunchWake.wait, saidSo: false, tick: 12), .giveUp)
         XCTAssertLessThan(LaunchWake.retryEvery, LaunchWake.wait)
+        // Said once; then every half minute, so a PC that wakes late is found.
+        let later = (13...24).map { LaunchWake.step(elapsed: LaunchWake.wait + 5, saidSo: true, tick: $0) }
+        XCTAssertEqual(later.filter { $0 == .retry }.count, 2)
+        XCTAssertFalse(later.contains(.giveUp))
     }
 
     func testSaysWhatIsHappeningAndWhatToCheck() {
