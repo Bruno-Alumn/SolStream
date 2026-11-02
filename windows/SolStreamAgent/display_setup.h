@@ -66,6 +66,11 @@ std::wstring ReadRegString(HKEY root, const wchar_t* key, const wchar_t* name);
 /// first changes it. Named once, so what uninstall deletes is what this writes.
 constexpr wchar_t kVddSettingsBackupSuffix[] = L".solstream-backup";
 
+/// Added to vdd_settings.xml's name for the new version written beside it and
+/// then moved over it. Left behind only by a process killed in between, and
+/// removed with the folder.
+constexpr wchar_t kVddSettingsWriteSuffix[] = L".new";
+
 /// Is this path a junction, symbolic link or other reparse point? Elevated
 /// writes and deletes under C:\ refuse those: any user can make folders there.
 bool IsReparsePoint(const std::wstring& path);

@@ -254,7 +254,7 @@ bool ReadFileText(const std::wstring& path, std::string& out) {
 /// is deleted first and then made new, never opened as it is -- elevated, this
 /// must not write through a link somebody left at that name.
 bool WriteFileText(const std::wstring& path, const std::string& text) {
-    const std::wstring temporary = path + L".new";
+    const std::wstring temporary = path + kVddSettingsWriteSuffix;
     if (!DeleteFileW(temporary.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND) {
         return false;
     }
@@ -388,7 +388,8 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
     if (!CopyFileW(path.c_str(), (path + kVddSettingsBackupSuffix).c_str(), TRUE)
         && GetLastError() != ERROR_FILE_EXISTS) {
         error = "Could not keep a copy of " + ToUtf8(path)
-              + " before changing it, so it was left as it is.";
+              + " before changing it, so it was left as it is. Setting up the "
+                "display driver needs administrator rights.";
         return false;
     }
     if (!WriteFileText(path, xml)) {

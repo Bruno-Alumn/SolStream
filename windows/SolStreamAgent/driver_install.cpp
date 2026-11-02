@@ -1044,6 +1044,7 @@ bool RemoveDriverSettingsFolder(const std::wstring& folder) {
     // changed it. In a folder SolStream made, that file was SolStream's too.
     const std::wstring settings = L"vdd_settings.xml";
     for (const std::wstring& file : {settings, settings + kVddSettingsBackupSuffix,
+                                     settings + kVddSettingsWriteSuffix,
                                      std::wstring(L"option.txt"), std::wstring(L"adapter.txt")}) {
         const std::wstring path = folder + L"\\" + file;
         if (!IsReparsePoint(path)) {
