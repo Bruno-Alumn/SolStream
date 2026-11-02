@@ -513,6 +513,16 @@ final class Updater {
         guard case .ready(let version) = state, let downloaded, downloaded.version == version else {
             return
         }
+        // macOS empties Caches when the disk runs low, and a download that is
+        // gone is downloaded again rather than reported as one that would not
+        // unpack.
+        guard FileManager.default.fileExists(atPath: downloaded.zip.path) else {
+            Log.info("[update] the download of \(version) has gone; downloading it again")
+            self.downloaded = nil
+            state = .available(version)
+            Task { await download() }
+            return
+        }
         guard !isStreaming else {
             Log.info("[update] \(version) will install when the stream closes")
             state = .waitingForStream(version)
@@ -624,14 +634,24 @@ final class Updater {
     /// enough to delete anything else.
     func cleanUpAfterUpdate() {
         if let path = defaults.string(forKey: Key.replacedBundle) {
-            defaults.removeObject(forKey: Key.replacedBundle)
+            // Forgotten once it is gone, not before: a copy that could be
+            // neither deleted nor trashed this time -- another account's, or
+            // App Management refusing -- is tried again at the next start
+            // rather than left hidden in Applications for good.
             let old = URL(fileURLWithPath: path)
-            if old.lastPathComponent.hasPrefix(UpdateInstaller.replacedPrefix),
-               old.pathExtension == "app", let installTarget,
-               old.deletingLastPathComponent().standardizedFileURL
-                == installTarget.deletingLastPathComponent().standardizedFileURL {
+            let ours = old.lastPathComponent.hasPrefix(UpdateInstaller.replacedPrefix)
+                && old.pathExtension == "app" && installTarget.map {
+                    old.deletingLastPathComponent().standardizedFileURL
+                        == $0.deletingLastPathComponent().standardizedFileURL
+                } == true
+            // Not one to delete, or already gone: nothing to try again.
+            if !ours || !FileManager.default.fileExists(atPath: old.path) {
+                defaults.removeObject(forKey: Key.replacedBundle)
+            }
+            if ours {
                 do {
                     try FileManager.default.removeItem(at: old)
+                    defaults.removeObject(forKey: Key.replacedBundle)
                     Log.info("[update] now running \(currentVersion); removed the copy it replaced")
                 } catch {
                     // Not yet seen on a real install: macOS's App Management
@@ -641,6 +661,7 @@ final class Updater {
                     // inside it -- so nothing hidden is left in Applications.
                     do {
                         try FileManager.default.trashItem(at: old, resultingItemURL: nil)
+                        defaults.removeObject(forKey: Key.replacedBundle)
                         Log.info("[update] now running \(currentVersion); could not delete the copy it "
                                  + "replaced (\(error.localizedDescription)), so moved it to the Trash")
                     } catch let trashError {

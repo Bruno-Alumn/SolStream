@@ -266,13 +266,18 @@ enum UpdateInstaller {
     ///
     /// `open` while the old copy is still running would only bring the old
     /// copy forward, so the shell waits for this process ID to disappear --
-    /// ten seconds at most -- and then opens the new bundle. The path and the
+    /// thirty seconds at most -- and then opens the new bundle; not with `-n`,
+    /// and not at all if the old copy is still there by then, so two copies
+    /// never run at once and the new one's clean-up never deletes a folder the
+    /// old one is using. A copy left running is the updated one at its next
+    /// launch. The path and the
     /// ID go in as arguments, never spliced into the script.
     static func relaunch(_ app: URL) throws {
         let script = """
             i=0
-            while kill -0 "$1" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-            exec /usr/bin/open -n "$2"
+            while kill -0 "$1" 2>/dev/null && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+            kill -0 "$1" 2>/dev/null && exit 0
+            exec /usr/bin/open "$2"
             """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")

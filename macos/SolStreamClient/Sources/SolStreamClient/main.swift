@@ -507,6 +507,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.forgetPicker()
             self.agent = nil
             agent.disconnect()
+            // Off the PC: the session a stream left the picker in is over.
+            if self.appWindows.isEmpty {
+                MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+            }
             if self.appWindows.isEmpty && !self.testMode {
                 self.showConnectWindow()
             }
@@ -1045,16 +1049,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // finishes during it must not quit the app halfway through, with
             // no session yet for quitting to close. Set back on each way out
             // that ends without a window; `presentApps` keeps it set.
+            // Put back as it was on a way out with no window: still set when
+            // this open came from the picker a stream was switched away from,
+            // which is the same session (see `endStream`).
+            let wasStreaming = Updater.shared.isStreaming
             Updater.shared.isStreaming = true
             guard let media = await agent.openMediaSession(request) else {
-                Updater.shared.isStreaming = false
+                Updater.shared.isStreaming = wasStreaming
                 Log.error("[app] \(host) refused the media session")
                 self.failOpen("\(host) didn't start streaming. Try again; if it keeps happening, "
                               + "restart SolStream on the PC.", for: agent)
                 return
             }
             guard media.streaming else {
-                Updater.shared.isStreaming = false
+                Updater.shared.isStreaming = wasStreaming
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
                 self.failOpen("\(host) couldn't start streaming: "
@@ -1064,7 +1072,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Agreed with a PC that has since been left: its connection is
             // gone, and the PC ends the stream with it.
             guard self.isCurrent(agent) else {
-                Updater.shared.isStreaming = false
+                Updater.shared.isStreaming = wasStreaming
                 return
             }
             self.mediaRequest = request
@@ -1131,7 +1139,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // capture, encoder, sender and receive threads, the socket and
                 // the keys all survive until something starts a new session, and
                 // any key or mouse button still held is never released.
-                self.endStream { agent.closeMediaSession() }
+                // Still the session, as far as an update is concerned: the
+                // picker comes straight back over the same connection, and an
+                // install that quit the app now would take it away mid-Switch
+                // App or mid-Retry. Leaving the picker ends it.
+                self.endStream(keepsSession: !self.testMode) { agent.closeMediaSession() }
                 // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
                 // tell a new connection from the last one's teardown still
                 // running, and answers "busy". Nothing needs the disconnect: the
@@ -1850,7 +1862,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Stop the stream and its clipboard sync, and forget what it was opened
     /// with. `closing` runs just before an update the person asked for during
     /// the stream is let go, which installs it and may relaunch the app.
-    private func endStream(closing: () -> Void = {}) {
+    /// - Parameter keepsSession: the picker follows on the same connection, so
+    ///   an update waiting for the stream to close goes on waiting until it is
+    ///   left (`showPicker`'s cancel, `leaveHost`).
+    private func endStream(keepsSession: Bool = false, closing: () -> Void = {}) {
         session?.stop()
         session = nil
         mediaRequest = nil
@@ -1863,7 +1878,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clipboard?.stop()
         clipboard = nil
         closing()
-        MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+        if !keepsSession {
+            MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+        }
     }
 
     /// Whether a Host menu item has anything to act on. Disconnect was on with
