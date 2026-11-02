@@ -69,6 +69,10 @@ final class ClipboardBudgetTests: XCTestCase {
         XCTAssertGreaterThan(AgentConnection.maxLineBytes,
                              AgentConnection.maxClipboardSetBytes * 6,
                              "line cap must clear worst-case JSON escaping of a full set")
+        XCTAssertGreaterThan(AgentConnection.maxLineBytes,
+                             (AgentConnection.maxClipboardSetBytes
+                              + 2 * AgentConnection.maxRichClipboardBytes) * 6,
+                             "line cap must clear worst-case JSON escaping of a set with its formatting")
     }
 
     /// A set is a full payload of the Mac's lines given Windows' CRs, and the

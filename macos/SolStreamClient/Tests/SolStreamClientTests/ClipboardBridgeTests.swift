@@ -199,9 +199,23 @@ final class ClipboardBridgeTests: XCTestCase {
                                                        rtf: "{\\rtf1 table}"))
         settle()
         XCTAssertEqual(pasteboard.string(forType: .string), "table")
-        XCTAssertEqual(pasteboard.string(forType: .html), "<table><tr><td>table</td></tr></table>")
+        XCTAssertEqual(pasteboard.string(forType: .html),
+                       "<meta charset=\"utf-8\"><table><tr><td>table</td></tr></table>")
         XCTAssertEqual(pasteboard.data(forType: .rtf).flatMap { String(data: $0, encoding: .ascii) },
                        "{\\rtf1 table}")
+    }
+
+    /// HTML from the PC is UTF-8 and says nothing about it; AppKit reads it as
+    /// Latin-1 unless told. Checked by reading it back as AppKit does.
+    func testPCHtmlKeepsItsAccents() throws {
+        ClipboardBridge.put(AgentConnection.RichText(html: "<b>café — “q”</b>"), on: pasteboard)
+        let html = try XCTUnwrap(pasteboard.data(forType: .html))
+        let read = try NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html],
+                                          documentAttributes: nil)
+        XCTAssertEqual(read.string.trimmingCharacters(in: .whitespacesAndNewlines), "café — “q”")
+        // One that declares its own is left as it is.
+        let declared = "<meta charset='windows-1252'><p>x</p>"
+        XCTAssertEqual(ClipboardBridge.declaringUTF8(declared), declared)
     }
 
     /// RTF travels as the ASCII it is written in; anything else is left out.

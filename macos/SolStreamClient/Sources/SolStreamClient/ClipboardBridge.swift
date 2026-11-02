@@ -553,10 +553,19 @@ final class ClipboardBridge {
         return AgentConnection.RichText(html: html, rtf: rtf).travelling()
     }
 
+    /// HTML that says it is UTF-8, as it is. Windows' HTML Format is UTF-8 by
+    /// definition and Chrome's and Edge's say nothing more, while AppKit reads
+    /// undeclared HTML as Latin-1: "café" pasted as "cafÃ©". Chrome on the Mac
+    /// puts the same declaration in front of its own copies.
+    static func declaringUTF8(_ html: String) -> String {
+        let head = html.prefix(1024).lowercased()
+        return head.contains("charset") ? html : "<meta charset=\"utf-8\">" + html
+    }
+
     /// The PC's formatting onto the pasteboard, after its text.
     static func put(_ rich: AgentConnection.RichText, on pasteboard: NSPasteboard) {
         if let html = rich.html {
-            pasteboard.setString(html, forType: .html)
+            pasteboard.setString(declaringUTF8(html), forType: .html)
         }
         if let rtf = rich.rtf, let data = rtf.data(using: .ascii) {
             pasteboard.setData(data, forType: .rtf)

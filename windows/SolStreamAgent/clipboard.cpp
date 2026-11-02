@@ -193,7 +193,9 @@ std::optional<std::string> ClipboardBytes(const wchar_t* format, size_t cap) {
     if (!bytes) {
         return std::nullopt;
     }
-    const size_t length = strnlen(bytes, size);
+    // Never further than one past the cap: a format the size of the whole
+    // clipboard was scanned end to end only to be turned down.
+    const size_t length = strnlen(bytes, (std::min)(size, cap + 1));
     std::optional<std::string> read;
     if (length <= cap) {
         read = std::string(bytes, length);
@@ -364,8 +366,12 @@ std::string ClipboardGetJson() {
     }
     // Formatting only with the whole text: cut, it would say more than the
     // text it travels with. Read while the clipboard is still held.
+    // And not for a copy whose text is already past the formatting's budget:
+    // the formatting is never smaller than its text, and asking for it makes
+    // the app that copied -- Excel, Word -- render it all while this holds the
+    // clipboard, for nothing.
     std::string rich;
-    if (!truncated) {
+    if (!truncated && text.size() <= kMaxRichClipboardBytes) {
         // Read a little past the cap: the header and the document around the
         // fragment are not what is measured.
         if (auto cf_html = ClipboardBytes(L"HTML Format", kMaxRichClipboardBytes + 4096)) {
