@@ -1021,13 +1021,18 @@ final class AppWindow: NSObject, NSWindowDelegate {
             say("Wait for the files already on their way to the PC.", for: 3)
             return false
         }
-        let files = urls.filter {
+        // Through links, to what they point at: a dropped alias of a file is
+        // that file.
+        let files = urls.map { $0.resolvingSymlinksInPath() }.filter {
             (try? $0.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
         }
         guard !files.isEmpty else {
             say("Only files can be sent to the PC, not folders.", for: 3)
             return false
         }
+        // Said when the rest have gone, not swallowed: a folder dropped with
+        // files is left out, and the note says so.
+        let leftOut = urls.count - files.count
         Self.isSendingFiles = true
         let cancellation = AgentConnection.UploadCancellation()
         sendingFiles = cancellation
@@ -1093,9 +1098,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     guard let self else { return }
                     if let sequence { self.onHostClipboardSet?(sequence) }
                     let what = received.count == 1 ? "1 file" : "\(received.count) files"
-                    self.say(sequence != nil
-                             ? "\(what) copied to the PC. Press ⌘V to paste."
-                             : "\(what) saved in Downloads on the PC.", for: 6)
+                    let skipped = leftOut == 0 ? ""
+                        : " \(leftOut == 1 ? "A folder was" : "\(leftOut) folders were") left "
+                          + "out: only files can be sent."
+                    self.say((sequence != nil
+                              ? "\(what) copied to the PC. Press ⌘V to paste."
+                              : "\(what) saved in Downloads on the PC.") + skipped, for: 6)
                     Log.info("[transfer] \(what) on the host's clipboard: \(sequence != nil)")
                 }
             }

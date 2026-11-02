@@ -1811,6 +1811,15 @@ public final class AgentConnection {
     /// `refused` is told, before `completion`, what the host said when it
     /// turned the file down for a reason meant for the person: too big, no
     /// room left on the PC.
+    /// What a failed upload says when the Mac is what failed: the file
+    /// could not be read here.
+    public static let unreadableOnMac =
+        "This Mac couldn't read it. If it's in iCloud Drive, download it first; "
+        + "otherwise check you can open it."
+    /// And when the connection did.
+    public static let connectionLostMidUpload =
+        "The connection to the PC dropped on the way. Drop it again once it's back."
+
     public func upload(_ file: URL, as name: String,
                        cancellation: UploadCancellation? = nil,
                        progress: ((Int64) -> Void)? = nil,
@@ -1818,6 +1827,7 @@ public final class AgentConnection {
                        completion: @escaping (String?) -> Void) {
         guard let handle = try? FileHandle(forReadingFrom: file),
               let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
+            refused?(Self.unreadableOnMac)
             completion(nil)
             return
         }
@@ -1841,12 +1851,16 @@ public final class AgentConnection {
             } catch {
                 Log.error("[transfer] could not read \(file.lastPathComponent): \(error)")
                 if offset > 0 { abortUpload() }
+                refused?(Self.unreadableOnMac)
                 return finish(nil)
             }
             send(["cmd": "upload", "name": name, "offset": offset, "total": size,
                   "data": chunk.base64EncodedString()]) { [weak self] result in
                 guard let self else { return finish(nil) }
                 guard case .success(let message) = result, message["ok"] as? Bool == true else {
+                    if case .failure = result {
+                        refused?(Self.connectionLostMidUpload)
+                    }
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[transfer] the host did not take \(name): \(why)")
                         if let reason = message["reason"] as? String, !reason.isEmpty {

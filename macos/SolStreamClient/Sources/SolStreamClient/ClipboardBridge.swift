@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import ImageIO
 import SolStreamLogging
 import MediaSession
 import AgentChannel
@@ -459,7 +460,8 @@ final class ClipboardBridge {
                 // what crossed last.
                 lastSyncedText = nil
             }
-            if local == nil, let png = Self.png(on: pasteboard) {
+            var tooLarge = false
+            if local == nil, let png = Self.png(on: pasteboard, tooLarge: &tooLarge) {
                 let digest = Self.digest(png)
                 if digest != lastSyncedImage {
                     pushImage(png, digest: digest, changeCount: changeCount)
@@ -469,6 +471,10 @@ final class ClipboardBridge {
                 // Text, files, a picture too big to send, or nothing: the Mac
                 // no longer holds the picture that crossed last.
                 lastSyncedImage = nil
+                if tooLarge, toldTooLarge != changeCount {
+                    toldTooLarge = changeCount
+                    onPictureTooLarge?()
+                }
             }
         }
 
@@ -595,17 +601,49 @@ final class ClipboardBridge {
 
     // MARK: - Pictures
 
-    /// Pixels past which a TIFF is not encoded at all: 40 MP. A screenshot of
-    /// a 6K display at its largest scaled size is 7520x4230, about 32 MP, and
-    /// fits; a photo past it would not fit in the host's 32 MB as a PNG anyway.
-    static let maxPicturePixels = 40_000_000
+    /// Pixels past which a picture is not sent: 7680x4320, the most the host
+    /// reads (kMaxClipboardImagePixels). A screenshot of a 6K display at its
+    /// largest scaled size is 7520x4230 and fits. Past it, a picture whose PNG
+    /// fit in 32 MB went over in full, sixty-odd round trips, to be refused.
+    static let maxPicturePixels = 7680 * 4320
+
+    /// Its pixel count, from the header alone: nothing is decoded.
+    static func pixelCount(of data: Data) -> Int? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        return width * height
+    }
+
+    /// A picture copied on the Mac was too big to send, said once per copy:
+    /// otherwise ⌘V on the PC pastes what was there before, and nothing says why.
+    var onPictureTooLarge: (() -> Void)?
+    private var toldTooLarge: Int?
+
+    /// What the stream window says when that happens.
+    static let pictureTooLargeNote =
+        "That picture is too big to paste on the PC (the most is 7680 × 4320). "
+        + "Save it as a file and drop it on the window instead."
+
+    static func png(on pasteboard: NSPasteboard) -> Data? {
+        var tooLarge = false
+        return png(on: pasteboard, tooLarge: &tooLarge)
+    }
 
     /// The picture on `pasteboard` as PNG, if it holds one and is not a copy
     /// of files -- whose icons Finder puts beside them -- and it is not too
-    /// big to send.
-    static func png(on pasteboard: NSPasteboard) -> Data? {
+    /// big to send; `tooLarge` says when that is why there is none.
+    static func png(on pasteboard: NSPasteboard, tooLarge: inout Bool) -> Data? {
         let types = pasteboard.types ?? []
         guard !types.contains(.fileURL) else { return nil }
+        if let direct = pasteboard.data(forType: .png), let pixels = pixelCount(of: direct),
+           pixels > maxPicturePixels {
+            Log.info("[clipboard] a picture of \(pixels) pixels is too large to send to the host")
+            tooLarge = true
+            return nil
+        }
         let png = pasteboard.data(forType: .png)
             ?? pasteboard.data(forType: .tiff).flatMap { tiff -> Data? in
                 guard let picture = NSBitmapImageRep(data: tiff) else { return nil }
@@ -617,6 +655,7 @@ final class ClipboardBridge {
                 guard pixels <= maxPicturePixels else {
                     Log.info("[clipboard] a \(picture.pixelsWide)x\(picture.pixelsHigh) picture "
                              + "is too large to send to the host")
+                    tooLarge = true
                     return nil
                 }
                 return picture.representation(using: .png, properties: [:])
@@ -628,6 +667,7 @@ final class ClipboardBridge {
             Log.info("[clipboard] a picture of \(png.count / 1_048_576) MB is over the "
                      + "\(AgentConnection.maxClipboardImageBytes / 1_048_576) MB the host takes; "
                      + "not sending it")
+            tooLarge = true
             return nil
         }
         return png

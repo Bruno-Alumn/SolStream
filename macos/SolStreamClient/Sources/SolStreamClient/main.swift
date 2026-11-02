@@ -1277,6 +1277,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appWindows.contains { $0.window?.isKeyWindow == true } ?? false
         }
         clipboard = bridge
+        bridge.onPictureTooLarge = { [weak self] in
+            self?.appWindows.first { $0.window?.isKeyWindow == true }?
+                .tell(ClipboardBridge.pictureTooLargeNote)
+        }
         if StreamSettings.shared.syncsClipboard {
             bridge.start(resuming: false)
         } else {

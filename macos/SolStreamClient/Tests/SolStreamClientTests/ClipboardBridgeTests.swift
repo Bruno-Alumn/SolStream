@@ -521,6 +521,38 @@ final class ClipboardBridgeTests: XCTestCase {
         return rep.representation(using: .png, properties: [:])!
     }
 
+    /// A blank greyscale PNG of `width` x `height`: a byte a pixel to build,
+    /// and next to nothing once compressed.
+    private func blankPNG(width: Int, height: Int) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                                   bitsPerSample: 8, samplesPerPixel: 1, hasAlpha: false,
+                                   isPlanar: false, colorSpaceName: .deviceWhite,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        return rep.representation(using: .png, properties: [:])!
+    }
+
+    /// The Mac sends no bigger a picture than the PC reads, and says so.
+    func testAPictureTooLargeForThePCIsNotSentAndIsSaid() {
+        XCTAssertEqual(ClipboardBridge.maxPicturePixels, 7680 * 4320, "the host's limit")
+        var told = 0
+        bridge.onPictureTooLarge = { told += 1 }
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let huge = blankPNG(width: 8000, height: 5000)
+        XCTAssertEqual(ClipboardBridge.pixelCount(of: huge), 40_000_000)
+        pasteboard.clearContents()
+        pasteboard.setData(huge, forType: .png)
+        bridge.syncNow()
+        XCTAssertTrue(fake.imageWrites.isEmpty)
+        XCTAssertEqual(told, 1)
+        settle()
+        // Once per copy, not at every tick.
+        fake.answerRead(sequence: 1, unchanged: true)
+        settle()
+        bridge.syncNow()
+        XCTAssertEqual(told, 1)
+    }
+
     func testAMacPictureGoesToThePCOnceAsPNG() {
         bridge.start(resuming: false)
         streamHasKeyboard = true

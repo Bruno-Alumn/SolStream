@@ -721,8 +721,12 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
                 const DWORD error = GetLastError();
                 return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
             });
-        if (folder.empty() || path.empty()) {
-            return Error("upload", "no folder to write to");
+        if (folder.empty()) {
+            return Refused("The PC has no Downloads folder SolStream can write to.");
+        }
+        if (path.empty()) {
+            return Refused("Downloads\\SolStream on the PC already has too many files with "
+                           "this name. Move some out of it, then send it again.");
         }
         HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
