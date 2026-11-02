@@ -203,8 +203,13 @@ everything after the proof is encrypted (see Pairing).
 | `{"cmd":"windows"}` | `{"type":"windows","windows":[{"id","pid","title","class","x","y","w","h","exStyle","captionInset","naturalW","naturalH","occluded","occludedBy"}]}` |
 | `{"cmd":"apps"}` | `{"type":"apps","apps":[{"name","path"}]}` |
 | `{"cmd":"icon","id":N}` or `{"cmd":"icon","path":"…"}`, optionally `"size":256` with a path | `{"type":"icon","ok":true,"id","w","h","bgra"}`, base64, 64x64, or 256x256 when asked and the shell has one |
-| `{"cmd":"clipboard"}` or `{"cmd":"clipboard","seq":N}` | `{"type":"clipboard","ok":true,"seq","truncated","text"}`, or `"unchanged":true` when `seq` is still current |
+| `{"cmd":"clipboard"}` or `{"cmd":"clipboard","seq":N}` | `{"type":"clipboard","ok":true,"seq","truncated","text"}`, with `"image":true` when there is no text but a picture, `"private":true` for what a password manager marked, or `"unchanged":true` when `seq` is still current |
 | `{"cmd":"clipboard","text":"…"}` | `{"type":"clipboard","ok":true,"seq"}` |
+| `{"cmd":"clipboardImage","seq":S,"offset":O}` | `{"type":"clipboardImage","ok":true,"seq","total","offset","data"}`: 512 KB of the clipboard's picture as PNG, base64; `ok:false` once the clipboard has moved on from `S` |
+| `{"cmd":"clipboardImage","offset":O,"total":T,"data":"…"}` | `{"type":"clipboardImage","ok":true,"received"}`, then on the last chunk `"done":true,"seq"`: a PNG put on the clipboard as PNG and CF_DIB |
+| `{"cmd":"upload","name":"…","offset":O,"total":T,"data":"…"}` | `{"type":"upload","ok":true,"received"}`, then on the last chunk `"done":true,"path"`: a file written to `Downloads\SolStream` under a cleaned name. `{"cmd":"upload","abort":1}` deletes one left unfinished |
+| `{"cmd":"clipboardFiles","paths":"a\nb"}` | `{"type":"clipboardFiles","ok":true,"seq"}`: received files on the clipboard to paste; only files directly in `Downloads\SolStream` |
+| `{"cmd":"wakeInfo"}` | `{"type":"wakeInfo","ok":true,"adapters":[{"mac","broadcast"}]}`: wired and Wi-Fi adapters that are up with a gateway, for Wake-on-LAN |
 | `{"cmd":"media","op":"open","cpub":"…","cnonce":"…","display":"\\\\.\\DISPLAY5"}` | `{"type":"media","ok":true,"ver":1,"hpub","hnonce","hcount","hauth","streaming","hport"}` |
 | `{"cmd":"media","op":"stats"}` | `{"type":"media","ok":true,"op":"stats","stats":{…}}` |
 | `{"cmd":"media","op":"stop"}` | `{"type":"media","ok":true,"op":"stop"}` |
