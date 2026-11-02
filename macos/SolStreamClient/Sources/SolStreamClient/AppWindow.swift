@@ -997,7 +997,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 }
             }) { [weak self] path in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    // Whether or not the window is still there: a window closed
+                    // mid-upload must not leave every later drop refused.
+                    guard let self else {
+                        AppWindow.isSendingFiles = false
+                        return
+                    }
                     guard let path else {
                         Self.isSendingFiles = false
                         self.say("Couldn't send \(file.lastPathComponent) to the PC. SolStream "
@@ -1013,8 +1018,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
         func finish() {
             agent.setClipboardFiles(received) { [weak self] sequence in
                 DispatchQueue.main.async {
+                    AppWindow.isSendingFiles = false
                     guard let self else { return }
-                    Self.isSendingFiles = false
                     if let sequence { self.onHostClipboardSet?(sequence) }
                     let what = received.count == 1 ? "1 file" : "\(received.count) files"
                     self.say(sequence != nil

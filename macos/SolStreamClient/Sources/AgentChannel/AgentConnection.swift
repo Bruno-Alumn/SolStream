@@ -292,6 +292,18 @@ public final class AgentConnection {
     /// wrong thing entirely, so both halves have to agree before either switches.
     private var hostOffersChannelCrypto = false
     private var channel: ChannelCrypto?
+    /// Whether requests may go out on this connection: once it is
+    /// authenticated (and sealed, with a host that offers it), or the host
+    /// has said it wants no token. Until then they are held, not sent in the
+    /// clear and refused -- a clipboard copied in the moment after a
+    /// reconnect, before the greeting, crossed the network unencrypted.
+    /// Pings alone go before it: the host answers them unauthenticated.
+    private var mayTalk = false
+    /// The greeting asked for a token this Mac does not have, and the
+    /// question is with the user. A token supplied at any other time --
+    /// from a second sheet, after the connection authenticated, before a new
+    /// socket's greeting -- would be a second proof the host never asked for.
+    private var awaitingToken = false
     /// Held between sending the proof and reading the reply that names the
     /// host's half. Dropped the moment the keys are derived.
     private var pendingEphemeral: P256.KeyAgreement.PrivateKey?
@@ -334,6 +346,16 @@ public final class AgentConnection {
         // later request held for the life of the connection.
         queue.async { [weak self] in
             guard let self else { return }
+            // Only an answer to the question the greeting asked: a second
+            // sheet's answer, one after the connection authenticated, or one
+            // on a new socket before its greeting would each be a proof the
+            // host never asked for -- and would drop the connection, or have a
+            // correct token reported as rejected.
+            guard self.awaitingToken, !self.authInFlight, self.channel == nil else {
+                Log.info("[agent] a token was typed for \(self.host) when none was asked "
+                         + "for; ignoring it")
+                return
+            }
             // A token that is not hexadecimal cannot be a SolStream token: the
             // host makes 16 random bytes and prints them as hex, and the proof
             // is an HMAC keyed with those bytes. `authenticate` returns false
@@ -742,6 +764,10 @@ public final class AgentConnection {
         // app that could never reach the host again without being restarted.
         channel = nil
         pendingEphemeral = nil
+        // The last socket's challenge is no proof for this one's.
+        authChallenge = nil
+        mayTalk = false
+        awaitingToken = false
         buffer.removeAll()
         authInFlight = false
         heldWhileAuthenticating.removeAll()
@@ -955,8 +981,11 @@ public final class AgentConnection {
         // captured is pinned too. Clearing them means one such mistake costs a
         // stale closure rather than a permanent leak.
         resetCallbacks()
-        queue.async { [weak self] in
-            guard let self else { return }
+        // Strongly: this is often the last reference -- the caller drops it
+        // straight after -- and a block that found it gone would never fail
+        // what is waiting, leaving a media session's await or an upload's
+        // completion hanging for good.
+        queue.async { [self] in
             // Before cancelling: `.cancelled` and the receive completion both
             // run through paths that would otherwise queue a reconnect to a host
             // the user has just left.
@@ -1044,6 +1073,7 @@ public final class AgentConnection {
         // Closed before the send, not after: the reply is what reopens it, and
         // a reply cannot arrive before this line has gone out.
         authInFlight = true
+        awaitingToken = false
         connection.send(content: payload, completion: .contentProcessed { error in
             if let error { Log.error("[agent] could not send the auth proof: \(error)") }
         })
@@ -1859,7 +1889,8 @@ public final class AgentConnection {
             // one round trip on a socket that is already open. A takeover in
             // flight holds them the same way, and for the same kind of reason:
             // the host reads exactly one line before it answers.
-            if self.authInFlight || self.takeoverInFlight {
+            if self.authInFlight || self.takeoverInFlight
+                || (!self.mayTalk && request["cmd"] as? String != "ping") {
                 self.heldWhileAuthenticating.append((request, completion))
                 return
             }
@@ -2050,6 +2081,7 @@ public final class AgentConnection {
                     // Not a failure: the connection is open and healthy, it is
                     // simply waiting to be told who we are. Ask, rather than
                     // tearing down and telling the user to find a command line.
+                    awaitingToken = true
                     report(.needsToken(host: host, rejected: false))
                     return
                 }
@@ -2076,6 +2108,10 @@ public final class AgentConnection {
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+            } else {
+                // A host that wants no token, and this Mac holds none for it.
+                mayTalk = true
+                releaseHeldRequests()
             }
             return
         case "auth":
@@ -2106,6 +2142,10 @@ public final class AgentConnection {
                         Log.error("[agent] \(host) derived DIFFERENT channel keys — "
                                   + "refusing the connection")
                         pendingEphemeral = nil
+                        // Said, not only logged: without it the picker spun on
+                        // and a stream's windows never said the link was gone.
+                        report(.failed("\(host) could not agree a key with this Mac. "
+                                       + "Connect again; if it keeps happening, pair again."))
                         dropConnection(AgentError.protocolDesync, reconnect: false)
                         return
                     }
@@ -2147,6 +2187,7 @@ public final class AgentConnection {
                     dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
                     return
                 }
+                mayTalk = true
             } else {
                 Log.error("[agent] token rejected")
                 TokenStore.remove(for: host)
@@ -2158,9 +2199,12 @@ public final class AgentConnection {
                 // host's three attempts per reconnect, and reporting
                 // `rejected: true` about a token the person had never been shown.
                 token = nil
+                awaitingToken = true
                 report(.needsToken(host: host, rejected: true))
             }
             // Whichever way it went, the framing is now settled on both ends.
+            // Refused, they are held again (`mayTalk`) for the next proof
+            // rather than sent in the clear to be refused.
             releaseHeldRequests()
             return
         case "cursor":
