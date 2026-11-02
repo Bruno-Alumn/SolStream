@@ -35,6 +35,9 @@ constexpr size_t kTransferChunkBytes = 512 * 1024;
 constexpr size_t kMaxClipboardImageBytes = 32 * 1024 * 1024;
 /// A picture larger than this on a side is not decoded at all.
 constexpr unsigned int kMaxClipboardImageSide = 16384;
+/// Nor one with more pixels than this, 8K's 33 million: a small PNG of a
+/// huge flat picture would otherwise cost gigabytes as a DIB.
+constexpr unsigned long long kMaxClipboardImagePixels = 7680ull * 4320ull;
 
 /// Base64 without line breaks, and back. False for anything that is not.
 std::string Base64Encode(const unsigned char* bytes, size_t size);
@@ -59,6 +62,10 @@ std::string ClipboardImageSetJson(long long offset, long long total, const std::
 /// last answers with the path it was written to.
 std::string UploadJson(const std::string& name, long long offset, long long total,
                        const std::string& base64);
+
+/// Drop an upload that has not finished, deleting the part written: the Mac
+/// gave up on it (`{"cmd":"upload","abort":1}`) or went away.
+void AbandonUpload();
 
 /// The reply to `{"cmd":"clipboardFiles","paths":"a\nb"}`: those files on the
 /// clipboard, to paste, if every one is in UploadFolder().

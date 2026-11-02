@@ -110,6 +110,9 @@ final class ClipboardBridge {
     /// The same for a picture, by its PNG's digest. At most one of the two is
     /// set: each is what both clipboards hold.
     private var lastSyncedImage: String?
+    /// The host sequence whose picture failed to come once and was asked for
+    /// again; see `pullImage`.
+    private var retriedImageSequence: Int?
     private var inFlight = false
     /// A sync asked for while a request was on the wire, run as soon as it is
     /// answered rather than left to the next tick.
@@ -249,6 +252,7 @@ final class ClipboardBridge {
             lastLocalChangeCount = pasteboard.changeCount
             adoptsRemoteBaseline = true
             lastSyncedText = nil
+            lastSyncedImage = nil
         }
         schedule(every: Self.idleInterval)
         Log.info("[clipboard] syncing with the host")
@@ -333,6 +337,7 @@ final class ClipboardBridge {
             if Self.isPrivate(types: pasteboard.types) {
                 lastLocalChangeCount = changeCount
                 lastSyncedText = nil
+                lastSyncedImage = nil
                 Log.info("[clipboard] a private item was copied; not sending it to the host")
                 return
             }
@@ -404,7 +409,9 @@ final class ClipboardBridge {
                     pushImage(png, digest: digest)
                     return
                 }
-            } else if local != nil {
+            } else {
+                // Text, files, a picture too big to send, or nothing: the Mac
+                // no longer holds the picture that crossed last.
                 lastSyncedImage = nil
             }
         }
@@ -440,6 +447,7 @@ final class ClipboardBridge {
                 // and the host answers "unchanged" without looking again.
                 if remote.isPrivate {
                     self.lastSyncedText = nil
+                    self.lastSyncedImage = nil
                     Log.info("[clipboard] a private item was copied on the host; "
                              + "not bringing it to the Mac")
                     return
@@ -480,6 +488,19 @@ final class ClipboardBridge {
                 }
             }
         }
+    }
+
+    /// Something other than the bridge put `sequence` on the host's
+    /// clipboard: files dropped on a window. What the Mac holds now, sent or
+    /// waiting to be, does not go over them -- a URL copied in Safari before
+    /// the drop would otherwise replace the files the moment the window took
+    /// the keyboard, and ⌘V would paste the URL.
+    func adopt(remoteSequence sequence: Int) {
+        lastRemoteSequence = sequence
+        lastLocalChangeCount = pasteboard.changeCount
+        unsettledCopy = nil
+        lastSyncedText = nil
+        lastSyncedImage = nil
     }
 
     // MARK: - Pictures
@@ -530,7 +551,17 @@ final class ClipboardBridge {
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { self.settle() }
-                guard let png, self.isRunning else { return }
+                guard let png else {
+                    // Asked again at the next poll, once: most often another
+                    // program had the PC's clipboard open. A picture the host
+                    // cannot send at all is not asked for every second.
+                    if self.lastRemoteSequence == sequence, self.retriedImageSequence != sequence {
+                        self.retriedImageSequence = sequence
+                        self.lastRemoteSequence = nil
+                    }
+                    return
+                }
+                guard self.isRunning else { return }
                 let digest = Self.digest(png)
                 guard digest != self.lastSyncedImage else { return }
                 guard self.pasteboard.changeCount == changeCountAsked else {

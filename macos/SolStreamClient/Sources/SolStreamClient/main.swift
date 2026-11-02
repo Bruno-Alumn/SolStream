@@ -1133,6 +1133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindow.onKeyboardChange = { [weak self] in
                 self?.clipboard?.syncNow()
             }
+            appWindow.onHostClipboardSet = { [weak self] sequence in
+                self?.clipboard?.adopt(remoteSequence: sequence)
+            }
             appWindow.setStatus("Connecting to \(host)", detail: target.title)
             // A StreamSession cannot be restarted in place — stop() releases the
             // decoder and start() does not build another — so recovering means a

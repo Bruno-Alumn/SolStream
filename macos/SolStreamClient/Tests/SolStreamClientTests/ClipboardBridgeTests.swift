@@ -508,6 +508,57 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertNil(pasteboard.data(forType: .png))
     }
 
+    /// Files dropped on a window are on the PC's clipboard; a Mac copy made
+    /// before the drop, still held, must not go over them when the window
+    /// takes the keyboard.
+    func testFilesPutOnThePCAreNotReplacedByAHeldMacCopy() {
+        bridge.start(resuming: false)
+        copyOnTheMac("https://example.com")
+        bridge.adopt(remoteSequence: 40)
+        streamHasKeyboard = true
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, [], "the held copy went over the files")
+        XCTAssertEqual(fake.reads, [40])
+    }
+
+    /// A picture that failed to come is asked for once more, and not again.
+    func testAPCPictureThatFailedIsAskedForOnceMore() {
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        fake.answerRead(sequence: 7, hasImage: true)
+        settle()
+        fake.answerImageRead(nil)
+        settle()
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.last ?? -1, nil, "asked as new, so the picture is named again")
+        fake.answerRead(sequence: 7, hasImage: true)
+        settle()
+        fake.answerImageRead(nil)
+        settle()
+        bridge.syncNow()
+        XCTAssertEqual(fake.reads.last, 7, "a picture the host cannot send is not asked for again")
+    }
+
+    /// The same picture copied again after something that did not cross is a
+    /// copy worth sending: the PC no longer holds it.
+    func testTheSamePictureAfterAPrivateCopyOnThePCGoesAgain() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let picture = png()
+        pasteboard.clearContents()
+        pasteboard.setData(picture, forType: .png)
+        bridge.syncNow()
+        fake.answerImageWrite(sequence: 3)
+        settle()
+        bridge.syncNow()
+        fake.answerRead(sequence: 4, isPrivate: true)
+        settle()
+        pasteboard.clearContents()
+        pasteboard.setData(picture, forType: .png)
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites.count, 2)
+    }
+
     /// A picture the host could not send leaves the Mac's clipboard alone.
     func testAPCPictureThatDoesNotComeChangesNothing() {
         copyOnTheMac("kept")

@@ -3500,6 +3500,11 @@ void TestTransferNames() {
     CHECK(SafeFileName(L"CON.txt") == L"_CON.txt");
     CHECK(SafeFileName(L"com1") == L"_com1");
     CHECK(SafeFileName(L"console.txt") == L"console.txt");
+    CHECK(SafeFileName(L"nul .txt") == L"_nul .txt");
+    CHECK(SafeFileName(L"COM0.log") == L"_COM0.log");
+    CHECK(SafeFileName(L"lpt\u00B9") == L"_lpt\u00B9");
+    CHECK(SafeFileName(L"CONOUT$") == L"_CONOUT$");
+    CHECK(SafeFileName(L"company.txt") == L"company.txt");
     const std::wstring longName = std::wstring(200, L'x') + L".docx";
     const std::wstring cut = SafeFileName(longName);
     CHECK(cut.size() == 120);

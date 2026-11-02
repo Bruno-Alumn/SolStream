@@ -194,6 +194,9 @@ public final class AgentConnection {
             let asked = (request["timeoutMs"] as? Int).map { Double($0) / 1000 } ?? 25
             return max(30, asked + 5)
         case "apps": return 30
+        // A chunk is 700 KB on the wire, and a slow relay can take seconds
+        // over one; the host encodes a large picture before its first chunk.
+        case "upload", "clipboardImage": return 60
         case "media" where request["op"] as? String == "open": return 15
         default: return 10
         }
@@ -1537,10 +1540,12 @@ public final class AgentConnection {
                 chunk = try handle.read(upToCount: Self.transferChunkBytes) ?? Data()
             } catch {
                 Log.error("[transfer] could not read \(file.lastPathComponent): \(error)")
+                if offset > 0 { abortUpload() }
                 return finish(nil)
             }
             send(["cmd": "upload", "name": name, "offset": offset, "total": size,
-                  "data": chunk.base64EncodedString()]) { result in
+                  "data": chunk.base64EncodedString()]) { [weak self] result in
+                guard let self else { return finish(nil) }
                 guard case .success(let message) = result, message["ok"] as? Bool == true else {
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[transfer] the host did not take \(name): \(why)")
@@ -1553,6 +1558,7 @@ public final class AgentConnection {
                     finish(message["path"] as? String)
                 } else if chunk.isEmpty || offset >= size {
                     // The file shrank under us, or the host wants more than it has.
+                    self.abortUpload()
                     finish(nil)
                 } else {
                     next()
@@ -1560,6 +1566,12 @@ public final class AgentConnection {
             }
         }
         next()
+    }
+
+    /// Tell the host an upload under way will not be finished, so it deletes
+    /// the part it has rather than leaving it looking whole.
+    public func abortUpload() {
+        send(["cmd": "upload", "abort": 1]) { _ in }
     }
 
     /// Put files the host received from `upload` on its clipboard, to paste.

@@ -125,7 +125,8 @@ bool Decode(IWICImagingFactory* factory, const std::vector<unsigned char>& bytes
     }
     UINT width = 0, height = 0;
     return SUCCEEDED(frame->GetSize(&width, &height)) && width > 0 && height > 0
-        && width <= kMaxClipboardImageSide && height <= kMaxClipboardImageSide;
+        && width <= kMaxClipboardImageSide && height <= kMaxClipboardImageSide
+        && static_cast<unsigned long long>(width) * height <= kMaxClipboardImagePixels;
 }
 
 bool CreateFactory(Ref<IWICImagingFactory>& factory) {
@@ -323,8 +324,8 @@ struct Upload {
 Upload g_upload;
 
 /// An upload that never finished goes, rather than leaving half a file
-/// in Downloads looking like a whole one.
-void AbandonUpload() {
+/// in Downloads looking like a whole one. The caller holds the mutex.
+void DropUpload() {
     if (g_upload.file != INVALID_HANDLE_VALUE) {
         CloseHandle(g_upload.file);
         DeleteFileW(g_upload.path.c_str());
@@ -341,6 +342,11 @@ std::wstring Lower(std::wstring text) {
 }
 
 }  // namespace
+
+void AbandonUpload() {
+    std::lock_guard<std::mutex> guard(g_transfer_mutex);
+    DropUpload();
+}
 
 std::string Base64Encode(const unsigned char* bytes, size_t size) {
     if (size == 0) {
@@ -406,9 +412,12 @@ std::string ClipboardImageGetJson(long long seq, long long offset) {
             // which a DIB mostly does not. Otherwise the DIB, as a BMP file.
             source = FormatBytes(PngFormat());
             if (source.empty()) {
-                std::vector<unsigned char> dib = FormatBytes(CF_DIBV5);
+                // CF_DIB before CF_DIBV5. A V5 that Windows made from a
+                // 32-bit DIB of GDI's, alpha all zero, can carry an alpha mask
+                // the decoder honours, and the picture comes out invisible.
+                std::vector<unsigned char> dib = FormatBytes(CF_DIB);
                 if (dib.empty()) {
-                    dib = FormatBytes(CF_DIB);
+                    dib = FormatBytes(CF_DIBV5);
                 }
                 source = DibAsBmp(dib.data(), dib.size());
             }
@@ -519,13 +528,19 @@ std::wstring SafeFileName(const std::wstring& name) {
     if (cleaned.empty()) {
         cleaned = L"file";
     }
-    // CON, NUL, COM1 and the rest are devices whatever extension follows.
-    const std::wstring stem = Lower(cleaned.substr(0, cleaned.find(L'.')));
-    static const wchar_t* devices[] = {L"con", L"prn", L"aux", L"nul"};
+    // CON, NUL, COM1 and the rest are devices whatever extension follows,
+    // and with spaces before it: "nul .txt" is NUL. COM and LPT take any digit
+    // and the superscripts one to three.
+    std::wstring stem = Lower(cleaned.substr(0, cleaned.find(L'.')));
+    while (!stem.empty() && stem.back() == L' ') {
+        stem.pop_back();
+    }
+    static const wchar_t* devices[] = {L"con", L"prn", L"aux", L"nul", L"conin$", L"conout$"};
     bool device = std::any_of(std::begin(devices), std::end(devices),
                               [&](const wchar_t* d) { return stem == d; });
     if (stem.size() == 4 && (stem.rfind(L"com", 0) == 0 || stem.rfind(L"lpt", 0) == 0)
-        && stem[3] >= L'1' && stem[3] <= L'9') {
+        && ((stem[3] >= L'0' && stem[3] <= L'9') || stem[3] == L'\u00B9' || stem[3] == L'\u00B2'
+            || stem[3] == L'\u00B3')) {
         device = true;
     }
     if (device) {
@@ -594,7 +609,7 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         return Error("upload", "bad size");
     }
     if (offset == 0) {
-        AbandonUpload();
+        DropUpload();
         const std::wstring folder = UploadFolder();
         const std::wstring path = UniqueFilePath(folder, SafeFileName(ToWide(name)),
             [](const std::wstring& candidate) {
@@ -619,7 +634,7 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         || static_cast<unsigned long long>(total) != g_upload.total
         || !Base64Decode(base64, chunk) || chunk.size() > kTransferChunkBytes
         || g_upload.written + chunk.size() > g_upload.total) {
-        AbandonUpload();
+        DropUpload();
         return Error("upload", "out of order");
     }
     DWORD wrote = 0;
@@ -627,7 +642,7 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         && (!WriteFile(g_upload.file, chunk.data(), static_cast<DWORD>(chunk.size()), &wrote,
                        nullptr)
             || wrote != chunk.size())) {
-        AbandonUpload();
+        DropUpload();
         return Error("upload", "could not write the file -- is the disk full?");
     }
     g_upload.written += chunk.size();

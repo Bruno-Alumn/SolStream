@@ -69,7 +69,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private let captureHint = CaptureHint()
     /// What is happening to files dropped on the window; see `filesDropped`.
     private let transferNote = CaptureHint(text: "")
-    private var isSendingFiles = false
+    /// One sending at a time across every window: they share one connection,
+    /// and the host keeps one upload at a time.
+    private static var isSendingFiles = false
+    /// Told the host clipboard's new sequence once dropped files are on it,
+    /// so the clipboard sync does not put an older Mac copy over them.
+    var onHostClipboardSet: ((Int) -> Void)?
     private var hasExplainedCapture = false
     private var qualityTimer: Timer?
     private var lastFrameCount: UInt64 = 0
@@ -941,7 +946,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// file takes a pasted one. So the note says ⌘V, which arrives as Ctrl+V.
     /// They are kept in Downloads\SolStream on the PC either way.
     func filesDropped(_ urls: [URL]) -> Bool {
-        guard !isSendingFiles else {
+        guard !Self.isSendingFiles else {
             say("Wait for the files already on their way to the PC.", for: 3)
             return false
         }
@@ -952,7 +957,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             say("Only files can be sent to the PC, not folders.", for: 3)
             return false
         }
-        isSendingFiles = true
+        Self.isSendingFiles = true
         let sizes = files.map {
             Int64((try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
@@ -976,7 +981,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     guard let path else {
-                        self.isSendingFiles = false
+                        Self.isSendingFiles = false
                         self.say("Couldn't send \(file.lastPathComponent) to the PC. SolStream "
                                  + "on the PC may need updating.", for: 6)
                         return
@@ -991,7 +996,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
             agent.setClipboardFiles(received) { [weak self] sequence in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.isSendingFiles = false
+                    Self.isSendingFiles = false
+                    if let sequence { self.onHostClipboardSet?(sequence) }
                     let what = received.count == 1 ? "1 file" : "\(received.count) files"
                     self.say(sequence != nil
                              ? "\(what) copied to the PC. Press ⌘V to paste."

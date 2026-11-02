@@ -4275,6 +4275,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     if (command == "upload") {
+        long long abort = 0;
+        if (FieldNumber(line, "abort", abort) && abort != 0) {
+            solstream::AbandonUpload();
+            return "{\"type\":\"upload\",\"ok\":true,\"aborted\":true}";
+        }
         std::string name, data;
         long long offset = 0, total = -1;
         if (!FieldString(line, "name", name) || !FieldString(line, "data", data)
@@ -5278,6 +5283,8 @@ void ServeAndRetire(SOCKET client) {
     g_clients_connected.fetch_sub(1);
     RestoreReleasedSlots(released);
     g_windows_restoring.fetch_sub(1);
+    // A file the Mac was sending when it went is not left half written.
+    solstream::AbandonUpload();
     Log("[agent] client disconnected");
 }
 
