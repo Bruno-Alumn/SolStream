@@ -57,6 +57,9 @@ public final class VideoDecoder {
     /// `noteAsyncDecodeFailure`.
     private let failureLock = NSLock()
     private var pendingAsyncFailure: OSStatus = noErr
+    /// A picture came out of the session since the last `decode()` looked.
+    /// Guarded by `failureLock`, for the same reason.
+    private var decodedSinceLastLook = false
 
     /// Whether a failure has cost the session its reference pictures, so that
     /// nothing but an IDR can be decoded. Guarded by `lock`.
@@ -149,7 +152,12 @@ public final class VideoDecoder {
         failureLock.lock()
         let asyncFailure = pendingAsyncFailure
         pendingAsyncFailure = noErr
+        let decoded = decodedSinceLastLook
+        decodedSinceLastLook = false
         failureLock.unlock()
+        if decoded {
+            recovery.pictureDecoded()
+        }
         if asyncFailure != noErr {
             noteDecodeFailure(asyncFailure, beforeIdr: startsOver)
         }
@@ -157,7 +165,8 @@ public final class VideoDecoder {
         // A session dropped by a failure is rebuilt by an IDR and nothing
         // else. See `SessionRecovery`.
         guard recovery.admit(isIdr: startsOver) else {
-            requestKeyframeNow(throttled: true)
+            requestKeyframe(after: max(Self.keyframeRequestInterval,
+                                       recovery.keyframeWait(Self.keyframeRequestInterval)))
             return
         }
 
@@ -309,6 +318,14 @@ public final class VideoDecoder {
         failureLock.unlock()
     }
 
+    /// A picture came out of the session; `decode()` tells `recovery`, which
+    /// is guarded by `lock` and so out of the callback's reach.
+    private func noteAsyncPicture() {
+        failureLock.lock()
+        decodedSinceLastLook = true
+        failureLock.unlock()
+    }
+
     /// Deal with a decode failure, rebuilding the session for the errors Apple
     /// documents as recoverable only that way.
     ///
@@ -339,9 +356,24 @@ public final class VideoDecoder {
         invalidateSession()
         // The next IDR rebuilds it; ask for one now rather than waiting for
         // the host's own keyframe interval. Unless that IDR is the frame in
-        // hand, in which case it is already here.
+        // hand, in which case it is already here -- or the IDRs before it
+        // failed too: a Mac that cannot decode this stream at all asked for
+        // one after every failure, and the host sent five a second for as long
+        // as the window stayed open. Those wait longer each time instead.
         if recovery.sessionDropped(beforeIdr: beforeIdr) {
-            requestKeyframeNow(throttled: false)
+            requestKeyframe(after: recovery.keyframeWait(Self.keyframeRequestInterval))
+        }
+    }
+
+    /// Ask the host for an IDR unless one was asked for less than `wait` ago.
+    /// Call with `lock` held.
+    private func requestKeyframe(after wait: TimeInterval) {
+        if wait > 0, Date().timeIntervalSince(lastKeyframeRequest) < wait {
+            return
+        }
+        if requestKeyframeNow(throttled: false), wait > Self.keyframeRequestInterval {
+            Log.error("[decode] the \(codec.title) decoder failed on "
+                      + "\(recovery.failedKeyframes) IDRs in a row; asking for another")
         }
     }
 
@@ -395,6 +427,7 @@ public final class VideoDecoder {
                 }
                 return
             }
+            decoder.noteAsyncPicture()
             decoder.frameCallback(pixelBuffer)
         }
 
@@ -426,9 +459,21 @@ public final class VideoDecoder {
                  + (Self.decodesInHardware(codec) ? "" : " (in software: this Mac has no hardware decoder for it)"))
     }
 
+    /// Drain the session before letting it go. Its frames still in flight
+    /// would otherwise report afterwards, and their failures -- the callback
+    /// cannot tell one session from the next -- were found by the next frame
+    /// and dropped the healthy session that replaced it: a freeze and a second
+    /// IDR asked for nothing, at every resolution change. Draining runs those
+    /// callbacks now, and what they failed on belonged to the old session, so
+    /// it is forgotten with it. Safe with `lock` held: the callback never
+    /// takes it.
     private func invalidateSession() {
         if let session {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
+            failureLock.lock()
+            pendingAsyncFailure = noErr
+            failureLock.unlock()
         }
         session = nil
     }
@@ -526,6 +571,10 @@ struct SessionRecovery {
             || status == kVTVideoDecoderBadDataErr
     }
 
+    /// IDRs let through since a picture last came out of the session. One
+    /// that is followed by a failure is an IDR this Mac could not decode.
+    private(set) var failedKeyframes = 0
+
     /// The session has been dropped. Returns whether to ask the host for an
     /// IDR: not when the failure was an earlier frame's found just as an IDR
     /// is about to be decoded, because that IDR starts the new session itself.
@@ -540,8 +589,25 @@ struct SessionRecovery {
     mutating func admit(isIdr: Bool) -> Bool {
         if isIdr {
             awaitingIdr = false
+            failedKeyframes += 1
             return true
         }
         return !awaitingIdr
+    }
+
+    /// A picture came out: whatever failed before, this stream decodes.
+    mutating func pictureDecoded() {
+        failedKeyframes = 0
+    }
+
+    /// How long to leave it before asking for another IDR after a failure.
+    /// None after the first: one bad IDR is a glitch. After that the stream is
+    /// one this Mac cannot decode -- too large for its hardware, a profile it
+    /// lacks -- and every IDR asked for is megabits the host sends for
+    /// nothing, so the wait doubles from `interval`, up to ten seconds, in
+    /// case it decodes after a wake or a GPU switch.
+    func keyframeWait(_ interval: TimeInterval) -> TimeInterval {
+        guard failedKeyframes > 1 else { return 0 }
+        return min(interval * pow(2, Double(failedKeyframes - 2)), 10)
     }
 }

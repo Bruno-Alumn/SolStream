@@ -67,4 +67,51 @@ final class DecoderRecoveryTests: XCTestCase {
         XCTAssertEqual(hold.picture(frameId: 4, isIdr: true, now: t0 + 60_000_000), .decode)
         XCTAssertEqual(hold.picture(frameId: 5, isIdr: false, now: t0 + 76_000_000), .decode)
     }
+
+    /// A Mac that cannot decode the stream fails on every IDR. Asking for the
+    /// next one at once after each made the host send five a second for as
+    /// long as the window stayed open; after the first, each wait doubles.
+    func testIdrsThatKeepFailingAreAskedForLessOften() {
+        var recovery = SessionRecovery()
+        XCTAssertEqual(recovery.keyframeWait(0.5), 0)
+
+        XCTAssertTrue(recovery.admit(isIdr: true))
+        XCTAssertTrue(recovery.sessionDropped(beforeIdr: false))
+        XCTAssertEqual(recovery.keyframeWait(0.5), 0, "one bad IDR is a glitch: ask at once")
+
+        var waits: [TimeInterval] = []
+        for _ in 0..<8 {
+            XCTAssertTrue(recovery.admit(isIdr: true))
+            XCTAssertTrue(recovery.sessionDropped(beforeIdr: false))
+            waits.append(recovery.keyframeWait(0.5))
+        }
+        XCTAssertEqual(waits, [0.5, 1, 2, 4, 8, 10, 10, 10])
+    }
+
+    /// Any picture out of the session means the stream decodes: the next
+    /// failure is a glitch again, asked about at once.
+    func testAPictureEndsTheBackOff() {
+        var recovery = SessionRecovery()
+        for _ in 0..<4 {
+            _ = recovery.admit(isIdr: true)
+            _ = recovery.sessionDropped(beforeIdr: false)
+        }
+        XCTAssertGreaterThan(recovery.keyframeWait(0.5), 0)
+        recovery.pictureDecoded()
+        XCTAssertEqual(recovery.failedKeyframes, 0)
+        _ = recovery.admit(isIdr: true)
+        _ = recovery.sessionDropped(beforeIdr: false)
+        XCTAssertEqual(recovery.keyframeWait(0.5), 0)
+    }
+
+    /// A healthy stream's IDRs, each followed by pictures, never back off.
+    func testAHealthyStreamNeverWaits() {
+        var recovery = SessionRecovery()
+        for _ in 0..<10 {
+            XCTAssertTrue(recovery.admit(isIdr: true))
+            recovery.pictureDecoded()
+            XCTAssertTrue(recovery.admit(isIdr: false))
+        }
+        XCTAssertEqual(recovery.keyframeWait(0.5), 0)
+    }
 }
