@@ -24,6 +24,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         var name: String?
         /// Whether the agent's port answered. Nil while unknown.
         var isReachable: Bool?
+        /// Not answering because the PC turned the connection away: it is on,
+        /// and nothing is listening -- SolStream is not running, most often
+        /// because nobody is signed in to Windows. Silence instead is a PC
+        /// asleep, off, or out of reach.
+        var isRefused = false
         var isPaired: Bool
         var latency: TimeInterval?
         /// What this Mac's Tailscale was when the PC was last asked, for the
@@ -40,6 +45,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private let hintLabel = NSTextField(wrappingLabelWithString: "")
     private let connectButton: DS.Button
     private let quitButton: DS.Button
+    /// Sends the PC a wake-on-LAN packet; shown while it is silent and this
+    /// Mac knows how to wake it. See `WakeOnLAN`.
+    let wakeButton: DS.Button
+    /// When Wake was pressed for the PC shown, for what the hint says while
+    /// it may still be waking.
+    private var wokeAt: Date?
+    /// The last Wake could not send its packet at all.
+    private var wakeFailed = false
     /// "Update 1.1.0 available", in the corner the buttons leave free. Not an
     /// alert and not the accent: the one thing this window is for is the PC,
     /// and the update waits in Settings until somebody wants it.
@@ -98,7 +111,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Whether this Mac is on Tailscale, and whether a host answers on the
     /// agent's port: the real readings, except in tests.
     private let readTailscale: () -> TailscaleStatus
-    private let reach: (String) -> Bool
+    /// What opening the agent's port found.
+    enum Reach: Equatable { case open, refused, silent }
+
+    private let reach: (String) -> Reach
     /// Where the hosts used before are kept: the app's own defaults, except
     /// in tests, which each keep theirs apart -- the standard defaults of a
     /// test run are shared by every test run on the Mac at the time.
@@ -110,7 +126,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
          defaults: UserDefaults = .standard) {
         self.onConnect = onConnect
         self.readTailscale = readTailscale
-        self.reach = reach ?? { Self.canReach(host: $0, port: StreamPorts.agent) }
+        self.reach = reach.map { reach in { reach($0) ? .open : .silent } }
+            ?? { Self.canReach(host: $0, port: StreamPorts.agent) }
         self.defaults = defaults
         let shown = Self.lastHost(in: defaults) ?? Self.recentHosts(in: defaults).first ?? ""
         self.state = HostState(address: shown, name: nil, isReachable: nil, isPaired: false,
@@ -122,6 +139,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
         connectButton = DS.Button(title: "Connect", style: .primary, target: nil, action: nil)
         quitButton = DS.Button(title: "Quit", target: nil, action: nil)
+        wakeButton = DS.Button(title: "Wake PC", target: nil, action: nil)
 
         // 440 wide and exactly as tall as its content. It used to be a fixed
         // 420x280 with the content pinned to the top, which left a band of empty
@@ -211,6 +229,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         connectButton.keyEquivalent = "\r"
         quitButton.target = self
         quitButton.action = #selector(quitTapped)
+        wakeButton.target = self
+        wakeButton.action = #selector(wakeTapped)
+        wakeButton.isHidden = true
 
         updateNotice.target = self
         updateNotice.action = #selector(updateNoticeTapped)
@@ -245,8 +266,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // they cost the window no height.
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [settingsButton, updateNotice, spacer, quitButton,
-                                          connectButton])
+        let buttons = NSStackView(views: [settingsButton, updateNotice, spacer, wakeButton,
+                                          quitButton, connectButton])
         buttons.orientation = .horizontal
         buttons.spacing = DS.Space.x3
 
@@ -403,7 +424,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             }
             dotState = .live
         case .some(false):
-            parts.append(.words("Not answering"))
+            parts.append(.words(state.isRefused ? "SolStream not running" : "Not answering"))
             dotState = .danger
         case nil:
             parts.append(.words(state.address.isEmpty ? "Enter an address" : "Checking…"))
@@ -413,6 +434,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                   detail: parts, dotState: dotState)
         hostDropdown.items = hostItems()
         hostDropdown.isDiscovering = browser.isRunning
+
+        wakeButton.isHidden = !(state.isReachable == false && !state.isRefused && canWake)
+        if state.isReachable == true {
+            wokeAt = nil
+            wakeFailed = false
+        }
 
         switch (state.isReachable, state.needsPairing) {
         case (.some(true), true):
@@ -424,8 +451,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = "Reachable and paired. Connecting is one step."
             connectButton.title = "Connect"
         case (.some(false), _):
-            hintLabel.stringValue = "Not answering on port \(StreamPorts.agent). "
-                                  + "Check the PC is awake and SolStream is running."
+            hintLabel.stringValue = offlineHint()
             connectButton.title = "Connect"
         case (nil, _):
             // Without stripping the suffix this line reads "Found
@@ -566,12 +592,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let reach = self.reach
         let work = DispatchWorkItem { [weak self] in
             let started = Date()
-            let reachable = reach(address)
+            let answer = reach(address)
+            let reachable = answer == .open
             let elapsed = Date().timeIntervalSince(started)
             DispatchQueue.main.async {
                 guard let self, self.probeGeneration == generation,
                       self.state.address == address else { return }
                 self.state.isReachable = reachable
+                self.state.isRefused = answer == .refused
                 self.state.latency = reachable ? elapsed : nil
                 if !reachable, self.preferDiscoveredHost() { return }
                 if !reachable, self.preferAnotherRoute() { return }
@@ -601,27 +629,31 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// connect ignores SO_SNDTIMEO here: an address on somebody else's network
     /// that silently drops the SYN held each probe for the kernel's full
     /// connect timeout, far longer than anybody looks at this window.
+    ///
+    /// Turned away outright -- a reset, which Windows sends for a port nothing
+    /// listens on when its firewall lets the knock through -- is told apart
+    /// from no answer at all: one is a PC that is on, the other may be asleep.
     private static func canReach(host: String, port: UInt16,
-                                 timeoutMs: Int32 = 3000) -> Bool {
+                                 timeoutMs: Int32 = 3000) -> Reach {
         var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
         var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &info) == 0, let first = info else { return false }
+        guard getaddrinfo(host, String(port), &hints, &info) == 0, let first = info else { return .silent }
         defer { freeaddrinfo(info) }
 
         let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .silent }
         defer { Darwin.close(fd) }
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
-        if connect(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 { return true }
-        guard errno == EINPROGRESS else { return false }
+        if connect(fd, first.pointee.ai_addr, first.pointee.ai_addrlen) == 0 { return .open }
+        guard errno == EINPROGRESS else { return errno == ECONNREFUSED ? .refused : .silent }
         var waiting = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        guard poll(&waiting, 1, timeoutMs) == 1 else { return false }
+        guard poll(&waiting, 1, timeoutMs) == 1 else { return .silent }
         var failure: Int32 = 0
         var length = socklen_t(MemoryLayout<Int32>.size)
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &failure, &length)
-        return failure == 0
+        return failure == 0 ? .open : failure == ECONNREFUSED ? .refused : .silent
     }
 
     // MARK: - Discovery
@@ -720,7 +752,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 group.enter()
                 DispatchQueue.global(qos: .userInitiated).async {
                     let started = Date()
-                    if reach(candidate) {
+                    if reach(candidate) == .open {
                         resultsLock.lock()
                         answered[candidate] = Date().timeIntervalSince(started)
                         resultsLock.unlock()
@@ -799,6 +831,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.address = typed
         state.name = discovered.first { $0.connectTarget == typed }?.name
         state.isReachable = nil
+        state.isRefused = false
+        wokeAt = nil
+        wakeFailed = false
         state.latency = nil
         refresh()
         scheduleProbe()
@@ -850,6 +885,55 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func removeEscapeToQuit() {
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
+    }
+
+    /// Whether this Mac has learned how to wake the PC shown.
+    private var canWake: Bool {
+        !state.address.isEmpty && !WakeOnLAN.targets(for: state.address, in: defaults).isEmpty
+    }
+
+    /// What the hint says about a PC that is not answering.
+    private func offlineHint() -> String {
+        // Said as what is likely, not as fact: the address may be another
+        // machine's on this network, and Windows' firewall drops a knock on
+        // a port nothing listens on more often than it refuses one -- so a
+        // PC waiting at the sign-in screen usually looks the same as one
+        // asleep.
+        if state.isRefused {
+            return "Something is on at this address, but SolStream isn't answering. If it's "
+                + "your PC, sign in to Windows or open SolStream."
+        }
+        if wakeFailed {
+            return "Couldn't send the wake signal from this Mac. Check it's on a network."
+        }
+        if let wokeAt {
+            return Date().timeIntervalSince(wokeAt) < Self.wakeWait
+                ? "Waking the PC… This can take up to a minute."
+                : "Still not answering. If the PC is awake, sign in to Windows. If not, "
+                    + "Wake-on-LAN may be off on it, or it's on another network."
+        }
+        return canWake
+            ? "Not answering. The PC may be asleep, or nobody is signed in to Windows."
+            : "Not answering on port \(StreamPorts.agent). "
+                + "Check the PC is awake and SolStream is running."
+    }
+
+    /// How long a PC is given to wake before the hint says it has not.
+    static let wakeWait: TimeInterval = 60
+
+    @objc private func wakeTapped() {
+        let targets = WakeOnLAN.targets(for: state.address, in: defaults)
+        wakeFailed = !WakeOnLAN.wake(targets)
+        wokeAt = wakeFailed ? nil : Date()
+        refresh()
+        // The window rechecks a silent PC every few seconds already; this
+        // only brings the hint round when the wait is up -- on the window
+        // still up, not one Connect has put away.
+        let woke = wokeAt
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeWait + 0.5) { [weak self] in
+            guard let self, self.window.isVisible, self.wokeAt == woke else { return }
+            self.refresh()
+        }
     }
 
     @objc private func settingsTapped() {

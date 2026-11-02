@@ -567,7 +567,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let reuse { present(reuse) } else { agent.apps(completion: present) }
             }
         }
-        agent.onDisplays = { _ in fill(true) }
+        // Each greeting is a connection to a PC that is awake: the time to
+        // learn how to wake it later. See `WakeOnLAN`.
+        agent.onDisplays = { [weak agent] _ in
+            fill(true)
+            if let agent { WakeOnLAN.learn(from: agent, host: host) }
+        }
         agent.onWindowsChanged = { fill(false) }
         refillPicker = { fill(false) }
         if existing == nil {
@@ -1890,6 +1895,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         TokenStore.removeAll()
+        // And how to wake each one: a PC's hardware address is about that PC.
+        WakeOnLAN.forgetAll()
         Log.info("[agent] every stored pairing token forgotten")
     }
 

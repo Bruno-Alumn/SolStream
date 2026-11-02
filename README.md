@@ -137,6 +137,17 @@ PC's audio.
 </details>
 
 <details>
+<summary><strong>The PC is asleep</strong></summary>
+
+Once SolStream has connected to a PC, it remembers how to wake it. When that
+PC doesn't answer, the connect window offers **Wake PC**. This needs
+Wake-on-LAN turned on for the PC's network adapter (in Device Manager, and on
+some PCs in the BIOS), and the Mac on the same network: the wake signal
+doesn't cross routers or Tailscale. A PC waiting at the Windows sign-in
+screen looks the same as one asleep: SolStream runs once you sign in.
+</details>
+
+<details>
 <summary><strong>The connection drops when I sign out of Windows</strong></summary>
 
 The host runs inside your Windows session, so it stops when you sign out and

@@ -68,6 +68,7 @@
 #include "foreground.h"
 #include "tailscale.h"
 #include "transfer.h"
+#include "wake.h"
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
@@ -4295,6 +4296,11 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             return "{\"type\":\"error\",\"message\":\"clipboardFiles needs paths\"}";
         }
         return solstream::ClipboardFilesJson(paths);
+    }
+
+    if (command == "wakeInfo") {
+        // What a Mac needs to wake this PC later; see wake.h.
+        return solstream::WakeInfoJson();
     }
 
     if (command == "icon") {

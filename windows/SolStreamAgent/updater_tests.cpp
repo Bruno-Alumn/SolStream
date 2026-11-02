@@ -42,6 +42,7 @@
 #include "capture_display.h"
 #include "clipboard.h"
 #include "transfer.h"
+#include "wake.h"
 #include "driver_install.h"
 #include "foreground.h"
 #include "media/audio_reopen.h"
@@ -3549,6 +3550,17 @@ void TestTransferEncoding() {
     CHECK(drop.size() == sizeof(DROPFILES) + (5 + 6 + 1) * sizeof(wchar_t));
 }
 
+void TestWake() {
+    const unsigned char mac[] = {0x0a, 0x1B, 0xc2, 0x00, 0xff, 0x09};
+    CHECK(solstream::FormatMac(mac, 6) == "0A:1B:C2:00:FF:09");
+    CHECK(solstream::BroadcastAddress({192, 168, 1, 20}, 24) == "192.168.1.255");
+    CHECK(solstream::BroadcastAddress({10, 0, 37, 5}, 16) == "10.0.255.255");
+    CHECK(solstream::BroadcastAddress({172, 16, 5, 130}, 25) == "172.16.5.255");
+    CHECK(solstream::BroadcastAddress({172, 16, 5, 20}, 25) == "172.16.5.127");
+    CHECK(solstream::BroadcastAddress({192, 168, 1, 20}, 32).empty());
+    CHECK(solstream::BroadcastAddress({192, 168, 1, 20}, 0).empty());
+}
+
 void TestAgentCrypto() {
     // SHA-256, FIPS 180-2's "abc".
     const std::string abc = "abc";
@@ -3743,6 +3755,7 @@ int wmain(int argc, wchar_t** argv) {
     TestAgentCrypto();
     TestTransferNames();
     TestTransferEncoding();
+    TestWake();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

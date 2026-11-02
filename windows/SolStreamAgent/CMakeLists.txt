@@ -91,6 +91,8 @@ add_library(SolStreamCore OBJECT
     driver_install.cpp
     # Whether this PC is on Tailscale, for the window's away-from-home advice.
     tailscale.cpp
+    # The adapters a Mac can wake this PC through.
+    wake.cpp
     # Whether a Mac knocking on a busy host may take back the session it left.
     session_takeover.cpp
     # Putting a streamed window back as it was, and remembering what is owed.

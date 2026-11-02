@@ -1585,6 +1585,27 @@ public final class AgentConnection {
         }
     }
 
+    /// One of the host's network adapters a magic packet can wake it through.
+    public struct WakeAdapter: Sendable, Equatable {
+        public let mac: String
+        public let broadcast: String?
+    }
+
+    /// The host's wake-on-LAN adapters; nil from a host that predates them.
+    public func wakeInfo(completion: @escaping ([WakeAdapter]?) -> Void) {
+        send(["cmd": "wakeInfo"]) { result in
+            guard case .success(let message) = result, message["ok"] as? Bool == true,
+                  let adapters = message["adapters"] as? [[String: Any]] else {
+                completion(nil)
+                return
+            }
+            completion(adapters.compactMap { entry in
+                guard let mac = entry["mac"] as? String else { return nil }
+                return WakeAdapter(mac: mac, broadcast: entry["broadcast"] as? String)
+            })
+        }
+    }
+
     /// A window's or application's icon.
     ///
     /// Fetched one at a time and on demand, so a picker listing hundreds of
