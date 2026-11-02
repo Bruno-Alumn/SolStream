@@ -71,9 +71,10 @@ constexpr wchar_t kVddSettingsBackupSuffix[] = L".solstream-backup";
 bool IsReparsePoint(const std::wstring& path);
 
 /// Whether a file or folder that exists is one an elevated process must not
-/// write through: a link, or one owned by anybody but Administrators or
-/// SYSTEM -- which a standard user can replace with a link once a check by
-/// path is done. False for a path that is not there yet.
+/// write through: a link, or one owned by anybody but Administrators, SYSTEM
+/// or the account this process runs as -- another user can replace theirs
+/// with a link once a check by path is done. False for a path that is not
+/// there yet.
 bool IsUnsafeForElevatedWrite(const std::wstring& path);
 
 /// The attached virtual display SolStream streams from, as \\.\DISPLAYn, or

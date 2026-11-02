@@ -41,12 +41,14 @@ constexpr wchar_t kResultTokenSwitch[] = L"--result-token";
 /// Who may do what in C:\ProgramData\SolStream. SYSTEM and Administrators own the
 /// place; ordinary users get read, write and delete on the files in it, which
 /// is all a transient result file and a log are worth -- and on the folder
-/// itself only read and add, not delete. Deletable, a standard user could
-/// remove it between the elevated half's check and its next write, and put a
-/// link where it was. Why it has to be written out rather than inherited is in
+/// itself only read and add a file (0x12008B: FILE_GENERIC_READ |
+/// FILE_ADD_FILE). Not delete, and not write-attributes: either would let a
+/// standard user turn the folder into a link -- removed and remade, or made a
+/// mount point once emptied -- between the elevated half's check and its next
+/// write. Why it has to be written out rather than inherited is in
 /// SharedDirectory.
 constexpr wchar_t kSharedDacl[] =
-    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FRFW;;;BU)(A;OICIIO;FRFWSD;;;BU)";
+    L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x12008b;;;BU)(A;OICIIO;FRFWSD;;;BU)";
 
 /// The value following `name` on THIS process's own command line, or empty.
 ///
@@ -614,9 +616,9 @@ bool CreateShortcut(const std::wstring& link_path, const std::wstring& target,
     return ok;
 }
 
-/// CSIDL rather than KNOWNFOLDERID for the same reason InstallDirectory reads an
-/// environment variable: the FOLDERID GUIDs live in an import library the mingw
-/// cross-build does not link, and this program is cross-compiled from a Mac.
+/// CSIDL rather than KNOWNFOLDERID: the FOLDERID GUIDs live in an import
+/// library the mingw cross-build does not link, and this program is
+/// cross-compiled from a Mac.
 std::wstring SystemFolder(int csidl) {
     wchar_t path[MAX_PATH] = {0};
     if (FAILED(SHGetFolderPathW(nullptr, csidl, nullptr, SHGFP_TYPE_CURRENT, path))) {

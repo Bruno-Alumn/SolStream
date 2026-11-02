@@ -139,6 +139,30 @@ bool IsReparsePoint(const std::wstring& path) {
         && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
+namespace {
+
+/// Whether `owner` is the account this process runs as: a folder the person
+/// who is installing made themselves -- the driver unpacked by hand into
+/// C:\\VirtualDisplayDriver -- is theirs to have written to. Another standard
+/// user's is not.
+bool OwnedByThisAccount(PSID owner) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> buffer(size);
+    bool same = false;
+    if (size > 0 && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+        same = EqualSid(owner, reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid) != FALSE;
+    }
+    CloseHandle(token);
+    return same;
+}
+
+}  // namespace
+
 bool IsUnsafeForElevatedWrite(const std::wstring& path) {
     HANDLE handle = CreateFileW(path.c_str(), READ_CONTROL | FILE_READ_ATTRIBUTES,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -159,7 +183,8 @@ bool IsUnsafeForElevatedWrite(const std::wstring& path) {
                            nullptr, nullptr, nullptr, &descriptor) == ERROR_SUCCESS
         && owner) {
         unsafe = !IsWellKnownSid(owner, WinBuiltinAdministratorsSid)
-              && !IsWellKnownSid(owner, WinLocalSystemSid);
+              && !IsWellKnownSid(owner, WinLocalSystemSid)
+              && !OwnedByThisAccount(owner);
     }
     if (descriptor) {
         LocalFree(descriptor);
