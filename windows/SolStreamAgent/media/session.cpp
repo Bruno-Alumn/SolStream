@@ -218,6 +218,12 @@ struct MediaSession::Impl {
     void ReportOpened(std::string error);
     void CaptureLoop();
     void RunCapture();
+    /// Set by a pass that ended because the graphics device was lost; see
+    /// RunCapture. Capture thread only.
+    bool deviceLost = false;
+    /// When this pass started encoding, or 0 when it never got that far: a
+    /// rebuild that fails before then is retried too. Capture thread only.
+    long long encodingSince = 0;
     void SenderLoop();
     void ReceiveLoop();
     void SendPicture(const Picture& picture);
@@ -405,9 +411,36 @@ void MediaSession::Impl::CaptureLoop() {
     // capture item, a new size and a new parameter set -- which is a new
     // encoder -- so it is done by going round again rather than by pretending
     // an encoder can change its mind.
+    // A lost graphics device is recovered the way a retarget is: a fresh pass
+    // builds a new capture and a new encoder on a new device. A few times, a
+    // second apart -- a driver that keeps failing ends the session instead of
+    // spinning on it.
+    int recoveries = 0;
+    bool recovering = false;
     while (running.load()) {
         retargetWanted.store(false);
+        deviceLost = false;
+        encodingSince = 0;
         RunCapture();
+        // A minute of pictures since the last rebuild starts the count again,
+        // so three resets far apart in a long session are three recoveries.
+        if (encodingSince != 0 && MillisBetween(encodingSince, Now()) >= 60000.0) {
+            recoveries = 0;
+        }
+        // A rebuild fails while the driver is still coming back -- no adapter
+        // yet, or only the basic display adapter -- and that is the same loss,
+        // not a reason to end the session.
+        const bool rebuildFailed = recovering && encodingSince == 0;
+        recovering = false;
+        if ((deviceLost || rebuildFailed) && running.load() && !retargetWanted.load()
+            && recoveries < 3) {
+            recovering = true;
+            ++recoveries;
+            Log("[media] reopening the capture after losing the graphics device "
+                "(%d of 3)", recoveries);
+            Sleep(1000);
+            continue;
+        }
         if (!retargetWanted.load()) {
             break;
         }
@@ -587,6 +620,7 @@ void MediaSession::Impl::RunCapture() {
     // 250 ms for as long as the session lasted. Capture now notices the item
     // closing, and the pass -- and with no retarget pending, the session --
     // ends.
+    encodingSince = Now();
     while (running.load() && !retargetWanted.load() && capture->Running()) {
         Frame current{};
         if (!capture->Acquire(current, lastSerial, idleMs)) {
@@ -605,10 +639,24 @@ void MediaSession::Impl::RunCapture() {
         }
         lastSerial = current.serial;
         lastEncodedAt = Now();
-        encoder->Submit(current.texture, current.width, current.height,
-                       current.isNew ? current.capturedAt : Now(), false);
+        if (!encoder->Submit(current.texture, current.width, current.height,
+                             current.isNew ? current.capturedAt : Now(), false)) {
+            // A driver reset, update or crash removes the device without the
+            // capture ever saying its source closed: frames stop, Submit fails
+            // on every retained one, and the Mac showed the last picture for
+            // the rest of the session with only a climbing "dropped" count to
+            // say why. The device says so itself; the pass ends and is rebuilt.
+            ID3D11Device* device = capture->Device();
+            const HRESULT removed = device ? device->GetDeviceRemovedReason() : S_OK;
+            if (FAILED(removed)) {
+                Log("[media] the graphics device was lost (0x%08lx)",
+                    (unsigned long) removed);
+                deviceLost = true;
+                break;
+            }
+        }
     }
-    if (running.load() && !retargetWanted.load() && !capture->Running()) {
+    if (running.load() && !retargetWanted.load() && !deviceLost && !capture->Running()) {
         Log("[media] the captured source has closed; ending the session");
     }
 }

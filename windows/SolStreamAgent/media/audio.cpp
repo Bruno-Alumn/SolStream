@@ -11,6 +11,7 @@
 #include "log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -69,6 +70,20 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
         || (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE
             && ((const WAVEFORMATEXTENSIBLE*) format)->SubFormat.Data1
                    == WAVE_FORMAT_IEEE_FLOAT);
+
+    // Packed 24-bit, 8-bit and 64-bit float come out as zeros below, which the
+    // silence check then drops -- the Mac heard nothing and nothing said why.
+    // Once per process is enough to say it.
+    const bool handled = format->wBitsPerSample == 16 || format->wBitsPerSample == 32;
+    if (!handled) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true)) {
+            Log("[media] the sound arrives as %u-bit %s, which SolStream cannot "
+                "read, so none is sent. Choose a 16-bit format in Windows' sound "
+                "settings for this device.",
+                (unsigned) format->wBitsPerSample, isFloat ? "float" : "integer");
+        }
+    }
 
     for (UINT32 i = 0; i < frames; ++i) {
         float left = 0.0f, right = 0.0f;
@@ -558,6 +573,7 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                 }
                 taps.erase(std::remove_if(taps.begin(), taps.end(), unwanted), taps.end());
                 for (DWORD pid : wanted) {
+                    if (!running()) { break; }
                     const bool have = std::any_of(taps.begin(), taps.end(),
                                                   [pid](const ProcessTap& tap) { return tap.pid == pid; });
                     if (have) { continue; }
@@ -568,18 +584,26 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                         tap.reopen.Opened(GetTickCount64());
                         taps.push_back(std::move(tap));
                     } else {
-                        Log("[media] could not hear %s (0x%08lX)", ProcessName(pid).c_str(), hr);
+                        // Kept, closed, so the retry below opens it once what
+                        // stopped it passes. It used to be dropped until the set
+                        // of streamed windows changed: an app opened while the
+                        // audio service was still starting -- just after logon
+                        // or wake -- stayed silent for the whole session. The
+                        // Reopener keeps the retries out of the log.
+                        tap.pid = pid;
+                        if (tap.reopen.OpenFailed(hr, GetTickCount64())) {
+                            Log("[media] could not hear %s (0x%08lX); trying again",
+                                ProcessName(pid).c_str(), hr);
+                        }
+                        taps.push_back(std::move(tap));
                     }
                 }
-                // A failed open is not retried until the set changes; asking a
-                // process that refused once, four times a second, would only
-                // fill the log.
                 current = wanted;
             }
-            // Unlike a tap that would not open, one that opened and then
-            // stopped working is opened again, every half second until it
-            // does: it worked, so what stopped it -- the audio service
-            // restarting, most likely -- passes. The time is taken after each
+            // A tap that is not open -- one that never opened, or one that
+            // opened and then stopped working -- is opened again, every half
+            // second until it does: what stopped it -- the audio service
+            // starting or restarting, most likely -- passes. The time is taken after each
             // open rather than before: one that times out takes two seconds,
             // and counted from before it, it would be due again at once.
             for (ProcessTap& tap : taps) {
