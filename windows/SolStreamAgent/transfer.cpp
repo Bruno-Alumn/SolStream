@@ -710,8 +710,10 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         } else if (static_cast<unsigned long long>(total) > kMaxUploadBytes) {
             return Refused(UploadRefusal(static_cast<unsigned long long>(total), ~0ull));
         }
+        // What stood in the way, when it was not a file already there.
+        DWORD odd_error = 0;
         const std::wstring path = UniqueFilePath(folder, SafeFileName(ToWide(name)),
-            [](const std::wstring& candidate) {
+            [&odd_error](const std::wstring& candidate) {
                 // Taken unless plainly absent: a name still being deleted --
                 // the last upload's, held a moment by a scanner -- answers
                 // access denied, and CREATE_NEW on it would fail.
@@ -719,10 +721,25 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
                     return true;
                 }
                 const DWORD error = GetLastError();
-                return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+                    return false;
+                }
+                if (error != ERROR_ACCESS_DENIED) {
+                    odd_error = error;
+                }
+                return true;
             });
         if (folder.empty()) {
             return Refused("The PC has no Downloads folder SolStream can write to.");
+        }
+        if (path.empty() && odd_error == ERROR_FILENAME_EXCED_RANGE) {
+            return Refused("Its name is too long for the PC. Rename it shorter, then send it "
+                           "again.");
+        }
+        if (path.empty() && odd_error != 0) {
+            Log("[transfer] no name for an upload: error %lu", odd_error);
+            return Refused("The PC couldn't make a file in Downloads\\SolStream. Check "
+                           "that folder on the PC, then send it again.");
         }
         if (path.empty()) {
             return Refused("Downloads\\SolStream on the PC already has too many files with "

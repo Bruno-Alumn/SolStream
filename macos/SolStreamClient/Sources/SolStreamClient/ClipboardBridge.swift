@@ -624,7 +624,7 @@ final class ClipboardBridge {
 
     /// What the stream window says when that happens.
     static let pictureTooLargeNote =
-        "That picture is too big to paste on the PC (the most is 7680 × 4320). "
+        "That picture is too big to paste on the PC (the most is 7680 × 4320 and 32 MB). "
         + "Save it as a file and drop it on the window instead."
 
     static func png(on pasteboard: NSPasteboard) -> Data? {
@@ -638,13 +638,13 @@ final class ClipboardBridge {
     static func png(on pasteboard: NSPasteboard, tooLarge: inout Bool) -> Data? {
         let types = pasteboard.types ?? []
         guard !types.contains(.fileURL) else { return nil }
-        if let direct = pasteboard.data(forType: .png), let pixels = pixelCount(of: direct),
-           pixels > maxPicturePixels {
+        let direct = pasteboard.data(forType: .png)
+        if let direct, let pixels = pixelCount(of: direct), pixels > maxPicturePixels {
             Log.info("[clipboard] a picture of \(pixels) pixels is too large to send to the host")
             tooLarge = true
             return nil
         }
-        let png = pasteboard.data(forType: .png)
+        let png = direct
             ?? pasteboard.data(forType: .tiff).flatMap { tiff -> Data? in
                 guard let picture = NSBitmapImageRep(data: tiff) else { return nil }
                 // Encoded on the main thread, as the stream takes the keyboard:

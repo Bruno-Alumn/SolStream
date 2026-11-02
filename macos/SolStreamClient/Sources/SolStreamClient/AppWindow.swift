@@ -1021,17 +1021,21 @@ final class AppWindow: NSObject, NSWindowDelegate {
             say("Wait for the files already on their way to the PC.", for: 3)
             return false
         }
-        // Through links, to what they point at: a dropped alias of a file is
-        // that file.
-        let files = urls.map { $0.resolvingSymlinksInPath() }.filter {
-            (try? $0.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
-        }
+        // Through aliases and links, to what they point at, but under the
+        // name that was dropped: an alias of a file is that file, not the
+        // little bookmark that stands for it.
+        let dropped = urls.map { (name: $0.lastPathComponent, url: Self.resolvingAlias($0)) }
+            .filter {
+                (try? $0.url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            }
+        let files = dropped.map(\.url)
+        let names = dropped.map(\.name)
         guard !files.isEmpty else {
             say("Only files can be sent to the PC, not folders.", for: 3)
             return false
         }
         // Said when the rest have gone, not swallowed: a folder dropped with
-        // files is left out, and the note says so.
+        // files -- or a link to nothing -- is left out, and the note says so.
         let leftOut = urls.count - files.count
         Self.isSendingFiles = true
         let cancellation = AgentConnection.UploadCancellation()
@@ -1048,15 +1052,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
         func send(_ index: Int) {
             guard index < files.count else { return finish() }
             let file = files[index]
-            say(Self.sendingText(files.count, name: file.lastPathComponent, percent: 0))
+            let name = names[index]
+            say(Self.sendingText(files.count, name: name, percent: 0))
             // What the PC said when it turned the file down for a reason of
             // its own -- too big, no room -- said instead of a guess.
             var reason: String?
-            agent.upload(file, as: file.lastPathComponent, cancellation: cancellation,
+            agent.upload(file, as: name, cancellation: cancellation,
                          progress: { [weak self] sent in
                 DispatchQueue.main.async {
                     let percent = Int((done + sent) * 100 / total)
-                    self?.say(Self.sendingText(files.count, name: file.lastPathComponent,
+                    self?.say(Self.sendingText(files.count, name: name,
                                                percent: percent))
                 }
             }, refused: { reason = $0 }) { [weak self] path in
@@ -1079,7 +1084,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                             : " The \(received.count == 1 ? "file" : "\(received.count) files") "
                               + "before it \(received.count == 1 ? "is" : "are") in "
                               + "Downloads\\SolStream on the PC."
-                        self.say("Couldn't send \(file.lastPathComponent) to the PC. "
+                        self.say("Couldn't send \(name) to the PC. "
                                  + (reason ?? "Check that the PC has room and SolStream there "
                                     + "is up to date.") + kept,
                                  for: 8)
@@ -1099,8 +1104,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     if let sequence { self.onHostClipboardSet?(sequence) }
                     let what = received.count == 1 ? "1 file" : "\(received.count) files"
                     let skipped = leftOut == 0 ? ""
-                        : " \(leftOut == 1 ? "A folder was" : "\(leftOut) folders were") left "
-                          + "out: only files can be sent."
+                        : " \(leftOut == 1 ? "One item was" : "\(leftOut) items were") left "
+                          + "out: only files can be sent, not folders."
                     self.say((sequence != nil
                               ? "\(what) copied to the PC. Press ⌘V to paste."
                               : "\(what) saved in Downloads on the PC.") + skipped, for: 6)
@@ -1110,6 +1115,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
         send(0)
         return true
+    }
+
+    /// What a dropped alias or link points at; the item itself otherwise.
+    static func resolvingAlias(_ url: URL) -> URL {
+        (try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting]))
+            ?? url.resolvingSymlinksInPath()
     }
 
     static func sendingText(_ count: Int, name: String, percent: Int) -> String {

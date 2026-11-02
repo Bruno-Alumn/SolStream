@@ -964,3 +964,21 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertNil(bridge.pollInterval)
     }
 }
+
+/// A dropped link or alias is sent as the file it stands for.
+final class DroppedAliasTests: XCTestCase {
+    func testALinkIsFollowedToItsFile() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-alias-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = folder.appendingPathComponent("log-2026-11-03.log")
+        try Data("x".utf8).write(to: target)
+        let link = folder.appendingPathComponent("latest.log")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        XCTAssertEqual(AppWindow.resolvingAlias(link).resolvingSymlinksInPath().path,
+                       target.resolvingSymlinksInPath().path)
+        // A plain file is itself.
+        XCTAssertEqual(AppWindow.resolvingAlias(target).lastPathComponent, "log-2026-11-03.log")
+    }
+}

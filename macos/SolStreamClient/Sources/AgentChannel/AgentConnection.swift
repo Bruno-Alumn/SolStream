@@ -1819,6 +1819,9 @@ public final class AgentConnection {
     /// And when the connection did.
     public static let connectionLostMidUpload =
         "The connection to the PC dropped on the way. Drop it again once it's back."
+    /// And when the PC went quiet mid-way.
+    public static let pcStoppedAnswering =
+        "The PC stopped answering on the way. Drop it again once SolStream reconnects."
 
     public func upload(_ file: URL, as name: String,
                        cancellation: UploadCancellation? = nil,
@@ -1858,8 +1861,12 @@ public final class AgentConnection {
                   "data": chunk.base64EncodedString()]) { [weak self] result in
                 guard let self else { return finish(nil) }
                 guard case .success(let message) = result, message["ok"] as? Bool == true else {
-                    if case .failure = result {
-                        refused?(Self.connectionLostMidUpload)
+                    if case .failure(let error) = result {
+                        if case .timedOut? = error as? AgentError {
+                            refused?(Self.pcStoppedAnswering)
+                        } else {
+                            refused?(Self.connectionLostMidUpload)
+                        }
                     }
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[transfer] the host did not take \(name): \(why)")
