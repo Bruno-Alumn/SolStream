@@ -6363,18 +6363,29 @@ int wmain(int argc, wchar_t** argv) {
     // A link clicked with SolStream chosen as the browser (links.h). Before
     // anything else, and doing nothing else: this copy lives for one click.
     if (argc >= 3 && std::wstring(argv[1]) == L"--open-url") {
+        // No console for a click. The manifest keeps Windows 11 24H2 and later
+        // from making one at all; before that, it is let go at once.
+        ReleaseUnwantedConsole();
         const std::string url = ToUtf8(argv[2]);
-        if (solstream::IsForwardableLink(url) && solstream::SendLinkToRunningHost(url)) {
+        if (!solstream::IsForwardableLink(url)) {
             return 0;
         }
-        // No Mac to take it, or a link it shouldn't carry: opened here, in
-        // Edge, so choosing SolStream never leaves a click going nowhere.
-        // Only the schemes SolStream registered for reach this; anything else
-        // is not opened at all.
-        if (solstream::IsForwardableLink(url)) {
-            ShellExecuteW(nullptr, L"open", (L"microsoft-edge:" + std::wstring(argv[2])).c_str(),
-                          nullptr, nullptr, SW_SHOWNORMAL);
+        if (solstream::SendLinkToRunningHost(url)) {
+            return 0;
         }
+        // No Mac to take it. A web link opens here, in Edge, so choosing
+        // SolStream never leaves a click going nowhere. A mail link can't:
+        // Edge hands mailto back to its handler, which is this.
+        if (url.rfind("mailto:", 0) == 0 || url.rfind("MAILTO:", 0) == 0) {
+            MessageBoxW(nullptr,
+                        L"No Mac is connected to open this email link. Connect from "
+                        L"SolStream on your Mac, or choose another mail app for "
+                        L"email links in Settings \u203A Apps \u203A Default apps.",
+                        L"SolStream", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            return 0;
+        }
+        ShellExecuteW(nullptr, L"open", (L"microsoft-edge:" + std::wstring(argv[2])).c_str(),
+                      nullptr, nullptr, SW_SHOWNORMAL);
         return 0;
     }
     ReleaseUnwantedConsole();

@@ -3,6 +3,7 @@
 #include "links.h"
 
 #include <windows.h>
+#include <shlobj.h>
 
 #include <cctype>
 
@@ -86,19 +87,29 @@ void RegisterLinkHandler(const std::wstring& exe) {
     // Relative to HKLM, without the hive, as RegisteredApplications wants.
     ok = SetString(kRegisteredApps, L"SolStream",
                    L"Software\\Clients\\StartMenuInternet\\SolStream\\Capabilities") && ok;
+    // Or Default apps and Open with go on showing the old list until sign-out.
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     media::Log(ok ? "[install] offered as a browser in Default apps, for links to open on the Mac"
                   : "[install] could not register as a browser; links stay on the PC");
 }
 
 void RemoveLinkHandler() {
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kClientKey);
-    RegDeleteTreeW(HKEY_LOCAL_MACHINE, kProgIdKey);
+    // In the 64-bit view, as written: RegDeleteTreeW on HKLM itself takes the
+    // calling process's view, which would be the wrong one for a 32-bit build.
+    HKEY software = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE", 0,
+                      KEY_ALL_ACCESS | KEY_WOW64_64KEY, &software) == ERROR_SUCCESS) {
+        RegDeleteTreeW(software, L"Clients\\StartMenuInternet\\SolStream");
+        RegDeleteTreeW(software, L"Classes\\SolStreamURL");
+        RegCloseKey(software);
+    }
     HKEY apps = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegisteredApps, 0, KEY_SET_VALUE | KEY_WOW64_64KEY,
                       &apps) == ERROR_SUCCESS) {
         RegDeleteValueW(apps, L"SolStream");
         RegCloseKey(apps);
     }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
 
 }  // namespace solstream
