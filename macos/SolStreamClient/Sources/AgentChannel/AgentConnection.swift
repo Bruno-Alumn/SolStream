@@ -1689,9 +1689,14 @@ public final class AgentConnection {
     ///
     /// Read a chunk at a time, so a large file is never in memory whole.
     /// `progress` is told the bytes sent so far after each chunk.
+    ///
+    /// `refused` is told, before `completion`, what the host said when it
+    /// turned the file down for a reason meant for the person: too big, no
+    /// room left on the PC.
     public func upload(_ file: URL, as name: String,
                        cancellation: UploadCancellation? = nil,
                        progress: ((Int64) -> Void)? = nil,
+                       refused: ((String) -> Void)? = nil,
                        completion: @escaping (String?) -> Void) {
         guard let handle = try? FileHandle(forReadingFrom: file),
               let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
@@ -1726,6 +1731,9 @@ public final class AgentConnection {
                 guard case .success(let message) = result, message["ok"] as? Bool == true else {
                     if case .success(let message) = result, let why = message["message"] as? String {
                         Log.error("[transfer] the host did not take \(name): \(why)")
+                        if let reason = message["reason"] as? String, !reason.isEmpty {
+                            refused?(reason)
+                        }
                     }
                     // The part already there is deleted, not left in
                     // Downloads under the file's own name looking whole --

@@ -645,6 +645,13 @@ std::vector<unsigned char> DropFilesData(const std::vector<std::wstring>& paths)
     return data;
 }
 
+/// An upload turned down for a reason the person who dropped it should read:
+/// `reason`, as `quit` says its own, beside the usual `message`.
+std::string Refused(const std::string& reason) {
+    return "{\"type\":\"upload\",\"ok\":false,\"message\":\"" + JsonEscape(reason)
+         + "\",\"reason\":\"" + JsonEscape(reason) + "\"}";
+}
+
 std::string UploadRefusal(unsigned long long total, unsigned long long free_bytes) {
     if (total > kMaxUploadBytes) {
         return "That file is too big to send to the PC (the limit is 8 GB).";
@@ -674,10 +681,10 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
                 UploadRefusal(static_cast<unsigned long long>(total), free_bytes.QuadPart);
             if (!refusal.empty()) {
                 Log("[transfer] refused a %lld-byte file: %s", total, refusal.c_str());
-                return Error("upload", refusal);
+                return Refused(refusal);
             }
         } else if (static_cast<unsigned long long>(total) > kMaxUploadBytes) {
-            return Error("upload", UploadRefusal(static_cast<unsigned long long>(total), ~0ull));
+            return Refused(UploadRefusal(static_cast<unsigned long long>(total), ~0ull));
         }
         const std::wstring path = UniqueFilePath(folder, SafeFileName(ToWide(name)),
             [](const std::wstring& candidate) {

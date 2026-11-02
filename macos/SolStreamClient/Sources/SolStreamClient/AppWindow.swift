@@ -1034,6 +1034,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
             guard index < files.count else { return finish() }
             let file = files[index]
             say(Self.sendingText(files.count, name: file.lastPathComponent, percent: 0))
+            // What the PC said when it turned the file down for a reason of
+            // its own -- too big, no room -- said instead of a guess.
+            var reason: String?
             agent.upload(file, as: file.lastPathComponent, cancellation: cancellation,
                          progress: { [weak self] sent in
                 DispatchQueue.main.async {
@@ -1041,7 +1044,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     self?.say(Self.sendingText(files.count, name: file.lastPathComponent,
                                                percent: percent))
                 }
-            }) { [weak self] path in
+            }, refused: { reason = $0 }) { [weak self] path in
                 DispatchQueue.main.async {
                     // Whether or not the window is still there: a window closed
                     // mid-upload must not leave every later drop refused.
@@ -1061,8 +1064,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
                             : " The \(received.count == 1 ? "file" : "\(received.count) files") "
                               + "before it \(received.count == 1 ? "is" : "are") in "
                               + "Downloads\\SolStream on the PC."
-                        self.say("Couldn't send \(file.lastPathComponent) to the PC. Check that "
-                                 + "the PC has room and SolStream there is up to date." + kept,
+                        self.say("Couldn't send \(file.lastPathComponent) to the PC. "
+                                 + (reason ?? "Check that the PC has room and SolStream there "
+                                    + "is up to date.") + kept,
                                  for: 8)
                         return
                     }

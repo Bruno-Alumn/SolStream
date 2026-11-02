@@ -4736,9 +4736,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     }
 
     // What the host application is doing with itself: its capture display and
-    // its media port. Answered before authentication because it
-    // says nothing a port scan could not already establish, and because it is
-    // what the Mac shows when it cannot get any further.
+    // its media port. For diagnosing a host by hand; the Mac never asks.
+    // Before authentication it says only that the agent is listening, which a
+    // port scan establishes anyway.
     if (command == "status") {
         std::string out = "{\"type\":\"status\",\"ok\":true";
         out += ",\"agent\":\"listening\"";

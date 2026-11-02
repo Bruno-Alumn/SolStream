@@ -300,7 +300,9 @@ final class VideoReassemblyTests: XCTestCase {
         let reassembler = VideoReassembler()
         let payload = Data(repeating: 4, count: 100)
         let farEnd = (1 << 24) - 200
-        for id in UInt32(1)...20 {
+        // Seven is enough to pass the cap (96 MiB is six of them at 16 MiB),
+        // and each costs a 16 MiB buffer filled byte by byte in a debug build.
+        for id in UInt32(1)...7 {
             reassembler.ingest(fragment(frameId: id, offset: farEnd, payload: payload,
                                         start: false, end: false))
             XCTAssertLessThanOrEqual(reassembler.bufferedBytes, VideoReassembler.maxBufferedBytes)
