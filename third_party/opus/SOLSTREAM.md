@@ -12,6 +12,17 @@ Windows host only. The Mac decodes Opus with AudioToolbox and needs nothing.
 | SHA-256 | `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1`, as listed in Xiph's `SHA256SUMS.txt` |
 | Licence | BSD 3-clause, in `COPYING`. The licence asks for its notice to travel with any binary built from this code, so the host embeds it as a resource, and `SolStream.exe --licenses` prints it. |
 
+## Known upstream issues
+
+- [xiph/opus#447](https://github.com/xiph/opus/issues/447): an integer
+  overflow in `quant_coarse_energy` (`celt/quant_bands.c`) that a fuzzer
+  crashes the **encoder** with. Open, with no fixed release after 1.6.1 as of
+  2026-11-02. Not reachable here: the host encodes only the PC's own captured
+  sound, and the most a paired Mac chooses is the bitrate and frame length,
+  each from a fixed list; nothing decodes untrusted Opus with this library.
+  When a release fixes it, take that release and replace the version and
+  SHA-256 above.
+
 ## Why it is here at all
 
 SolStream otherwise uses only what the two operating systems ship. Windows
