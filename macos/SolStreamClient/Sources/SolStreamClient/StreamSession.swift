@@ -115,6 +115,15 @@ final class StreamSession {
     /// session, as the answer is.
     let hostSendsWholePC: Bool
 
+    /// Whether the PC's sound has been above silence in the last two seconds:
+    /// what "Playing from the PC" means.
+    var soundIsAudible: Bool {
+        audioLock.lock()
+        let renderer = audioRenderer
+        audioLock.unlock()
+        return renderer?.wasAudible(within: 2) ?? false
+    }
+
     static func hostSendsWholePC(asked config: StreamConfig, answered source: AudioSource,
                                  stated: Bool) -> Bool {
         config.audio && config.audioSource == .apps && stated && source == .system

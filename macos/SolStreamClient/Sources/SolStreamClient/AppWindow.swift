@@ -150,7 +150,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
             stats.latencyMs = snapshot.latencyMs
             stats.droppedFrames = snapshot.dropped
             stats.totalFrames = snapshot.frames
-            stats.audioActive = snapshot.audioFrames > 0
+            // What can be heard, not what has arrived: per-app sound arrives
+            // as silence whenever the app makes none.
+            stats.audioActive = self.session.soundIsAudible
             stats.hostIgnoresSoundQuality = self.session.hostIgnoresSoundQuality
             stats.hostSendsWholePC = self.session.hostSendsWholePC
             stats.hostDisplay = self.hostDisplay

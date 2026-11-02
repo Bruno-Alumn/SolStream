@@ -115,8 +115,10 @@ public final class AudioRenderer {
             // sample is not a rounding error but a permanent channel swap.
             let usable = count - (count % 2)
             guard usable > 0 else { return }
-            ringBuffer.write(UnsafeBufferPointer(
-                start: base.assumingMemoryBound(to: Int16.self), count: usable))
+            let samples = UnsafeBufferPointer(start: base.assumingMemoryBound(to: Int16.self),
+                                              count: usable)
+            noteLevel(samples)
+            ringBuffer.write(samples)
         }
     }
 
@@ -131,8 +133,36 @@ public final class AudioRenderer {
         return opus.decode(packet) { samples in
             let usable = samples.count - (samples.count % 2)
             guard usable > 0 else { return }
-            ringBuffer.write(UnsafeBufferPointer(rebasing: samples[0..<usable]))
+            let whole = UnsafeBufferPointer(rebasing: samples[0..<usable])
+            noteLevel(whole)
+            ringBuffer.write(whole)
         }
+    }
+
+    // MARK: - Whether anything can be heard
+
+    /// When a sample last rose above silence, in uptime nanoseconds; zero
+    /// before one has. Written on the receive thread, read on the main one.
+    private let audibleLock = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+    /// Below this a sample is silence -- a PC's dither, a codec's floor --
+    /// not sound: about -54 dBFS.
+    static let audibleThreshold: Int16 = 64
+
+    private func noteLevel(_ samples: UnsafeBufferPointer<Int16>) {
+        guard samples.contains(where: { $0 > Self.audibleThreshold || $0 < -Self.audibleThreshold })
+        else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        audibleLock.withLock { $0 = now }
+    }
+
+    /// Whether anything above silence has played in the last `seconds`. The
+    /// count of packets says nothing about that: per-app sound sends
+    /// silence, continuously, whenever the streamed app makes none.
+    public func wasAudible(within seconds: Double) -> Bool {
+        let last = audibleLock.withLock { $0 }
+        guard last > 0 else { return false }
+        return Double(DispatchTime.now().uptimeNanoseconds - last) / 1e9 < seconds
     }
 
     /// Built on the first Opus packet, so a stream of PCM -- from a host that
