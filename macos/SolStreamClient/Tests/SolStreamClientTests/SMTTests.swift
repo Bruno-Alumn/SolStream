@@ -118,6 +118,27 @@ final class SMTPacketTests: XCTestCase {
         XCTAssertNil(SMTPacket.open(datagram, direction: receive, window: &window))
     }
 
+    /// Another session's tag is turned away before any GCM verify, and the
+    /// right one still has to authenticate. Nothing is recorded for a turned
+    /// away datagram, so the genuine one with the same counter still opens.
+    func testAnotherSessionsTagIsTurnedAwayFirst() throws {
+        let send = direction(0x05)
+        let receive = direction(0x05)
+        var window = SMTReplayWindow()
+        let datagram = try XCTUnwrap(SMTPacket.seal(Data([SMT.typePing]),
+                                                    direction: send, sessionTag: 0x42))
+        XCTAssertNil(SMTPacket.open(datagram, direction: receive, window: &window,
+                                    sessionTag: 0x43))
+        XCTAssertNotNil(SMTPacket.open(datagram, direction: receive, window: &window,
+                                       sessionTag: 0x42))
+        // A forgery carrying the right tag still fails its tag.
+        var forged = try XCTUnwrap(SMTPacket.seal(Data([SMT.typePing]),
+                                                  direction: direction(0x06), sessionTag: 0x42))
+        forged[forged.startIndex + 2] = 0xFF
+        XCTAssertNil(SMTPacket.open(forged, direction: receive, window: &window,
+                                    sessionTag: 0x42))
+    }
+
     func testAnotherKeyCannotOpenIt() throws {
         let send = direction(0x03)
         let other = direction(0x04)
@@ -255,6 +276,36 @@ final class VideoReassemblyTests: XCTestCase {
         reassembler.ingest(fragment(frameId: 1, offset: 0, payload: Data(repeating: 2, count: 500),
                                     start: false, end: true))
         XCTAssertEqual(pictures, 0, "a picture with bytes past its end was emitted")
+    }
+
+    /// A host sending a fragment of picture after picture, none ever ending,
+    /// no longer holds them all until the idle timeout: past
+    /// `maxAssemblies` the oldest are given up, and said to be damaged.
+    func testOnlySoManyPicturesAreAssembledAtOnce() {
+        let reassembler = VideoReassembler()
+        var damaged: [UInt32] = []
+        reassembler.onDamaged = { damaged.append($0) }
+        let payload = Data(repeating: 3, count: 100)
+        for id in UInt32(1)...100 {
+            reassembler.ingest(fragment(frameId: id, offset: 0, payload: payload,
+                                        start: true, end: false))
+        }
+        XCTAssertEqual(reassembler.assemblingCount, VideoReassembler.maxAssemblies)
+        XCTAssertEqual(damaged, Array(UInt32(1)...UInt32(100 - VideoReassembler.maxAssemblies)))
+    }
+
+    /// And each reaching for the far end of the 24-bit offset no longer makes
+    /// a 16 MiB buffer apiece: the bytes held between them stay capped.
+    func testTheBytesHeldBetweenPicturesAreCapped() {
+        let reassembler = VideoReassembler()
+        let payload = Data(repeating: 4, count: 100)
+        let farEnd = (1 << 24) - 200
+        for id in UInt32(1)...20 {
+            reassembler.ingest(fragment(frameId: id, offset: farEnd, payload: payload,
+                                        start: false, end: false))
+            XCTAssertLessThanOrEqual(reassembler.bufferedBytes, VideoReassembler.maxBufferedBytes)
+        }
+        XCTAssertGreaterThan(reassembler.assemblingCount, 0)
     }
 
     func testAPictureLostWholeIsReportedDamaged() {

@@ -1714,6 +1714,19 @@ void TestForwardableLinks() {
     CHECK(!IsForwardableLink("https://example.com/" + std::string(8200, 'a')));
 }
 
+/// A paired Mac can't fill the PC's disk: no file over 8 GB, and none that
+/// would leave less than 2 GB free.
+void TestUploadRefusal() {
+    const unsigned long long gb = 1024ull * 1024 * 1024;
+    CHECK(UploadRefusal(100, 500 * gb).empty());
+    CHECK(UploadRefusal(kMaxUploadBytes, 500 * gb).empty());
+    CHECK(!UploadRefusal(kMaxUploadBytes + 1, 500 * gb).empty());
+    CHECK(UploadRefusal(gb, 3 * gb).empty());
+    CHECK(!UploadRefusal(gb + 1, 3 * gb).empty());
+    CHECK(!UploadRefusal(1, gb).empty());
+    CHECK(!UploadRefusal(0, 0).empty());
+}
+
 // ── Tailscale ────────────────────────────────────────────────────────────────
 
 /// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
@@ -4036,6 +4049,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDriverRecords(scratch);
     TestWaitsForRestart();
     TestPushFeatures();
+    TestUploadRefusal();
     TestWindowsToClose();
     TestForceQuitRefusal();
     TestForwardableLinks();

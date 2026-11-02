@@ -915,7 +915,7 @@ void MediaSession::Impl::ReceiveLoop() {
         size_t plaintextLen = 0;
         uint64_t counter = 0;
         if (!smt::Open(fromClient, replay, buffer, (size_t) n, &plaintext,
-                       &plaintextLen, &counter)) {
+                       &plaintextLen, &counter, sessTag)) {
             rejected.fetch_add(1);
             continue;
         }

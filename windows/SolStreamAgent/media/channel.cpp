@@ -221,7 +221,7 @@ bool OpenMessage(Channel& channel, std::string& buffer, std::string& message,
     // already answered; a mismatch here is tampering, not reordering.
     smt::ReplayWindow window;
     if (!smt::Open(channel.fromClient, window, record, sealedLength, &plaintext,
-                   &plaintextLength, &counter)
+                   &plaintextLength, &counter, channel.sessTag)
         || counter != channel.fromClient.counter) {
         fatal = true;
         return false;

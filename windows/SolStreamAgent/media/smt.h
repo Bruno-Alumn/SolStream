@@ -174,8 +174,11 @@ struct ReplayWindow {
 };
 
 /// Verify and decrypt in place. `plaintext` points into `datagram` on success.
+/// With `sessTag` (0-255), a datagram carrying another is turned away with a
+/// byte compare before any GCM verify: a forged flood costs 1/256 of the work.
+/// Never an authority -- one that matches still has to authenticate.
 bool Open(Direction& direction, ReplayWindow& window, unsigned char* datagram,
           size_t length, unsigned char** plaintext, size_t* plaintextLen,
-          uint64_t* counterOut);
+          uint64_t* counterOut, int sessTag = -1);
 
 }  // namespace solstream::smt

@@ -69,6 +69,13 @@ public final class VideoReassembler {
     /// the caller asks for a keyframe rather than waiting on a picture that
     /// will never arrive.
     private static let maxPictureBytes = 1 << 24
+    /// Pictures assembled at once, and the bytes they may hold between them.
+    /// A real stream has two or three in flight; a host sending fragments of
+    /// hundreds, each reaching for the 16 MiB end of the offset, held them all
+    /// until the idle timeout -- gigabytes, from a host gone bad. Past either,
+    /// the oldest are given up, as damaged, before a new one starts.
+    static let maxAssemblies = 32
+    static let maxBufferedBytes = 96 << 20
 
     private struct Assembly {
         var bytes: [UInt8]
@@ -198,8 +205,13 @@ public final class VideoReassembler {
         // dictionary sharing the buffer, so the write below copies all of it —
         // half a megabyte per fragment, about a gigabyte a second at 20 Mbit/s,
         // on the receive thread. Every path below puts it back or retires it.
-        var assembly = building.removeValue(forKey: frameId)
-            ?? Assembly(bytes: takeBuffer(), lastSeen: stamp)
+        var assembly: Assembly
+        if let existing = building.removeValue(forKey: frameId) {
+            assembly = existing
+        } else {
+            makeRoom(forOneMore: true, bytes: 0)
+            assembly = Assembly(bytes: takeBuffer(), lastSeen: stamp)
+        }
         let end = fragOff + payloadCount
         if end > Self.maxPictureBytes {
             // Past what the wire format can address, so refuse the whole
@@ -218,6 +230,7 @@ public final class VideoReassembler {
             // pictures are consistently larger, rather than reallocating once
             // per fragment as the offsets climb.
             let grown = min(Self.maxPictureBytes, max(end, assembly.bytes.count * 2))
+            makeRoom(forOneMore: false, bytes: grown)
             assembly.bytes.append(contentsOf:
                 repeatElement(UInt8(0), count: grown - assembly.bytes.count))
         }
@@ -303,6 +316,27 @@ public final class VideoReassembler {
             finished.insert(lost)
             damaged &+= 1
             if reporting { onDamaged?(lost) }
+        }
+    }
+
+    /// Pictures being assembled, and the bytes they hold; for the tests.
+    var assemblingCount: Int { building.count }
+    var bufferedBytes: Int { building.values.reduce(0) { $0 + $1.bytes.count } }
+
+    /// Give up the oldest assemblies until one more fits under
+    /// `maxAssemblies` (when `forOneMore`) and `bytes` more fit under
+    /// `maxBufferedBytes`. The picture in hand is out of `building` while
+    /// this runs, so it is never the one given up.
+    private func makeRoom(forOneMore: Bool, bytes: Int) {
+        func buffered() -> Int { building.values.reduce(0) { $0 + $1.bytes.count } }
+        while !building.isEmpty,
+              (forOneMore && building.count >= Self.maxAssemblies)
+                || buffered() + bytes > Self.maxBufferedBytes {
+            guard let oldest = building.min(by: { $0.value.lastSeen < $1.value.lastSeen })?.key,
+                  building.removeValue(forKey: oldest) != nil else { break }
+            finished.insert(oldest)
+            damaged &+= 1
+            onDamaged?(oldest)
         }
     }
 

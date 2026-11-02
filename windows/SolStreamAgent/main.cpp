@@ -4742,6 +4742,12 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
     if (command == "status") {
         std::string out = "{\"type\":\"status\",\"ok\":true";
         out += ",\"agent\":\"listening\"";
+        // The rest after the token only: who else is connected, whether a
+        // stream is running and which display it captures say something about
+        // this PC beyond what a port scan would.
+        if (!authenticated) {
+            return out + "}";
+        }
         out += ",\"clients\":" + std::to_string(g_clients_authenticated.load());
 #ifdef SOLSTREAM_MEDIA
         out += ",\"streaming\":"

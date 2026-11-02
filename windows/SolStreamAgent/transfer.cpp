@@ -645,6 +645,17 @@ std::vector<unsigned char> DropFilesData(const std::vector<std::wstring>& paths)
     return data;
 }
 
+std::string UploadRefusal(unsigned long long total, unsigned long long free_bytes) {
+    if (total > kMaxUploadBytes) {
+        return "That file is too big to send to the PC (the limit is 8 GB).";
+    }
+    if (free_bytes < kKeepFreeBytes || total > free_bytes - kKeepFreeBytes) {
+        return "There isn't enough room on the PC for that file. Free up some space "
+               "on its drive and try again.";
+    }
+    return {};
+}
+
 std::string UploadJson(const std::string& name, long long offset, long long total,
                        const std::string& base64) {
     std::lock_guard<std::mutex> guard(g_transfer_mutex);
@@ -654,6 +665,20 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
     if (offset == 0) {
         DropUpload();
         const std::wstring folder = UploadFolder();
+        // Before anything is written: a file a paired Mac says is huge, or a
+        // run of them, would otherwise go on filling the disk until it was full.
+        ULARGE_INTEGER free_bytes{};
+        if (!folder.empty()
+            && GetDiskFreeSpaceExW(folder.c_str(), &free_bytes, nullptr, nullptr)) {
+            const std::string refusal =
+                UploadRefusal(static_cast<unsigned long long>(total), free_bytes.QuadPart);
+            if (!refusal.empty()) {
+                Log("[transfer] refused a %lld-byte file: %s", total, refusal.c_str());
+                return Error("upload", refusal);
+            }
+        } else if (static_cast<unsigned long long>(total) > kMaxUploadBytes) {
+            return Error("upload", UploadRefusal(static_cast<unsigned long long>(total), ~0ull));
+        }
         const std::wstring path = UniqueFilePath(folder, SafeFileName(ToWide(name)),
             [](const std::wstring& candidate) {
                 return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES;

@@ -77,11 +77,14 @@ size_t Seal(Direction& direction, unsigned char sessTag, const unsigned char* pl
 
 bool Open(Direction& direction, ReplayWindow& window, unsigned char* datagram,
           size_t length, unsigned char** plaintext, size_t* plaintextLen,
-          uint64_t* counterOut) {
+          uint64_t* counterOut, int sessTag) {
     if (!direction.key || length < (size_t) kOverhead) {
         return false;
     }
     if ((datagram[0] >> 4) != 1) {
+        return false;
+    }
+    if (sessTag >= 0 && datagram[1] != static_cast<unsigned char>(sessTag)) {
         return false;
     }
     const uint64_t counter = ReadBE(datagram + 2, 6);

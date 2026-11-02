@@ -147,8 +147,13 @@ public enum SMTPacket {
 
     /// Verify and decrypt. Returns nil for anything that does not authenticate,
     /// which includes a forged header, because the header is the AAD.
+    ///
+    /// With `sessionTag`, a datagram carrying another is turned away with a
+    /// byte compare before any GCM verify: a forged flood costs 1/256 of the
+    /// work. Never an authority -- one that matches still has to authenticate.
     public static func open(_ datagram: Data, direction: SMTDirection,
-                            window: inout SMTReplayWindow) -> (Data, UInt64)? {
+                            window: inout SMTReplayWindow,
+                            sessionTag: UInt8? = nil) -> (Data, UInt64)? {
         guard datagram.count >= SMT.overhead else { return nil }
         let (version, counter) = datagram.withUnsafeBytes { raw -> (UInt8, UInt64) in
             var counter: UInt64 = 0
@@ -156,6 +161,7 @@ public enum SMTPacket {
             return (raw[0] >> 4, counter)
         }
         guard version == 1 else { return nil }
+        if let sessionTag, datagram[datagram.startIndex + 1] != sessionTag { return nil }
         guard !window.seenOrTooOld(counter) else { return nil }
 
         let header = datagram.prefix(SMT.headerBytes)

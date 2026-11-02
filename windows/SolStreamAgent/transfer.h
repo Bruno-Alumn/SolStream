@@ -31,6 +31,11 @@ namespace solstream {
 /// One chunk's worth of a picture or a file, before base64: a third again on
 /// the wire, well inside kMaxLineBytes.
 constexpr size_t kTransferChunkBytes = 512 * 1024;
+/// The largest file a Mac may send, and the room every upload leaves on the
+/// drive it lands on: a paired Mac can't fill the PC's disk, by one file or
+/// by many.
+constexpr unsigned long long kMaxUploadBytes = 8ull * 1024 * 1024 * 1024;
+constexpr unsigned long long kKeepFreeBytes = 2ull * 1024 * 1024 * 1024;
 /// A picture on the clipboard larger than this as PNG is not offered.
 constexpr size_t kMaxClipboardImageBytes = 32 * 1024 * 1024;
 /// A picture larger than this on a side is not decoded at all.
@@ -56,6 +61,10 @@ std::string ClipboardImageGetJson(long long seq, long long offset);
 /// next chunk of a PNG from the Mac. The last puts the picture on the
 /// clipboard, as PNG and as a DIB, and answers with the new sequence.
 std::string ClipboardImageSetJson(long long offset, long long total, const std::string& base64);
+
+/// Why a file of `total` bytes may not come, with `free_bytes` free on its
+/// drive; empty when it may. Said to the person who dropped it.
+std::string UploadRefusal(unsigned long long total, unsigned long long free_bytes);
 
 /// The reply to `{"cmd":"upload","name":N,"offset":O,"total":T,"data":…}`: the
 /// next chunk of a file dropped on a window, written under UploadFolder(). The

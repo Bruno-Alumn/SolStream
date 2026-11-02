@@ -793,7 +793,8 @@ public final class MediaClient {
             // write -- every picture looked idle while its remaining fragments
             // sat queued behind the stall, was given up, and cost a keyframe.
             let datagram = Data(buffer[0..<n])
-            let opened = SMTPacket.open(datagram, direction: fromHost, window: &window)
+            let opened = SMTPacket.open(datagram, direction: fromHost, window: &window,
+                                        sessionTag: sessionTag)
             // Counted once it is the host's: forged ones, which anyone who can
             // spoof its address may send, inflated the bitrate the window
             // shows and the count the feedback reports.
