@@ -204,6 +204,16 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                     std::lock_guard<std::mutex> guard(targetLock_);
                     raise = target_.window;
                 }
+                // The dialog it is waiting on, when it has one: see
+                // InputOwner in main.cpp. Raised itself, a window with a modal
+                // dialog took the foreground and the dialog's keys with it.
+                if (raise && IsWindow(raise) && !IsWindowEnabled(raise)) {
+                    const HWND popup = GetLastActivePopup(raise);
+                    if (popup && popup != raise && IsWindowVisible(popup)
+                        && IsWindowEnabled(popup)) {
+                        raise = popup;
+                    }
+                }
                 if (raise && IsWindow(raise) && GetForegroundWindow() != raise) {
                     SetForegroundWindow(raise);
                 }

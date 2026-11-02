@@ -953,6 +953,22 @@ solstream::LatestJobWorker& g_foreground_worker = *new solstream::LatestJobWorke
 /// Returns what GetForegroundWindow actually says afterwards, never the result
 /// of the request — the whole problem here is a call that claims nothing and
 /// fails anyway.
+/// The window that takes `window`'s input: the dialog it is waiting on, when it
+/// has one open. A window with a modal dialog is disabled, and given the
+/// foreground itself it took it with the dialog drawn on top and inactive --
+/// "Save As" in front of Notepad, and the file name typed into nothing, while
+/// `focus` said it had worked. The dialog is what Alt+Tab would activate.
+HWND InputOwner(HWND window) {
+    if (IsWindowEnabled(window)) {
+        return window;
+    }
+    const HWND popup = GetLastActivePopup(window);
+    if (popup && popup != window && IsWindowVisible(popup) && IsWindowEnabled(popup)) {
+        return popup;
+    }
+    return window;
+}
+
 bool ForceForeground(HWND window) {
     // A hung application cannot take the foreground anyway, and every call
     // below would wait on its message loop -- and AttachThreadInput would tie
@@ -1003,7 +1019,9 @@ bool ForceForeground(HWND window) {
             SetWindowPos(wanted, HWND_TOP, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         }
-        if (wanted && GetForegroundWindow() != wanted && !IsHungAppWindow(wanted)) {
+        // Against what takes its input: a disabled window already in front,
+        // with its dialog inactive on top, is exactly the case to put right.
+        if (wanted && GetForegroundWindow() != InputOwner(wanted) && !IsHungAppWindow(wanted)) {
             // A message queue of its own, which AttachThreadInput needs.
             MSG msg;
             PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
@@ -1029,11 +1047,18 @@ bool ForceForeground(HWND window) {
                 g_foreground_turns.EndJoin();
             }
 
-            SetForegroundWindow(wanted);
+            const HWND target = InputOwner(wanted);
+            SetForegroundWindow(target);
             // Both, because they answer different questions: which top-level
             // window is active, and which control inside it takes the keys.
-            SetActiveWindow(wanted);
-            SetFocus(wanted);
+            // Focus only when no control of the window has it already: on the
+            // window's own thread the call succeeds, and focus on the frame
+            // took it away from the text field the app had just put it back on.
+            SetActiveWindow(target);
+            const HWND focused = GetFocus();
+            if (!focused || (focused != target && !IsChild(target, focused))) {
+                SetFocus(target);
+            }
 
             // Still refused: a Store app is in front or being asked for. Its
             // frame host refuses to be joined (access denied), and even joined,
@@ -1042,19 +1067,19 @@ bool ForceForeground(HWND window) {
             // the last input may take the foreground, so send some -- a
             // movement of nothing -- and ask again. Measured there: refused
             // both ways before, granted both ways after.
-            if (GetForegroundWindow() != wanted) {
+            if (GetForegroundWindow() != target) {
                 INPUT nudge{};
                 nudge.type = INPUT_MOUSE;
                 nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
                 SendInput(1, &nudge, sizeof(nudge));
-                SetForegroundWindow(wanted);
+                SetForegroundWindow(target);
             }
 
             // Overtaken while asking: put the newest request's window back in
             // front, which this thread may still do while it is joined.
             const HWND newest = g_foreground_turns.Wanted(turn, window);
             if (newest && newest != wanted && !IsHungAppWindow(newest)) {
-                SetForegroundWindow(newest);
+                SetForegroundWindow(InputOwner(newest));
             }
 
             if (attached) {
@@ -1088,7 +1113,7 @@ bool ForceForeground(HWND window) {
             break;
         }
     }
-    return GetForegroundWindow() == window;
+    return GetForegroundWindow() == InputOwner(window);
 }
 
 // ── Launchable applications ──────────────────────────────────────────────────
