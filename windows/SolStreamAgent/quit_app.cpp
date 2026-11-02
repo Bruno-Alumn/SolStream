@@ -20,9 +20,45 @@ bool IsExplorer(const std::wstring& image_name) {
     return FoldCase(image_name) == L"explorer.exe";
 }
 
-std::wstring FileName(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? path : path.substr(slash + 1);
+bool IsFrameHost(const std::wstring& image_name) {
+    return FoldCase(image_name) == L"applicationframehost.exe";
+}
+
+/// The executable's file name for a process, or empty.
+std::wstring ImageName(DWORD pid) {
+    std::wstring image;
+    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t path[MAX_PATH] = {0};
+        DWORD length = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+            const std::wstring full(path, length);
+            const size_t slash = full.find_last_of(L"\\/");
+            image = slash == std::wstring::npos ? full : full.substr(slash + 1);
+        }
+        CloseHandle(process);
+    }
+    return image;
+}
+
+/// A Store app's own process: the one owning a child window inside the
+/// frame ApplicationFrameHost draws, as SoundOwner finds it. Zero when no
+/// child belongs to another process.
+DWORD StoreAppInside(HWND frame, DWORD frame_pid) {
+    struct Search {
+        DWORD frame;
+        DWORD app;
+    } search{frame_pid, 0};
+    EnumChildWindows(frame, [](HWND child, LPARAM param) -> BOOL {
+        auto* found = reinterpret_cast<Search*>(param);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(child, &pid);
+        if (pid != 0 && pid != found->frame) {
+            found->app = pid;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    return search.app;
 }
 
 }  // namespace
@@ -34,7 +70,8 @@ std::vector<HWND> WindowsToClose(const std::vector<QuitCandidate>& windows, HWND
         if (IsShellWindow(candidate.class_name)) {
             continue;
         }
-        if (IsExplorer(image_name) ? candidate.window == streamed
+        const bool shared = IsExplorer(image_name) || IsFrameHost(image_name);
+        if (shared ? candidate.window == streamed
                                    : (candidate.visible && !candidate.owned)) {
             close.push_back(candidate.window);
         }
@@ -57,21 +94,17 @@ std::string ForceQuitRefusal(DWORD pid, DWORD own_pid, DWORD session, DWORD own_
         return "File Explorer is also the PC's taskbar and desktop, so it can't be "
                "force quit. Quit it instead, which closes only this window.";
     }
+    if (IsFrameHost(image_name)) {
+        return "SolStream couldn't tell which Store app is in that window, so it "
+               "wasn't ended. Quit it instead, or end it on the PC.";
+    }
     return {};
 }
 
 std::string QuitAppJson(HWND streamed, bool force) {
     DWORD pid = 0;
     GetWindowThreadProcessId(streamed, &pid);
-    std::wstring image;
-    if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
-        wchar_t path[MAX_PATH] = {0};
-        DWORD length = MAX_PATH;
-        if (QueryFullProcessImageNameW(process, 0, path, &length)) {
-            image = FileName(std::wstring(path, length));
-        }
-        CloseHandle(process);
-    }
+    std::wstring image = ImageName(pid);
     auto refused = [](const std::string& reason) {
         return "{\"type\":\"quit\",\"ok\":false,\"reason\":\"" + JsonEscape(reason) + "\"}";
     };
@@ -119,6 +152,15 @@ std::string QuitAppJson(HWND streamed, bool force) {
         return "{\"type\":\"quit\",\"ok\":true,\"windows\":" + std::to_string(posted) + "}";
     }
 
+    // A Store app's frame is ApplicationFrameHost's, which draws every Store
+    // app: the process to end is the app inside it. Not found, the frame host
+    // stays the one named, and ForceQuitRefusal turns it down.
+    if (IsFrameHost(image)) {
+        if (const DWORD app = StoreAppInside(streamed, pid)) {
+            pid = app;
+            image = ImageName(pid);
+        }
+    }
     DWORD session = 0, own_session = 0;
     ProcessIdToSessionId(pid, &session);
     ProcessIdToSessionId(GetCurrentProcessId(), &own_session);

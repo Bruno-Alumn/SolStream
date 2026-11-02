@@ -1661,6 +1661,14 @@ void TestWindowsToClose() {
     // Even named as the streamed window, the shell's own are left alone.
     CHECK(WindowsToClose(windows, tray, L"explorer.exe").empty());
     CHECK(WindowsToClose({}, main, L"notepad.exe").empty());
+    // Every Store app's frame belongs to ApplicationFrameHost: only the one
+    // being streamed, never Calculator's and Photos' together.
+    const HWND calculator = reinterpret_cast<HWND>(0x70);
+    const HWND photos = reinterpret_cast<HWND>(0x80);
+    const auto frames = WindowsToClose({{calculator, L"ApplicationFrameWindow", true, false},
+                                        {photos, L"ApplicationFrameWindow", true, false}},
+                                       photos, L"ApplicationFrameHost.exe");
+    CHECK(frames.size() == 1 && frames[0] == photos);
 }
 
 /// Force Quit ends the app's process, but never this host, another user's
@@ -1672,6 +1680,8 @@ void TestForceQuitRefusal() {
     CHECK(!ForceQuitRefusal(42, 7, 2, 1, false, L"notepad.exe").empty());
     CHECK(!ForceQuitRefusal(42, 7, 1, 1, true, L"svchost.exe").empty());
     CHECK(!ForceQuitRefusal(42, 7, 1, 1, false, L"Explorer.EXE").empty());
+    CHECK(!ForceQuitRefusal(42, 7, 1, 1, false, L"ApplicationFrameHost.exe").empty());
+    CHECK(ForceQuitRefusal(42, 7, 1, 1, false, L"CalculatorApp.exe").empty());
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
