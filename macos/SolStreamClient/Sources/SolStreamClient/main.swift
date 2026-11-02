@@ -1897,6 +1897,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostMenu.addItem(withTitle: "Add App to Dock", action: #selector(addStreamToDock),
                          keyEquivalent: "")
         hostMenu.addItem(.separator())
+        // Closing the window only stops streaming it; these end it on the PC.
+        // Force Quit is the ⌥ alternate, as in the Dock.
+        for item in Self.quitItems(for: nil) {
+            hostMenu.addItem(item)
+        }
+        hostMenu.addItem(.separator())
         hostMenu.addItem(withTitle: "Forget Paired PCs…",
                          action: #selector(forgetHosts), keyEquivalent: "")
         hostMenuItem.submenu = hostMenu
@@ -2018,6 +2024,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
     }
 
+    // MARK: - Quitting an app on the PC
+
+    /// Quit and its ⌥ alternate, Force Quit, for `appWindow`, or for the
+    /// stream in front when nil.
+    private static func quitItems(for appWindow: AppWindow?) -> [NSMenuItem] {
+        let name = appWindow?.window?.title
+        let quit = NSMenuItem(title: name.map { "Quit \u{201C}\($0)\u{201D} on PC" } ?? "Quit App on PC",
+                              action: #selector(quitStreamedApp(_:)), keyEquivalent: "")
+        let force = NSMenuItem(title: name.map { "Force Quit \u{201C}\($0)\u{201D} on PC…" }
+                                   ?? "Force Quit App on PC…",
+                               action: #selector(forceQuitStreamedApp(_:)), keyEquivalent: "")
+        force.keyEquivalentModifierMask = .option
+        force.isAlternate = true
+        quit.representedObject = appWindow
+        force.representedObject = appWindow
+        return [quit, force]
+    }
+
+    /// The stream a Quit item acts on: the one it names, else the one in front.
+    private func quitTarget(_ sender: NSMenuItem) -> AppWindow? {
+        if let named = sender.representedObject as? AppWindow {
+            return appWindows.contains { $0 === named } ? named : nil
+        }
+        return appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
+    }
+
+    @objc private func quitStreamedApp(_ sender: NSMenuItem) {
+        guard let target = quitTarget(sender) else { return }
+        quit(target, force: false)
+    }
+
+    @objc private func forceQuitStreamedApp(_ sender: NSMenuItem) {
+        guard let target = quitTarget(sender) else { return }
+        let name = target.window?.title ?? "the app"
+        let alert = NSAlert()
+        alert.messageText = "Force quit \u{201C}\(name)\u{201D} on the PC?"
+        alert.informativeText = "Anything not saved in it will be lost. Use this only "
+            + "when the app has stopped responding."
+        alert.addButton(withTitle: "Force Quit")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        quit(target, force: true)
+    }
+
+    /// Ask the PC to quit it. Its window closes on the Mac by itself once the
+    /// app's window is gone there; only a refusal needs saying.
+    private func quit(_ target: AppWindow, force: Bool) {
+        guard let agent else { return }
+        let name = target.window?.title ?? "the app"
+        Log.info("[quit] \(force ? "force quitting" : "quitting") \"\(name)\" on the PC")
+        agent.quit(windowID: target.remoteWindowID, force: force) { reason in
+            guard let reason else { return }
+            Log.info("[quit] the PC refused: \(reason)")
+            let alert = NSAlert()
+            alert.messageText = "Couldn\u{2019}t quit \u{201C}\(name)\u{201D}"
+            alert.informativeText = reason
+            alert.runModal()
+        }
+    }
+
+    /// One Quit, with Force Quit on ⌥, per streamed app.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard !appWindows.isEmpty else { return nil }
+        let menu = NSMenu()
+        for appWindow in appWindows {
+            for item in Self.quitItems(for: appWindow) {
+                item.target = self
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
     @objc private func forgetHosts() {
         let alert = NSAlert()
         alert.messageText = "Forget paired PCs?"
@@ -2079,6 +2158,20 @@ extension AppDelegate: NSMenuItemValidation {
             // Named, so it says what it will add.
             menuItem.title = streamLink.map { "Add \($0.name) to Dock" } ?? "Add App to Dock"
             return !appWindows.isEmpty && streamLink?.path != nil
+        }
+        if menuItem.action == #selector(quitStreamedApp(_:))
+            || menuItem.action == #selector(forceQuitStreamedApp(_:)) {
+            let target = quitTarget(menuItem)
+            // The Host menu's pair names the app in front; the Dock's were
+            // named when they were made.
+            if menuItem.representedObject == nil {
+                let force = menuItem.action == #selector(forceQuitStreamedApp(_:))
+                let name = target?.window?.title
+                menuItem.title = (force ? "Force Quit " : "Quit ")
+                    + (name.map { "\u{201C}\($0)\u{201D}" } ?? "App")
+                    + (force ? " on PC…" : " on PC")
+            }
+            return target != nil
         }
         return Self.hostMenuAllows(menuItem.action,
                             connected: agent != nil || picker != nil || session != nil,

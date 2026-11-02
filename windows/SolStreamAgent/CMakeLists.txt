@@ -97,6 +97,8 @@ add_library(SolStreamCore OBJECT
     wake.cpp
     # Whether a Mac knocking on a busy host may take back the session it left.
     session_takeover.cpp
+    # Quitting a streamed application from the Mac.
+    quit_app.cpp
     # Putting a streamed window back as it was, and remembering what is owed.
     window_restore.cpp
     installer.cpp

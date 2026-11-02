@@ -76,6 +76,7 @@
 #include "host_window.h"
 #include "installer.h"
 #include "ports.h"
+#include "quit_app.h"
 #include "session_takeover.h"
 #include "stranded.h"
 #include "window_restore.h"
@@ -4961,6 +4962,20 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                       "{\"type\":\"topmost\",\"ok\":%s,\"on\":%s}",
                       ok ? "true" : "false", on ? "true" : "false");
         return buffer;
+    }
+
+    // Quit the streamed application, as its close box would, or with `force`
+    // end its process. Only through the window being streamed: the Mac names
+    // a window, never a process. See quit_app.h.
+    if (command == "quit") {
+        std::string refusal;
+        HWND window = WindowArg(line, "quit needs id", refusal);
+        if (!window) {
+            return refusal;
+        }
+        long long force = 0;
+        FieldNumber(line, "force", force);
+        return solstream::QuitAppJson(window, force != 0);
     }
 
     if (command == "focus") {

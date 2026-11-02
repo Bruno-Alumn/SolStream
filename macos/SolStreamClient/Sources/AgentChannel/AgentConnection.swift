@@ -2034,6 +2034,42 @@ public final class AgentConnection {
         }
     }
 
+    /// Quit the application that owns this window on the host, as its close
+    /// box would -- it may still ask to save first -- or with `force` end its
+    /// process. Answers on the main queue with nil when the host did it, or
+    /// with what to tell the user.
+    public func quit(windowID: UInt64, force: Bool, completion: @escaping (String?) -> Void) {
+        send(["cmd": "quit", "id": windowID, "force": force ? 1 : 0]) { result in
+            let reason: String?
+            switch result {
+            case .success(let reply) where reply["ok"] as? Bool == true:
+                reason = nil
+            case .success(let reply):
+                reason = Self.quitRefusal(reply)
+            case .failure:
+                reason = "The PC couldn't be reached. Check that it's on and SolStream "
+                    + "is running there."
+            }
+            DispatchQueue.main.async { completion(reason) }
+        }
+    }
+
+    /// What to say when the host would not quit an app. A host from before
+    /// `quit` answers "unknown cmd", which is about updating, not the app.
+    static func quitRefusal(_ reply: [String: Any]) -> String {
+        if let reason = reply["reason"] as? String, !reason.isEmpty {
+            return reason
+        }
+        if reply["message"] as? String == "unknown cmd" {
+            return "The PC's copy of SolStream is too old to quit apps from the Mac. "
+                + "Update it from its window on the PC."
+        }
+        if reply["message"] as? String == "no such window" {
+            return "The app's window has already closed on the PC."
+        }
+        return "The PC didn't quit the app."
+    }
+
     // MARK: - Transport
 
     private func send(_ request: [String: Any],

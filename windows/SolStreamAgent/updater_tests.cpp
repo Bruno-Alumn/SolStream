@@ -52,6 +52,7 @@
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
 #include "media/video_codec.h"
+#include "quit_app.h"
 #include "session_takeover.h"
 #include "stranded.h"
 #include "media/keys.h"
@@ -1630,6 +1631,47 @@ void TestSolStreamDisplays() {
                                          display(L"spacedesk Graphics Adapter")});
     CHECK(ours.size() == 1);
     CHECK(!ours.empty() && ours[0].friendly_name == L"Virtual Display Driver");
+}
+
+/// Quit closes every window of the app that nothing owns, so an app with two
+/// windows quits rather than losing one -- except Explorer, whose process is
+/// also the taskbar and the desktop: only the streamed window. The shell's own
+/// windows are never closed.
+void TestWindowsToClose() {
+    const HWND main = reinterpret_cast<HWND>(0x10);
+    const HWND second = reinterpret_cast<HWND>(0x20);
+    const HWND dialog = reinterpret_cast<HWND>(0x30);
+    const HWND hidden = reinterpret_cast<HWND>(0x40);
+    const HWND tray = reinterpret_cast<HWND>(0x50);
+    const HWND desktop = reinterpret_cast<HWND>(0x60);
+    const std::vector<QuitCandidate> windows = {
+        {main, L"Notepad", true, false},
+        {second, L"Notepad", true, false},
+        {dialog, L"#32770", true, true},
+        {hidden, L"Notepad", false, false},
+        {tray, L"Shell_TrayWnd", true, false},
+        {desktop, L"Progman", true, false},
+    };
+    const auto notepad = WindowsToClose(windows, main, L"notepad.exe");
+    CHECK(notepad.size() == 2);
+    CHECK(notepad.size() == 2 && notepad[0] == main && notepad[1] == second);
+
+    const auto explorer = WindowsToClose(windows, second, L"EXPLORER.EXE");
+    CHECK(explorer.size() == 1 && explorer[0] == second);
+    // Even named as the streamed window, the shell's own are left alone.
+    CHECK(WindowsToClose(windows, tray, L"explorer.exe").empty());
+    CHECK(WindowsToClose({}, main, L"notepad.exe").empty());
+}
+
+/// Force Quit ends the app's process, but never this host, another user's
+/// app, a critical Windows process or Explorer, which is the shell.
+void TestForceQuitRefusal() {
+    CHECK(ForceQuitRefusal(42, 7, 1, 1, false, L"notepad.exe").empty());
+    CHECK(!ForceQuitRefusal(7, 7, 1, 1, false, L"SolStream.exe").empty());
+    CHECK(!ForceQuitRefusal(0, 7, 1, 1, false, L"").empty());
+    CHECK(!ForceQuitRefusal(42, 7, 2, 1, false, L"notepad.exe").empty());
+    CHECK(!ForceQuitRefusal(42, 7, 1, 1, true, L"svchost.exe").empty());
+    CHECK(!ForceQuitRefusal(42, 7, 1, 1, false, L"Explorer.EXE").empty());
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
@@ -3953,6 +3995,8 @@ int wmain(int argc, wchar_t** argv) {
     TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+    TestWindowsToClose();
+    TestForceQuitRefusal();
     TestSolStreamDisplays();
     TestSwitchedOff();
     TestTailscaleAdapter();
