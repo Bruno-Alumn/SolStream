@@ -201,4 +201,12 @@ final class TailscaleTests: XCTestCase {
             XCTAssertTrue(TailscaleStatus.tunnels().contains { $0.contains(address) })
         }
     }
+
+    /// With the command-line daemon stopped no tunnel is Tailscale's, so a
+    /// NetBird tunnel in its range is not taken for it.
+    func testAStoppedDaemonHasNoTunnel() {
+        XCTAssertEqual(TailscaleStatus.decide(tunnels: [["fe80::1%utun100", "100.92.3.4"]],
+                                              installed: .commandLine(daemonRunning: false)),
+                       .commandLineButOff(daemonRunning: false))
+    }
 }

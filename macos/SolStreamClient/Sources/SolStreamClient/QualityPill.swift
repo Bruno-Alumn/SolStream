@@ -109,6 +109,15 @@ final class QualityPill: DS.Box {
         togglePopover()
     }
 
+    /// A button to VoiceOver, Voice Control and Switch Control, so pressed by
+    /// them too: said to be one and not pressable, the popover -- mute,
+    /// volume, mouse mode, quality -- was out of their reach.
+    override func accessibilityPerformPress() -> Bool {
+        guard window != nil else { return false }
+        togglePopover()
+        return true
+    }
+
     private func togglePopover() {
         if let popover, popover.isShown {
             popover.performClose(nil)
@@ -384,12 +393,18 @@ final class QualityPill: DS.Box {
         if soundMoved || hintMoved { refitDetail() }
     }
 
+    /// A rate in Mbps, with a decimal below 10: a still window sends a few
+    /// hundred kilobits, and "0 Mbps" read as nothing being sent at all.
+    static func megabits(_ rate: Double) -> String {
+        rate < 9.95 ? String(format: "%.1f Mbps", rate) : String(format: "%.0f Mbps", rate)
+    }
+
     /// Fixed widths and monospaced digits, so none of these reflow anything.
     private func showFigures() {
         fpsValue?.stringValue = stats.fps > 0 ? "\(stats.fps)" : "—"
         latencyValue?.stringValue = stats.latencyMs.map { "\($0) ms" } ?? "—"
         // "Mbps", as the quality notes spell it, since the two are compared.
-        bandwidthValue?.stringValue = stats.bitrateMbps.map { String(format: "%.0f Mbps", $0) } ?? "—"
+        bandwidthValue?.stringValue = stats.bitrateMbps.map(Self.megabits) ?? "—"
         droppedLabel?.attributedStringValue = DS.detail([
             ("\(stats.droppedFrames) dropped of \(Self.compact(stats.totalFrames))", isData: true),
         ])
@@ -487,7 +502,9 @@ final class QualityPill: DS.Box {
         // would not happen -- goes. A flag fixes it for the run, as --bitrate
         // fixes the video's.
         let pinned = Self.commandLineOverrides.contains(.soundQuality)
-        soundQualityMenu?.isEnabled = !off && !pinned
+        // Nor when the PC sends what it always has whatever is chosen: a
+        // choice there only restarted the picture for nothing.
+        soundQualityMenu?.isEnabled = !off && !pinned && !stats.hostIgnoresSoundQuality
         let qualityText = Self.soundQualityNote(settings.soundQuality, pinned: pinned,
                                                 ignored: stats.hostIgnoresSoundQuality)
         let qualityMoved = Self.show(qualityText, in: soundQualityNote)

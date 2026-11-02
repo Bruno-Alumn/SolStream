@@ -80,7 +80,14 @@ enum TailscaleStatus: Equatable {
         // since 0.71. A Headscale server's prefix has to lie inside
         // Tailscale's, so the loop above has already found it.
         guard let installed else { return .missing }
-        for addresses in tunnels where !addresses.contains(where: isOwnIPv6) {
+        // Not with the command-line daemon known to be stopped: then no
+        // tunnel can be Tailscale's, and taking NetBird's for it hid the
+        // advice to start the daemon.
+        let daemonStopped: Bool
+        if case .commandLine(daemonRunning: false) = installed { daemonStopped = true } else {
+            daemonStopped = false
+        }
+        for addresses in tunnels where !daemonStopped && !addresses.contains(where: isOwnIPv6) {
             if let address = addresses.first(where: isTailscaleAddress) {
                 return .connected(address: address)
             }

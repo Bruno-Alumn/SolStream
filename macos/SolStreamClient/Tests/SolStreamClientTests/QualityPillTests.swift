@@ -459,4 +459,24 @@ final class QualityPillTests: XCTestCase {
     private static func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
         view.subviews.flatMap { ($0 as? T).map { [$0] } ?? [] + all(type, in: $0) }
     }
+
+    /// A still window's few hundred kilobits are not "0 Mbps".
+    func testALowRateKeepsADecimal() {
+        XCTAssertEqual(QualityPill.megabits(0.3), "0.3 Mbps")
+        XCTAssertEqual(QualityPill.megabits(9.4), "9.4 Mbps")
+        XCTAssertEqual(QualityPill.megabits(18), "18 Mbps")
+    }
+
+    /// Pressable by VoiceOver, as it says it is a button.
+    func testThePillCanBePressedByAssistiveTechnology() {
+        let pill = QualityPill()
+        pills.append(pill)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        window.contentView?.addSubview(pill)
+        XCTAssertTrue(pill.accessibilityPerformPress())
+        pill.accessibilityPerformPress()   // and closed again
+        window.close()
+    }
 }
