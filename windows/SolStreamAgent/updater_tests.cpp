@@ -55,6 +55,7 @@
 #include "session_takeover.h"
 #include "stranded.h"
 #include "media/keys.h"
+#include "media/pointer_math.h"
 #include "tailscale.h"
 #include "vdd.h"
 #include "window_restore.h"
@@ -2881,6 +2882,35 @@ void TestVideoCodecs() {
     CHECK(!StartsWithParameterSets(VideoCodec::Hevc, h264Idr, sizeof(h264Idr)));
 }
 
+void TestPointerMath() {
+    using namespace media;
+    // Every pixel the Mac aims at (pixel * 65535 / extent, rounded down) comes
+    // back as itself, the last one included.
+    for (int64_t extent : {1280, 1920, 2560, 3840, 6016, 7680}) {
+        bool exact = true;
+        for (int64_t pixel = 0; pixel < extent; ++pixel) {
+            const uint16_t unit = (uint16_t) (pixel * 65535 / extent);
+            exact = exact && PixelFromUnit(unit, extent) == pixel;
+        }
+        CHECK(exact);
+        CHECK(PixelFromUnit(65535, extent) == extent - 1);
+    }
+    // And SendInput's coordinate gives the pixel back whether Windows rounds
+    // it down or to the nearest, on a desktop as wide as three 4K monitors
+    // (exact so up to 16384 wide).
+    for (int64_t extent : {1366, 1920, 3840, 4480, 11520}) {
+        bool down = true, nearest = true;
+        for (int64_t pixel = 0; pixel < extent; ++pixel) {
+            const int64_t value = AbsoluteFromPixel(pixel, extent);
+            down = down && ((value * extent) >> 16) == pixel;
+            nearest = nearest && ((value * extent + 32768) >> 16) == pixel;
+        }
+        CHECK(down);
+        CHECK(nearest);
+    }
+    CHECK(AbsoluteFromPixel(-5, 1920) == 0);
+}
+
 void TestReceiveFailures() {
     using namespace media;
     static_assert(kWsaMessageTooBig == WSAEMSGSIZE);
@@ -3813,6 +3843,7 @@ int wmain(int argc, wchar_t** argv) {
 
     TestVersions();
     TestAppIds();
+    TestPointerMath();
     TestDibAsBmp();
     TestBase64();
     TestSignature(vector);

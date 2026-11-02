@@ -1973,8 +1973,10 @@ public final class InputCapture {
         let target = Self.canvasPoint(unit: unit, source: source, edgeGuard: edgeGuard,
                                       guardsTop: guardsTopEdge)
         positionsSent += 1
-        emit(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded()),
-                                            y: Int(target.y.rounded()),
+        // Down, not to the nearest: a pixel covers [i, i+1), so a pointer at
+        // 10.6 is over pixel 10, and sending 11 put it a pixel off.
+        emit(SMTInput.mouseMoveAbsolute(x: Int(target.x.rounded(.down)),
+                                            y: Int(target.y.rounded(.down)),
                                             referenceWidth: Int(canvas.width),
                                             referenceHeight: Int(canvas.height)))
     }

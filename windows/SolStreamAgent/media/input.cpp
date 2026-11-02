@@ -1,5 +1,6 @@
 #include "input.h"
 #include "keys.h"
+#include "pointer_math.h"
 #include "log.h"
 #include "smt.h"
 
@@ -126,8 +127,8 @@ bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) cons
     if (width <= 0 || height <= 0) {
         return false;
     }
-    *x = area.left + (LONG) ((int64_t) nx * width / 65535);
-    *y = area.top + (LONG) ((int64_t) ny * height / 65535);
+    *x = area.left + (LONG) PixelFromUnit(nx, width);
+    *y = area.top + (LONG) PixelFromUnit(ny, height);
     return true;
 }
 
@@ -148,9 +149,9 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                 return false;
             }
             // SendInput's absolute coordinates are normalised over the VIRTUAL
-            // desktop, not the primary monitor, and the denominator is one less
-            // than the extent. Both are easy to get subtly wrong in a way that
-            // only shows on a multi-monitor host.
+            // desktop, not the primary monitor -- easy to get subtly wrong in a
+            // way that only shows on a multi-monitor host. See pointer_math.h
+            // for the rounding.
             const LONG left = GetSystemMetrics(SM_XVIRTUALSCREEN);
             const LONG top = GetSystemMetrics(SM_YVIRTUALSCREEN);
             const LONG width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -159,8 +160,8 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             input.type = INPUT_MOUSE;
             input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE
                              | MOUSEEVENTF_VIRTUALDESK;
-            input.mi.dx = (LONG) ((int64_t) (x - left) * 65535 / (width - 1));
-            input.mi.dy = (LONG) ((int64_t) (y - top) * 65535 / (height - 1));
+            input.mi.dx = AbsoluteFromPixel(x - left, width);
+            input.mi.dy = AbsoluteFromPixel(y - top, height);
             break;
         }
         case kInputMouseRel: {
