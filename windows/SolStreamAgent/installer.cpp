@@ -1306,7 +1306,9 @@ bool ReadInstallResult(std::string& error, std::string* display) {
     if (file == INVALID_HANDLE_VALUE) {
         // No file at all means the elevated half never got far enough to write
         // one — most often because the UAC prompt was dismissed.
-        error = "The install did not run.";
+        // Setup, uninstall and the virtual display's set-up all end here.
+        error = "The part that needs administrator rights didn't run. Try again; if it "
+                "happens again, restart this PC first.";
         return false;
     }
     char buffer[8192] = {0};
@@ -1631,8 +1633,12 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     }
     if (!replaced) {
         DeleteFileW(incoming.c_str());
-        error = "Could not copy SolStream into " + ToUtf8(destination)
-              + " (error " + std::to_string(failure) + ")";
+        // Not "quit SolStream": the copy running was stopped before this and
+        // is started again just below. Something else holds the file.
+        error = "Couldn't copy SolStream into " + ToUtf8(destination)
+              + ". Something on this PC is holding its files, often antivirus checking "
+                "them. Try again in a minute, or restart this PC first. (error "
+              + std::to_string(failure) + ")";
         InstallLog("copy failed: " + error);
         if (GetFileAttributesW(installed.c_str()) != INVALID_FILE_ATTRIBUTES) {
             // The old copy is intact: bring it back rather than leave the PC

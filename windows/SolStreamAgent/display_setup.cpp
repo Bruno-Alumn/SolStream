@@ -547,14 +547,15 @@ bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& 
     LONG rc = ChangeDisplaySettingsExW(gdi_name.c_str(), &mode, nullptr,
                                        CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
-        error = "Could not set the virtual display's mode (DISP_CHANGE "
-              + std::to_string((int) rc) + ").";
+        error = "The virtual display is installed, but Windows wouldn't set its size. "
+                "Restarting this PC usually fixes it. (code " + std::to_string((int) rc) + ")";
         return false;
     }
     rc = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
-        error = "Could not apply the display configuration (DISP_CHANGE "
-              + std::to_string((int) rc) + ").";
+        error = "The virtual display is installed, but Windows wouldn't apply its "
+                "settings. Restarting this PC usually fixes it. (code "
+              + std::to_string((int) rc) + ")";
         return false;
     }
     return true;

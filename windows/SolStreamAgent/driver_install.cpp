@@ -621,8 +621,13 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                                  fetch_error)) {
             // Network trouble or the release gone: either way a pointer to the
             // project itself, which is the way round both.
-            error = "Couldn't download the virtual display driver: " + fetch_error + "."
-                  + kManualInstall;
+            // Its own words last, in brackets, for whoever reads the log: the
+            // next step is what the line is for, and the way round it the
+            // project's page offers needs the same connection.
+            // What to do next is said by whoever shows this: setup adds where
+            // to set it up again.
+            error = "Couldn't download the virtual display driver. Check this PC's "
+                    "internet connection. (" + fetch_error + ")";
             return false;
         }
 

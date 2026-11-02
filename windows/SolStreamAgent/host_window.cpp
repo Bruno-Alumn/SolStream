@@ -826,8 +826,11 @@ Screen Describe(const HostStatus& status) {
     if (status.address.empty()) {
         screen.headline = L"Not reachable yet.";
         screen.subtitle = L"SolStream is ready, but your Mac can't reach this PC.";
-        screen.what = L"This PC isn't on a network your Mac can see.";
-        screen.why = L"SolStream needs both machines on the same local network.";
+        // Only shown with no address at all: no network, rather than one
+        // the Mac is not on -- and Tailscale counts as one.
+        screen.what = L"This PC has no network address.";
+        screen.why = L"Connect it to Wi-Fi or Ethernet, or check the router gave it an "
+                     L"address. SolStream notices by itself.";
         screen.code = L"SS-104";
         screen.mark = Mark::Failed;
     } else if (!status.streaming_ready) {
@@ -2408,7 +2411,8 @@ void ApplyInstallerExited(HWND window, DWORD exit_code) {
                   Mark::NeedsYou, true);
     } else {
         SetNotice(L"SolStream couldn't install the update.",
-                  L"The installer stopped before replacing this copy. What happened is in "
+                  L"The installer stopped before replacing this copy. To try again, choose "
+                  L"Install update from SolStream's icon by the clock; what happened is in "
                       + InstallLogPath() + L".",
                   Mark::Failed, true);
     }
@@ -3406,7 +3410,8 @@ void SayInstallOutcome(bool installed, const std::string& version) {
     } else {
         SetNotice(L"The update to SolStream " + ToWide(version) + L" didn't finish.",
                   L"This PC is still running SolStream " + std::wstring(kVersion)
-                      + L". What happened is in " + InstallLogPath() + L".",
+                      + L". SolStream offers the update again when it next checks; what "
+                      L"happened is in " + InstallLogPath() + L".",
                   Mark::Failed, true);
     }
 }
