@@ -18,6 +18,28 @@ bool IsClientId(const std::string& id) {
     return true;
 }
 
+long PushFeaturesFrom(const std::string& names) {
+    long features = 0;
+    size_t at = 0;
+    while (at < names.size()) {
+        const size_t end = names.find_first_of(" ,", at);
+        const std::string name =
+            names.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (name == "title") {
+            features |= kPushTitle;
+        } else if (name == "attention") {
+            features |= kPushAttention;
+        } else if (name == "openURL") {
+            features |= kPushOpenUrl;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        at = end + 1;
+    }
+    return features;
+}
+
 std::vector<unsigned char> TakeoverProofMessage(const std::vector<unsigned char>& challenge,
                                                 const std::vector<unsigned char>& cnonce,
                                                 const std::string& client_id) {

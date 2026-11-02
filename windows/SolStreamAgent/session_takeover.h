@@ -34,6 +34,20 @@ constexpr unsigned long long kTakeoverSilenceMs = 15000;
 /// Anything else is treated as no id at all.
 bool IsClientId(const std::string& id);
 
+/// Pushes a Mac says it understands, as bits. A Mac reads a push it doesn't
+/// know as the reply to whatever request it has waiting -- there are no
+/// request ids -- and every reply after it then goes to the request before
+/// its own, for the life of the connection. So a push newer than the oldest
+/// Mac still about goes only to a Mac that listed it when it proved the
+/// token.
+constexpr long kPushTitle = 1;
+constexpr long kPushAttention = 2;
+constexpr long kPushOpenUrl = 4;
+
+/// The bits for the auth line's "pushes": names separated by spaces or
+/// commas; unknown names are ignored. Nothing for a Mac that sent none.
+long PushFeaturesFrom(const std::string& names);
+
 /// What a takeover proof is the HMAC of, keyed with the pairing token:
 ///
 ///     "SolStream agent takeover v1" || challenge || cnonce || client id

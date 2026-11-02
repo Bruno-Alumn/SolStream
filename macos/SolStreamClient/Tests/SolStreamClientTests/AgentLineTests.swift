@@ -61,6 +61,17 @@ final class AgentLineTests: XCTestCase {
 
     // MARK: - Lines that will not parse
 
+    /// The pushes this Mac tells the host it understands are ones it handles
+    /// -- and can pass over when garbled. Listing one it didn't handle would
+    /// have the host send it, and the Mac read it as a reply.
+    func testEveryPushThisMacListsIsOneItHandles() {
+        let listed = AgentConnection.understoodPushes.split(separator: " ").map(String.init)
+        XCTAssertFalse(listed.isEmpty)
+        for name in listed {
+            XCTAssertTrue(AgentConnection.skippablePushes.contains(name), name)
+        }
+    }
+
     func testAPushThatWillNotParseIsPassedOver() {
         let broken = [
             (#"{"type":"occluded","id":7,"by":}"#, "occluded"),

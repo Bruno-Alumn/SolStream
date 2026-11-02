@@ -1086,6 +1086,11 @@ public final class AgentConnection {
             // -- and to no other -- if it reconnects while the host is still
             // holding it. See `clientID`.
             "client": clientID,
+            // The pushes beyond the original set that this Mac understands.
+            // The host sends no other: an unknown push would be read as the
+            // reply to a waiting request, and every reply after it would go
+            // to the request before its own.
+            "pushes": Self.understoodPushes,
         ]
         // The same message that proves the token also carries an ephemeral
         // public point, so the channel's keys cost no extra round trip. The
@@ -2618,6 +2623,10 @@ public final class AgentConnection {
     /// Not `hello` or `auth`, which carry the handshake; not `displays`, which
     /// is a reply as often as it is the greeting's push; and not `busy`, which
     /// decides whether this Mac gives up, waits, or asks for its session back.
+    /// Said in the auth line; see the host's PushFeaturesFrom. Every push
+    /// newer than the original set is named here once this Mac handles it.
+    static let understoodPushes = "title attention"
+
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
                                                "title", "attention"]
 

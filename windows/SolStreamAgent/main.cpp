@@ -1793,6 +1793,9 @@ constexpr int kMaxLocks = 8;
 
 SOCKET g_push_client = INVALID_SOCKET;
 volatile LONG g_push_authorised = 0;
+/// The pushes beyond the original set that the signed-in Mac understands:
+/// see PushFeaturesFrom. Zero for a Mac that never said.
+volatile LONG g_push_features = 0;
 /// Serialises writes to the client socket. Three threads send on it — the one
 /// serving commands, the cursor watcher and the window watcher — and a line
 /// interleaved with another is a line neither end can parse.
@@ -1892,6 +1895,16 @@ volatile LONG g_cursor_generation = 0;
 /// `generation` is the cursor watcher's own, or 0 for any other push. Checked
 /// inside the lock as well: a watcher that waited there past
 /// StopCursorWatcher's timeout belongs to nobody.
+/// A push only some Macs understand: sent, and said to be, only to a Mac
+/// that listed `feature`. False to one that didn't, as to nobody at all.
+bool PushLine(const std::string& line, LONG generation);
+bool PushFeature(long feature, const std::string& line) {
+    if ((InterlockedCompareExchange(&g_push_features, 0, 0) & feature) == 0) {
+        return false;
+    }
+    return PushLine(line, 0);
+}
+
 bool PushLine(const std::string& line, LONG generation = 0) {
     if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
         return true;
@@ -2601,7 +2614,8 @@ void NotifyStreamedWindows() {
             continue;
         }
         last = now;
-        PushLine("{\"type\":\"attention\",\"id\":" + std::to_string(IdFromWindow(window)) + "}");
+        PushFeature(solstream::kPushAttention,
+                    "{\"type\":\"attention\",\"id\":" + std::to_string(IdFromWindow(window)) + "}");
     }
 
     if (!g_streamed_titles_dirty.load()) {
@@ -2642,7 +2656,8 @@ void NotifyStreamedWindows() {
             continue;
         }
         // Remembered only once it went: unsent, the next rename pushes again.
-        if (PushLine("{\"type\":\"title\",\"id\":" + std::to_string(IdFromWindow(windows[i]))
+        if (PushFeature(solstream::kPushTitle,
+                        "{\"type\":\"title\",\"id\":" + std::to_string(IdFromWindow(windows[i]))
                      + ",\"title\":\"" + JsonEscape(text) + "\"}")) {
             current[windows[i]] = text;
         } else if (known != pushed_titles.end()) {
@@ -5367,6 +5382,7 @@ void StartCursorWatcher(SOCKET client, bool authorised) {
     EnterCriticalSection(&g_send_cs);
     g_push_client = client;
     LeaveCriticalSection(&g_send_cs);
+    InterlockedExchange(&g_push_features, 0);
     InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
     const LONG generation = InterlockedIncrement(&g_cursor_generation);
     g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc,
@@ -5390,6 +5406,7 @@ void StopCursorWatcher() {
     g_push_client = INVALID_SOCKET;
     LeaveCriticalSection(&g_send_cs);
     InterlockedExchange(&g_push_authorised, 0);
+    InterlockedExchange(&g_push_features, 0);
 }
 
 /// A session that has proved the token may go this long without saying anything.
@@ -5768,6 +5785,10 @@ void ServeClient(SOCKET client) {
                     id.clear();
                 }
                 BecomeHolder(client, id);
+                // And what it can be told, before anything is.
+                std::string pushes;
+                FieldString(line, "pushes", pushes);
+                InterlockedExchange(&g_push_features, solstream::PushFeaturesFrom(pushes));
                 InterlockedExchange(&g_push_authorised, 1);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;

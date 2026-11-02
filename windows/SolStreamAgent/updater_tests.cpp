@@ -1684,6 +1684,17 @@ void TestForceQuitRefusal() {
     CHECK(ForceQuitRefusal(42, 7, 1, 1, false, L"CalculatorApp.exe").empty());
 }
 
+/// The pushes a Mac lists when it proves the token, as bits: names it
+/// doesn't know are ignored, and a Mac that lists none gets none of them.
+void TestPushFeatures() {
+    CHECK(PushFeaturesFrom("") == 0);
+    CHECK(PushFeaturesFrom("title") == kPushTitle);
+    CHECK(PushFeaturesFrom("title attention") == (kPushTitle | kPushAttention));
+    CHECK(PushFeaturesFrom("openURL,title") == (kPushOpenUrl | kPushTitle));
+    CHECK(PushFeaturesFrom("titles attention nonsense") == kPushAttention);
+    CHECK(PushFeaturesFrom("  title  ") == kPushTitle);
+}
+
 // ── Tailscale ────────────────────────────────────────────────────────────────
 
 /// 100.64.0.0/10 is where Tailscale's addresses are, but other VPNs hand out
@@ -4005,6 +4016,7 @@ int wmain(int argc, wchar_t** argv) {
     TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+    TestPushFeatures();
     TestWindowsToClose();
     TestForceQuitRefusal();
     TestSolStreamDisplays();
