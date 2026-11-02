@@ -548,12 +548,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Onto a screen of another scale, or another screen: the host window's
     /// pixel size, and the window's size limits, were worked out for the
     /// last one, and the picture stayed soft until an edge was nudged.
+    /// Settled, so the window takes what the host managed: twice the pixels
+    /// can be more than the capture display holds, or less than an app will
+    /// go to, and the picture would not be the window's shape until an edge
+    /// was nudged after all.
     func windowDidChangeBackingProperties(_ notification: Notification) {
-        requestResize()
+        requestResize(settle: !(window?.inLiveResize ?? false))
     }
 
     func windowDidChangeScreen(_ notification: Notification) {
-        requestResize()
+        requestResize(settle: !(window?.inLiveResize ?? false))
     }
 
     func windowDidResize(_ notification: Notification) {
