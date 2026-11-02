@@ -543,6 +543,11 @@ final class ClipboardBridge {
 
     // MARK: - Pictures
 
+    /// Pixels past which a TIFF is not encoded at all: 40 MP. A screenshot of
+    /// a 6K display at its largest scaled size is 7520x4230, about 32 MP, and
+    /// fits; a photo past it would not fit in the host's 32 MB as a PNG anyway.
+    static let maxPicturePixels = 40_000_000
+
     /// The picture on `pasteboard` as PNG, if it holds one and is not a copy
     /// of files -- whose icons Finder puts beside them -- and it is not too
     /// big to send.
@@ -550,10 +555,27 @@ final class ClipboardBridge {
         let types = pasteboard.types ?? []
         guard !types.contains(.fileURL) else { return nil }
         let png = pasteboard.data(forType: .png)
-            ?? pasteboard.data(forType: .tiff).flatMap {
-                NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:])
+            ?? pasteboard.data(forType: .tiff).flatMap { tiff -> Data? in
+                guard let picture = NSBitmapImageRep(data: tiff) else { return nil }
+                // Encoded on the main thread, as the stream takes the keyboard:
+                // a photo of tens of megapixels held the whole app for seconds,
+                // only for the PNG to come out over the limit and be dropped.
+                // Its size is read from the header first, which costs nothing.
+                let pixels = picture.pixelsWide * picture.pixelsHigh
+                guard pixels <= maxPicturePixels else {
+                    Log.info("[clipboard] a \(picture.pixelsWide)x\(picture.pixelsHigh) picture "
+                             + "is too large to send to the host")
+                    return nil
+                }
+                return picture.representation(using: .png, properties: [:])
             }
-        guard let png, !png.isEmpty, png.count <= AgentConnection.maxClipboardImageBytes else {
+        guard let png, !png.isEmpty else { return nil }
+        guard png.count <= AgentConnection.maxClipboardImageBytes else {
+            // Said, not skipped in silence: otherwise ⌘V on the PC pastes
+            // what was there before, and nothing anywhere says why.
+            Log.info("[clipboard] a picture of \(png.count / 1_048_576) MB is over the "
+                     + "\(AgentConnection.maxClipboardImageBytes / 1_048_576) MB the host takes; "
+                     + "not sending it")
             return nil
         }
         return png
