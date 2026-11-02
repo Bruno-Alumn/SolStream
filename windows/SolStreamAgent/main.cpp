@@ -58,6 +58,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -2451,6 +2452,13 @@ std::atomic<ULONGLONG> g_window_set_touched{0};
 /// list AND the application list -- a full enumeration and a Start Menu walk
 /// two and a half times a second, for as long as some title kept moving.
 std::atomic<bool> g_window_titles_dirty{false};
+
+/// A window being streamed was renamed, or asked for attention: see
+/// NotifyStreamedWindows. Set on the window loop's thread, pushed from the
+/// watcher's, so a stalled socket never holds up the host's window.
+std::atomic<bool> g_streamed_titles_dirty{false};
+std::mutex g_attention_cs;
+std::vector<HWND> g_attention_pending;  // guarded by g_attention_cs
 /// When a rename last went out. Watcher thread only.
 ULONGLONG g_titles_pushed_at = 0;
 constexpr ULONGLONG kTitlePushIntervalMs = 5000;
@@ -2486,6 +2494,14 @@ void CALLBACK WindowSetChanged(HWINEVENTHOOK, DWORD event, HWND window,
                                LONG object, LONG child, DWORD, DWORD) {
     if (object != OBJID_WINDOW || child != CHILDID_SELF || !window) {
         return;
+    }
+    // A streamed window's own title goes to its Mac window at once, not with
+    // the picker's five-second nudge.
+    if (event == EVENT_OBJECT_NAMECHANGE && HeldWindow(window, nullptr)) {
+        g_streamed_titles_dirty.store(true);
+        if (g_watcher_wake) {
+            SetEvent(g_watcher_wake);
+        }
     }
     const bool was = g_listed_windows.count(window) != 0;
     // Asked before the top-level test: a destroyed window has no ancestor left.
@@ -2536,6 +2552,93 @@ void NotifyWindowsChangedIfSettled() {
     // redraw the picker anyway — so sending a list here would either be half
     // the answer or a second copy of one it is about to fetch.
     PushLine("{\"type\":\"windowsChanged\"}");
+}
+
+/// The taskbar button of a window being streamed flashed -- a message, a
+/// finished download -- so its Mac window asks for attention too. From the
+/// host window's shell hook.
+void StreamedWindowFlashed(HWND window) {
+    if (!HeldWindow(window, nullptr)) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_attention_cs);
+        if (g_attention_pending.size() < 8) {
+            g_attention_pending.push_back(window);
+        }
+    }
+    if (g_watcher_wake) {
+        SetEvent(g_watcher_wake);
+    }
+}
+
+/// Tell the Mac what changed about the windows it streams: a new title, at
+/// most once a second, and a flash, at most once every few seconds per
+/// window -- an app flashes its button over and over until looked at, and one
+/// bounce says as much as twenty. Watcher thread only.
+void NotifyStreamedWindows() {
+    static std::map<HWND, std::string> pushed_titles;
+    static std::map<HWND, ULONGLONG> flashed_at;
+    static ULONGLONG titles_at = 0;
+    const ULONGLONG now = GetTickCount64();
+
+    std::vector<HWND> flashed;
+    {
+        std::lock_guard<std::mutex> lock(g_attention_cs);
+        flashed.swap(g_attention_pending);
+    }
+    for (HWND window : flashed) {
+        ULONGLONG& last = flashed_at[window];
+        if (last != 0 && now - last < 3000) {
+            continue;
+        }
+        last = now;
+        PushLine("{\"type\":\"attention\",\"id\":" + std::to_string(IdFromWindow(window)) + "}");
+    }
+
+    if (!g_streamed_titles_dirty.load()) {
+        return;
+    }
+    if (now - titles_at < 1000) {
+        // Still dirty: the next tick, a moment later, picks it up.
+        if (g_watcher_wake) {
+            SetEvent(g_watcher_wake);
+        }
+        return;
+    }
+    g_streamed_titles_dirty.store(false);
+    titles_at = now;
+    HWND windows[kMaxLocks] = {};
+    int count = 0;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window) {
+            windows[count++] = g_locks[i].window;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    std::map<HWND, std::string> current;
+    for (int i = 0; i < count; ++i) {
+        // Never by messaging it, as the window list reads titles: a hung app
+        // would hold this thread.
+        wchar_t title[1024] = {};
+        const int copied = InternalGetWindowText(windows[i], title, 1024);
+        const std::string text =
+            ToUtf8(std::wstring(title, static_cast<size_t>(std::max(copied, 0))));
+        current[windows[i]] = text;
+        auto known = pushed_titles.find(windows[i]);
+        // An empty title says nothing worth showing; the Mac keeps its own.
+        if (text.empty() || (known != pushed_titles.end() && known->second == text)) {
+            continue;
+        }
+        PushLine("{\"type\":\"title\",\"id\":" + std::to_string(IdFromWindow(windows[i]))
+                 + ",\"title\":\"" + JsonEscape(text) + "\"}");
+    }
+    // Forget windows no longer streamed, so the maps never grow.
+    pushed_titles.swap(current);
+    for (auto it = flashed_at.begin(); it != flashed_at.end();) {
+        it = pushed_titles.count(it->first) ? std::next(it) : flashed_at.erase(it);
+    }
 }
 
 /// Windows already carried back to a real monitor. Kept so that someone who
@@ -3094,6 +3197,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         }
         RetryOwedRestoresIfDue();
         NotifyWindowsChangedIfSettled();
+        NotifyStreamedWindows();
         interval = holding || g_window_set_dirty.load() ? kWatchActiveMs : kWatchIdleMs;
     }
 }
@@ -7139,6 +7243,7 @@ int wmain(int argc, wchar_t** argv) {
             "only refresh when it reconnects");
     }
 
+    solstream::SetShellFlashHandler(StreamedWindowFlashed);
     solstream::SetEndSessionHandler([] {
         // As the exit below does, without the ExitProcess: Windows ends the
         // process itself once the window has answered.

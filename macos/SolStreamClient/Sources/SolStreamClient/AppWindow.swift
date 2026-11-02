@@ -1114,6 +1114,21 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The app was renamed on the PC: the document it has open, an unread
+    /// count. The window, the Window menu and ⌘Tab's names follow it.
+    func hostTitleChanged(_ title: String) {
+        guard !isClosing, let window, window.title != title else { return }
+        window.title = title
+    }
+
+    /// The app's taskbar button flashed on the PC. The Dock bounces once, as
+    /// a Mac app asking for attention does -- only while SolStream is in the
+    /// background, which is the only time AppKit bounces anything.
+    func hostAskedForAttention() {
+        guard !isClosing, !NSApp.isActive else { return }
+        NSApp.requestUserAttention(.informationalRequest)
+    }
+
     func setStatus(_ title: String, detail: String? = nil) {
         metalView?.setStatus(title, detail: detail, busy: true)
     }

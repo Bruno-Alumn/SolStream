@@ -153,6 +153,8 @@ final class AgentLineTests: XCTestCase {
             #"{"type":"displays","displays":[{"name":"\\\\.\\DISPLAY1","adapter":"x","x":0,"#
                 + #""y":0,"w":1920,"h":1080,"primary":true,"captured":true}]}"#,
             #"{"type":"occluded","id":7,"by":"Sécurité Windows"}"#,
+            #"{"type":"title","id":7,"title":"report.docx - Word"}"#,
+            #"{"type":"attention","id":7}"#,
         ] {
             greeting.append(codePage(text))
             greeting.append(0x0A)
@@ -186,8 +188,22 @@ final class AgentLineTests: XCTestCase {
             XCTAssertEqual(by, "S\u{FFFD}curit\u{FFFD} Windows")
             occluded.fulfill()
         }
+        // A streamed window renamed, and asking for attention.
+        let renamed = expectation(description: "the title push arrived")
+        renamed.assertForOverFulfill = false
+        agent.onWindowTitle = { id, title in
+            XCTAssertEqual(id, 7)
+            XCTAssertEqual(title, "report.docx - Word")
+            renamed.fulfill()
+        }
+        let flashed = expectation(description: "the attention push arrived")
+        flashed.assertForOverFulfill = false
+        agent.onAttention = { id in
+            XCTAssertEqual(id, 7)
+            flashed.fulfill()
+        }
         agent.connect()
-        wait(for: [connected, occluded], timeout: 5)
+        wait(for: [connected, occluded, renamed, flashed], timeout: 5)
         body(agent)
     }
 

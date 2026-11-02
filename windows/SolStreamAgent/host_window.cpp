@@ -161,6 +161,10 @@ std::wstring g_outcome;   ///< the sentence shown when it finishes, either way
 bool g_job_running = false;
 /// What main gives back when Windows ends the process; see WM_ENDSESSION.
 void (*g_end_session_handler)() = nullptr;
+/// See SetShellFlashHandler. The message the shell hook arrives as, once
+/// registered.
+void (*g_shell_flash_handler)(HWND) = nullptr;
+UINT g_shell_hook_message = 0;
 
 /// A one-off message the Host window shows in place of its usual banner — the
 /// result of pressing a button, which used to be a MessageBox. A modal system
@@ -2751,6 +2755,14 @@ void ShowTrayMenu(HWND window) {
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (g_shell_hook_message != 0 && message == g_shell_hook_message) {
+        // HSHELL_FLASH: a taskbar button is flashing for attention.
+        if ((wparam & 0x7FFF) == HSHELL_REDRAW && (wparam & HSHELL_HIGHBIT) != 0
+            && g_shell_flash_handler) {
+            g_shell_flash_handler(reinterpret_cast<HWND>(lparam));
+        }
+        return 0;
+    }
     if (g_taskbar_created != 0 && message == g_taskbar_created) {
         if (g_mode == WindowMode::Host) {
             g_tray_added = false;
@@ -3216,6 +3228,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
 
         case WM_DESTROY:
+            if (g_shell_hook_message != 0) {
+                DeregisterShellHookWindow(window);
+                g_shell_hook_message = 0;
+            }
             RemoveTrayIcon(window);
             DiscardTarget();
             PostQuitMessage(0);
@@ -3298,6 +3314,14 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
         nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_window) {
         return false;
+    }
+    // Told of taskbar flashes, for a streamed app's Mac window to bounce in
+    // the Dock. Only the host's window: setup has nothing streaming.
+    if (mode == WindowMode::Host) {
+        g_shell_hook_message = RegisterWindowMessageW(L"SHELLHOOK");
+        if (g_shell_hook_message != 0 && !RegisterShellHookWindow(g_window)) {
+            g_shell_hook_message = 0;
+        }
     }
     // Lay out once while the window is still hidden, so it is shown already at
     // the height of what it says rather than at a guess that then snaps. The
@@ -3428,6 +3452,10 @@ int RunHostWindowLoop() {
 bool HostWindowClosed() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_closed;
+}
+
+void SetShellFlashHandler(void (*handler)(HWND window)) {
+    g_shell_flash_handler = handler;
 }
 
 void SetEndSessionHandler(void (*handler)()) {

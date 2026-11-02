@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <windows.h>
+
 #include <functional>
 #include <string>
 
@@ -117,6 +119,11 @@ bool HostWindowClosed();
 /// What to run when Windows ends this process -- sign-out, shutdown, an
 /// installer's Restart Manager -- which it does without the window closing.
 void SetEndSessionHandler(void (*handler)());
+
+/// What to run when a window's taskbar button flashes, as the shell hook
+/// reports it: Windows tells only windows registered for it, and the host's
+/// own is one.
+void SetShellFlashHandler(void (*handler)(HWND window));
 
 bool FocusExistingHostWindow();
 

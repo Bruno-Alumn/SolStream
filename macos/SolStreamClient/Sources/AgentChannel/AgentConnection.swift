@@ -282,6 +282,11 @@ public final class AgentConnection {
     /// Some window on the host has opened, closed or been renamed. Carries
     /// nothing: it is a nudge to re-read the list, not the list itself.
     public var onWindowsChanged: (() -> Void)?
+    /// A streamed window was renamed on the host: the document it has open,
+    /// an unread count. Its id and its new title.
+    public var onWindowTitle: ((UInt64, String) -> Void)?
+    /// A streamed window's taskbar button flashed on the host.
+    public var onAttention: ((UInt64) -> Void)?
     /// Something belonging to another application on the PC is sitting on top of
     /// the window with this id. An empty name means it has gone away again.
     public var onOccluded: ((UInt64, String) -> Void)?
@@ -999,6 +1004,8 @@ public final class AgentConnection {
         onWindowClosed = nil
         onReconnected = nil
         onWindowsChanged = nil
+        onWindowTitle = nil
+        onAttention = nil
         onOccluded = nil
     }
 
@@ -2504,6 +2511,19 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onOccluded?(id, by) }
             }
             return
+        case "title":
+            // Unsolicited, and at most once a second from the host.
+            if let id = (message["id"] as? NSNumber)?.uint64Value,
+               let title = message["title"] as? String, !title.isEmpty {
+                DispatchQueue.main.async { [weak self] in self?.onWindowTitle?(id, title) }
+            }
+            return
+        case "attention":
+            // Unsolicited; the host sends one per flash every few seconds.
+            if let id = (message["id"] as? NSNumber)?.uint64Value {
+                DispatchQueue.main.async { [weak self] in self?.onAttention?(id) }
+            }
+            return
         case "windowsChanged":
             // Unsolicited too, and debounced by the host. Nothing to consume a
             // pending slot with — whoever cares re-asks for the list.
@@ -2598,7 +2618,8 @@ public final class AgentConnection {
     /// Not `hello` or `auth`, which carry the handshake; not `displays`, which
     /// is a reply as often as it is the greeting's push; and not `busy`, which
     /// decides whether this Mac gives up, waits, or asks for its session back.
-    static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged"]
+    static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
+                                               "title", "attention"]
 
     static func read(line: Data) -> LineReading {
         if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {

@@ -1306,6 +1306,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .hostWindowClosed(noticedBy: "pushed by the host")
         }
 
+        agent.onWindowTitle = { [weak self] id, title in
+            self?.appWindows.first { $0.remoteWindowID == id }?.hostTitleChanged(title)
+        }
+        agent.onAttention = { [weak self] id in
+            self?.appWindows.first { $0.remoteWindowID == id }?.hostAskedForAttention()
+        }
+
         // Named in the title bar of the window it is covering, not broadcast:
         // with two windows open, only one of them may be behind a dialog.
         agent.onOccluded = { [weak self] id, name in
