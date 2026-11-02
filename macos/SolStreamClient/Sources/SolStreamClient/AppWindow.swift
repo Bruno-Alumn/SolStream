@@ -63,6 +63,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// This window went full screen because the app did on the PC, so it comes
     /// out when the app does. Not when the user put it there themselves.
     private var fullScreenForHost = false
+    /// Between AppKit's will- and did-enter or exit full screen.
+    private var fullScreenTransition = false
+    /// What the PC last said while that animation ran.
+    private var hostFullScreenWish: Bool?
     /// Set while this window is being resized to match the host, so the resize
     /// handler does not bounce the request straight back at it.
     private var isMatchingHostSize = false
@@ -636,6 +640,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func reassertOnHost() {
         guard !isClosing else { return }
         Log.info("[window] agent reconnected; re-applying this window's placement")
+        // The host has forgotten whether the app was full screen, and will not
+        // say when it comes out: a full screen entered for it is the user's now.
+        fullScreenForHost = false
         agent.setTopmost(windowID: remoteWindowID, true)
         placeAndLock()
     }
@@ -1143,11 +1150,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// What a window does when its app goes into or out of full screen on
     /// the PC: follow it in, and back out only from a full screen it went
-    /// into for the app -- one the user chose stays.
-    enum FullScreenFollow: Equatable { case enter, leave, stay }
+    /// into for the app -- one the user chose stays. Mid-animation, AppKit
+    /// ignores a toggle, so the wish waits for the animation to end.
+    enum FullScreenFollow: Equatable { case enter, leave, stay, wait }
 
-    static func followFullScreen(hostOn: Bool, isFullScreen: Bool,
-                                 enteredForHost: Bool) -> FullScreenFollow {
+    static func followFullScreen(hostOn: Bool, isFullScreen: Bool, enteredForHost: Bool,
+                                 transitioning: Bool = false) -> FullScreenFollow {
+        if transitioning { return .wait }
         if hostOn { return isFullScreen ? .stay : .enter }
         return isFullScreen && enteredForHost ? .leave : .stay
     }
@@ -1157,9 +1166,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// sized to it as after any other resize.
     func hostFullScreenChanged(_ on: Bool) {
         guard !isClosing, let window else { return }
-        let isFullScreen = window.styleMask.contains(.fullScreen)
-        switch Self.followFullScreen(hostOn: on, isFullScreen: isFullScreen,
-                                     enteredForHost: fullScreenForHost) {
+        switch Self.followFullScreen(hostOn: on,
+                                     isFullScreen: window.styleMask.contains(.fullScreen),
+                                     enteredForHost: fullScreenForHost,
+                                     transitioning: fullScreenTransition) {
         case .enter:
             Log.info("[window] the app went full screen on the PC; following it")
             fullScreenForHost = true
@@ -1167,17 +1177,45 @@ final class AppWindow: NSObject, NSWindowDelegate {
         case .leave:
             Log.info("[window] the app came out of full screen on the PC; following it")
             window.toggleFullScreen(nil)
+        case .wait:
+            hostFullScreenWish = on
         case .stay:
             break
         }
     }
 
+    /// The animation is over: act on what the PC said during it, if anything.
+    private func fullScreenTransitionEnded() {
+        fullScreenTransition = false
+        guard let wish = hostFullScreenWish else { return }
+        hostFullScreenWish = nil
+        hostFullScreenChanged(wish)
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        fullScreenTransition = true
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        fullScreenTransition = true
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        fullScreenTransitionEnded()
+    }
+
     func windowDidExitFullScreen(_ notification: Notification) {
         fullScreenForHost = false
+        fullScreenTransitionEnded()
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
         fullScreenForHost = false
+        fullScreenTransitionEnded()
+    }
+
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        fullScreenTransitionEnded()
     }
 
     func setStatus(_ title: String, detail: String? = nil) {

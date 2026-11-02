@@ -4123,24 +4123,49 @@ void TestFullScreen() {
     CHECK(!LooksFullScreen(popup, RECT{0, 0, 3024, 1963}, monitor));
     CHECK(!LooksFullScreen(popup, whole, RECT{}));
 
-    bool on = false;
-    // A framed window on its tile: nothing.
-    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::None && !on);
-    // The app drops its caption and covers the display.
-    CHECK(NextFullScreen(on, popup, whole, monitor, tile) == FullScreenChange::Entered && on);
-    CHECK(NextFullScreen(on, popup, whole, monitor, tile) == FullScreenChange::None && on);
+    FullScreenWatch watch;
+    const LONG_PTR maximised = WS_POPUP | WS_VISIBLE | WS_MAXIMIZE;
+    // A framed window on its tile: nothing, but it has a caption to drop.
+    CHECK(NextFullScreen(watch, framed, tile, monitor, tile) == FullScreenChange::None);
+    CHECK(!watch.on && watch.armed);
+    // Captionless but still on its tile: not yet.
+    CHECK(NextFullScreen(watch, popup, tile, monitor, tile) == FullScreenChange::None);
+    // Then it covers the display.
+    CHECK(NextFullScreen(watch, popup, whole, monitor, tile) == FullScreenChange::Entered);
+    CHECK(watch.on);
+    CHECK(NextFullScreen(watch, popup, whole, monitor, tile) == FullScreenChange::None && watch.on);
     // The Mac went full screen and the host holds it to a size of its own:
     // still full screen, as far as the app is concerned.
-    CHECK(NextFullScreen(on, popup, RECT{0, 0, 2800, 1800}, monitor, RECT{0, 0, 2800, 1800})
-          == FullScreenChange::None && on);
+    CHECK(NextFullScreen(watch, popup, RECT{0, 0, 2800, 1800}, monitor, RECT{0, 0, 2800, 1800})
+          == FullScreenChange::None && watch.on);
     // Its caption comes back: out.
-    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::Left && !on);
-    CHECK(NextFullScreen(on, framed, tile, monitor, tile) == FullScreenChange::None && !on);
+    watch.hold_until = 5000;
+    CHECK(NextFullScreen(watch, framed, tile, monitor, tile) == FullScreenChange::Left);
+    CHECK(!watch.on && watch.hold_until == 0);
+    CHECK(NextFullScreen(watch, framed, tile, monitor, tile) == FullScreenChange::None);
+    // And in again.
+    CHECK(NextFullScreen(watch, popup, whole, monitor, tile) == FullScreenChange::Entered);
 
-    // A captionless app the host itself sized to the whole display, because
-    // its Mac window is that big, has not gone full screen.
-    on = false;
-    CHECK(NextFullScreen(on, popup, whole, monitor, whole) == FullScreenChange::None && !on);
+    // An app drawn without a caption never had one to drop: maximising it,
+    // or the host sizing it to the whole display, is not full screen.
+    FullScreenWatch frameless;
+    CHECK(NextFullScreen(frameless, popup, whole, monitor, tile) == FullScreenChange::None);
+    CHECK(NextFullScreen(frameless, popup, whole, monitor, whole) == FullScreenChange::None);
+    CHECK(!frameless.on);
+    // Nor is a captioned app maximised without its caption.
+    FullScreenWatch zoomed;
+    CHECK(NextFullScreen(zoomed, framed, tile, monitor, tile) == FullScreenChange::None);
+    CHECK(NextFullScreen(zoomed, maximised, whole, monitor, tile) == FullScreenChange::None);
+    // Nor a window the host itself sized to the whole display.
+    CHECK(NextFullScreen(zoomed, popup, whole, monitor, whole) == FullScreenChange::None);
+    CHECK(!zoomed.on);
+
+    // Waiting for the Mac lasts until its deadline, and not at all without one.
+    FullScreenWatch waiting;
+    CHECK(!WaitingForMac(waiting, 100));
+    waiting.hold_until = 3100;
+    CHECK(WaitingForMac(waiting, 100));
+    CHECK(!WaitingForMac(waiting, 3100));
 }
 
 int wmain(int argc, wchar_t** argv) {

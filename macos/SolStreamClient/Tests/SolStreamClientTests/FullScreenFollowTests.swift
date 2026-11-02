@@ -23,4 +23,11 @@ final class FullScreenFollowTests: XCTestCase {
         XCTAssertEqual(follow(false, full: true, forHost: false), .stay)
         XCTAssertEqual(follow(false, full: false, forHost: false), .stay)
     }
+
+    func testWaitsOutAnAnimation() {
+        XCTAssertEqual(AppWindow.followFullScreen(hostOn: false, isFullScreen: true,
+                                                  enteredForHost: true, transitioning: true), .wait)
+        XCTAssertEqual(AppWindow.followFullScreen(hostOn: true, isFullScreen: false,
+                                                  enteredForHost: false, transitioning: true), .wait)
+    }
 }

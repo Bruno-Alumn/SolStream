@@ -1946,9 +1946,8 @@ struct WindowLock {
     WINDOWPLACEMENT saved_placement{};
     bool saved_topmost = false;
     bool geometry_locked = false;  // the watcher holds this one in place
-    /// The application has gone full screen, as far as the Mac was told; see
-    /// full_screen.h. Watcher thread only, under the lock.
-    bool full_screen = false;
+    /// Whether the application has gone full screen; see full_screen.h.
+    solstream::FullScreenWatch full_screen;
     bool active = false;           // the agent owes this window a restore
     /// Bumped on every claim, so the watcher can tell that the slot it read a
     /// moment ago is still the same tenancy.
@@ -3207,9 +3206,14 @@ constexpr ULONGLONG kRescueIntervalMs = 900;
 
 void RetryOwedRestoresIfDue();
 
+/// How long the host leaves a window that has just gone full screen where the
+/// app put it, for the Mac to follow and ask for a size.
+constexpr ULONGLONG kFullScreenHoldMs = 3000;
+
 /// Tell the Mac when the window in slot `i` goes full screen or comes out of it.
-/// True when it has just gone in. Nothing here messages the window, so a hung
-/// application cannot hold the watcher.
+/// True while the window is to be left where the app put it, for the Mac to
+/// follow. Nothing here messages the window, so a hung application cannot hold
+/// the watcher.
 bool WatchFullScreen(int i, HWND window, uint64_t generation) {
     const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
     RECT bounds{};
@@ -3219,26 +3223,41 @@ bool WatchFullScreen(int i, HWND window, uint64_t generation) {
         || !GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
         return false;
     }
+    const ULONGLONG now = GetTickCount64();
     solstream::FullScreenChange change = solstream::FullScreenChange::None;
+    bool waiting = false;
     EnterCriticalSection(&g_lock_cs);
-    if (g_locks[i].active && g_locks[i].window == window
-        && g_locks[i].generation == generation) {
+    const bool ours = g_locks[i].active && g_locks[i].window == window
+                   && g_locks[i].generation == generation;
+    if (ours) {
         change = solstream::NextFullScreen(g_locks[i].full_screen, style, bounds,
                                            monitor.rcMonitor, g_locks[i].desired);
+        waiting = solstream::WaitingForMac(g_locks[i].full_screen, now);
     }
     LeaveCriticalSection(&g_lock_cs);
     if (change == solstream::FullScreenChange::None) {
-        return false;
+        return waiting;
     }
     const bool entered = change == solstream::FullScreenChange::Entered;
     Log("[agent] window %llu %s full screen", (unsigned long long) IdFromWindow(window),
         entered ? "went" : "came out of");
     // Not retried when it does not go: a Mac that cannot follow carries on as
     // before, and the next change says where things stand.
-    PushFeature(solstream::kPushFullScreen,
-                "{\"type\":\"fullScreen\",\"id\":" + std::to_string(IdFromWindow(window))
-                    + ",\"on\":" + (entered ? "true" : "false") + "}");
-    return entered;
+    const bool told = PushFeature(
+        solstream::kPushFullScreen,
+        "{\"type\":\"fullScreen\",\"id\":" + std::to_string(IdFromWindow(window))
+            + ",\"on\":" + (entered ? "true" : "false") + "}");
+    if (!entered || !told) {
+        // A Mac that never heard is not coming: the window goes back on its tile.
+        return false;
+    }
+    EnterCriticalSection(&g_lock_cs);
+    if (g_locks[i].active && g_locks[i].window == window
+        && g_locks[i].generation == generation && g_locks[i].full_screen.on) {
+        g_locks[i].full_screen.hold_until = now + kFullScreenHoldMs;
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    return true;
 }
 
 /// Put a locked window back if anything moved or resized it, and everything
@@ -3290,8 +3309,8 @@ DWORD WINAPI WatcherProc(LPVOID) {
                 continue;
             }
             if (WatchFullScreen(i, window, generation)) {
-                // Left where the application put it for now: the Mac is about
-                // to go full screen and ask for a size of its own.
+                // Left where the application put it for now: the Mac is going
+                // full screen and will ask for a size of its own.
                 continue;
             }
             // Un-maximised asynchronously, and placed on a later tick once the
@@ -3966,6 +3985,8 @@ void SetLockedGeometry(HWND window, const RECT& client) {
     const int slot = FindSlotLocked(window);
     if (slot >= 0) {
         g_locks[slot].desired = client;
+        // The Mac has asked for its size: no more waiting on it.
+        g_locks[slot].full_screen.hold_until = 0;
     }
     LeaveCriticalSection(&g_lock_cs);
 }
