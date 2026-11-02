@@ -832,6 +832,13 @@ std::vector<WindowInfo> EnumerateWindows() {
 /// is the one place `focus`, `place`, `topmost` and `lock` all pass through, so
 /// it is the place the rule belongs.
 HWND WindowFromId(uint64_t id) {
+    // A window handle is 32 bits wide to user32 whatever the pointer size, so
+    // a high half would name the same window under a second id -- and the
+    // slots that remember a window's original style and place compare the
+    // whole id, so the second would record the first's changes as original.
+    if (id == 0 || id > 0xFFFFFFFFull) {
+        return nullptr;
+    }
     auto handle = reinterpret_cast<HWND>(static_cast<uintptr_t>(id));
     if (!IsWindow(handle)) {
         return nullptr;
@@ -840,6 +847,20 @@ HWND WindowFromId(uint64_t id) {
     GetWindowThreadProcessId(handle, &pid);
     if (pid == GetCurrentProcessId()) {
         Log("[agent] refused a command aimed at SolStream's own window");
+        return nullptr;
+    }
+    // Only an application's own top-level windows, which are all the Mac is
+    // ever given: not a control inside one, and not the taskbar or the
+    // desktop, which `place` could move and `lock` strip of their frames.
+    if (GetAncestor(handle, GA_ROOT) != handle) {
+        Log("[agent] refused a command aimed at a child window");
+        return nullptr;
+    }
+    wchar_t cls[64] = {0};
+    GetClassNameW(handle, cls, 64);
+    if (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0
+        || wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0) {
+        Log("[agent] refused a command aimed at the taskbar or the desktop");
         return nullptr;
     }
     return handle;
@@ -3736,8 +3757,14 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
     if (at == std::string::npos) {
         return false;
     }
-    at = json.find('"', at + needle.size());
-    if (at == std::string::npos) {
+    // The value must be a string itself: the next quote after a null or a
+    // number is the following key's, and taking that as the value made
+    // {"text":null,"seq":3} set the clipboard to "seq".
+    at += needle.size();
+    while (at < json.size() && (json[at] == ' ' || json[at] == '\t' || json[at] == ':')) {
+        ++at;
+    }
+    if (at >= json.size() || json[at] != '"') {
         return false;
     }
 
@@ -4425,6 +4452,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!FieldNumber(line, "x", x) || !FieldNumber(line, "y", y)
             || !FieldNumber(line, "w", w) || !FieldNumber(line, "h", h)) {
             return "{\"type\":\"error\",\"message\":\"place needs id,x,y,w,h\"}";
+        }
+        // Inside what a virtual desktop can be. Past it the int arithmetic
+        // below overflows, and the watcher would hold the window wherever
+        // the wrapped numbers put it until the session ends.
+        constexpr long long kMaxCoordinate = 32767;
+        if (x < -kMaxCoordinate || x > kMaxCoordinate || y < -kMaxCoordinate
+            || y > kMaxCoordinate || w < 0 || w > kMaxCoordinate || h < 0 || h > kMaxCoordinate) {
+            return "{\"type\":\"placed\",\"ok\":false,\"message\":\"out of range\"}";
         }
         std::string refusal;
         HWND window = WindowArg(line, "place needs id,x,y,w,h", refusal);
@@ -5281,6 +5316,10 @@ void ServeAndRetire(SOCKET client) {
     // processes, and if one of those is hung, a cleanup stuck there
     // must not keep every later Mac turned away.
     const std::vector<WindowLock> released = TakeSlotsForRestore();
+    // A file the Mac was sending when it went is not left half written --
+    // and dropped before the slot is freed, so a Mac that takes the slot next
+    // cannot have its own upload dropped by this cleanup.
+    solstream::AbandonUpload();
     // Counted before the slot is freed, so nobody who claims the slot and
     // then reads this count can find it zero while the windows are being
     // moved. That holds only for a reader that claims first: see
@@ -5289,8 +5328,6 @@ void ServeAndRetire(SOCKET client) {
     g_clients_connected.fetch_sub(1);
     RestoreReleasedSlots(released);
     g_windows_restoring.fetch_sub(1);
-    // A file the Mac was sending when it went is not left half written.
-    solstream::AbandonUpload();
     Log("[agent] client disconnected");
 }
 

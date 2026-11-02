@@ -578,7 +578,11 @@ std::wstring UniqueFilePath(const std::wstring& folder, const std::wstring& name
 }
 
 bool IsDirectlyInside(const std::wstring& path, const std::wstring& folder) {
-    if (folder.empty() || path.size() <= folder.size() + 1) {
+    // A NUL ends the path for every API that checks it, and separates the
+    // entries of CF_HDROP: "a.txt\0C:secret" would pass as a.txt and paste as
+    // two files.
+    if (folder.empty() || path.size() <= folder.size() + 1
+        || path.find(L'\0') != std::wstring::npos) {
         return false;
     }
     if (Lower(path.substr(0, folder.size())) != Lower(folder) || path[folder.size()] != L'\\') {

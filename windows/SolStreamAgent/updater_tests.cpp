@@ -3526,6 +3526,8 @@ void TestTransferNames() {
     CHECK(!IsDirectlyInside(folder + L"Other\\a.pdf", folder));
     CHECK(!IsDirectlyInside(folder, folder));
     CHECK(!IsDirectlyInside(L"C:\\Windows\\win.ini", folder));
+    CHECK(!IsDirectlyInside(folder + L"\\real.txt" + std::wstring(1, L'\0') + L"C:secret.docx",
+                            folder));
 }
 
 void TestTransferEncoding() {
