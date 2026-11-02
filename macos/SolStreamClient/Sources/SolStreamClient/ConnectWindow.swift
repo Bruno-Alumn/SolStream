@@ -635,11 +635,20 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// from no answer at all: one is a PC that is on, the other may be asleep.
     private static func canReach(host: String, port: UInt16,
                                  timeoutMs: Int32 = 3000) -> Reach {
-        var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM,
+        // IPv4 first: the PC listens on IPv4 only, and macOS puts a .local
+        // name's link-local IPv6 address ahead of it, so a working PC was
+        // probed where it is not listening and shown as not answering. Any
+        // family only for what has no IPv4 address at all.
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
         var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &info) == 0, let first = info else { return .silent }
+        if getaddrinfo(host, String(port), &hints, &info) != 0 {
+            hints.ai_family = AF_UNSPEC
+            info = nil
+            guard getaddrinfo(host, String(port), &hints, &info) == 0 else { return .silent }
+        }
+        guard let first = info else { return .silent }
         defer { freeaddrinfo(info) }
 
         let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
@@ -660,7 +669,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     private func startDiscovery() {
         browser.onChange = { [weak self] hosts in
-            guard let self else { return }
+            // An answer queued before the window closed: Connect has the PC
+            // now, and probing it again here would race the picker.
+            guard let self, self.browser.isRunning, self.isOpen else { return }
             self.discovered = hosts
 
             // Offer the one obvious choice rather than making them open the list,
@@ -696,9 +707,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// Only before anybody has chosen a host here, and only for a paired host:
     /// a choice is never overridden, and a host that would ask for a token is
     /// not an improvement on one that might yet answer.
+    ///
+    /// Only once the remembered one has been asked and failed, though, not
+    /// while it may yet answer: with two paired PCs on one network, whichever
+    /// answered discovery first replaced the last one used -- and was then
+    /// remembered as the last one used.
     @discardableResult
     private func preferDiscoveredHost() -> Bool {
-        guard !hostChosenHere, state.isReachable != true,
+        guard !hostChosenHere, state.isReachable == false,
               !discovered.contains(where: { $0.connectTarget == state.address }),
               let paired = discovered.first(where: {
                   AgentConnection.hasStoredToken(for: $0.connectTarget)
@@ -815,7 +831,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func recheckLater(_ address: String, generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self, self.probeGeneration == generation,
-                  self.window.isVisible, self.state.address == address,
+                  self.isOpen, self.state.address == address,
                   self.state.isReachable != true, !self.searchingRoutes else { return }
             self.scheduleProbe()
         }
@@ -827,7 +843,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func hostPicked(_ address: String) {
         let typed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         hostChosenHere = true
-        guard typed != state.address else { return }
+        guard typed != state.address else {
+            // The same PC picked again: ask it again, rather than leave a
+            // route search this choice overrides to drop its own recheck.
+            if state.isReachable != true { scheduleProbe() }
+            return
+        }
         state.address = typed
         state.name = discovered.first { $0.connectTarget == typed }?.name
         state.isReachable = nil

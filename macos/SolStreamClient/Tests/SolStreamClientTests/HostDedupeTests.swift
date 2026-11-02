@@ -112,4 +112,14 @@ final class RecentsAgainstDiscoveryTests: XCTestCase {
             ["c.local", "a.local", "b.local"], discovered: [])
         XCTAssertEqual(rows, ["c.local", "a.local", "b.local"])
     }
+
+    /// A name an answer carries is shown without control or formatting
+    /// characters, and not at all when nothing is left.
+    func testDiscoveredNamesAreCleaned() {
+        XCTAssertEqual(HostBrowser.cleanName("  DESKTOP-PC  "), "DESKTOP-PC")
+        XCTAssertEqual(HostBrowser.cleanName("GAMING\u{202E}CP"), "GAMINGCP", "a right-to-left override")
+        XCTAssertEqual(HostBrowser.cleanName("PC\u{0007}\u{0000}"), "PC")
+        XCTAssertNil(HostBrowser.cleanName("\u{202E}\u{200B}"))
+        XCTAssertNil(HostBrowser.cleanName(String(repeating: "x", count: 80)))
+    }
 }

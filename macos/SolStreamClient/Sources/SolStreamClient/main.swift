@@ -750,6 +750,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func failOpen(_ message: String, for agent: AgentConnection) {
         guard isCurrent(agent) else { return }
         picker?.clearBusy()
+        // The list was held while the open ran; what opened or closed on the
+        // PC meanwhile is shown now, not at its next change.
+        if agent.isConnected { refillPicker?() }
         picker?.showFailure(message)
     }
 

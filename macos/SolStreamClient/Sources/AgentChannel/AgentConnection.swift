@@ -2155,7 +2155,6 @@ public final class AgentConnection {
         case "auth":
             let accepted = message["ok"] as? Bool == true
             if accepted {
-                if let token { Self.rememberToken(token, for: host) }
                 // This reply is the last thing that arrives in the clear, and
                 // it carries the host's half of the exchange. The switch happens
                 // here and not a message earlier or later.
@@ -2225,6 +2224,11 @@ public final class AgentConnection {
                     dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
                     return
                 }
+                // Kept only now, once the host has proved it knows it too and
+                // the channel is what it should be: an impostor that answered
+                // "ok" to anything used to have the typed token stored under its
+                // address, and be shown as paired, and chosen automatically.
+                if let token { Self.rememberToken(token, for: host) }
                 mayTalk = true
             } else {
                 Log.error("[agent] token rejected")

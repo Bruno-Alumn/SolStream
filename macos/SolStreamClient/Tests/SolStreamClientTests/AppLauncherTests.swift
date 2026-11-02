@@ -53,13 +53,15 @@ final class AppLauncherTests: XCTestCase {
         XCTAssertGreaterThan(try Data(contentsOf: icns).count, 10_000)
     }
 
+    /// The same app -- the same shortcut on the same PC -- made again, with
+    /// its PC written another way, replaces its own launcher.
     func testMakingItAgainReplacesItInPlace() throws {
         let first = try AppLauncher.make(notepad, icon: nil, opener: "x", in: folder)
-        var renamed = notepad
-        renamed.path = #"C:\Elsewhere\Notepad.lnk"#
-        let second = try AppLauncher.make(renamed, icon: nil, opener: "x", in: folder)
+        var again = notepad
+        again.host = "Gaming-PC."
+        let second = try AppLauncher.make(again, icon: nil, opener: "x", in: folder)
         XCTAssertEqual(first, second)
-        XCTAssertEqual(AppLauncher.link(inLauncher: second), renamed)
+        XCTAssertEqual(AppLauncher.link(inLauncher: second), again)
         let left = try FileManager.default.contentsOfDirectory(atPath: folder.path)
         XCTAssertEqual(left, ["Notepad (PC).app"], "no staging folder is left behind")
     }
@@ -110,5 +112,17 @@ final class AppLauncherTests: XCTestCase {
         let tile: [String: Any] = ["tile-data": ["file-data": ["_CFURLString": "file:///A.app/"]]]
         XCTAssertEqual(AppLauncher.url(ofTile: tile), "file:///A.app/")
         XCTAssertNil(AppLauncher.url(ofTile: ["tile-type": "spacer-tile"]))
+    }
+
+    /// Two apps of one name on one PC get a launcher each.
+    func testTwoAppsOfOneNameGetALauncherEach() throws {
+        _ = try AppLauncher.make(notepad, icon: nil, opener: "x", in: folder)
+        let other = AppLink(host: "gaming-pc", name: "Notepad", path: #"C:\Other\Notepad.lnk"#)
+        let second = try AppLauncher.make(other, icon: nil, opener: "x", in: folder)
+        XCTAssertNotEqual(second.lastPathComponent, "Notepad (PC).app")
+        XCTAssertEqual(AppLauncher.link(inLauncher: folder.appendingPathComponent("Notepad (PC).app")),
+                       notepad, "the first app's launcher is left alone")
+        // And each is found again as its own.
+        XCTAssertEqual(try AppLauncher.make(other, icon: nil, opener: "x", in: folder), second)
     }
 }

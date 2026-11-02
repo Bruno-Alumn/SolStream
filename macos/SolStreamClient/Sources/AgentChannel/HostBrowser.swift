@@ -224,9 +224,8 @@ public final class HostBrowser {
             guard let text = String(bytes: buffer[0..<n], encoding: .utf8),
                   text.hasPrefix(Self.answerPrefix) else { continue }
 
-            let name = String(text.dropFirst(Self.answerPrefix.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, name.count < 64 else { continue }
+            guard let name = Self.cleanName(String(text.dropFirst(Self.answerPrefix.count)))
+            else { continue }
 
             var addressText = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
             var raw = from.sin_addr
@@ -235,6 +234,13 @@ public final class HostBrowser {
 
             lock.lock()
             guard running, generation == run else { lock.unlock(); return }
+            // Anything on the network can answer, so the list is bounded: past
+            // this many PCs a flood of made-up answers would otherwise push
+            // the row to type an address in off the screen.
+            if found[address] == nil, found.count >= Self.maxFound {
+                lock.unlock()
+                continue
+            }
             let host = DiscoveredHost(name: name, address: address)
             let changed = found[address]?.host != host
             found[address] = (host, DispatchTime.now().uptimeNanoseconds)
@@ -244,6 +250,27 @@ public final class HostBrowser {
                 DispatchQueue.main.async { [weak self] in self?.onChange?(snapshot) }
             }
         }
+    }
+
+    /// More PCs than anyone has on one network.
+    static let maxFound = 16
+
+    /// A name an answer carries, fit to show: without control or formatting
+    /// characters -- a right-to-left override would make one PC's row read as
+    /// another's -- and short. Nil for one that is nothing once cleaned.
+    static func cleanName(_ raw: String) -> String? {
+        let kept = raw.unicodeScalars.filter {
+            switch $0.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator,
+                 .privateUse, .surrogate, .unassigned:
+                return false
+            default:
+                return true
+            }
+        }
+        let name = String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, name.count < 64 else { return nil }
+        return name
     }
 
     /// Every host found, by name. Call with `lock` held.

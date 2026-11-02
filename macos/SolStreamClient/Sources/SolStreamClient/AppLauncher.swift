@@ -88,15 +88,20 @@ enum AppLauncher {
         return bundle
     }
 
-    /// Where `link`'s launcher goes: its own if it has one already, else
-    /// "<app> (PC)", else, if that is another PC's, "<app> (<host>)".
+    /// Where `link`'s launcher goes: the one already made for this app on
+    /// this PC if there is one, else the first free of "<app> (PC)",
+    /// "<app> (<host>)", "<app> (PC 2)" and on. Never another app's: two Start
+    /// Menu apps of one name, or of names that clean up the same, had one
+    /// launcher between them, and the Dock icon of the first opened the second.
     static func destination(for link: AppLink, in folder: URL) -> URL {
         let base = fileName(link.name)
-        let plain = folder.appendingPathComponent("\(base) (PC).app", isDirectory: true)
-        guard let existing = Self.link(inLauncher: plain), !AppLink.sameHost(existing.host, link.host) else {
-            return plain
+        var candidates = ["\(base) (PC)", "\(base) (\(fileName(link.host)))"]
+        candidates += (2...20).map { "\(base) (PC \($0))" }
+        let urls = candidates.map { folder.appendingPathComponent("\($0).app", isDirectory: true) }
+        if let own = urls.first(where: { Self.link(inLauncher: $0)?.sameApp(as: link) == true }) {
+            return own
         }
-        return folder.appendingPathComponent("\(base) (\(fileName(link.host))).app", isDirectory: true)
+        return urls.first { !FileManager.default.fileExists(atPath: $0.path) } ?? urls[0]
     }
 
     /// The link a launcher at `url` carries, if it is one of ours.
