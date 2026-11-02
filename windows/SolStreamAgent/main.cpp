@@ -5051,6 +5051,20 @@ bool HiddenByApplication(const CURSORINFO& info) {
     return GetSystemMetrics(SM_MOUSEPRESENT) != 0;
 }
 
+/// Whether the desktop taking input is the user's own, rather than the lock
+/// screen, Ctrl+Alt+Del or a UAC prompt -- which a process in the user's
+/// session cannot open, or finds under another name.
+bool OnUserDesktop() {
+    HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+    if (!input) {
+        return false;
+    }
+    wchar_t name[64] = {};
+    const BOOL named = GetUserObjectInformationW(input, UOI_NAME, name, sizeof(name), nullptr);
+    CloseDesktop(input);
+    return named && _wcsicmp(name, L"Default") == 0;
+}
+
 DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
     const LONG mine = (LONG) (LONG_PTR) parameter;
     HCURSOR last = nullptr;
@@ -5068,16 +5082,31 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
         }
         CURSORINFO info{};
         info.cbSize = sizeof(info);
-        if (!GetCursorInfo(&info)) {
-            // A failed read -- the secure desktop holding the input during a
-            // UAC prompt, say -- says nothing about the application, so the
-            // last state stands and nothing is sent. Either answer could be
-            // wrong: "hidden" has the Mac take the mouse for a game that never
-            // asked, and a shape gives it back from one that still wants it.
+        const bool read = GetCursorInfo(&info) != FALSE;
+        // The lock screen, Ctrl+Alt+Del or a UAC prompt has the input: no
+        // application is hiding the cursor there, whatever the last one did,
+        // and nothing on the Mac can answer them. A game's "hidden" carried
+        // over had the Mac keep the mouse over a picture of the lock screen
+        // until the PC was unlocked. Asked only when it matters -- a cursor
+        // that would be reported hidden, or a read that failed -- since it
+        // opens a desktop handle; and asked of the reading now, not the last
+        // report, or a lock screen that reads as hidden would alternate.
+        const bool would_hide = read && HiddenByApplication(info);
+        const bool elsewhere = (!read || would_hide) && !OnUserDesktop();
+        if (!read && !elsewhere) {
+            // A failed read on the user's own desktop says nothing about the
+            // application, so the last state stands and nothing is sent.
+            // Either answer could be wrong: "hidden" has the Mac take the
+            // mouse for a game that never asked, and a shape gives it back
+            // from one that still wants it.
             Sleep(40);
             continue;
         }
-        const bool hidden = HiddenByApplication(info);
+        if (elsewhere) {
+            info.flags = CURSOR_SHOWING;
+            info.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        }
+        const bool hidden = !elsewhere && would_hide;
         // No handle while hidden: a game swapping cursors it never shows is no
         // change worth a line.
         HCURSOR current = hidden ? nullptr : info.hCursor;
