@@ -166,7 +166,12 @@ public final class VideoDecoder {
         // change) and the host will keep sending the *same* SPS/PPS, so waiting
         // for a parameter-set change would blackscreen the stream for good.
         let sets = parameterSetTypes.compactMap { parameterSets[$0] }
-        if sets.count == parameterSetTypes.count, parameterSetsChanged || session == nil {
+        //
+        // After a build has failed, only an IDR tries again: a P-frame cannot
+        // start a stream, and trying with each one counted every frame as a
+        // failure -- the back-off below measures IDRs asked for and tried.
+        if sets.count == parameterSetTypes.count, parameterSetsChanged || session == nil,
+           buildFailures == 0 || startsOver {
             rebuildSession(parameterSets: sets)
         }
 
@@ -340,11 +345,11 @@ public final class VideoDecoder {
         }
     }
 
-    /// Ask the host for an IDR, at most every `keyframeRequestInterval` when
-    /// `throttled`. Returns whether it asked. Call with `lock` held.
     /// Builds in a row that failed with parameter sets in hand; see `decode`.
     private var buildFailures = 0
 
+    /// Ask the host for an IDR, at most every `keyframeRequestInterval` when
+    /// `throttled`. Returns whether it asked. Call with `lock` held.
     @discardableResult
     private func requestKeyframeNow(throttled: Bool) -> Bool {
         let now = Date()

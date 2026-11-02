@@ -792,10 +792,6 @@ public final class MediaClient {
             // so after this thread stalled -- a decoder rebuilt, a slow log
             // write -- every picture looked idle while its remaining fragments
             // sat queued behind the stall, was given up, and cost a keyframe.
-            if Self.millis(since: lastTickAt) >= 25, Self.nothingQueued(on: socket) {
-                reassembler.tick()
-                lastTickAt = DispatchTime.now().uptimeNanoseconds
-            }
             let datagram = Data(buffer[0..<n])
             let opened = SMTPacket.open(datagram, direction: fromHost, window: &window)
             stateLock.lock()
@@ -803,8 +799,16 @@ public final class MediaClient {
             stats.bytesReceived &+= UInt64(n)
             if opened != nil { lastHeardAt = DispatchTime.now().uptimeNanoseconds }
             stateLock.unlock()
-            guard let (plaintext, _) = opened else { continue }
-            handle(plaintext)
+            if let (plaintext, _) = opened { handle(plaintext) }
+            // After the datagram in hand is handled, so that "nothing queued"
+            // means everything that arrived has been seen. And at least every
+            // 100 ms whatever the socket holds, so a receive thread that never
+            // empties its queue still retires what will not complete.
+            let sinceTick = Self.millis(since: lastTickAt)
+            if sinceTick >= 100 || (sinceTick >= 25 && Self.nothingQueued(on: socket)) {
+                reassembler.tick()
+                lastTickAt = DispatchTime.now().uptimeNanoseconds
+            }
 
         }
     }
