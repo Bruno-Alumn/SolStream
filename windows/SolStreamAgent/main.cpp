@@ -2594,6 +2594,44 @@ void StreamedWindowFlashed(HWND window) {
     }
 }
 
+/// Links clicked on the PC, waiting for the watcher to send. Queued rather
+/// than sent from the window's thread, where a Mac slow to read would hold
+/// the host's window -- and the click's 3-second wait would give up and open
+/// the link in Edge as well.
+std::mutex g_links_cs;
+std::vector<std::string> g_links_pending;  // guarded by g_links_cs
+
+/// From the host window: a link handed over by `--open-url`. True when a
+/// signed-in Mac that understands links will be sent it; false sends the
+/// click to Edge. Any program on the PC can send this, so the link is checked
+/// again, and no more than one is taken every quarter second.
+bool QueueLinkForMac(const std::string& url) {
+    if (!solstream::IsForwardableLink(url)) {
+        return false;
+    }
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0
+        || (InterlockedCompareExchange(&g_push_features, 0, 0) & solstream::kPushOpenUrl) == 0) {
+        return false;
+    }
+    static ULONGLONG last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (last != 0 && now - last < 250) {
+        return true;  // A burst: taken, and dropped.
+    }
+    last = now;
+    {
+        std::lock_guard<std::mutex> lock(g_links_cs);
+        if (g_links_pending.size() >= 4) {
+            return true;
+        }
+        g_links_pending.push_back(url);
+    }
+    if (g_watcher_wake) {
+        SetEvent(g_watcher_wake);
+    }
+    return true;
+}
+
 /// Tell the Mac what changed about the windows it streams: a new title, at
 /// most once a second, and a flash, at most once every few seconds per
 /// window -- an app flashes its button over and over until looked at, and one
@@ -2603,6 +2641,17 @@ void NotifyStreamedWindows() {
     static std::map<HWND, ULONGLONG> flashed_at;
     static ULONGLONG titles_at = 0;
     const ULONGLONG now = GetTickCount64();
+
+    std::vector<std::string> links;
+    {
+        std::lock_guard<std::mutex> lock(g_links_cs);
+        links.swap(g_links_pending);
+    }
+    for (const std::string& url : links) {
+        Log("[links] sending a %s link to the Mac", url.rfind("mailto:", 0) == 0 ? "mail" : "web");
+        PushLine("{\"type\":\"openURL\",\"url\":\"" + JsonEscape(url) + "\"}", 0,
+                 solstream::kPushOpenUrl);
+    }
 
     std::vector<HWND> flashed;
     {
@@ -7310,14 +7359,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     solstream::SetShellFlashHandler(StreamedWindowFlashed);
-    solstream::SetLinkHandler([](const std::string& url) {
-        // Re-checked here: any program on the PC can send this message.
-        if (!solstream::IsForwardableLink(url) || g_clients_authenticated.load() == 0) {
-            return false;
-        }
-        Log("[links] sending a %s link to the Mac", url.rfind("mailto:", 0) == 0 ? "mail" : "web");
-        return PushLine("{\"type\":\"openURL\",\"url\":\"" + JsonEscape(url) + "\"}");
-    });
+    solstream::SetLinkHandler(QueueLinkForMac);
     solstream::SetEndSessionHandler([] {
         // As the exit below does, without the ExitProcess: Windows ends the
         // process itself once the window has answered.
