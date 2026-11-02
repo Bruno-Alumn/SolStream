@@ -474,7 +474,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let tailscaleOff = StreamSettings.isRemote(host: state.address)
             && state.isReachable != true && !tailscale.isConnected
         if tailscaleOff {
-            hintLabel.stringValue = "That's a Tailscale address, and Tailscale is off on this Mac."
+            // A MagicDNS name is certainly Tailscale's. A 100.64/10 address
+            // only probably is: phone hotspots' carrier NAT and other VPNs
+            // hand out the same range, so it is said as an if.
+            let certain = state.address.lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".")).hasSuffix(".ts.net")
+            hintLabel.stringValue = certain
+                ? "That's a Tailscale address, and Tailscale is off on this Mac."
+                : "If that's a Tailscale address, turn Tailscale on on this Mac."
         }
         hintLabel.textColor = DS.textMuted
         connectButton.isEnabled = !state.address.isEmpty
