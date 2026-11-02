@@ -944,6 +944,9 @@ public final class AgentConnection {
         }
     }
 
+    /// The host this connection was made to, as it was given.
+    public var hostName: String { host }
+
     /// Whether a socket is up and this connection can carry a request now.
     ///
     /// Not "wants to be connected": `wantsConnection` stays true through the

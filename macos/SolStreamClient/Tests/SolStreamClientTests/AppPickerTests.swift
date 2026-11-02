@@ -213,4 +213,32 @@ final class AppPickerTests: XCTestCase {
         table.keyDown(with: key("\r", code: 36, in: window))
         XCTAssertEqual(chosen, ["Calculator"])
     }
+
+    // MARK: - Failures on the status line
+
+    /// The PC was asleep, then came up: its lists fill, and the red message
+    /// about not reaching it goes with them.
+    func testAConnectionFailureGoesWhenTheConnectionIsBack() {
+        let picker = makePicker()
+        picker.showFailure("Can't reach pc.", isConnection: true)
+        picker.connectionIsBack()
+        picker.present(windows: [], apps: [RemoteApp(name: "Notepad", path: "C:\\Notepad.lnk")])
+        XCTAssertEqual(picker.statusText, "0 windows open · 1 app")
+    }
+
+    /// Why an open failed stays until somebody acts, reconnect or not.
+    func testAnOpenFailureStaysWhenTheConnectionIsBack() {
+        let picker = makePicker()
+        picker.showFailure("Notepad didn't open a window.")
+        picker.connectionIsBack()
+        picker.present(windows: [], apps: [])
+        XCTAssertEqual(picker.statusText, "Notepad didn't open a window.")
+    }
+
+    func testAnOpenThatFailedOfflineBlamesTheConnection() {
+        XCTAssertTrue(AppDelegate.openFailedOffline(host: "pc", reconnecting: true)
+            .contains("reconnecting"))
+        XCTAssertTrue(AppDelegate.openFailedOffline(host: "pc", reconnecting: false)
+            .contains("connect again"))
+    }
 }

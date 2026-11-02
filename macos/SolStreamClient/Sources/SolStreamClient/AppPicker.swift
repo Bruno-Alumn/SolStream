@@ -320,14 +320,30 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// An open under way from this picker, which owns the list until it ends.
     var isOpening: Bool { isBusy }
 
+    /// What the status line says.
+    var statusText: String { statusLabel.stringValue }
+
     /// A failure is on the status line; see `present`.
     private var showsFailure = false
+    /// The failure on the status line is the connection's, and goes when the
+    /// connection comes back; one from an open stays until somebody acts.
+    private var failureIsConnection = false
 
-    func showFailure(_ message: String) {
+    func showFailure(_ message: String, isConnection: Bool = false) {
         showsFailure = true
+        failureIsConnection = isConnection
         setSpinning(false)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.danger
+    }
+
+    /// The connection is back. Its failure no longer stands, and the refill
+    /// that follows puts the counts in its place; red beside a list that
+    /// works said the PC could not be reached when it could.
+    func connectionIsBack() {
+        guard showsFailure, failureIsConnection else { return }
+        showsFailure = false
+        failureIsConnection = false
     }
 
     /// Something is being waited for and will resolve by itself -- the PC

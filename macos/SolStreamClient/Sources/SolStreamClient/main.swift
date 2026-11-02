@@ -18,6 +18,8 @@ struct SolStreamApp {
 SolStreamApp.main()
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The display stays on while a stream is open; see StayAwake.
+    private let stayAwake = StayAwake()
     private var connectWindow: ConnectWindow?
     private var agent: AgentConnection?
     private var session: StreamSession?
@@ -534,7 +536,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch state {
             case .failed(let message):
                 // `explain` already names the host and says what to do.
-                picker?.showFailure(message)
+                picker?.showFailure(message, isConnection: true)
+            case .connected:
+                picker?.connectionIsBack()
             case .waiting(let message):
                 picker?.showWaiting(message)
             case .needsToken(let host, let rejected):
@@ -756,8 +760,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         picker?.clearBusy()
         // The list was held while the open ran; what opened or closed on the
         // PC meanwhile is shown now, not at its next change.
-        if agent.isConnected { refillPicker?() }
-        picker?.showFailure(message)
+        if agent.isConnected {
+            refillPicker?()
+            picker?.showFailure(message)
+        } else {
+            // With no connection every request fails at once, and the open's
+            // own words -- restart SolStream on the PC, the app opened no
+            // window -- blamed the PC or the app for a dropped connection.
+            picker?.showFailure(Self.openFailedOffline(host: agent.hostName,
+                                                       reconnecting: agent.willReconnect),
+                                isConnection: true)
+        }
+    }
+
+    /// What a failed open says when the connection is what failed.
+    static func openFailedOffline(host: String, reconnecting: Bool) -> String {
+        reconnecting
+            ? "The connection to \(host) dropped. SolStream is reconnecting; "
+              + "try again once the list refreshes."
+            : "The connection to \(host) was lost. Go back and connect again."
     }
 
     /// Stream one window, keeping the picker up until there is one to look at.
@@ -1120,6 +1141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let session = StreamSession(host: host, config: config, session: media)
         self.session = session
+        stayAwake.hold()
         streamConfig = config
         streamDisplay = display
         streamHost = host
@@ -1235,12 +1257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 MainActor.assumeIsolated {
                     self.promptForToken(host: host, rejected: rejected, over: parent,
                                         agent: agent) { reason in
-                        self.appWindows.forEach { $0.setError("Can't reconnect", detail: reason) }
+                        self.showEnded("Can't reconnect", detail: reason)
                     }
                 }
             case .failed(let message) where agent?.willReconnect == false:
                 self.connectionLostShown = true
-                self.appWindows.forEach { $0.setError("Lost the connection", detail: message) }
+                self.showEnded("Lost the connection", detail: message)
             case .waiting(let message):
                 // The host is still holding the connection this Mac lost; the
                 // channel knocks again by itself and says when it gives up.
@@ -1306,6 +1328,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .live:
                 self.mediaRecoveryAttempts = 0
                 self.appWindows.forEach { $0.hideStatus() }
+                // Pictures again after an error said the stream had ended.
+                self.stayAwake.hold()
             case .stalled(let seconds):
                 self.show(self.notice(for: .stalled(seconds: seconds), agent: agent, host: host))
             case .lost:
@@ -1315,11 +1339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // (`.streaming`), so this is a stream that cannot be got
                     // back by restarting it, and Try Again is the honest offer
                     // rather than a fourth "Reconnecting…" and a fifth.
-                    self.appWindows.forEach {
-                        $0.setError("Lost the stream",
-                                    detail: "No picture from \(host) after three restarts. Try Again; "
-                                        + "if it keeps happening, check the PC's network.")
-                    }
+                    self.showEnded("Lost the stream",
+                                   detail: "No picture from \(host) after three restarts. Try Again; "
+                                       + "if it keeps happening, check the PC's network.")
                     return
                 }
                 // With the agent channel down too, `onReconnected` recovers.
@@ -1380,12 +1402,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Put a notice on every stream window. `.restart` is for the caller to act
     /// on, and shows nothing here.
+    /// Every window says the stream has ended, and the display may sleep
+    /// again: a window left saying so -- the PC shut down while nobody was
+    /// at the Mac -- must not keep the screen on until someone comes back.
+    private func showEnded(_ title: String, detail: String) {
+        appWindows.forEach { $0.setError(title, detail: detail) }
+        stayAwake.release()
+    }
+
     private func show(_ notice: StreamNotice) {
         switch notice {
         case .status(let title, let detail):
             appWindows.forEach { $0.setStatus(title, detail: detail) }
         case .error(let title, let detail):
-            appWindows.forEach { $0.setError(title, detail: detail) }
+            showEnded(title, detail: detail)
         case .restart, .keep:
             break
         }
@@ -1425,10 +1455,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }) {
             Log.info("[app] \(display.name) changed while the stream was down; "
                      + "returning to the picker")
-            appWindows.forEach {
-                $0.setError("Lost the stream",
-                            detail: "\(host)'s display changed. Try Again to pick the app again.")
-            }
+            showEnded("Lost the stream",
+                      detail: "\(host)'s display changed. Try Again to pick the app again.")
             return
         }
 
@@ -1888,6 +1916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pendingRestart = nil
         clipboard?.stop()
         clipboard = nil
+        stayAwake.release()
         closing()
         if !keepsSession {
             MainActor.assumeIsolated { Updater.shared.isStreaming = false }

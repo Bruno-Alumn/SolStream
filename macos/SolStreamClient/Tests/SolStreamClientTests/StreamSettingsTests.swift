@@ -10,6 +10,8 @@ final class StreamSettingsTests: XCTestCase {
         XCTAssertTrue(StreamSettings.isRemote(host: "100.64.0.1"))
         XCTAssertTrue(StreamSettings.isRemote(host: "pc.tailnet-1234.ts.net"))
         XCTAssertTrue(StreamSettings.isRemote(host: "PC.Tailnet.TS.NET."))
+        XCTAssertTrue(StreamSettings.isRemote(host: "fd7a:115c:a1e0::1234:5678"))
+        XCTAssertTrue(StreamSettings.isRemote(host: "[FD7A:115C:A1E0:AB12::1]"))
     }
 
     func testTheHomeNetworkDoesNot() {
@@ -18,6 +20,7 @@ final class StreamSettingsTests: XCTestCase {
         XCTAssertFalse(StreamSettings.isRemote(host: "100.63.0.1"), "just below Tailscale's range")
         XCTAssertFalse(StreamSettings.isRemote(host: "100.128.0.1"), "just above it")
         XCTAssertFalse(StreamSettings.isRemote(host: "desktop-example.local"))
+        XCTAssertFalse(StreamSettings.isRemote(host: "fd00::1"), "another private IPv6 range")
     }
 
     func testAutomaticQualityStartsLowerOverTailscale() {

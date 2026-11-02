@@ -359,11 +359,15 @@ final class StreamSettings {
     // MARK: - Applying
 
     /// Whether `host` is reached over Tailscale -- an address in
-    /// 100.64.0.0/10 or a MagicDNS `*.ts.net` name -- and so possibly over the
-    /// internet, for the Automatic choices.
+    /// 100.64.0.0/10 or fd7a:115c:a1e0::/48, or a MagicDNS `*.ts.net` name --
+    /// and so possibly over the internet, for the Automatic choices.
     static func isRemote(host: String) -> Bool {
         let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
         if name.hasSuffix(".ts.net") { return true }
+        // Tailscale's IPv6 range, fd7a:115c:a1e0::/48, as it appears in a
+        // typed address with or without brackets.
+        let bare = name.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if bare.hasPrefix("fd7a:115c:a1e0:") { return true }
         let parts = name.split(separator: ".").compactMap { Int($0) }
         guard parts.count == 4 else { return false }
         return parts[0] == 100 && (64...127).contains(parts[1])
