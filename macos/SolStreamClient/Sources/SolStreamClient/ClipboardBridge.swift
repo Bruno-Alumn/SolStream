@@ -126,6 +126,9 @@ final class ClipboardBridge {
     /// The host sequence whose picture failed to come once and was asked for
     /// again; see `pullImage`.
     private var retriedImageSequence: Int?
+    /// The Mac copy that the host failed to take once and is sent again; see
+    /// `sendAgainOnce`.
+    private var retriedChangeCount: Int?
     private var inFlight = false
     /// A sync asked for while a request was on the wire, run as soon as it is
     /// answered rather than left to the next tick.
@@ -438,6 +441,7 @@ final class ClipboardBridge {
                             // the PC's clipboard open — so the PC does not hold
                             // it, and the same text copied again goes again.
                             self.lastSyncedText = nil
+                            self.sendAgainOnce(changeCount)
                         }
                         self.settle()
                     }
@@ -458,7 +462,7 @@ final class ClipboardBridge {
             if local == nil, let png = Self.png(on: pasteboard) {
                 let digest = Self.digest(png)
                 if digest != lastSyncedImage {
-                    pushImage(png, digest: digest)
+                    pushImage(png, digest: digest, changeCount: changeCount)
                     return
                 }
             } else {
@@ -631,7 +635,7 @@ final class ClipboardBridge {
     }
 
     /// The Mac's picture to the PC.
-    private func pushImage(_ png: Data, digest: String) {
+    private func pushImage(_ png: Data, digest: String, changeCount: Int) {
         lastSyncedImage = digest
         lastSyncedText = nil
         inFlight = true
@@ -646,10 +650,25 @@ final class ClipboardBridge {
                     self.adoptsRemoteBaseline = false
                 } else if self.lastSyncedImage == digest {
                     self.lastSyncedImage = nil
+                    self.sendAgainOnce(changeCount)
                 }
                 self.settle()
             }
         }
+    }
+
+    /// A copy the host did not take -- most often another program holding the
+    /// PC's clipboard open for longer than the host waits -- goes once more at
+    /// the next tick. It was counted as handled when it went, so without this
+    /// it never went again, and a paste on the PC got what was there before.
+    /// Once: one the host cannot take at all is not sent every second.
+    private func sendAgainOnce(_ changeCount: Int) {
+        guard pasteboard.changeCount == changeCount, lastLocalChangeCount == changeCount,
+              retriedChangeCount != changeCount else { return }
+        retriedChangeCount = changeCount
+        Log.info("[clipboard] the PC did not take the copy; sending it once more")
+        // Anything but this count: the next tick sees it as unhandled.
+        lastLocalChangeCount = changeCount - 1
     }
 
     /// The PC's picture to the Mac, unless the Mac copied something since the

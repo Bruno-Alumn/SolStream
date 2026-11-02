@@ -3919,6 +3919,11 @@ void TestTransferNames() {
     CHECK(SafeFileName(L"../../etc/passwd") == L"passwd");
     CHECK(SafeFileName(L"a:b*c?.txt") == L"a_b_c_.txt");
     CHECK(SafeFileName(L"..") == L"file");
+    // A long name cut at a space, with no extension to follow it.
+    CHECK(SafeFileName(std::wstring(119, L'a') + L" tail") == std::wstring(119, L'a'));
+    // An "extension" too long to be one is cut through like the rest.
+    CHECK(SafeFileName(std::wstring(118, L'a') + L" ." + std::wstring(25, L'x'))
+          == std::wstring(118, L'a'));
     CHECK(SafeFileName(L"notes. ") == L"notes");
     CHECK(SafeFileName(L".hidden") == L"hidden");
     CHECK(SafeFileName(L"CON.txt") == L"_CON.txt");

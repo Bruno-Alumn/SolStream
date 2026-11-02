@@ -774,6 +774,42 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
     }
 
+    /// A copy the host did not take goes once more by itself, without being
+    /// copied again -- and only once: one the PC cannot take at all is not
+    /// sent every second.
+    func testACopyTheHostDidNotTakeIsSentOnceMore() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        copyOnTheMac("ssh deploy@example")
+        bridge.syncNow()
+        fake.answerWrite(sequence: nil)
+        settle()
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes, ["ssh deploy@example", "ssh deploy@example"])
+        fake.answerWrite(sequence: nil)
+        settle()
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.writes.count, 2, "sent a third time")
+    }
+
+    func testAPictureTheHostDidNotTakeIsSentOnceMore() {
+        bridge.start(resuming: false)
+        streamHasKeyboard = true
+        let picture = png()
+        pasteboard.clearContents()
+        pasteboard.setData(picture, forType: .png)
+        bridge.syncNow()
+        fake.answerImageWrite(sequence: nil)
+        settle()
+
+        bridge.syncNow()
+        XCTAssertEqual(fake.imageWrites, [picture, picture])
+        fake.answerImageWrite(sequence: 4)
+        settle()
+    }
+
     /// Turned on mid-stream, sync starts from nothing having crossed: either
     /// side may have copied anything while it was off.
     func testTurningSyncBackOnForgetsWhatCrossedBefore() {

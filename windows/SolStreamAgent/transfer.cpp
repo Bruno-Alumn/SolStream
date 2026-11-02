@@ -296,6 +296,16 @@ struct Upload {
 };
 Upload g_upload;
 
+/// Whether Windows deletes the file when its handle closes. Set on an upload
+/// from its first byte and cleared after its last, so a host that dies
+/// mid-way -- killed, crashed, the PC switched off -- leaves no half file
+/// behind under the whole one's name, which DropUpload alone could not see to.
+bool DeleteWhenClosed(HANDLE file, bool remove) {
+    FILE_DISPOSITION_INFO disposition{remove ? TRUE : FALSE};
+    return SetFileInformationByHandle(file, FileDispositionInfo, &disposition,
+                                      sizeof(disposition)) != FALSE;
+}
+
 /// An upload that never finished goes, rather than leaving half a file
 /// in Downloads looking like a whole one. The caller holds the mutex.
 void DropUpload() {
@@ -591,7 +601,19 @@ std::wstring SafeFileName(const std::wstring& name) {
         if (keep > 0 && cleaned[keep - 1] >= 0xD800 && cleaned[keep - 1] <= 0xDBFF) {
             --keep;
         }
-        cleaned = cleaned.substr(0, keep) + extension;
+        std::wstring kept = cleaned.substr(0, keep);
+        // With nothing after it, a cut that lands on a space or a dot leaves
+        // a name Windows strips -- and the path sent back to the Mac, to put
+        // on the clipboard, would name a file that is not there.
+        if (extension.empty()) {
+            while (!kept.empty() && (kept.back() == L'.' || kept.back() == L' ')) {
+                kept.pop_back();
+            }
+            if (kept.empty()) {
+                kept = L"file";
+            }
+        }
+        cleaned = kept + extension;
     }
     return cleaned;
 }
@@ -693,10 +715,16 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
         if (folder.empty() || path.empty()) {
             return Error("upload", "no folder to write to");
         }
-        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE) {
             return Error("upload", "could not create the file");
+        }
+        // Best effort: where it cannot be set, DropUpload still covers every
+        // ending but the host's own.
+        if (!DeleteWhenClosed(file, true)) {
+            Log("[transfer] could not mark the upload to go if the host stops: %lu",
+                GetLastError());
         }
         g_upload.file = file;
         g_upload.path = path;
@@ -724,6 +752,13 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
     if (g_upload.written < g_upload.total) {
         return "{\"type\":\"upload\",\"ok\":true,\"received\":"
              + std::to_string(g_upload.written) + "}";
+    }
+    // Kept now it is whole. If that cannot be said, closing would delete it,
+    // so it is reported rather than claimed.
+    if (!DeleteWhenClosed(g_upload.file, false)) {
+        Log("[transfer] could not keep the finished upload: %lu", GetLastError());
+        DropUpload();
+        return Error("upload", "could not finish the file on the PC");
     }
     CloseHandle(g_upload.file);
     const std::string path = ToUtf8(g_upload.path);
