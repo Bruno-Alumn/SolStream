@@ -370,6 +370,18 @@ public final class InputCapture {
     /// pressed while ⌘ was down -- see `releaseChordKeys`.
     private var heldKeys: [UInt16: (key: HostKey, chord: Bool)] = [:]
 
+    // MARK: The Mac's input method
+
+    /// Hands a key to the Mac's input method -- Japanese, Chinese, Korean --
+    /// and says whether it took it. Set by the window, whose view is the
+    /// input method's client; nil leaves every key to the PC.
+    public var inputMethodHandles: ((NSEvent) -> Bool)?
+    /// Whether the input method has text it has not settled on yet.
+    public var inputMethodComposing: (() -> Bool)?
+    /// Keys whose press went to the input method: their release does too,
+    /// not to the PC, which never saw them go down.
+    private var keysAtInputMethod: Set<UInt16> = []
+
     /// Whether a key is physically down on this Mac right now, by macOS key
     /// code. Replaceable so the tests decide rather than the keyboard of the
     /// Mac running them.
@@ -504,6 +516,55 @@ public final class InputCapture {
     /// rather than against a restatement of the mapping table: what matters is
     /// the bytes a ⌘C actually puts on the wire.
     @discardableResult
+    /// Whether a key goes to the Mac's input method rather than the PC.
+    ///
+    /// Keys go to the PC by position, typed with the PC's layout, which is
+    /// right for every layout but the ones that are not a layout at all: a
+    /// Japanese, Chinese or Korean input method turns several keys into one
+    /// word, chosen from candidates. With one of those selected on the Mac,
+    /// a key that types goes to it instead, and so does every key while it
+    /// is composing -- Return to settle, Delete to take back, the arrows to
+    /// pick a candidate. What it settles on reaches the PC as text
+    /// (`sendText`). Keys that do not type, with nothing being composed, still
+    /// go to the PC as keys: Return, Tab, the arrows, Escape. ⌘ and ⌃ chords
+    /// never go to the input method.
+    private func routeToInputMethod(_ event: NSEvent) -> Bool {
+        if event.type == .keyUp {
+            return keysAtInputMethod.remove(event.keyCode) != nil
+        }
+        guard let hand = inputMethodHandles, Self.inputMethodSelected(),
+              event.modifierFlags.intersection([.command, .control]).isEmpty else { return false }
+        let composing = inputMethodComposing?() ?? false
+        guard composing || Self.typesCharacters(event), hand(event) else { return false }
+        keysAtInputMethod.insert(event.keyCode)
+        return true
+    }
+
+    /// Whether the selected input source is an input method that composes,
+    /// as opposed to a keyboard layout -- or an input method in a mode that
+    /// types Latin letters straight, like Japanese's alphanumeric mode.
+    static func inputMethodSelected() -> Bool {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            return false
+        }
+        func property(_ key: CFString) -> AnyObject? {
+            TISGetInputSourceProperty(source, key).map {
+                Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue()
+            }
+        }
+        let type = property(kTISPropertyInputSourceType) as? String
+        let asciiCapable = (property(kTISPropertyInputSourceIsASCIICapable) as? Bool) ?? true
+        return type == (kTISTypeKeyboardInputMode as String) && !asciiCapable
+    }
+
+    /// Whether a key press types something: a letter, a digit, punctuation,
+    /// a space -- not Return, Tab, Escape, an arrow or a function key.
+    static func typesCharacters(_ event: NSEvent) -> Bool {
+        guard let scalar = event.characters?.unicodeScalars.first else { return false }
+        return !CharacterSet.controlCharacters.contains(scalar)
+            && !(0xF700...0xF8FF).contains(scalar.value)
+    }
+
     func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard isCapturing else { return false }
 
@@ -524,6 +585,7 @@ public final class InputCapture {
                     || !Self.isReserved(keyCode: event.keyCode, flags: event.modifierFlags) else {
                 return false
             }
+            if held == nil, routeToInputMethod(event) { return true }
             // A key already down on the host is let go of as it was pressed.
             // Anything else is first asked whether a key typed it at all --
             // except the key after a dead key, see `followsDeadKey`.

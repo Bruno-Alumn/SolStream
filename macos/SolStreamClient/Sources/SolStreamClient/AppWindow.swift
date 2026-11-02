@@ -67,6 +67,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private let pill = QualityPill()
     /// Says how to get the mouse back, the first time this window takes it.
     private let captureHint = CaptureHint()
+    /// What the Mac's input method is composing, before it goes to the PC.
+    private let compositionNote = CaptureHint(text: "")
     /// What is happening to files dropped on the window; see `filesDropped`.
     private let transferNote = CaptureHint(text: "")
     /// One sending at a time across every window: they share one connection,
@@ -464,6 +466,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
                                                 constant: -2 * DS.Space.x4),
         ])
         view.onDropFiles = { [weak self] urls in self?.filesDropped(urls) ?? false }
+        // Above the transfer note, where the input method's candidates open
+        // (`MetalView.firstRect`).
+        view.addSubview(compositionNote)
+        NSLayoutConstraint.activate([
+            compositionNote.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            compositionNote.bottomAnchor.constraint(equalTo: view.bottomAnchor,
+                                                    constant: -DS.Space.x4 - 40),
+            compositionNote.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor,
+                                                   constant: -2 * DS.Space.x4),
+        ])
 
         let capture = InputCapture()
         capture.attach(to: view)
@@ -488,6 +500,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // as the text it is. The view must have the keyboard focus for the
         // system to offer either.
         view.onInsertText = { [weak capture] text in capture?.sendText(text) }
+        // A Japanese, Chinese or Korean input method selected on the Mac
+        // composes here, and only what it settles on goes to the PC.
+        capture.inputMethodHandles = { [weak view] event in view?.handToInputMethod(event) ?? false }
+        capture.inputMethodComposing = { [weak view] in view?.hasMarkedText() ?? false }
+        view.onMarkedText = { [weak self] text in self?.showComposition(text) }
         window.initialFirstResponder = view
         window.makeFirstResponder(view)
 
@@ -1013,6 +1030,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
     static func sendingText(_ count: Int, name: String, percent: Int) -> String {
         let what = count == 1 ? name : "\(count) files"
         return "Sending \(what) to the PC… \(min(max(percent, 0), 100))%"
+    }
+
+    private func showComposition(_ text: String?) {
+        guard let text else {
+            compositionNote.dismiss()
+            return
+        }
+        compositionNote.text = text
+        compositionNote.hold()
     }
 
     /// The note at the foot of the window: held while `seconds` is nil.

@@ -151,6 +151,11 @@ public final class MetalView: NSView {
     /// as well and be sent twice.
     public var onInsertText: ((String) -> Void)?
 
+    /// The input method's word as it is being composed, nil once it is
+    /// settled or dropped; see `setMarkedText`.
+    public var onMarkedText: ((String?) -> Void)?
+    var markedText = ""
+
     /// Files dragged onto the picture, to send to the PC. True if they are
     /// taken. Set, the view accepts file drags; nil, it accepts none.
     public var onDropFiles: (([URL]) -> Bool)? {
@@ -413,22 +418,48 @@ private final class StatusOverlay: NSView {
 /// insertion. A replacement range cannot be honoured, since the text is
 /// already in a Windows application, and is ignored.
 extension MetalView: NSTextInputClient {
+    /// Give a key to the Mac's input method, which answers through the
+    /// methods below. True if it took the key.
+    public func handToInputMethod(_ event: NSEvent) -> Bool {
+        inputContext?.handleEvent(event) ?? false
+    }
+
     public func insertText(_ string: Any, replacementRange: NSRange) {
         let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        setMarked("")
         guard !text.isEmpty else { return }
         onInsertText?(text)
     }
 
+    /// The input method's word before it settles on it. Nothing is typed on
+    /// the PC until it does; the window shows it meanwhile (`onMarkedText`).
     public func setMarkedText(_ string: Any, selectedRange: NSRange,
-                              replacementRange: NSRange) {}
+                              replacementRange: NSRange) {
+        setMarked((string as? NSAttributedString)?.string ?? (string as? String) ?? "")
+    }
 
-    public func unmarkText() {}
+    public func unmarkText() {
+        // Settling is the input method's to do, with insertText; this only
+        // forgets what was being composed.
+        setMarked("")
+    }
 
-    public func selectedRange() -> NSRange { NSRange(location: 0, length: 0) }
+    private func setMarked(_ text: String) {
+        guard text != markedText else { return }
+        markedText = text
+        onMarkedText?(text.isEmpty ? nil : text)
+    }
 
-    public func markedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
+    public func selectedRange() -> NSRange {
+        NSRange(location: (markedText as NSString).length, length: 0)
+    }
 
-    public func hasMarkedText() -> Bool { false }
+    public func markedRange() -> NSRange {
+        markedText.isEmpty ? NSRange(location: NSNotFound, length: 0)
+            : NSRange(location: 0, length: (markedText as NSString).length)
+    }
+
+    public func hasMarkedText() -> Bool { !markedText.isEmpty }
 
     public func attributedSubstring(forProposedRange range: NSRange,
                                     actualRange: NSRangePointer?) -> NSAttributedString? {
@@ -445,7 +476,11 @@ extension MetalView: NSTextInputClient {
     public func firstRect(forCharacterRange range: NSRange,
                           actualRange: NSRangePointer?) -> NSRect {
         guard let window else { return .zero }
-        let line = NSRect(x: bounds.midX, y: bounds.midY - 10, width: 1, height: 20)
+        // While composing, by the note that shows the word at the foot of the
+        // picture, so the input method's candidates open beside it.
+        let line = markedText.isEmpty
+            ? NSRect(x: bounds.midX, y: bounds.midY - 10, width: 1, height: 20)
+            : NSRect(x: bounds.midX, y: bounds.minY + 64, width: 1, height: 20)
         return window.convertToScreen(convert(line, to: nil))
     }
 

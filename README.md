@@ -36,7 +36,7 @@ screen and switch to with ⌘-Tab, while the app itself keeps running on the PC.
 | **Clipboard and files** | Copy and paste text and pictures both ways. Drop files on a window to send them to the PC. |
 | **Dedicated display** | Apps run on a virtual display sized to your Mac, leaving the PC's monitor untouched. |
 | **Low latency** | Hardware H.264 encoding over a purpose-built UDP transport; 49 fps at 3600×2338 in testing. |
-| **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. |
+| **Keyboard layouts** | Keys are sent by position and typed with the PC's layout. Caps Lock stays in sync. Japanese, Chinese and Korean input methods on the Mac compose as usual. |
 | **Per-app sound** | Audio from the streamed apps only on Windows 11, or the whole PC on Windows 10. Opus or lossless. |
 | **Gaming mode** | Raw mouse input for games. Press ⌃⌥ to release the mouse. |
 | **Automatic recovery** | Reconnects after Wi-Fi drops, network changes and host restarts. |
