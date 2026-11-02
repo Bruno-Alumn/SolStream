@@ -36,7 +36,11 @@ jobs:
     name: Pack, test and publish
     runs-on: windows-2022
     # A release run that failed published nothing, so there is nothing to follow.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Only a release from a pushed tag: one dispatched again on an old tag has
+    # been published already, and Chocolatey refuses a version twice.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     env:
       GH_TOKEN: ${{ github.token }}
       # Read from the environment, never pasted into a script.
@@ -44,13 +48,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Point the package at the release
-        if: github.event_name != 'pull_request'
+        # On a pull request, the latest release: the same edit a release makes,
+        # so it is tested before a release depends on it.
         shell: bash
         run: |
-          case "$TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::not a release tag: $TAG"; exit 1 ;;
-          esac
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          fi
+          if ! printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::not a release tag: $TAG"; exit 1
+          fi
           sh scripts/update-packages.sh "$TAG"
       - name: Pack
         run: |
@@ -58,10 +65,9 @@ jobs:
           choco pack packaging/chocolatey/solstream.nuspec --outputdirectory dist
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install from the package
-        # Without the virtual display: a runner has no use for a driver, and
-        # the package's own steps are what is being tried here.
+        # The defaults, which leave out the virtual display.
         run: |
-          choco install solstream --source "$PWD\dist" --yes --no-progress --params "'/NoDisplayDriver'"
+          choco install solstream --source "$PWD\dist" --yes --no-progress
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $exe = Join-Path $env:ProgramFiles 'SolStream\SolStream.exe'
           if (-not (Test-Path $exe)) { Write-Error "no $exe after the install"; exit 1 }

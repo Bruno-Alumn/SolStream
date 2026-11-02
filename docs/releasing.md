@@ -118,8 +118,8 @@ uploads to a draft and publishes last, which is what immutable releases need.
    git push origin main
    ```
 
-   Until then `brew install` and `choco install` give the previous version,
-   and copies installed that way still update themselves.
+   Until then `brew install` gives the previous version, and copies installed
+   that way still update themselves.
 
 What the six jobs do:
 

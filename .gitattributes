@@ -17,3 +17,8 @@ tests/update-vector/* -text
 
 # One line, read by shell, PowerShell, CMake and the workflows: always LF.
 VERSION text eol=lf
+
+# Run and edited by scripts/update-packages.sh under Git Bash on a Windows
+# runner, whose anchored greps and `set -eu` would trip over a CR: always LF.
+*.sh text eol=lf
+packaging/** text eol=lf

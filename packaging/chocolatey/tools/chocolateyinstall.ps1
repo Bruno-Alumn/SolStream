@@ -4,7 +4,9 @@ $ErrorActionPreference = 'Stop'
 # and Chocolatey runs it elevated, so there is no UAC prompt either.
 $pp = Get-PackageParameters
 $arguments = @('--install')
-if (-not $pp['NoDisplayDriver']) { $arguments += '--with-display-driver' }
+# The virtual display only when asked for: installing the driver makes Windows
+# ask whether to trust its publisher, which an unattended install can't answer.
+if ($pp['DisplayDriver']) { $arguments += '--with-display-driver' }
 if ($pp['NoDesktopShortcut']) { $arguments += '--no-desktop-shortcut' }
 if ($pp['NoStartMenu']) { $arguments += '--no-start-menu' }
 if ($pp['NoLogon']) { $arguments += '--no-logon' }
