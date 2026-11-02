@@ -2,6 +2,7 @@
 
 #include "window_restore.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdlib>
@@ -307,7 +308,17 @@ OwedRecord ParseOwedWindows(const std::string& text) {
             || p.rcNormalPosition.bottom <= p.rcNormalPosition.top) {
             continue;
         }
-        record.windows.push_back(owed);
+        // Once a window: everything that acts on the record takes the first
+        // entry for a handle, so a second one -- in a file written by hand,
+        // or broken -- outlived the session that claimed the first, and a
+        // later retry put a window being streamed back where it had been.
+        const bool listed = std::any_of(record.windows.begin(), record.windows.end(),
+                                        [&owed](const OwedWindow& other) {
+                                            return other.window == owed.window;
+                                        });
+        if (!listed) {
+            record.windows.push_back(owed);
+        }
     }
     return record;
 }
@@ -346,8 +357,12 @@ OwedRecord LoadOwedWindows(const std::wstring& path) {
     }
     // Eight windows of a line each is well under this; anything longer is not
     // a record this host wrote.
+    // A byte more is read than is allowed, to tell a file that long apart
+    // from one cut at the limit: parsed cut, a last line ending part way
+    // through its last number still made a window, at the wrong size.
+    constexpr size_t kLimit = 64 * 1024;
     std::string text;
-    if (!ReadSmallFile(path, 64 * 1024, text)) {
+    if (!ReadSmallFile(path, kLimit + 1, text) || text.size() > kLimit) {
         return {};
     }
     return ParseOwedWindows(text);

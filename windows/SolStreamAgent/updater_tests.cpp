@@ -3207,6 +3207,13 @@ void TestOwedWindows(const std::wstring& scratch) {
     const std::string when = "13404567890 7200000\n";
     const std::string good = "100 7 55 0 0 0 1 0 0 0 0 10 20 110 220\n";
     CHECK(ParseOwedWindows(header + when + good).windows.size() == 1);
+    // A handle listed twice is one window, the first entry's.
+    {
+        const OwedRecord twice = ParseOwedWindows(
+            header + when + good + "100 7 55 0 0 0 1 0 0 0 0 30 40 130 240\n");
+        CHECK(twice.windows.size() == 1);
+        CHECK(twice.windows.size() == 1 && twice.windows[0].placement.rcNormalPosition.left == 10);
+    }
     CHECK(ParseOwedWindows(when + good).windows.empty());
     CHECK(ParseOwedWindows(header + good).windows.empty());
     CHECK(ParseOwedWindows(header + "0 7200000\n" + good).windows.empty());
