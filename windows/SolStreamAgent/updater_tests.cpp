@@ -52,7 +52,11 @@
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
 #include "media/video_codec.h"
+<<<<<<< HEAD
 #include "quit_app.h"
+=======
+#include "links.h"
+>>>>>>> d01d2dc (Open links clicked in a streamed app on the Mac, with SolStream chosen as the PC's browser)
 #include "session_takeover.h"
 #include "stranded.h"
 #include "media/keys.h"
@@ -1633,6 +1637,7 @@ void TestSolStreamDisplays() {
     CHECK(!ours.empty() && ours[0].friendly_name == L"Virtual Display Driver");
 }
 
+<<<<<<< HEAD
 /// Quit closes every window of the app that nothing owns, so an app with two
 /// windows quits rather than losing one -- except Explorer, whose process is
 /// also the taskbar and the desktop: only the streamed window. The shell's own
@@ -1693,6 +1698,24 @@ void TestPushFeatures() {
     CHECK(PushFeaturesFrom("openURL,title") == (kPushOpenUrl | kPushTitle));
     CHECK(PushFeaturesFrom("titles attention nonsense") == kPushAttention);
     CHECK(PushFeaturesFrom("  title  ") == kPushTitle);
+=======
+/// Only web and mail links cross to the Mac, and only ones nothing could
+/// read as more than a link.
+void TestForwardableLinks() {
+    CHECK(IsForwardableLink("https://example.com/a?b=c#d"));
+    CHECK(IsForwardableLink("HTTP://example.com"));
+    CHECK(IsForwardableLink("mailto:someone@example.com?subject=Hi"));
+    CHECK(!IsForwardableLink(""));
+    CHECK(!IsForwardableLink("https://"));
+    CHECK(!IsForwardableLink("mailto:"));
+    CHECK(!IsForwardableLink("file:///C:/Windows/System32/calc.exe"));
+    CHECK(!IsForwardableLink("javascript:alert(1)"));
+    CHECK(!IsForwardableLink("ms-settings:display"));
+    CHECK(!IsForwardableLink("https//example.com"));
+    CHECK(!IsForwardableLink("https://example.com/a b"));
+    CHECK(!IsForwardableLink("https://example.com/\nx"));
+    CHECK(!IsForwardableLink("https://example.com/" + std::string(8200, 'a')));
+>>>>>>> d01d2dc (Open links clicked in a streamed app on the Mac, with SolStream chosen as the PC's browser)
 }
 
 // ── Tailscale ────────────────────────────────────────────────────────────────
@@ -4016,9 +4039,13 @@ int wmain(int argc, wchar_t** argv) {
     TestRecordedDevice();
     TestDriverRecords(scratch);
     TestWaitsForRestart();
+<<<<<<< HEAD
     TestPushFeatures();
     TestWindowsToClose();
     TestForceQuitRefusal();
+=======
+    TestForwardableLinks();
+>>>>>>> d01d2dc (Open links clicked in a streamed app on the Mac, with SolStream chosen as the PC's browser)
     TestSolStreamDisplays();
     TestSwitchedOff();
     TestTailscaleAdapter();

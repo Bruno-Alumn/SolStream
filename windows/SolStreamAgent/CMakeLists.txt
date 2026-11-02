@@ -99,6 +99,8 @@ add_library(SolStreamCore OBJECT
     session_takeover.cpp
     # Quitting a streamed application from the Mac.
     quit_app.cpp
+    # Links clicked on the PC, opened on the Mac.
+    links.cpp
     # Putting a streamed window back as it was, and remembering what is owed.
     window_restore.cpp
     installer.cpp

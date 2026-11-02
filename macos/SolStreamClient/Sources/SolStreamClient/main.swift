@@ -625,6 +625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let agent { WakeOnLAN.learn(from: agent, host: host) }
         }
         agent.onWindowsChanged = { fill(false) }
+        agent.onOpenLink = { Self.openLinkFromPC($0) }
         refillPicker = { fill(false) }
         if existing == nil {
             agent.connect()
@@ -1306,6 +1307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .hostWindowClosed(noticedBy: "pushed by the host")
         }
 
+        agent.onOpenLink = { Self.openLinkFromPC($0) }
         agent.onWindowTitle = { [weak self] id, title in
             self?.appWindows.first { $0.remoteWindowID == id }?.hostTitleChanged(title)
         }
@@ -2106,6 +2108,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return menu
+    }
+
+    /// A link clicked on the PC, with SolStream chosen as its browser there:
+    /// opened in this Mac's own browser or mail app, if it is one it may open.
+    static func openLinkFromPC(_ text: String) {
+        guard let url = AgentConnection.linkToOpen(text) else {
+            Log.info("[links] the PC sent a link this Mac won't open; ignored")
+            return
+        }
+        Log.info("[links] opening a \(url.scheme ?? "") link from the PC")
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func forgetHosts() {

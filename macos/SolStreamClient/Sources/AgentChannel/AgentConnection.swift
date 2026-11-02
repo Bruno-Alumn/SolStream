@@ -287,6 +287,9 @@ public final class AgentConnection {
     public var onWindowTitle: ((UInt64, String) -> Void)?
     /// A streamed window's taskbar button flashed on the host.
     public var onAttention: ((UInt64) -> Void)?
+    /// A link clicked on the host, with SolStream chosen as its browser there,
+    /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
+    public var onOpenLink: ((String) -> Void)?
     /// Something belonging to another application on the PC is sitting on top of
     /// the window with this id. An empty name means it has gone away again.
     public var onOccluded: ((UInt64, String) -> Void)?
@@ -1006,6 +1009,7 @@ public final class AgentConnection {
         onWindowsChanged = nil
         onWindowTitle = nil
         onAttention = nil
+        onOpenLink = nil
         onOccluded = nil
     }
 
@@ -2523,6 +2527,13 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onWindowTitle?(id, title) }
             }
             return
+        case "openURL":
+            // Unsolicited: a click on the PC, sent only to a Mac that listed
+            // it among the pushes it understands.
+            if let url = message["url"] as? String {
+                DispatchQueue.main.async { [weak self] in self?.onOpenLink?(url) }
+            }
+            return
         case "attention":
             // Unsolicited; the host sends one per flash every few seconds.
             if let id = (message["id"] as? NSNumber)?.uint64Value {
@@ -2624,11 +2635,30 @@ public final class AgentConnection {
     /// is a reply as often as it is the greeting's push; and not `busy`, which
     /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
-                                               "title", "attention"]
+                                               "title", "attention", "openURL"]
 
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
-    static let understoodPushes = "title attention"
+    static let understoodPushes = "title attention openURL"
+
+    /// A link from the host that this Mac may open: web or mail, as the host
+    /// registered for, and nothing else -- not a file, not a script, not an
+    /// app's own scheme -- whatever the host sends.
+    public static func linkToOpen(_ text: String) -> URL? {
+        guard text.utf8.count <= 8192,
+              !text.unicodeScalars.contains(where: { $0.value <= 0x20 || $0.value == 0x7F }),
+              let url = URL(string: text), let scheme = url.scheme?.lowercased() else {
+            return nil
+        }
+        switch scheme {
+        case "http", "https":
+            return url.host?.isEmpty == false ? url : nil
+        case "mailto":
+            return text.count > "mailto:".count ? url : nil
+        default:
+            return nil
+        }
+    }
 
     static func read(line: Data) -> LineReading {
         if let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {

@@ -165,6 +165,9 @@ void (*g_end_session_handler)() = nullptr;
 /// registered.
 void (*g_shell_flash_handler)(HWND) = nullptr;
 UINT g_shell_hook_message = 0;
+/// See SetLinkHandler, and the tag its WM_COPYDATA carries: "SOLL".
+bool (*g_link_handler)(const std::string&) = nullptr;
+constexpr ULONG_PTR kLinkCopyData = 0x534F4C4C;
 
 /// A one-off message the Host window shows in place of its usual banner — the
 /// result of pressing a button, which used to be a MessageBox. A modal system
@@ -2755,6 +2758,15 @@ void ShowTrayMenu(HWND window) {
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_COPYDATA) {
+        const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+        if (data && data->dwData == kLinkCopyData && data->lpData && data->cbData <= 16384
+            && g_link_handler) {
+            const std::string url(static_cast<const char*>(data->lpData), data->cbData);
+            return g_link_handler(url) ? 1 : 0;
+        }
+        return 0;
+    }
     if (g_shell_hook_message != 0 && message == g_shell_hook_message) {
         // HSHELL_FLASH: a taskbar button is flashing for attention.
         if ((wparam & 0x7FFF) == HSHELL_REDRAW && (wparam & HSHELL_HIGHBIT) != 0
@@ -3460,6 +3472,28 @@ void SetShellFlashHandler(void (*handler)(HWND window)) {
 
 void SetEndSessionHandler(void (*handler)()) {
     g_end_session_handler = handler;
+}
+
+void SetLinkHandler(bool (*handler)(const std::string& url)) {
+    g_link_handler = handler;
+}
+
+bool SendLinkToRunningHost(const std::string& url) {
+    HWND host = FindWindowW(kClassName, nullptr);
+    if (!host) {
+        return false;
+    }
+    COPYDATASTRUCT data{};
+    data.dwData = kLinkCopyData;
+    data.cbData = static_cast<DWORD>(url.size());
+    data.lpData = const_cast<char*>(url.data());
+    DWORD_PTR answer = 0;
+    // Bounded: a host that has stopped answering must not hold the click.
+    if (!SendMessageTimeoutW(host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &answer)) {
+        return false;
+    }
+    return answer == 1;
 }
 
 bool FocusExistingHostWindow() {

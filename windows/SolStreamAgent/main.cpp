@@ -76,6 +76,7 @@
 #include "wake.h"
 #include "host_window.h"
 #include "installer.h"
+#include "links.h"
 #include "ports.h"
 #include "quit_app.h"
 #include "session_takeover.h"
@@ -6359,6 +6360,23 @@ void RaiseToNormalPriority() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    // A link clicked with SolStream chosen as the browser (links.h). Before
+    // anything else, and doing nothing else: this copy lives for one click.
+    if (argc >= 3 && std::wstring(argv[1]) == L"--open-url") {
+        const std::string url = ToUtf8(argv[2]);
+        if (solstream::IsForwardableLink(url) && solstream::SendLinkToRunningHost(url)) {
+            return 0;
+        }
+        // No Mac to take it, or a link it shouldn't carry: opened here, in
+        // Edge, so choosing SolStream never leaves a click going nowhere.
+        // Only the schemes SolStream registered for reach this; anything else
+        // is not opened at all.
+        if (solstream::IsForwardableLink(url)) {
+            ShellExecuteW(nullptr, L"open", (L"microsoft-edge:" + std::wstring(argv[2])).c_str(),
+                          nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        return 0;
+    }
     ReleaseUnwantedConsole();
     // Everything outside main.cpp logs through the agent's file rather than
     // through a second one, and learns where that is here rather than by
@@ -7281,6 +7299,14 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     solstream::SetShellFlashHandler(StreamedWindowFlashed);
+    solstream::SetLinkHandler([](const std::string& url) {
+        // Re-checked here: any program on the PC can send this message.
+        if (!solstream::IsForwardableLink(url) || g_clients_authenticated.load() == 0) {
+            return false;
+        }
+        Log("[links] sending a %s link to the Mac", url.rfind("mailto:", 0) == 0 ? "mail" : "web");
+        return PushLine("{\"type\":\"openURL\",\"url\":\"" + JsonEscape(url) + "\"}");
+    });
     solstream::SetEndSessionHandler([] {
         // As the exit below does, without the ExitProcess: Windows ends the
         // process itself once the window has answered.

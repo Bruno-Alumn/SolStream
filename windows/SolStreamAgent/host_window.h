@@ -125,6 +125,14 @@ void SetEndSessionHandler(void (*handler)());
 /// own is one.
 void SetShellFlashHandler(void (*handler)(HWND window));
 
+/// What to run with a link handed over by `--open-url` (links.h): whether it
+/// went on to a Mac. Runs on the window's thread.
+void SetLinkHandler(bool (*handler)(const std::string& url));
+
+/// From `--open-url`: hand the link to the host already running. False when
+/// there is none, or no Mac took it -- then it is the caller's to open here.
+bool SendLinkToRunningHost(const std::string& url);
+
 bool FocusExistingHostWindow();
 
 }  // namespace solstream

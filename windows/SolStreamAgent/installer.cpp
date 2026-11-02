@@ -16,6 +16,7 @@
 
 #include "driver_install.h"
 #include "host_window.h"
+#include "links.h"
 #include "ports.h"
 #include "util.h"
 
@@ -1693,6 +1694,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
 
     WriteShortcuts(destination, options);
     RegisterUninstallEntry(destination);
+    RegisterLinkHandler(InstalledExe(destination));
 
     auto also = [&warning](const std::string& clause) {
         if (!warning.empty()) {
@@ -1849,6 +1851,7 @@ bool UninstallSelf(std::string& error, std::string& left) {
     InstallLog("asked Windows Firewall to remove every rule this install writes");
     RemoveShortcuts();
     RemoveUninstallEntry();
+    RemoveLinkHandler();
     InstallLog("shortcuts and the Add/Remove Programs entry removed");
     RemoveTree(destination);
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
