@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Chocolatey package for SolStream's Windows host. scripts/update-packages.sh
+     sets the version here and the download in tools/chocolateyinstall.ps1 from a
+     release; .github/workflows/chocolatey.yml packs, tests and publishes it. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>solstream</id>
+    <version>1.0.4</version>
+    <title>SolStream</title>
+    <authors>Bruno-Alumn</authors>
+    <owners>Bruno-Alumn</owners>
+    <projectUrl>https://github.com/Bruno-Alumn/SolStream</projectUrl>
+    <packageSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/main/packaging/chocolatey</packageSourceUrl>
+    <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream</projectSourceUrl>
+    <docsUrl>https://github.com/Bruno-Alumn/SolStream#readme</docsUrl>
+    <bugTrackerUrl>https://github.com/Bruno-Alumn/SolStream/issues</bugTrackerUrl>
+    <releaseNotes>https://github.com/Bruno-Alumn/SolStream/releases</releaseNotes>
+    <iconUrl>https://raw.githubusercontent.com/Bruno-Alumn/SolStream/main/assets/logo/out/icon.png</iconUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>solstream streaming remote-desktop game-streaming mac windows</tags>
+    <summary>Stream Windows apps from your PC into their own windows on your Mac.</summary>
+    <description><![CDATA[SolStream streams single Windows apps, not the whole desktop, to a Mac, where each one opens in its own native window.
+
+This package installs the PC half: the SolStream host, which runs in the system tray. The Mac app is on the [releases page](https://github.com/Bruno-Alumn/SolStream/releases/latest), or `brew install --cask bruno-alumn/solstream/solstream`.
+
+SolStream updates itself from new releases once it is installed.
+
+## Package parameters
+
+By default the install also sets up a virtual display (it downloads the Virtual Display Driver from GitHub), adds desktop and Start menu shortcuts, and starts SolStream when you sign in.
+
+- `/NoDisplayDriver` - don't set up the virtual display; SolStream streams the main display instead
+- `/NoDesktopShortcut` - no desktop shortcut
+- `/NoStartMenu` - no Start menu shortcut
+- `/NoLogon` - don't start SolStream when you sign in
+
+Example: `choco install solstream --params "'/NoDisplayDriver /NoDesktopShortcut'"`
+]]></description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

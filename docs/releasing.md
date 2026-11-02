@@ -99,19 +99,27 @@ uploads to a draft and publishes last, which is what immutable releases need.
    somebody asks: *Check for Updates…* on the Mac, *Check for updates* on the
    PC.
 
-4. Bring the Homebrew cask up to the new release. This sets the version and
-   checksum in `packaging/solstream.rb` from the release's `SHA256SUMS`, and
-   `--push` writes it to the tap, `Bruno-Alumn/homebrew-solstream`:
+4. Bring the package managers up to the new release. The **Chocolatey**
+   workflow does its part by itself once the release is out: it points the
+   package at the release, installs and uninstalls it on a runner, and
+   publishes it with the `CHOCOLATEY_API_KEY` secret (the API key of the
+   community.chocolatey.org account that owns `solstream`). Chocolatey's
+   moderators review each version before it is listed.
+
+   Homebrew is by hand. This sets the version and checksum in
+   `packaging/solstream.rb` and the Chocolatey files from the release's
+   `SHA256SUMS`, and `--push` writes the cask to the tap,
+   `Bruno-Alumn/homebrew-solstream`:
 
    ```bash
-   scripts/update-cask.sh v1.0.1 --push
-   git add packaging/solstream.rb
-   TZ=UTC git commit -m "Point the cask at 1.0.1"
+   scripts/update-packages.sh v1.0.1 --push
+   git add packaging
+   TZ=UTC git commit -m "Point the packages at 1.0.1"
    git push origin main
    ```
 
-   Until then `brew install` keeps giving the previous version, and copies
-   installed that way still update themselves.
+   Until then `brew install` and `choco install` give the previous version,
+   and copies installed that way still update themselves.
 
 What the six jobs do:
 

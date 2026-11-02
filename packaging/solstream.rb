@@ -1,6 +1,6 @@
 # Homebrew cask for SolStream's Mac app. It lives in the tap repository
 # Bruno-Alumn/homebrew-solstream (Casks/solstream.rb); this copy is the source.
-# scripts/update-cask.sh sets the version and sha256 from the latest release.
+# scripts/update-packages.sh sets the version and sha256 from the latest release.
 cask "solstream" do
   version "1.0.4"
   sha256 "e14363d76f47b2b36a28a7855284dfed34381b01a3567946d571443142492b7f"

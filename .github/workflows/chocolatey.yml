@@ -1,0 +1,87 @@
+name: Chocolatey
+
+# The Chocolatey package (packaging/chocolatey): packed and tried out --
+# installed, then uninstalled -- on every change to it, and after a release
+# also pointed at that release and published.
+#
+# Publishing needs the repository secret CHOCOLATEY_API_KEY, the API key of the
+# community.chocolatey.org account that owns the package. Without it the run
+# still packs and tests, and says it published nothing.
+on:
+  pull_request:
+    paths:
+      - 'packaging/chocolatey/**'
+      - 'scripts/update-packages.sh'
+      - '.github/workflows/chocolatey.yml'
+  # After every release: release.yml runs on the tag, so head_branch is the tag.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  # Publishing a release again by hand: `gh workflow run chocolatey.yml -f tag=v1.0.4`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, vX.Y.Z'
+        required: true
+
+concurrency:
+  group: chocolatey-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Pack, test and publish
+    runs-on: windows-2022
+    # A release run that failed published nothing, so there is nothing to follow.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Read from the environment, never pasted into a script.
+      TAG: ${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Point the package at the release
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::not a release tag: $TAG"; exit 1 ;;
+          esac
+          sh scripts/update-packages.sh "$TAG"
+      - name: Pack
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          choco pack packaging/chocolatey/solstream.nuspec --outputdirectory dist
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install from the package
+        # Without the virtual display: a runner has no use for a driver, and
+        # the package's own steps are what is being tried here.
+        run: |
+          choco install solstream --source "$PWD\dist" --yes --no-progress --params "'/NoDisplayDriver'"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $env:ProgramFiles 'SolStream\SolStream.exe'
+          if (-not (Test-Path $exe)) { Write-Error "no $exe after the install"; exit 1 }
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\SolStream' |
+            Select-Object DisplayName, DisplayVersion
+      - name: Uninstall
+        run: |
+          choco uninstall solstream --yes
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = Join-Path $env:ProgramFiles 'SolStream\SolStream.exe'
+          if (Test-Path $exe) { Write-Error "$exe is still there after the uninstall"; exit 1 }
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          if (-not $env:CHOCOLATEY_API_KEY) {
+            echo "::warning::CHOCOLATEY_API_KEY is not set, so nothing was published."
+            exit 0
+          }
+          $package = Get-ChildItem dist\solstream.*.nupkg | Select-Object -First 1
+          choco push $package.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
