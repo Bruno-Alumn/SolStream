@@ -32,6 +32,7 @@ static_assert(solstream::media::kWsaTimedOut == WSAETIMEDOUT);
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -635,6 +636,13 @@ void MediaSession::Impl::RunCapture() {
     // while nothing changes, so without this the last frame's damage is never
     // repaired and a client joining a static screen waits forever.
     const int idleMs = 1000 / (int) (active.fps ? active.fps : 60);
+    // Pictures no closer together than the rate asked for. Windows hands over
+    // a frame at the display's own refresh -- 60 Hz under a 30 fps stream, 144
+    // under a 60 -- and every one was encoded: the encoder, told the rate,
+    // spends bitrate/fps on each, so the stream ran at two or more times the
+    // bitrate asked for, the sender fell behind, and its queue was thrown
+    // away with a keyframe over and over whenever anything moved.
+    const double frameMs = 1000.0 / (double) (active.fps ? active.fps : 60);
     long long lastEncodedAt = Now();
     // capture->Running() as well, because Acquire never says the source has
     // gone: once a frame exists it hands back the retained one for ever. A
@@ -658,6 +666,17 @@ void MediaSession::Impl::RunCapture() {
                         || encoder->IdrPending();
         if (!current.isNew && !stale) {
             continue;
+        }
+        // Early: wait for this picture's slot, then take the newest frame
+        // there is -- this one, or a later one. Not dropped: the last change
+        // before the screen goes still is still the picture that goes out. A
+        // keyframe being waited for goes now.
+        if (current.isNew && !encoder->IdrPending()) {
+            const double since = MillisBetween(lastEncodedAt, Now());
+            if (since < frameMs - 1.0) {
+                Sleep((DWORD) std::ceil(frameMs - since));
+                continue;
+            }
         }
         lastSerial = current.serial;
         lastEncodedAt = Now();
