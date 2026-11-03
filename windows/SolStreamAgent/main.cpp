@@ -2040,8 +2040,23 @@ bool HeldWindow(HWND window, bool* any) {
 /// slot, so every later Mac was turned away until the host was restarted. So
 /// every cross-process window write below asks first, and the ones whose result
 /// nothing measures afterwards are made asynchronous as well.
+/// How long a window has to answer before the host leaves it alone; see
+/// Unresponsive.
+constexpr UINT kAnswerWithinMs = 250;
+
 bool Unresponsive(HWND window) {
-    return IsHungAppWindow(window) != FALSE;
+    if (IsHungAppWindow(window) != FALSE) {
+        return true;
+    }
+    // Windows calls a window hung only after five seconds without an answer,
+    // and the calls that follow this -- ShowWindow, SetWindowPos -- wait on
+    // its thread with no time limit. A window that had just stopped answering
+    // held `place` there, and the connection's thread with it: its slot never
+    // came free, and every Mac after it was turned away until the host
+    // restarted. So it is asked, briefly, as well.
+    DWORD_PTR result = 0;
+    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, kAnswerWithinMs,
+                               &result) == 0;
 }
 
 /// When a process started (GetProcessTimes, in 100 ns units), or 0 when it
@@ -2933,6 +2948,12 @@ void RescueStrandedWindows() {
     if (!g_capture_visibility.invisible) {
         return;
     }
+    // Only windows still about. Kept for good, the list filled at 64 and every
+    // later stranded window went unrescued; and a handle Windows gave to a
+    // new window was skipped as if that window had been rescued already.
+    g_rescued.erase(std::remove_if(g_rescued.begin(), g_rescued.end(),
+                                   [](HWND rescued) { return !IsWindow(rescued); }),
+                    g_rescued.end());
     StrandedSearch search;
     search.capture = g_capture_visibility.capture;
     const RECT rescue_to = g_capture_visibility.rescue_to;
@@ -2988,6 +3009,10 @@ struct OcclusionState {
     HWND reported = nullptr;   // what the Mac has been told about
     HWND candidate = nullptr;  // what the last sample saw
     int stable_ticks = 0;
+    /// The tenancy this is about. A slot handed to another window between two
+    /// ticks -- Switch App -- kept what the last one had been told, and the new
+    /// one, covered by the same dialog on the same tile, was never said to be.
+    uint64_t generation = 0;
 };
 OcclusionState g_occlusion[kMaxLocks];
 
@@ -3022,16 +3047,22 @@ void ReportOcclusion() {
         HWND window = nullptr;
         RECT rect{};
         DWORD owner = 0;
+        uint64_t generation = 0;
         EnterCriticalSection(&g_lock_cs);
         if (g_locks[i].active) {
             window = g_locks[i].window;
             rect = g_locks[i].desired;
             owner = g_locks[i].pid;
+            generation = g_locks[i].generation;
         }
         LeaveCriticalSection(&g_lock_cs);
         if (!window) {
             g_occlusion[i] = OcclusionState{};
             continue;
+        }
+        if (g_occlusion[i].generation != generation) {
+            g_occlusion[i] = OcclusionState{};
+            g_occlusion[i].generation = generation;
         }
 
         const LONG width = rect.right - rect.left;
@@ -3276,6 +3307,27 @@ bool WatchFullScreen(int i, HWND window, uint64_t generation) {
     return true;
 }
 
+/// The window the watcher is moving right now, under g_lock_cs; null between
+/// moves. Its moves take several calls into another process, and a restore
+/// landing between two of them was undone by the next, leaving a window that
+/// was owed nothing on the capture display.
+HWND g_watcher_acting = nullptr;
+
+/// Wait, briefly, for the watcher to finish with `window`.
+void WaitForWatcher(HWND window) {
+    for (int waited = 0; waited < 100; ++waited) {
+        EnterCriticalSection(&g_lock_cs);
+        const bool acting = g_watcher_acting == window;
+        LeaveCriticalSection(&g_lock_cs);
+        if (!acting) {
+            return;
+        }
+        Sleep(10);
+    }
+    Log("[restore] the watcher did not let go of window %llu within a second",
+        (unsigned long long) IdFromWindow(window));
+}
+
 /// Put a locked window back if anything moved or resized it, and everything
 /// else that has to notice the desktop changing. Runs for the life of the host.
 DWORD WINAPI WatcherProc(LPVOID) {
@@ -3329,15 +3381,9 @@ DWORD WINAPI WatcherProc(LPVOID) {
                 // full screen and will ask for a size of its own.
                 continue;
             }
-            // Un-maximised asynchronously, and placed on a later tick once the
-            // restore has landed: measuring straight after an asynchronous
-            // restore would measure the maximised window.
-            if (IsZoomed(window)) {
-                ShowWindowAsync(window, SW_RESTORE);
-                continue;
-            }
+            const bool zoomed = IsZoomed(window) != FALSE;
             const RECT now = ClientAreaInScreen(window);
-            if (now.left == desired.left && now.top == desired.top
+            if (!zoomed && now.left == desired.left && now.top == desired.top
                 && now.right == desired.right && now.bottom == desired.bottom) {
                 continue;
             }
@@ -3363,13 +3409,26 @@ DWORD WINAPI WatcherProc(LPVOID) {
                       && g_locks[i].generation == generation;
             if (still_ours) {
                 desired = g_locks[i].desired;
+                // Until the move is done: a release meanwhile waits for it
+                // before restoring, rather than being undone by it.
+                g_watcher_acting = window;
             }
             LeaveCriticalSection(&g_lock_cs);
             if (!still_ours) {
                 continue;
             }
-            PlaceClientArea(window, desired.left, desired.top,
-                            desired.right - desired.left, desired.bottom - desired.top);
+            if (zoomed) {
+                // Un-maximised asynchronously, and placed on a later tick once
+                // the restore has landed: measuring straight after an
+                // asynchronous restore would measure the maximised window.
+                ShowWindowAsync(window, SW_RESTORE);
+            } else {
+                PlaceClientArea(window, desired.left, desired.top,
+                                desired.right - desired.left, desired.bottom - desired.top);
+            }
+            EnterCriticalSection(&g_lock_cs);
+            g_watcher_acting = nullptr;
+            LeaveCriticalSection(&g_lock_cs);
         }
         // Each of these returns at once when nothing is held.
         ReportForegroundThief();
@@ -3826,6 +3885,7 @@ void RestoreReleasedSlots(const std::vector<WindowLock>& released) {
         if (!marked) {
             continue;
         }
+        WaitForWatcher(saved.window);
         RestoreMarkedWindow(saved);
     }
     ScheduleOwedRetry(true);
@@ -4045,6 +4105,13 @@ bool PlaceClientArea(HWND window, int x, int y, int width, int height,
         return false;
     }
     if (IsIconic(window)) {
+        ShowWindow(window, SW_RESTORE);
+    }
+    // Sized while maximised, a window stays WS_MAXIMIZE, and the `lock` that
+    // follows restores it -- to where it was before the session, on the real
+    // monitor, which is then the place held until the Mac asks again. A
+    // minimised one restores to maximised, so this comes after.
+    if (IsZoomed(window)) {
         ShowWindow(window, SW_RESTORE);
     }
 
