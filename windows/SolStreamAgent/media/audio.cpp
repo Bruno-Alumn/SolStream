@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "audio_downmix.h"
+#include "resampler.h"
 #include "audio_tree.h"
 
 #include <mmreg.h>
@@ -125,73 +126,7 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
     }
 }
 
-/// Resampling to 48 kHz by area averaging, with the part-finished output sample
-/// carried across calls.
-///
-/// Every output sample covers `ratio` input frames and is their mean: at 96 kHz
-/// the mean of two, at 192 kHz the mean of four, and at 48 kHz the ratio is 1 so
-/// each input frame passes through unchanged. Where a boundary falls inside an
-/// input frame -- 44.1 kHz, or any rate that is not a whole multiple of 48 kHz --
-/// that frame is split between the two output samples it straddles in
-/// proportion, so no input is dropped and none is counted twice.
-///
-/// This was linear interpolation, with a comment saying that at ratio 2 it took
-/// the mean of two inputs and so acted as a two-tap decimation filter. It did
-/// not. The read position advanced by exactly 2.0 each time, so the
-/// interpolation fraction was always zero and every second input frame was
-/// handed out untouched: nearest-sample decimation, with nothing at all between
-/// a 96 kHz mix and a 24 kHz Nyquist to keep content above it from folding back
-/// into the audible band. Nobody noticed because a desktop mix has almost no
-/// energy up there, which is exactly the sort of wrong that survives.
-///
-/// A boxcar mean of N is a poor anti-alias filter. It is a real one, which is
-/// the difference that matters here. Anything better would mean the Media
-/// Foundation resampler MFT and a second pipeline to keep alive for a case that
-/// has not been observed.
-struct Resampler {
-    /// The output sample being built: the input it has covered so far, each
-    /// frame weighted by how much of it belongs to this sample, and how wide
-    /// that coverage has become. Both are carried between calls because a WASAPI
-    /// buffer boundary falls wherever it likes, and an output sample that
-    /// straddles one must not be emitted twice or cut short.
-    double sumLeft = 0.0, sumRight = 0.0;
-    double filled = 0.0;
-
-    void Run(const std::vector<float>& in, double ratio, std::vector<float>& out) {
-        const size_t frames = in.size() / 2;
-        // The ratio comes from the endpoint's declared sample rate. Written as
-        // `!(ratio > 0.0)` so a rate of zero, or a NaN out of a broken driver,
-        // leaves rather than spins in the loop below asking for a bucket that
-        // can never fill.
-        if (frames == 0 || !(ratio > 0.0)) { return; }
-        for (size_t i = 0; i < frames; ++i) {
-            const double left = in[i * 2];
-            const double right = in[i * 2 + 1];
-            // One whole input frame, given out in pieces to however many output
-            // samples it spans: one, two where a boundary falls inside it, and
-            // more than that only when the endpoint runs below 48 kHz.
-            double remaining = 1.0;
-            while (remaining > 0.0) {
-                const double wanted = ratio - filled;
-                const double take = wanted < remaining ? wanted : remaining;
-                sumLeft += left * take;
-                sumRight += right * take;
-                filled += take;
-                remaining -= take;
-                // Finished to within rounding counts as finished. Without the
-                // epsilon a bucket that lands a hair short of `ratio` would drag
-                // a sliver of the next input frame in behind it, for no audible
-                // gain and one more trip round this loop every time.
-                if (filled + 1e-12 >= ratio) {
-                    out.push_back((float) (sumLeft / filled));
-                    out.push_back((float) (sumRight / filled));
-                    sumLeft = sumRight = 0.0;
-                    filled = 0.0;
-                }
-            }
-        }
-    }
-};
+// Resampling to 48 kHz: see SincResampler (resampler.h).
 
 /// libopus, set up the way the stream wants it, or null with the reason
 /// logged -- in which case the session sends PCM, which every Mac plays.
@@ -910,8 +845,7 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
     Loopback loopback;
     Reopener reopen;
     ReadTrouble trouble;
-    Resampler resampler;
-    double ratio = 1.0;
+    SincResampler resampler;
     ULONGLONG nextDeviceCheck = 0;
     std::vector<float> converted, pending;
     // Read since the device opened (see ProcessTap::readOnce), and whether
@@ -947,8 +881,7 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
             // works at internally. Worked out again for every device opened,
             // since the next one need not run at the same rate, and nothing
             // part-built by the last device's resampling is carried over.
-            ratio = (double) loopback.format->nSamplesPerSec / (double) kWireRate;
-            resampler = Resampler{};
+            resampler.Reset((double) loopback.format->nSamplesPerSec / (double) kWireRate);
             nextDeviceCheck = now + kDefaultDeviceCheckMs;
         }
 
@@ -994,7 +927,7 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
             } else if (frames > 0) {
                 sounding = true;
                 Convert(loopback.format, data, frames, converted);
-                resampler.Run(converted, ratio, pending);
+                resampler.Run(converted, pending);
             }
             loopback.capture->ReleaseBuffer(frames);
             hr = loopback.capture->GetNextPacketSize(&available);

@@ -52,6 +52,7 @@
 #include "media/audio_reopen.h"
 #include "media/audio_source.h"
 #include "media/audio_downmix.h"
+#include "media/resampler.h"
 #include "media/audio_tree.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
@@ -4425,6 +4426,58 @@ void TestAudioTree() {
     CHECK((WithoutDescendants({100, 600}, deep) == std::vector<uint32_t>{100, 600}));
 }
 
+/// A tone through the resampler: its level kept, and the image a 44.1 kHz
+/// device used to fold back into the audible band gone.
+void TestResampler() {
+    using solstream::media::SincResampler;
+    const double kPi = 3.14159265358979323846;
+    const auto level = [&](const std::vector<float>& s, double f) {
+        double re = 0, im = 0;
+        size_t n = 0;
+        for (size_t i = 2000; i < s.size() / 2; ++i) {
+            const double t = (double) i / 48000.0;
+            re += s[i * 2] * std::cos(2 * kPi * f * t);
+            im += s[i * 2] * std::sin(2 * kPi * f * t);
+            ++n;
+        }
+        return n ? 2 * std::sqrt(re * re + im * im) / (double) n : 0.0;
+    };
+    for (const double rate : {44100.0, 96000.0}) {
+        std::vector<float> in;
+        for (int i = 0; i < (int) rate / 2; ++i) {
+            const float v = (float) (0.5 * std::sin(2 * kPi * 10000.0 * i / rate));
+            in.push_back(v);
+            in.push_back(v);
+        }
+        SincResampler resampler;
+        resampler.Reset(rate / 48000.0);
+        std::vector<float> out;
+        for (size_t at = 0; at < in.size(); at += 882) {
+            std::vector<float> chunk(in.begin() + (long) at,
+                                     in.begin() + (long) (std::min)(in.size(), at + 882));
+            resampler.Run(chunk, out);
+        }
+        CHECK(out.size() / 2 > 23900 && out.size() / 2 < 24100);
+        const double tone = level(out, 10000.0);
+        CHECK(tone > 0.49 && tone < 0.51);
+        if (rate == 44100.0) {
+            // 48 - (44.1 - 10) = 13.9 kHz: about -10 dB from the boxcar.
+            CHECK(level(out, 13900.0) < 0.5 * 0.001);   // below -60 dB
+        }
+    }
+    // 48 kHz is passed through as it came, and a broken rate gives nothing.
+    SincResampler same;
+    same.Reset(1.0);
+    std::vector<float> through;
+    same.Run({0.25f, -0.25f}, through);
+    CHECK((through == std::vector<float>{0.25f, -0.25f}));
+    SincResampler broken;
+    broken.Reset(0.0);
+    std::vector<float> none;
+    broken.Run({0.25f, -0.25f}, none);
+    CHECK(none.empty());
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -4599,6 +4652,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferEncoding();
     TestWake();
     TestFullScreen();
+    TestResampler();
     TestAudioTree();
     TestDownmix();
     TestContrastPalette();
