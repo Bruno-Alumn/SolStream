@@ -2036,15 +2036,37 @@ COLORREF ToColorRef(const D2D1_COLOR_F& colour) {
 /// colours and keeps the immersive dark frame, which is the nearest it has.
 void AccentCaret();
 
+/// Whether a Windows contrast theme is on.
+bool HighContrast() {
+    HIGHCONTRASTW contrast{sizeof(contrast)};
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)
+        && (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+}
+
 void ApplyTheme(HWND window) {
-    const bool dark = SystemPrefersDark();
-    g_palette = dark ? DarkPalette() : LightPalette();
+    const bool contrast = HighContrast();
+    if (contrast) {
+        SystemColors colors;
+        colors.window = GetSysColor(COLOR_WINDOW);
+        colors.window_text = GetSysColor(COLOR_WINDOWTEXT);
+        colors.button_face = GetSysColor(COLOR_BTNFACE);
+        colors.gray_text = GetSysColor(COLOR_GRAYTEXT);
+        colors.highlight = GetSysColor(COLOR_HIGHLIGHT);
+        colors.highlight_text = GetSysColor(COLOR_HIGHLIGHTTEXT);
+        colors.hot_light = GetSysColor(COLOR_HOTLIGHT);
+        g_palette = ContrastPalette(colors);
+    } else {
+        g_palette = SystemPrefersDark() ? DarkPalette() : LightPalette();
+    }
+    const bool dark = g_palette.dark;
     const BOOL immersive = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, &immersive,
                           sizeof(immersive));
-    const COLORREF caption = ToColorRef(g_palette.ground);
-    const COLORREF border = ToColorRef(g_palette.ground);
-    const COLORREF title = ToColorRef(g_palette.text);
+    // Under a contrast theme the frame is the system's to draw, in the
+    // theme's own colours: DWMWA_COLOR_DEFAULT hands each back.
+    const COLORREF caption = contrast ? DWMWA_COLOR_DEFAULT : ToColorRef(g_palette.ground);
+    const COLORREF border = contrast ? DWMWA_COLOR_DEFAULT : ToColorRef(g_palette.ground);
+    const COLORREF title = contrast ? DWMWA_COLOR_DEFAULT : ToColorRef(g_palette.text);
     DwmSetWindowAttribute(window, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &border, sizeof(border));
     DwmSetWindowAttribute(window, DWMWA_TEXT_COLOR, &title, sizeof(title));
@@ -3411,11 +3433,20 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             break;
 
         case WM_SETTINGCHANGE:
-            if (lparam && wcscmp((const wchar_t*) lparam, L"ImmersiveColorSet") == 0) {
+            // A contrast theme turned on or off is said as SPI_SETHIGHCONTRAST.
+            if ((lparam && wcscmp((const wchar_t*) lparam, L"ImmersiveColorSet") == 0)
+                || wparam == SPI_SETHIGHCONTRAST) {
                 ApplyTheme(window);
             }
             if (g_mode == WindowMode::Host) {
                 RefreshTrayIcon(window);
+            }
+            return 0;
+
+        case WM_SYSCOLORCHANGE:
+            // One contrast theme for another: the same switch, other colours.
+            if (HighContrast()) {
+                ApplyTheme(window);
             }
             return 0;
 

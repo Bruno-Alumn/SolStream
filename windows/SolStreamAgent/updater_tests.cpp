@@ -48,6 +48,7 @@
 #include "driver_install.h"
 #include "foreground.h"
 #include "full_screen.h"
+#include "host_theme.h"
 #include "media/audio_reopen.h"
 #include "media/audio_source.h"
 #include "media/feed_ledger.h"
@@ -4308,6 +4309,39 @@ void TestReplayWindow() {
     }
 }
 
+/// Under a contrast theme the host window takes the theme's own colours: its
+/// text for every text and line, its highlight for the accent.
+void TestContrastPalette() {
+    // High Contrast Black: black window, white text, aqua link, blue highlight.
+    SystemColors black;
+    black.window = 0x000000;
+    black.window_text = 0xFFFFFF;
+    black.button_face = 0x000000;
+    black.gray_text = 0x3FF23F;
+    black.highlight = 0xFFFF00;      // COLORREF is BGR: aqua
+    black.highlight_text = 0x000000;
+    black.hot_light = 0x00FFFF;      // yellow
+    const Palette dark = ContrastPalette(black);
+    CHECK(dark.dark);
+    CHECK(dark.ground.r == 0.0f && dark.ground.g == 0.0f && dark.ground.b == 0.0f);
+    CHECK(dark.text.r == 1.0f && dark.textMuted.r == 1.0f && dark.textSecondary.g == 1.0f);
+    CHECK(dark.hairline.b == 1.0f && dark.edge.b == 1.0f);
+    // BGR read the right way round: 0x00FFFF is red and green, no blue.
+    CHECK(dark.live.r == 1.0f && dark.live.g == 1.0f && dark.live.b == 0.0f);
+    CHECK(dark.onAccent.r == 0.0f);
+
+    // High Contrast White: the other way about.
+    SystemColors white;
+    white.window = 0xFFFFFF;
+    white.window_text = 0x000000;
+    white.highlight = 0x800000;      // navy
+    white.highlight_text = 0xFFFFFF;
+    const Palette light = ContrastPalette(white);
+    CHECK(!light.dark);
+    CHECK(light.text.r == 0.0f && light.ground.g == 1.0f);
+    CHECK(light.accent.b > 0.49f && light.accent.b < 0.51f && light.accent.r == 0.0f);
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -4482,6 +4516,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferEncoding();
     TestWake();
     TestFullScreen();
+    TestContrastPalette();
     TestReplayWindow();
 
     RemoveTree(scratch);

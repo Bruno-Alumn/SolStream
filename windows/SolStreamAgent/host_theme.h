@@ -188,6 +188,62 @@ inline Palette LightPalette() {
     return p;
 }
 
+/// The colours a Windows contrast theme sets, as GetSysColor gives them.
+struct SystemColors {
+    unsigned window = 0;         ///< COLOR_WINDOW
+    unsigned window_text = 0;    ///< COLOR_WINDOWTEXT
+    unsigned button_face = 0;    ///< COLOR_BTNFACE
+    unsigned gray_text = 0;      ///< COLOR_GRAYTEXT
+    unsigned highlight = 0;      ///< COLOR_HIGHLIGHT
+    unsigned highlight_text = 0; ///< COLOR_HIGHLIGHTTEXT
+    unsigned hot_light = 0;      ///< COLOR_HOTLIGHT, the theme's link colour
+};
+
+/// A COLORREF (0x00BBGGRR) as a colour.
+constexpr D2D1_COLOR_F FromColorRef(unsigned bgr) {
+    return D2D1_COLOR_F{(bgr & 0xFF) / 255.0f, ((bgr >> 8) & 0xFF) / 255.0f,
+                        ((bgr >> 16) & 0xFF) / 255.0f, 1.0f};
+}
+
+/// The palette under a contrast theme: the person's own colours, not Solar's.
+/// Somebody who chose one did so to be able to read the screen, and the
+/// window kept its graphite and blue regardless. Every text is the theme's
+/// text colour -- no secondary or muted greys, which a contrast theme exists
+/// to remove -- every line the text colour too, so cards and fields keep an
+/// edge, and the accent is the theme's highlight with its own text on it.
+/// The dots' two hues become the theme's link colour and text colour: the
+/// words beside them carry what they mean, as they always do.
+inline Palette ContrastPalette(const SystemColors& c) {
+    Palette p{};
+    p.ground = FromColorRef(c.window);
+    p.surface = FromColorRef(c.window);
+    p.raised = FromColorRef(c.button_face);
+
+    p.hairline = FromColorRef(c.window_text);
+    p.edge = FromColorRef(c.window_text);
+
+    p.text = FromColorRef(c.window_text);
+    p.textSecondary = FromColorRef(c.window_text);
+    p.textMuted = FromColorRef(c.window_text);
+    p.textFaint = FromColorRef(c.gray_text);
+
+    p.accent = FromColorRef(c.highlight);
+    p.accentHover = FromColorRef(c.highlight);
+    p.accentPressed = FromColorRef(c.highlight);
+    p.onAccent = FromColorRef(c.highlight_text);
+    p.accentInk = FromColorRef(c.hot_light);
+    p.accentTint = FromColorRef(c.highlight);
+    p.accentTintInk = FromColorRef(c.highlight_text);
+
+    p.live = FromColorRef(c.hot_light);
+    p.danger = FromColorRef(c.window_text);
+
+    // Dark when the window is: the title bar and anything else that asks.
+    const D2D1_COLOR_F ground = p.ground;
+    p.dark = 0.2126f * ground.r + 0.7152f * ground.g + 0.0722f * ground.b < 0.5f;
+    return p;
+}
+
 /// The status dots. Severity is still carried by the words; the colour only
 /// makes it findable, so there are exactly two state hues and both are small.
 ///   Live      green — running, connected, present
