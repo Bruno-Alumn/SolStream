@@ -188,8 +188,36 @@ final class HostDropdown: DS.Box {
     /// The list's own window, so a test can capture it rather than the screen.
     var listWindow: NSWindow? { panel }
 
+    // Reachable without a mouse. A plain view is not an accessibility element
+    // and never takes focus, so VoiceOver read two loose labels and Tab went
+    // past it: there was no way to choose a PC, or to type one in, from the
+    // keyboard.
+    override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .popUpButton }
+    override func accessibilityLabel() -> String? { "PC" }
     override func accessibilityValue() -> Any? { titleLabel.stringValue }
+    override func accessibilityPerformPress() -> Bool {
+        isOpen ? closeList(commit: false) : openList()
+        return true
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: DS.Metric.fieldRadius,
+                     yRadius: DS.Metric.fieldRadius).fill()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Space, Return and ↓ open it, as they do a pop-up button.
+        switch event.keyCode {
+        case 49, 36, 76, 125:
+            if !isOpen { openList() }
+        default:
+            super.keyDown(with: event)
+        }
+    }
 
     // MARK: - The open list
 
@@ -246,8 +274,17 @@ final class HostDropdown: DS.Box {
         let selectedIndex = max(0, rows.firstIndex { $0.address == selectedAddress } ?? 0)
         let offsetToSelected = M.listPad + CGFloat(rowOffset(before: selectedIndex))
         screenRect.origin.y -= (height - M.rowHeight - offsetToSelected)
-        panel.setFrame(NSRect(x: screenRect.minX - M.listPad, y: screenRect.origin.y,
-                              width: panelWidth, height: height), display: false)
+        // On the screen, whatever that costs the alignment: a borderless window
+        // is not kept there by AppKit, and with a few PCs known and the window
+        // low on a small display the list ran off the bottom -- taking the
+        // address field in its last row with it.
+        var frame = NSRect(x: screenRect.minX - M.listPad, y: screenRect.origin.y,
+                           width: panelWidth, height: height)
+        if let visible = window.screen?.visibleFrame {
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+        }
+        panel.setFrame(frame, display: false)
 
         window.addChildWindow(panel, ordered: .above)
         self.panel = panel
@@ -577,6 +614,17 @@ final class HostDropdown: DS.Box {
         override func mouseEntered(with event: NSEvent) { onHover?(true) }
         override func mouseExited(with event: NSEvent) { onHover?(false) }
         override func mouseDown(with event: NSEvent) { onClick?() }
+
+        override func isAccessibilityElement() -> Bool { true }
+        override func accessibilityRole() -> NSAccessibility.Role? { .button }
+        override func accessibilityLabel() -> String? {
+            let more = detailLabel.stringValue
+            return more.isEmpty ? titleLabel.stringValue : titleLabel.stringValue + ", " + more
+        }
+        override func accessibilityPerformPress() -> Bool {
+            onClick?()
+            return true
+        }
     }
 
     /// A borderless panel returns false from `canBecomeKey`, whatever else is

@@ -41,6 +41,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private let tableView = PickerTableView()
     private let scrollView = NSScrollView()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private var hasBeenShown = false
     private let spinner = NSProgressIndicator()
     private let backButton: DS.Button
     private let openButton: DS.Button
@@ -182,7 +183,11 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // window grew wider than the screen to fit one on a single line, and the
         // end of the message — the part that says what to do — went off the
         // right edge where it could not be read at all.
-        statusLabel.maximumNumberOfLines = 3
+        // And not cut short either: three lines lost the end of the longer
+        // failures -- an app waiting on an administrator prompt, one that
+        // can't be found -- and with it the step that gets past them. The
+        // list above gives up the room.
+        statusLabel.maximumNumberOfLines = 9
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         statusLabel.preferredMaxLayoutWidth = 260
@@ -240,7 +245,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     func show() {
-        window.center()
+        // Centred the first time only: a Dock launcher for the PC already
+        // shown called this on a picker someone had moved, and it jumped back.
+        if !hasBeenShown {
+            window.center()
+            hasBeenShown = true
+        }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(searchField)
         NSApp.activate(ignoringOtherApps: true)

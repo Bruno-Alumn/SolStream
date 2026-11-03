@@ -148,7 +148,15 @@ enum TokenPrompt {
 
         @objc private func accept() {
             let token = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            finish(token.isEmpty ? nil : token)
+            // Return with nothing pasted -- or a paste that missed -- is not a
+            // choice to stop pairing: the sheet stays for the token. Cancel is
+            // how to stop.
+            guard !token.isEmpty else {
+                NSSound.beep()
+                window.makeFirstResponder(field)
+                return
+            }
+            finish(token)
         }
 
         @objc private func dismiss() { finish(nil) }
