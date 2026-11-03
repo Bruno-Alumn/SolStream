@@ -1743,6 +1743,18 @@ bool InstallStarting() {
     return g_install_starting;
 }
 
+namespace {
+std::mutex g_install_failure_mutex;
+std::string g_install_failure;  // guarded by g_install_failure_mutex
+}  // namespace
+
+std::string TakeLastInstallFailure() {
+    std::lock_guard<std::mutex> lock(g_install_failure_mutex);
+    std::string taken;
+    taken.swap(g_install_failure);
+    return taken;
+}
+
 bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& options,
                    const std::function<void(const std::wstring&)>& step,
                    const std::function<bool()>& may_install,
@@ -1846,7 +1858,7 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
             Log("[update] the installer for %s has started", release.version.c_str());
             return true;
         }
-        std::thread([held, process, installer_exited] {
+        std::thread([held, process, installer_exited, result_token] {
             DWORD exit_code = 0;
             const bool exited = WaitForSingleObject(process, INFINITE) == WAIT_OBJECT_0
                                 && GetExitCodeProcess(process, &exit_code);
@@ -1857,6 +1869,11 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
                 DeleteInstallNote();
                 Log("[update] the installer finished (exit code %lu) and this copy is still "
                     "running, so it was not replaced", exit_code);
+                std::string reason;
+                if (ReadInstallFailure(ToUtf8(result_token), reason)) {
+                    std::lock_guard<std::mutex> lock(g_install_failure_mutex);
+                    g_install_failure = reason;
+                }
                 if (installer_exited) {
                     installer_exited(exit_code);
                 }
@@ -1916,8 +1933,11 @@ InstallNote TakeInstallNote() {
     }
     note.version = VersionText(version);
     note.kind = compared == 0 ? InstallNote::Kind::Installed : InstallNote::Kind::NotInstalled;
-    if (note.kind == InstallNote::Kind::NotInstalled) {
-        ReadInstallFailure(token, note.reason);
+    // Read either way, so an installed one's answer does not linger; its
+    // reason is only news when it did not install.
+    std::string reason;
+    if (ReadInstallFailure(token, reason) && note.kind == InstallNote::Kind::NotInstalled) {
+        note.reason = reason;
     }
     // Fresh means somebody pressed Install minutes ago and is waiting for the
     // answer. An older note is news for whenever the window is next opened, not

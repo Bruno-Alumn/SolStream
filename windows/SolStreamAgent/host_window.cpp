@@ -2428,10 +2428,13 @@ void ApplyInstallerExited(HWND window, DWORD exit_code) {
                   L"and open it again to use the new one.",
                   Mark::NeedsYou, true);
     } else {
+        const std::string reason = update::TakeLastInstallFailure();
         SetNotice(L"SolStream couldn't install the update.",
-                  L"The installer stopped before replacing this copy. To try again, choose "
-                  L"Install update from SolStream's icon by the clock; what happened is in "
-                      + InstallLogPath() + L".",
+                  (reason.empty() ? std::wstring(L"The installer stopped before replacing this "
+                                                 L"copy.")
+                                  : ToWide(reason))
+                      + L" To try again, choose Install update from SolStream's icon by the "
+                        L"clock; what happened is in " + InstallLogPath() + L".",
                   Mark::Failed, true);
     }
     InvalidateRect(window, nullptr, FALSE);
@@ -3469,7 +3472,8 @@ void SayInstallOutcome(bool installed, const std::string& version, const std::st
                             + L". SolStream offers the update again when it next checks; what "
                               L"happened is in " + InstallLogPath() + L"."
                       : ToWide(reason) + L" SolStream offers the update again when it next "
-                                         L"checks.",
+                                         L"checks; what happened is in " + InstallLogPath()
+                            + L".",
                   Mark::Failed, true);
     }
 }

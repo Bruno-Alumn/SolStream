@@ -1004,7 +1004,9 @@ void TestInstallNote() {
     CHECK(note.version == VersionText(newer));
     // With the installer's result token beside it, as an update writes it: the
     // version still reads, and with no result written there is no reason.
-    WriteInstallNote(VersionText(newer), L"00ff00ff00ff00ff");
+    // Not hex, so no result file is looked for: this program touches nothing
+    // outside its own folders.
+    WriteInstallNote(VersionText(newer), L"not-a-token");
     note = TakeInstallNote();
     CHECK(note.kind == InstallNote::Kind::NotInstalled);
     CHECK(note.version == VersionText(newer));

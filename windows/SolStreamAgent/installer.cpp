@@ -1878,6 +1878,10 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
               + ". Something on this PC is holding its files, often antivirus checking "
                 "them. Try again in a minute, or restart this PC first.";
         InstallLog("copy failed (error " + std::to_string(failure) + "): " + error);
+        // Said before the old copy is brought back, not after this returns:
+        // the copy that starts reads it once, as it starts, and an answer that
+        // came after was lost.
+        WriteInstallResult(false, error);
         if (GetFileAttributesW(installed.c_str()) != INVALID_FILE_ATTRIBUTES) {
             // The old copy is intact: bring it back rather than leave the PC
             // with no host. A first install has no old copy and no task.

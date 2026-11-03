@@ -135,6 +135,10 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
 /// up for minutes, and the installer stopping this host would end their stream.
 bool InstallStarting();
 
+/// What the last installer this copy started said when it stopped before
+/// replacing it, once; empty when it said nothing.
+std::string TakeLastInstallFailure();
+
 /// What became of the last install InstallUpdate started, as the copy running
 /// now sees it. InstallUpdate leaves a note naming the version just before the
 /// installer starts; the installer then stops that copy and starts the new one
