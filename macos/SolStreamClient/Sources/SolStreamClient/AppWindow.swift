@@ -392,10 +392,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
                       width: rect.width * sx, height: rect.height * sy)
     }
 
-    /// A length in display pixels, in the canvas's; see `canvasRect`.
+    /// A length in display pixels, in the canvas's; see `canvasRect`. The
+    /// larger of the two axes' scales, as a guard must be: it is one figure
+    /// for both, and too small on either lets the pointer into the band.
     private func canvasPixels(_ length: CGFloat) -> CGFloat {
-        Self.canvasRect(CGRect(x: 0, y: 0, width: length, height: 0), display: displaySize,
-                        canvas: session.canvasSize).width
+        let scaled = Self.canvasRect(CGRect(x: 0, y: 0, width: length, height: length),
+                                     display: displaySize, canvas: session.canvasSize)
+        return max(scaled.width, scaled.height)
     }
 
     /// Point this window at a different region of the canvas: the host

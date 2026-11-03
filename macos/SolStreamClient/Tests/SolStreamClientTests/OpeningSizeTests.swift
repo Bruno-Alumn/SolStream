@@ -88,4 +88,18 @@ final class CanvasCropTests: XCTestCase {
                                         canvas: CGSize(width: 5120, height: 2880))
         XCTAssertEqual(same, tile)
     }
+
+    /// Clamped to the encoder, a canvas keeps the display's shape, so a crop
+    /// of it is the shape of its window.
+    func testTheEncoderClampKeepsTheShape() {
+        let wide = AppDelegate.clampedToEncoder(width: 5120, height: 1440)
+        XCTAssertEqual(wide.width, 4096)
+        XCTAssertEqual(wide.height, 1152)
+        let fiveK = AppDelegate.clampedToEncoder(width: 5120, height: 2880)
+        XCTAssertEqual(fiveK.width, 4096)
+        XCTAssertEqual(fiveK.height, 2304)
+        let usual = AppDelegate.clampedToEncoder(width: 3024, height: 1964)
+        XCTAssertEqual(usual.width, 3024)
+        XCTAssertEqual(usual.height, 1964)
+    }
 }

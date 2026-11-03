@@ -985,13 +985,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Above it the handshake succeeds and no frame ever arrives, with the
     /// reason only in the host's own log — and a 16" MacBook Pro at More Space
     /// asks for 4112x2658, so this is reachable with ordinary hardware rather
-    /// than a pathological setup. Every request the Mac sends is clamped to it
-    /// per axis, and the host clamps to the same figure, so the two arrive at
-    /// the same canvas rather than at two that merely resemble each other.
+    /// than a pathological setup. Every request the Mac sends is clamped to it,
+    /// and the host clamps to the same figure -- per axis, which a request
+    /// already inside it leaves alone -- so the two arrive at the same canvas
+    /// rather than at two that merely resemble each other.
     private static let encoderLimit = 4096
 
+    ///
+    /// Both sides by the same factor, so a canvas keeps the display's shape:
+    /// clamped each on its own, a 5120x1440 ultrawide became 4096x1440, and
+    /// every crop of it came out narrower than its window -- drawn squeezed
+    /// between bars. Even, as the encoder wants it.
     static func clampedToEncoder(width: Int, height: Int) -> (width: Int, height: Int) {
-        (min(width, encoderLimit), min(height, encoderLimit))
+        guard width > encoderLimit || height > encoderLimit, width > 0, height > 0 else {
+            return (width, height)
+        }
+        let scale = min(Double(encoderLimit) / Double(width), Double(encoderLimit) / Double(height))
+        func even(_ value: Int) -> Int { max(2, Int((Double(value) * scale).rounded(.down)) & ~1) }
+        return (even(width), even(height))
     }
 
     /// How many pixels a full-screen window on this Mac can show: its screen in
