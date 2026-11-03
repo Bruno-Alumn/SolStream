@@ -249,6 +249,13 @@ public:
     Packetizer& operator=(const Packetizer&) = delete;
 
     /// Send every whole packet `pending` holds, and keep the remainder.
+    /// A short silence after a sound, for a source that says "silent" with
+    /// a flag rather than with zeros: Drain sends it, finishing what Opus
+    /// held of the sound (see there).
+    void EndSound(std::vector<float>& pending) const {
+        pending.insert(pending.end(), frames_ * 2 * 2, 0.0f);
+    }
+
     void Drain(std::vector<float>& pending) {
         const size_t samples = frames_ * 2;
         size_t at = 0;
@@ -403,6 +410,9 @@ struct ProcessTap {
     std::vector<float> queued;
     ReadTrouble trouble;
     Reopener reopen;
+    /// Read since it opened: Windows flags the first buffer after a start as
+    /// a discontinuity, which is not sound lost.
+    bool readOnce = false;
 };
 
 void CloseTap(ProcessTap& tap) {
@@ -478,7 +488,7 @@ HRESULT OpenTap(DWORD pid, ProcessTap& tap) {
 /// being mixed stay in step. Returns the failure that stopped the reading, if
 /// one did: a tap whose reads fail has stopped delivering, and treating that
 /// as nothing yet kept the app silent until the set of windows changed.
-void NoteDiscontinuity();
+void NoteDiscontinuity(const char* whose);
 
 HRESULT ReadTap(ProcessTap& tap) {
     UINT32 available = 0;
@@ -491,9 +501,10 @@ HRESULT ReadTap(ProcessTap& tap) {
         if (FAILED(hr)) {
             break;
         }
-        if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
-            NoteDiscontinuity();
+        if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && tap.readOnce) {
+            NoteDiscontinuity("an app's");
         }
+        tap.readOnce = true;
         const size_t at = tap.queued.size();
         tap.queued.resize(at + (size_t) frames * 2, 0.0f);
         if (!(flags & AUDCLNT_BUFFERFLAGS_SILENT) && frames > 0) {
@@ -546,14 +557,16 @@ void Mix(std::vector<ProcessTap>& taps, std::vector<float>& out) {
 /// Windows dropped sound before this thread read it -- the thread was held
 /// off too long. Said at most every 30 s, with how often, rather than not at
 /// all: a dropout otherwise left nothing in the log.
-void NoteDiscontinuity() {
-    static ULONGLONG saidAt = 0;
-    static unsigned long count = 0;
+///
+/// Per thread, and so per session: each has a sound thread of its own.
+void NoteDiscontinuity(const char* whose) {
+    thread_local ULONGLONG saidAt = 0;
+    thread_local unsigned long count = 0;
     ++count;
     const ULONGLONG now = GetTickCount64();
     if (saidAt == 0 || now - saidAt >= 30000) {
-        Log("[media] Windows dropped some sound before it could be read (%lu time%s): the "
-            "PC was too busy for the sound thread", count, count == 1 ? "" : "s");
+        Log("[media] Windows dropped some of %s sound before it could be read (%lu time%s): "
+            "the PC was too busy for the sound thread", whose, count, count == 1 ? "" : "s");
         saidAt = now;
         count = 0;
     }
@@ -623,8 +636,17 @@ std::map<uint32_t, ProcessEntry> ProcessTree() {
 /// -- nearly everything is started by it, and Windows captures an app with
 /// all it started -- so an Explorer window streamed is not heard.
 bool IsExplorer(DWORD pid) {
-    const std::string name = ProcessName(pid);
-    return _strnicmp(name.c_str(), "explorer.exe ", 13) == 0;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) { return false; }
+    wchar_t path[MAX_PATH];
+    DWORD length = MAX_PATH;
+    bool explorer = false;
+    if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+        const wchar_t* base = wcsrchr(path, L'\\');
+        explorer = _wcsicmp(base ? base + 1 : path, L"explorer.exe") == 0;
+    }
+    CloseHandle(process);
+    return explorer;
 }
 
 /// The streamed apps' sound, and nothing else, until `running` says stop.
@@ -638,6 +660,7 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
     // The pids asked for last time, before the tree was looked at: the
     // snapshot is taken only when they change.
     std::vector<DWORD> lastAsked;
+    std::vector<DWORD> toldExplorer;   // said once each
     Log("[media] audio from the streamed apps only");
 
     while (running()) {
@@ -660,14 +683,27 @@ void RunApps(const AudioCapture::Processes& processes, Packetizer& packetizer,
                 std::vector<uint32_t> asked;
                 for (DWORD pid : wanted) {
                     if (IsExplorer(pid)) {
-                        Log("[media] not hearing File Explorer: Windows would include every "
-                            "app it started, which is most of the desktop");
+                        if (std::find(toldExplorer.begin(), toldExplorer.end(), pid)
+                            == toldExplorer.end()) {
+                            toldExplorer.push_back(pid);
+                            Log("[media] not hearing File Explorer: Windows would include every "
+                                "app it started, which is most of the desktop");
+                        }
                         continue;
                     }
                     asked.push_back((uint32_t) pid);
                 }
-                const std::vector<uint32_t> kept =
-                    asked.size() > 1 ? WithoutDescendants(asked, ProcessTree()) : asked;
+                std::vector<uint32_t> kept = asked;
+                if (asked.size() > 1) {
+                    const auto tree = ProcessTree();
+                    // No snapshot: every app kept, and asked again next time
+                    // rather than latched until the streamed set changes.
+                    if (tree.empty()) {
+                        lastAsked.clear();
+                    } else {
+                        kept = WithoutDescendants(asked, tree);
+                    }
+                }
                 if (kept.size() < asked.size()) {
                     Log("[media] %zu streamed app(s) already heard through the app that "
                         "started them", asked.size() - kept.size());
@@ -878,10 +914,15 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
     double ratio = 1.0;
     ULONGLONG nextDeviceCheck = 0;
     std::vector<float> converted, pending;
+    // Read since the device opened (see ProcessTap::readOnce), and whether
+    // sound was playing at the last buffer (see Packetizer::EndSound).
+    bool readOnce = false;
+    bool sounding = false;
 
     while (running()) {
         const ULONGLONG now = GetTickCount64();
         if (!loopback.capture) {
+            readOnce = false;
             if (!reopen.Due(now)) {
                 Sleep(kPacketMs);
                 continue;
@@ -937,13 +978,21 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
             if (FAILED(hr)) {
                 break;
             }
-            if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
-                NoteDiscontinuity();
+            if ((flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) && readOnce) {
+                NoteDiscontinuity("the PC's");
             }
+            readOnce = true;
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                // Nothing is playing; see Packetizer on why nothing is sent.
+                // Nothing is playing; see Packetizer on why nothing is sent --
+                // after a short silence to end what was playing on (Packetizer::
+                // EndSound), which arrives as this flag here, not as zeros.
+                if (sounding) {
+                    packetizer.EndSound(pending);
+                    sounding = false;
+                }
                 silent.fetch_add(1);
             } else if (frames > 0) {
+                sounding = true;
                 Convert(loopback.format, data, frames, converted);
                 resampler.Run(converted, ratio, pending);
             }

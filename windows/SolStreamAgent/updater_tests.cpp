@@ -4414,6 +4414,15 @@ void TestAudioTree() {
     CHECK((WithoutDescendants({100, 999}, all) == std::vector<uint32_t>{100, 999}));
     std::map<uint32_t, ProcessEntry> loop = {{1, {2, 0}}, {2, {1, 0}}};
     CHECK((WithoutDescendants({1}, loop) == std::vector<uint32_t>{1}));
+    // A great-grandchild is covered; a child whose start time could not be
+    // read (0) is kept rather than guessed at; a gap in the chain keeps it.
+    std::map<uint32_t, ProcessEntry> deep = {
+        {100, {10, 5}}, {200, {100, 9}}, {300, {200, 12}}, {400, {300, 15}},
+        {500, {100, 0}}, {600, {700, 20}},
+    };
+    CHECK((WithoutDescendants({100, 400}, deep) == std::vector<uint32_t>{100}));
+    CHECK((WithoutDescendants({100, 500}, deep) == std::vector<uint32_t>{100, 500}));
+    CHECK((WithoutDescendants({100, 600}, deep) == std::vector<uint32_t>{100, 600}));
 }
 
 void TestFullScreen() {
