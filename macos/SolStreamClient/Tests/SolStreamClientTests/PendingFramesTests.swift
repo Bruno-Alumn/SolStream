@@ -49,4 +49,17 @@ final class PendingFramesTests: XCTestCase {
         XCTAssertEqual(pending.push(frame(2), isIdr: true), .droppedFrame)
         XCTAssertFalse(pending.hasFrames)
     }
+
+    /// One at a time, and whether an IDR still waits.
+    func testTakenOneAtATimeAndAnIdrIsSeenWaiting() {
+        var pending = PendingFrames()
+        XCTAssertFalse(pending.idrWaiting)
+        _ = pending.push(frame(1), isIdr: true)
+        _ = pending.push(frame(2), isIdr: false)
+        XCTAssertTrue(pending.idrWaiting)
+        XCTAssertEqual(pending.takeNext()?.data, frame(1))
+        XCTAssertFalse(pending.idrWaiting, "the IDR has gone to the decoder")
+        XCTAssertEqual(pending.takeNext()?.data, frame(2))
+        XCTAssertNil(pending.takeNext())
+    }
 }

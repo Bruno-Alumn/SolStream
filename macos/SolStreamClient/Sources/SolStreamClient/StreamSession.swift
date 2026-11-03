@@ -299,8 +299,10 @@ final class StreamSession {
         }
         // Holding as well as asking: until the IDR, every P-frame would only
         // fail in a decoder that has lost what it refers to.
+        // Not while an IDR is already queued: see `idrOnItsWay`.
         decoder.onKeyframeNeeded = { [weak self] in
-            self?.media.holdUntilKeyframe()
+            guard let self, !self.idrOnItsWay else { return }
+            self.media.holdUntilKeyframe()
         }
     }
 
@@ -350,14 +352,23 @@ final class StreamSession {
     private func drainVideo() {
         while true {
             pendingLock.lock()
-            let frames = pending.takeAll()
-            if frames.isEmpty { draining = false }
+            let frame = pending.takeNext()
+            if frame == nil { draining = false }
             pendingLock.unlock()
-            guard !frames.isEmpty else { return }
-            for frame in frames {
-                decoder?.decode(frame.data, isIDR: frame.isIdr)
-            }
+            guard let frame else { return }
+            decoder?.decode(frame.data, isIDR: frame.isIdr)
         }
+    }
+
+    /// Whether an IDR is queued for the decoder and not yet decoded. Then a
+    /// keyframe the decoder asks for is already on its way: holding the
+    /// stream for another would freeze the picture behind the one that
+    /// repairs it -- the decoder, a few frames behind the receive thread now,
+    /// finds a failure only after the IDR has passed the hold.
+    private var idrOnItsWay: Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return pending.idrWaiting
     }
 
     /// Start the stream. Frames go to every attached window.

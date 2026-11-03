@@ -42,6 +42,16 @@ struct PendingFrames {
         return frames
     }
 
+    /// The next frame, or nil. One at a time, so what waits is all there is
+    /// behind the decoder -- the backlog counts it truly -- and a stop drops
+    /// everything not yet started.
+    mutating func takeNext() -> (data: Data, isIdr: Bool)? {
+        frames.isEmpty ? nil : frames.removeFirst()
+    }
+
+    /// IDRs queued and not yet handed to the decoder.
+    var idrWaiting: Bool { frames.contains { $0.isIdr } }
+
     /// No more frames, and those waiting are dropped.
     mutating func stop() {
         stopped = true
