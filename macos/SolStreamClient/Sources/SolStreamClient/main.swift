@@ -1600,10 +1600,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // question nobody is asking any more, and its Cancel would end a
             // stream that just came back. As the picker does; see `showPicker`.
             MainActor.assumeIsolated {
-                for window in self.appWindows.compactMap(\.window)
-                where TokenPrompt.withdraw(over: window) && self.tokenPromptParent === window {
-                    self.tokenPromptOpen = false
-                    self.tokenPromptParent = nil
+                for window in self.appWindows.compactMap(\.window) {
+                    if TokenPrompt.withdraw(over: window), self.tokenPromptParent === window {
+                        self.tokenPromptOpen = false
+                        self.tokenPromptParent = nil
+                    }
                 }
             }
             self.appWindows.forEach { $0.reassertOnHost() }
