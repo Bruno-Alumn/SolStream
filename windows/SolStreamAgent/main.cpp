@@ -6087,22 +6087,34 @@ void ServeClient(SOCKET client) {
             }
             const bool was_authenticated = authenticated;
             std::string channel_cnonce;
-            if (!SendLine(client, HandleCommand(line, authenticated, challenge,
-                                                channel_cnonce, auth_failures))) {
+            const std::string reply =
+                HandleCommand(line, authenticated, challenge, channel_cnonce, auth_failures);
+            // The reply and the switch to sealed records under one hold of the
+            // send lock: in between, a push -- authorised from the start on
+            // loopback -- went out as a plain line after the Mac had begun
+            // reading sealed ones. The lock is re-entrant, so SendLine takes
+            // it again inside.
+            EnterCriticalSection(&g_send_cs);
+            if (!SendLine(client, reply)) {
+                LeaveCriticalSection(&g_send_cs);
                 return;
             }
 #ifdef SOLSTREAM_MEDIA
             // AFTER the reply, never before: the client is still reading lines
             // until it has read the one that says the proof was accepted.
-            if (!channel_cnonce.empty() && !g_channel.encrypted) {
-                EnterCriticalSection(&g_send_cs);
+            const bool promoted = !channel_cnonce.empty() && !g_channel.encrypted;
+            if (promoted) {
                 g_channel.Adopt(g_pending_channel);
                 g_channel.encrypted = true;
                 g_channel_socket = client;
-                LeaveCriticalSection(&g_send_cs);
+            }
+            LeaveCriticalSection(&g_send_cs);
+            if (promoted) {
                 Log("[agent] the channel is encrypted from here, "
                     "with an ephemeral key");
             }
+#else
+            LeaveCriticalSection(&g_send_cs);
 #endif
             // Authenticating completes the greeting: the display list is part of
             // the hello sequence, withheld until now, and the Mac waits for it
@@ -6209,6 +6221,12 @@ void ServeAndRetire(SOCKET client) {
     // Loopback needs no token, so it is authorised from the start.
     StartCursorWatcher(client, !g_require_auth);
     ServeClient(client);
+    // Nothing more goes out on it from here. Between the channel's keys going
+    // and the watchers letting go of the socket -- up to two seconds -- a push
+    // went out in the clear, as plain JSON, to a Mac reading sealed records:
+    // and a session ends this way whenever one of its records fails its tag,
+    // which anyone on the path can arrange by changing a byte.
+    shutdown(client, SD_BOTH);
 #ifdef SOLSTREAM_MEDIA
     // Destroy the session keys with the session. The point of the
     // ephemeral half is that it stops existing when the connection
