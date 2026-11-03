@@ -211,7 +211,7 @@ everything after the proof is encrypted (see Pairing).
 | `{"cmd":"clipboard","text":"…"}` | `{"type":"clipboard","ok":true,"seq"}` |
 | `{"cmd":"clipboardImage","seq":S,"offset":O}` | `{"type":"clipboardImage","ok":true,"seq","total","offset","data"}`: 512 KB of the clipboard's picture as PNG, base64; `ok:false` once the clipboard has moved on from `S` |
 | `{"cmd":"clipboardImage","offset":O,"total":T,"data":"…"}` | `{"type":"clipboardImage","ok":true,"received"}`, then on the last chunk `"done":true,"seq"`: a PNG put on the clipboard as PNG and CF_DIB |
-| `{"cmd":"upload","name":"…","offset":O,"total":T,"data":"…"}` | `{"type":"upload","ok":true,"received"}`, then on the last chunk `"done":true,"path"`: a file written to `Downloads\SolStream` under a cleaned name. `{"cmd":"upload","abort":1}` deletes one left unfinished |
+| `{"cmd":"upload","name":"…","offset":O,"total":T,"data":"…"}` | `{"type":"upload","ok":true,"received"}`, then on the last chunk `"done":true,"path"`: a file written to `Downloads\SolStream` under a cleaned name. A refusal -- too big, no room, no name left -- is `ok:false` with `reason` in words the Mac shows. `{"cmd":"upload","abort":1}` deletes one left unfinished |
 | `{"cmd":"clipboardFiles","paths":"a\nb"}` | `{"type":"clipboardFiles","ok":true,"seq"}`: received files on the clipboard to paste; only files directly in `Downloads\SolStream` |
 | `{"cmd":"wakeInfo"}` | `{"type":"wakeInfo","ok":true,"adapters":[{"mac","broadcast"}]}`: wired and Wi-Fi adapters that are up with a gateway, for Wake-on-LAN |
 | `{"cmd":"media","op":"open","cpub":"…","cnonce":"…","display":"\\\\.\\DISPLAY5"}` | `{"type":"media","ok":true,"ver":1,"hpub","hnonce","hcount","hauth","streaming","hport"}` |
@@ -219,12 +219,14 @@ everything after the proof is encrypted (see Pairing).
 | `{"cmd":"media","op":"stop"}` | `{"type":"media","ok":true,"op":"stop"}` |
 | `{"cmd":"media","op":"retarget","display":"…"}` or `"window":N` | `{"type":"media","ok":bool,"op":"retarget"}` |
 | `{"cmd":"canvas","display":"\\\\.\\DISPLAY7","w":..,"h":..}` | `{"type":"canvas","ok":bool,"w","h","hz"}` |
-| `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}` |
+| `{"cmd":"launch","path":"…","timeoutMs":N}` | `{"type":"window","id":N,"alive":true,…}`, or `{"type":"error","reason":…,"message":…}` with `reason` `"approval"` (an administrator prompt is waiting on the PC), `"declined"` (it was answered No), `"missing"` (the app is not listed, or its file or shortcut target is gone) or `"refused"` (Windows would not start it) |
 | `{"cmd":"window","id":N}` | `{"type":"window","id":N,"alive":bool,"minimized":bool,"x","y","w","h","captionInset"}` |
 | `{"cmd":"place","id":N,"x":..,"y":..,"w":..,"h":..}` | `{"type":"placed","ok":bool,"x","y","w","h","minW","minH","maxW","maxH","resizable","border","missed","titleBar","program"}` |
 | `{"cmd":"focus","id":N}` | `{"type":"focused","ok":bool,"foreground":bool}` |
 | `{"cmd":"lock","id":N,"on":1}` | `{"type":"locked","ok":bool,"on":bool}` |
 | `{"cmd":"topmost","id":N,"on":1}` | `{"type":"topmost","ok":bool,"on":bool}` |
+| `{"cmd":"quit","id":N,"force":0}` | `{"type":"quit","ok":true,"windows":N}` once the app's windows have been asked to close, `{"type":"quit","ok":true,"forced":true}` with `"force":1`, or `{"type":"quit","ok":false,"reason":"…"}` in words the Mac shows |
+| `{"cmd":"download","id":N,"offset":O}` | `{"type":"download","ok":true,"id","total","offset","data"}`: 512 KB of a file offered with Send to Mac, base64; `{"cmd":"download","id":N,"offset":0,"cancel":1}` lets go of the offer |
 
 `lock` and `topmost` take `"on":1` or `"on":0`, and read an absent `on` as 1.
 Nothing reads a field called `topmost`, so `{"cmd":"topmost","id":N,"topmost":false}`
@@ -250,6 +252,20 @@ a window the Mac is managing is gone. `{"type":"occluded","id":N,"by":"…"}` sa
 something now covers one, and `by` is empty once it is clear.
 `{"type":"cursor","shape":"arrow","reportsHidden":1}` carries the pointer's shape,
 or `"hidden"` while an application has taken the cursor off the screen.
+
+Those four go to every Mac. Every push added since goes only to a Mac that
+names it in the auth line's `"pushes"`, a space-separated list, because a Mac
+reads a push it does not know as the reply to whatever request it is waiting
+on, and every reply after it then goes to the wrong request. A Mac on 1.0.4
+names none of them and receives none. The ones there are:
+
+| `pushes` name | Push |
+|:--|:--|
+| `title` | `{"type":"title","id":N,"title":"…"}`: a streamed window was renamed, at most once a second |
+| `attention` | `{"type":"attention","id":N}`: its taskbar button flashed, at most once every few seconds |
+| `openURL` | `{"type":"openURL","url":"…"}`: a web or mail link clicked on the PC, with SolStream as its browser there |
+| `fileOffer` | `{"type":"fileOffer","id":N,"name":"…","size":S}`: a file sent with Send to Mac, fetched with `download` |
+| `fullScreen` | `{"type":"fullScreen","id":N,"on":bool}`: the app went full screen on the PC, or came out of it |
 
 `displays[].name` is the `DXGI_OUTPUT_DESC.DeviceName` form (`\\.\DISPLAY1`) —
 the same string the media session names, so the capture display
