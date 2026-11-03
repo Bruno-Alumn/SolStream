@@ -68,6 +68,9 @@
 #ifndef DWMSBT_NONE
 #define DWMSBT_NONE 1
 #endif
+#ifndef DWMWA_COLOR_DEFAULT
+#define DWMWA_COLOR_DEFAULT 0xFFFFFFFF
+#endif
 
 namespace solstream {
 namespace {
@@ -735,6 +738,13 @@ void DrawButton(const Button& button) {
         Stroke(button.rect, radius,
                hot || down ? g_palette.edge : g_palette.hairline);
         ink = g_palette.text;
+        // A contrast theme's hairline IS its text colour, so a pressed caption
+        // vanished into its fill. Pressed is the theme's highlight instead,
+        // with the highlight's own text on it.
+        if (down && g_palette.contrast) {
+            Fill(button.rect, radius, g_palette.accent);
+            ink = g_palette.onAccent;
+        }
     }
 
     // The caption — and the shield, when there is one — centred as a group,
@@ -1198,6 +1208,11 @@ void DrawWorkingBar(float left, float top, float right) {
     constexpr unsigned kPeriod = 1600;
     const D2D1_RECT_F track{left, top, right, top + kHeight};
     Fill(track, kHeight / 2.0f, g_palette.raised);
+    // A contrast theme's button face can be its window colour -- High
+    // Contrast White's is -- and the track vanished: outlined instead.
+    if (g_palette.contrast) {
+        Stroke(track, kHeight / 2.0f, g_palette.edge);
+    }
 
     const float width = right - left;
     const float segment = width * 0.32f;

@@ -116,6 +116,9 @@ struct Palette {
     D2D1_COLOR_F danger;        ///< failed dot, destructive text
 
     bool dark;
+    /// The person's contrast theme rather than Solar: no tints to step
+    /// through, so a press or a track is shown another way (see the drawing).
+    bool contrast = false;
 };
 
 constexpr D2D1_COLOR_F Hex(unsigned rgb, float a = 1.0f) {
@@ -238,6 +241,7 @@ inline Palette ContrastPalette(const SystemColors& c) {
     p.live = FromColorRef(c.hot_light);
     p.danger = FromColorRef(c.window_text);
 
+    p.contrast = true;
     // Dark when the window is: the title bar and anything else that asks.
     const D2D1_COLOR_F ground = p.ground;
     p.dark = 0.2126f * ground.r + 0.7152f * ground.g + 0.0722f * ground.b < 0.5f;

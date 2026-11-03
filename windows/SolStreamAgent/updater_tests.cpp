@@ -4329,6 +4329,7 @@ void TestContrastPalette() {
     // BGR read the right way round: 0x00FFFF is red and green, no blue.
     CHECK(dark.live.r == 1.0f && dark.live.g == 1.0f && dark.live.b == 0.0f);
     CHECK(dark.onAccent.r == 0.0f);
+    CHECK(dark.contrast && !DarkPalette().contrast && !LightPalette().contrast);
 
     // High Contrast White: the other way about.
     SystemColors white;
