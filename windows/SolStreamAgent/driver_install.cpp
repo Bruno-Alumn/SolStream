@@ -26,6 +26,7 @@ extern "C" WINSETUPAPI WINBOOL WINAPI SetupDiSetDevicePropertyW(
 #include <vector>
 
 #include "display_setup.h"
+#include "installer.h"
 #include "media/log.h"
 #include "updater.h"
 #include "util.h"
@@ -33,6 +34,16 @@ extern "C" WINSETUPAPI WINBOOL WINAPI SetupDiSetDevicePropertyW(
 
 namespace solstream {
 namespace {
+
+/// What failed, in full, for whoever reads a log: the host's, and setup's,
+/// which its Failed screen points to. The screen says what to do instead.
+constexpr const char* kDeviceTrouble =
+    "Windows couldn't add the virtual display. Restart this PC.";
+
+void LogDetail(const std::string& line) {
+    media::Log("[driver] %s", line.c_str());
+    WriteInstallLog("display driver: " + line);
+}
 
 /// The driver-only zip of kDriverVersion, as GitHub serves it. The hash is the
 /// one GitHub reports for the asset, checked against a download by hand when
@@ -227,15 +238,17 @@ bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::wstring& instanc
                   std::string& error) {
     set = SetupDiCreateDeviceInfoList(&GUID_DEVCLASS_DISPLAY, nullptr);
     if (set == INVALID_HANDLE_VALUE) {
-        error = "could not start a device list (error " + std::to_string(GetLastError()) + ")";
+        LogDetail("could not start a device list: error " + std::to_string(GetLastError()));
+        error = kDeviceTrouble;
         return false;
     }
     created = SP_DEVINFO_DATA{};
     created.cbSize = sizeof(created);
     if (!SetupDiCreateDeviceInfoW(set, L"Display", &GUID_DEVCLASS_DISPLAY, nullptr, nullptr,
                                   DICD_GENERATE_ID, &created)) {
-        error = "could not create the display device (error "
-              + std::to_string(GetLastError()) + ")";
+        LogDetail("could not create the display device: error "
+                  + std::to_string(GetLastError()));
+        error = kDeviceTrouble;
         SetupDiDestroyDeviceInfoList(set);
         set = INVALID_HANDLE_VALUE;
         return false;
@@ -248,8 +261,9 @@ bool CreateDevice(SP_DEVINFO_DATA& created, HDEVINFO& set, std::wstring& instanc
                                            (const BYTE*) ids.data(),
                                            (DWORD) (ids.size() * sizeof(wchar_t)))
         || !SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, &created)) {
-        error = "could not register the display device (error "
-              + std::to_string(GetLastError()) + ")";
+        LogDetail("could not register the display device: error "
+                  + std::to_string(GetLastError()));
+        error = kDeviceTrouble;
         SetupDiDestroyDeviceInfoList(set);
         set = INVALID_HANDLE_VALUE;
         return false;
@@ -451,15 +465,15 @@ std::string InstallProblem(const char* what, DWORD code) {
         case ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED:
         case ERROR_AUTHENTICODE_PUBLISHER_NOT_TRUSTED:
             return "The driver wasn't installed, because Windows' driver prompt was "
-                   "declined. Set it up again and click Install when Windows asks.";
+                   "declined. Click Install when Windows asks.";
         case ERROR_INVALID_IMAGE_HASH:
         case (DWORD) TRUST_E_NOSIGNATURE:
             return "Windows would not accept the driver's signature, so nothing was "
                    "installed.";
         default:
-            media::Log("[driver] Windows could not %s: error %lu", what, code);
-            return std::string("Windows couldn't ") + what + ". Restart this PC, then set "
-                   "it up again.";
+            LogDetail(std::string("Windows could not ") + what + ": error "
+                      + std::to_string(code));
+            return std::string("Windows couldn't ") + what + ". Restart this PC.";
     }
 }
 
@@ -621,14 +635,10 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         std::string fetch_error;
         if (!update::FetchPinned(kPackageUrl, kPackageSha256, kPackageCap, package,
                                  fetch_error)) {
-            // Network trouble or the release gone: either way a pointer to the
-            // project itself, which is the way round both.
-            // Its own words last, in brackets, for whoever reads the log: the
-            // next step is what the line is for, and the way round it the
-            // project's page offers needs the same connection.
-            // What to do next is said by whoever shows this: setup adds where
-            // to set it up again.
-            media::Log("[driver] download failed: %s", fetch_error.c_str());
+            // Its own words go to the logs. What to do next is said by
+            // whoever shows this: setup and the window add where to set it
+            // up again.
+            LogDetail("download failed: " + fetch_error);
             error = "Couldn't download the virtual display driver. Check that this PC is "
                     "online.";
             return false;
@@ -637,9 +647,8 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         std::string folder_error;
         const std::wstring work = PrivateDirectory(folder_error);
         if (work.empty()) {
-            media::Log("[driver] no folder to unpack into: %s", folder_error.c_str());
-            error = "Couldn't unpack the virtual display driver. Restart this PC, then set it "
-                    "up again.";
+            LogDetail("no folder to unpack into: " + folder_error);
+            error = "Couldn't unpack the virtual display driver. Restart this PC.";
             return false;
         }
         struct Cleanup {
@@ -649,7 +658,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
 
         const std::wstring zip = work + L"\\driver.zip";
         if (!WriteBytes(zip, package)) {
-            error = "Couldn't save the virtual display driver it downloaded.";
+            LogDetail("could not save the download");
+            error = "Couldn't save the virtual display driver it downloaded. Check that this "
+                    "PC's drive has free space.";
             return false;
         }
         // tar has been in System32 since Windows 10 1803 and reads zip. The
@@ -661,9 +672,8 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         const std::wstring inf = package_dir + L"\\MttVDD.inf";
         if (unpacked != 0 || !Exists(inf) || !Exists(package_dir + L"\\MttVDD.dll")
             || !Exists(package_dir + L"\\mttvdd.cat")) {
-            media::Log("[driver] unpacking failed: tar %s", RunOutcome(unpacked).c_str());
-            error = "Couldn't unpack the virtual display driver. Restart this PC, then set it "
-                    "up again.";
+            LogDetail("unpacking failed: tar " + RunOutcome(unpacked));
+            error = "Couldn't unpack the virtual display driver. Restart this PC.";
             return false;
         }
 

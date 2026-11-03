@@ -1224,6 +1224,10 @@ std::wstring NewResultToken() {
 
 }  // namespace
 
+void WriteInstallLog(const std::string& line) {
+    InstallLog(line);
+}
+
 std::wstring InstallLogPath() {
     return SharedDirectory() + L"solstream-install.log";
 }
@@ -1383,11 +1387,13 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool ma
         // told somebody removing SolStream that it needed rights to install.
         // Neither half of the sentence has to name the operation -- the window
         // that raised the prompt is already saying which one it is.
-        error = GetLastError() == ERROR_CANCELLED
+        const DWORD code = GetLastError();
+        error = code == ERROR_CANCELLED
                     ? "Nothing changed, because Windows' permission prompt was closed. "
                       "Try again, and choose Yes when Windows asks."
-                    : "Windows wouldn't let SolStream ask for permission. Restart this PC, "
-                      "then try again.";
+                    : "SolStream couldn't ask Windows for permission. Run setup again from "
+                      "where you downloaded it.";
+        InstallLog("elevation failed: error " + std::to_string(code));
         // An uninstall started from Add/Remove Programs has no console and, with
         // --quiet, no window either, so this is the only place the reason exists.
         InstallLog("could not elevate: " + error);
@@ -1606,8 +1612,9 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
 
     if (!CreateDirectoryW(destination.c_str(), nullptr)
         && GetLastError() != ERROR_ALREADY_EXISTS) {
+        const DWORD code = GetLastError();
         InstallLog("could not create " + ToUtf8(destination) + ": error "
-                   + std::to_string(GetLastError()));
+                   + std::to_string(code));
         error = "SolStream couldn't create its folder in Program Files. Restart this PC, "
                 "then run setup again.";
         return false;

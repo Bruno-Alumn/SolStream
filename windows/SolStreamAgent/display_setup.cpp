@@ -844,8 +844,8 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
         }
     }
     if (adapter.gdi_name.empty()) {
-        error = "The virtual display isn't on this PC yet. Set it up, or restart this PC "
-                "if you just did.";
+        error = "Windows hasn't started the virtual display yet. Restart this PC; SolStream "
+                "finishes setting it up when it starts.";
         return false;
     }
     // Another product's virtual display -- Parsec's, Sunshine's, spacedesk's --

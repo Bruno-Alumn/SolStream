@@ -2262,7 +2262,7 @@ void StartDisplayJob(HWND window) {
                                  L"and SolStream sets it up for your Mac after that."
                                : L"Your Mac gets a screen of its own from the next time it "
                                  L"connects.")
-                    : ToWide(display.substr(7)));
+                    : ToWide(display.substr(7)) + L" Then choose Set up again.");
     }).detach();
 }
 

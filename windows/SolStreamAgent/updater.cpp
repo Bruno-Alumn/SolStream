@@ -66,8 +66,7 @@ constexpr const char* kGitHubUnreachable =
 /// What an update that could not be stored says.
 constexpr const char* kUpdateNotSaved =
     "SolStream couldn't save the update on this PC. Check that its drive has free space, "
-    "then choose Install update again.";
-
+    "then choose Install again.";
 
 using media::Log;
 
@@ -1022,7 +1021,7 @@ bool Pin(HANDLE& held, std::wstring& path, std::string& error) {
     held = INVALID_HANDLE_VALUE;
     Log("[update] not using the download: %s", detail.c_str());
     error = "SolStream couldn't check where the update was saved, so it wasn't installed. "
-            "Choose Install update again.";
+            "Choose Install again.";
     return false;
 }
 
@@ -1122,7 +1121,7 @@ bool PrepareInstaller(const Release& release,
     if (held == INVALID_HANDLE_VALUE) {
         Log("[update] could not open the download to check it (error %lu)", GetLastError());
         error = "Something on this PC is using the update's file, often antivirus. Wait a "
-                "minute, then choose Install update again.";
+                "minute, then choose Install again.";
         return false;
     }
     if (!Matches(held, release, detail)) {
@@ -1132,7 +1131,7 @@ bool PrepareInstaller(const Release& release,
         Log("[update] %s does not match SHA256SUMS, discarded: %s",
             release.installer.name.c_str(), detail.c_str());
         error = "The download arrived damaged, so it wasn't installed. Choose Install "
-                "update again to download it fresh.";
+                "again to download it fresh.";
         return false;
     }
     Log("[update] %s downloaded; its SHA-256 matches the signed SHA256SUMS",
@@ -1861,9 +1860,9 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
         Log("[update] the installer did not start (error %lu)", code);
         error = code == ERROR_CANCELLED
                     ? "Nothing changed, because Windows' permission prompt was closed. "
-                      "Choose Install update again, and choose Yes when Windows asks."
+                      "Choose Install again, and choose Yes when Windows asks."
                     : "Windows wouldn't start the update. Restart this PC, then choose "
-                      "Install update again.";
+                      "Install again.";
         return false;
     }
     Log("[update] the installer for %s has started; it stops this copy and starts the "

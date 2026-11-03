@@ -6829,9 +6829,11 @@ int wmain(int argc, wchar_t** argv) {
         // once InstallSelf has stopped the old host (and with it the updater's
         // hold). So no hold, no install -- before anything has been changed.
         if (self == INVALID_HANDLE_VALUE) {
-            const std::string error = "SolStream couldn't hold its own installer file "
-                                      "(error " + std::to_string(hold_error)
-                                    + "), so nothing was changed.";
+            solstream::WriteInstallLog("could not hold the installer file: error "
+                                       + std::to_string(hold_error));
+            const std::string error = "SolStream couldn't hold its own installer file, so "
+                                      "nothing was changed. Run setup again from where you "
+                                      "downloaded it.";
             solstream::WriteInstallResult(false, error);
             std::fprintf(stderr, "%s\n", error.c_str());
             return 1;
@@ -7429,14 +7431,14 @@ int wmain(int argc, wchar_t** argv) {
                     ? L"streaming" : L"ready";
             if (!status.streaming_ready) {
                 status.streaming_detail =
-                    L"This PC's Windows is too old for SolStream. Update Windows in "
-                    L"Settings > Windows Update, then open SolStream again.";
+                    L"This PC's Windows is too old for SolStream.";
                 // The version that added capturing one window or one display
                 // by its handle, which is how media/capture.cpp starts every
                 // capture. The calls that came later are tried and survived.
                 status.streaming_why =
                     L"SolStream streams with Windows' own window capture, which "
-                    L"needs Windows 10 version 1903 or later.";
+                    L"needs Windows 10 version 1903 or later. Update Windows in "
+                    L"Settings \u203A Windows Update, then open SolStream again.";
             }
 #else
             status.streaming_ready = false;

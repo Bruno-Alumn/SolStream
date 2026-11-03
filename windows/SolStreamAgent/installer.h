@@ -124,6 +124,11 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error);
 /// fails on a machine nobody was watching.
 std::wstring InstallLogPath();
 
+/// One line into that file, for the setup steps outside installer.cpp: the
+/// file setup's Failed screen points to, which the host's own log is not when
+/// an administrator's password ran the step.
+void WriteInstallLog(const std::string& line);
+
 /// The definition of the task that starts the installed host, as it is handed
 /// to Task Scheduler: run as `account`, from `destination`, at that account's
 /// logon when `at_logon` and otherwise only when asked to. Exposed for its
