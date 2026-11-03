@@ -6460,6 +6460,10 @@ std::string AnotherMacMessage() {
     return ComputerName() + " is already streaming to another Mac. Disconnect there first.";
 }
 
+std::string CrowdedMessage() {
+    return ComputerName() + " is busy answering other connections. Try again in a moment.";
+}
+
 std::string SameMacMessage() {
     return ComputerName() + " is still letting go of this Mac's last connection.";
 }
@@ -7701,8 +7705,16 @@ int wmain(int argc, wchar_t** argv) {
                     std::thread([client]() { OfferTakeover(client); }).detach();
                     continue;
                 }
-                Log("[agent] refused a second client: one is already connected");
-                SendKnockLine(client, BusyLine(AnotherMacMessage(), std::string()));
+                // Only a knock found every takeover listener taken -- by
+                // connections that say nothing, most likely. Not "another
+                // Mac", which may be false of a Mac whose own session this
+                // is, and gives it nothing to do; and no holder, so one
+                // reconnecting tries again.
+                const bool crowded = g_require_auth && !g_token.empty();
+                Log(crowded ? "[agent] refused a knock: every takeover listener is busy"
+                            : "[agent] refused a second client: one is already connected");
+                SendKnockLine(client, BusyLine(crowded ? CrowdedMessage() : AnotherMacMessage(),
+                                               std::string()));
                 closesocket(client);
                 continue;
             }
