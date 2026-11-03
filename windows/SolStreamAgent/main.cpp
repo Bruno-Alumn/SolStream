@@ -6461,7 +6461,7 @@ std::string AnotherMacMessage() {
 }
 
 std::string CrowdedMessage() {
-    return ComputerName() + " is busy answering other connections. Try again in a moment.";
+    return ComputerName() + " is busy answering other connections. Go back and connect again in a moment.";
 }
 
 std::string SameMacMessage() {
