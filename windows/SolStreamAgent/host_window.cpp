@@ -1033,8 +1033,24 @@ void FitToContent(HWND window, float content_bottom, bool shrink) {
     RECT frame{0, 0, MulDiv((int) metric::kWindowW, dpi, 96),
                MulDiv((int) wanted, dpi, 96)};
     AdjustWindowRectExForDpi(&frame, WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME, FALSE, 0, dpi);
-    SetWindowPos(window, nullptr, 0, 0, frame.right - frame.left,
-                 frame.bottom - frame.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    const int width = frame.right - frame.left;
+    const int height = frame.bottom - frame.top;
+    // Growing downwards only, a window low on a small screen at 150% put the
+    // token and its Copy button below the edge, where nobody could reach
+    // them: it cannot be resized or scrolled. Moved up as far as it needs,
+    // and no further than the top of the work area.
+    RECT at{};
+    GetWindowRect(window, &at);
+    MONITORINFO info{sizeof(info)};
+    if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &info)
+        && at.top + height > info.rcWork.bottom) {
+        const LONG top = (std::max)(info.rcWork.top, info.rcWork.bottom - height);
+        SetWindowPos(window, nullptr, at.left, top, width, height,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return;
+    }
+    SetWindowPos(window, nullptr, 0, 0, width, height,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 void HideAllControls() {
@@ -2072,8 +2088,20 @@ void SetEditFont() {
 /// here rather than carrying it to the Mac, its clipboard history and the
 /// user's other Apple devices, and Windows keeps it out of clipboard history
 /// and the cloud clipboard.
+///
+/// Opened with a few tries, as the clipboard's own code does: whoever has it
+/// open now -- a clipboard manager reading the last copy -- lets go within
+/// milliseconds, and a Copy that did nothing on the first refusal said nothing
+/// either.
 void CopyToClipboard(const std::wstring& text) {
-    if (text.empty() || !OpenClipboard(g_window)) {
+    if (text.empty()) {
+        return;
+    }
+    bool open = false;
+    for (int attempt = 0; attempt < 10 && !(open = OpenClipboard(g_window) != FALSE); ++attempt) {
+        Sleep(20);
+    }
+    if (!open) {
         return;
     }
     EmptyClipboard();
@@ -2092,6 +2120,51 @@ void CopyToClipboard(const std::wstring& text) {
         }
     }
     CloseClipboard();
+}
+
+/// The token field's own copy -- Ctrl+C, or Copy on its right-click menu --
+/// goes through CopyToClipboard too: the EDIT's put the token on the clipboard
+/// unmarked, into clipboard history and the user's other PCs, though the field
+/// exists for exactly that keystroke. Nothing can be cut, pasted or deleted.
+/// Tab and Escape leave the field as they leave the window.
+WNDPROC g_token_edit_proc = nullptr;
+void MoveFocus(HWND window, int direction);
+
+LRESULT CALLBACK TokenEditProc(HWND edit, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+        case WM_COPY: {
+            DWORD from = 0, to = 0;
+            SendMessageW(edit, EM_GETSEL, (WPARAM) &from, (LPARAM) &to);
+            const int length = GetWindowTextLengthW(edit);
+            std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+            text.resize(static_cast<size_t>(GetWindowTextW(edit, text.data(), length + 1)));
+            if (to > from && to <= text.size()) {
+                CopyToClipboard(text.substr(from, to - from));
+            }
+            return 0;
+        }
+        case WM_CUT:
+        case WM_PASTE:
+        case WM_CLEAR:
+            return 0;
+        case WM_KEYDOWN:
+            if (wparam == VK_TAB) {
+                MoveFocus(GetParent(edit), (GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
+                return 0;
+            }
+            if (wparam == VK_ESCAPE) {
+                PostMessageW(GetParent(edit), WM_CLOSE, 0, 0);
+                return 0;
+            }
+            break;
+        case WM_CHAR:
+            // The EDIT beeps at a Tab or Escape it was never going to take.
+            if (wparam == L'\t' || wparam == 0x1B) {
+                return 0;
+            }
+            break;
+    }
+    return CallWindowProcW(g_token_edit_proc, edit, message, wparam, lparam);
 }
 
 // ── Long jobs ────────────────────────────────────────────────────────────────
@@ -2690,6 +2763,20 @@ void RemoveTrayIcon(HWND window) {
 /// response to a click on the icon or a second launch -- both of which hand
 /// this process the right to take the foreground.
 void ShowFromTray(HWND window) {
+    // Back on a display that is still there. Hidden, a window is not moved
+    // when its display goes -- the virtual one it was dragged onto during a
+    // stream, removed since -- and it came back nowhere anybody could see.
+    if (!MonitorFromWindow(window, MONITOR_DEFAULTTONULL)) {
+        MONITORINFO info{sizeof(info)};
+        RECT at{};
+        GetWindowRect(window, &at);
+        if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &info)) {
+            const RECT& work = info.rcWork;
+            SetWindowPos(window, nullptr, work.left + ((work.right - work.left) - (at.right - at.left)) / 2,
+                         work.top + ((work.bottom - work.top) - (at.bottom - at.top)) / 2, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
     ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
     SetForegroundWindow(window);
 }
@@ -2752,6 +2839,9 @@ void ShowTrayMenu(HWND window) {
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON
                   | (GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN),
         at.x, at.y, window, nullptr);
+    // What Windows documents for a tray menu: without it the next right-click
+    // can open a menu that closes again at once.
+    PostMessageW(window, WM_NULL, 0, 0);
     DestroyMenu(menu);
     switch (chosen) {
         case kTrayOpen:
@@ -2925,6 +3015,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 // in the proportional UI font is a token whose characters cannot be
                 // told apart when somebody reads it aloud.
                 SetEditFont();
+                g_token_edit_proc = (WNDPROC) SetWindowLongPtrW(
+                    g_token_edit, GWLP_WNDPROC, (LONG_PTR) TokenEditProc);
                 AddTrayIcon(window);
             }
 
@@ -3113,6 +3205,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
 
         case WM_KEYDOWN: {
+            // Escape puts the host window away, as the close box does.
+            if (wparam == VK_ESCAPE && g_mode == WindowMode::Host) {
+                PostMessageW(window, WM_CLOSE, 0, 0);
+                return 0;
+            }
             if (wparam == VK_TAB) {
                 MoveFocus(window, (GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
                 return 0;

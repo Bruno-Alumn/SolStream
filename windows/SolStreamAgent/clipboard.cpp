@@ -139,7 +139,9 @@ void MarkClipboardPrivate() {
     const MarkerFormats& formats = Formats();
     // 0 refuses history and the cloud. The first format says what it says by
     // being there at all, so its 0 is only there to be some data.
-    for (const UINT format : {formats.exclude, formats.history, formats.cloud}) {
+    // And Clipboard Viewer Ignore, which clipboard managers that predate the
+    // other three still honour.
+    for (const UINT format : {formats.exclude, formats.history, formats.cloud, formats.ignore}) {
         if (format == 0) {
             continue;
         }
