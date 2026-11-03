@@ -71,11 +71,17 @@ enum TokenPrompt {
             // `SolStreamAgent.exe --print-token` — an executable name that has
             // not existed since the installed binary became SolStream.exe, for a
             // token the window has been displaying all along.
-            let body = NSTextField(wrappingLabelWithString: """
+            let body = NSTextField(wrappingLabelWithString: rejected
+                ? """
+                The token may have changed on the PC, or part of it was missed. \
+                Open SolStream on the PC, press Copy beside "Pairing token", and \
+                paste it here.
+                """
+                : """
                 Open SolStream on the Windows PC. It shows the token under \
                 "Pairing token", with a Copy button beside it.
 
-                Paste it below — SolStream remembers it for this host, so this \
+                Paste it below — SolStream remembers it for this PC, so this \
                 is asked once.
                 """)
             body.font = DS.body

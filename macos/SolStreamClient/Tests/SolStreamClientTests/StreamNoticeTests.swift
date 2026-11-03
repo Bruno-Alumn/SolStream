@@ -62,11 +62,12 @@ final class StreamNoticeTests: XCTestCase {
                        .error(title: "Stream failed", detail: "gone quiet"))
         XCTAssertEqual(AppDelegate.notice(for: .restartFailed("no display"), channel: .up,
                                           host: host, canRestart: false, finalErrorShown: false),
-                       .error(title: "Lost the stream", detail: "no display"))
+                       .error(title: "Lost the stream",
+                              detail: AppDelegate.startTroubleText("no display", host: host)))
         XCTAssertEqual(AppDelegate.notice(for: .restartFailed(nil), channel: .up,
                                           host: host, canRestart: false, finalErrorShown: false),
                        .error(title: "Lost the stream",
-                              detail: "\(host) did not start streaming again."))
+                              detail: "\(host) did not start streaming again. Choose Try Again."))
         XCTAssertEqual(AppDelegate.notice(for: .stalled(seconds: 3), channel: .up, host: host,
                                           canRestart: true, finalErrorShown: false),
                        .status(title: "Reconnecting…",

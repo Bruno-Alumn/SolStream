@@ -79,7 +79,8 @@ extension AppDelegate {
             return canRestart
                 ? .restart
                 : .error(title: "Lost the stream",
-                         detail: message ?? "\(host) did not start streaming again.")
+                         detail: message.map { AppDelegate.startTroubleText($0, host: host) }
+                             ?? "\(host) did not start streaming again. Choose Try Again.")
         }
     }
 }

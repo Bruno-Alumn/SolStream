@@ -861,8 +861,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.failOpen("\(app.name) opened a window and closed it again. Try opening it "
-                                          + "once more.", for: agent)
+                            self.failOpen("\(app.name) closed its first window, often a splash or "
+                                          + "update screen. When it has finished on the PC, pick it "
+                                          + "from the open windows.", for: agent)
                             return
                         }
                         self.attach(target, host: host, agent: agent)
@@ -903,7 +904,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + "here. Answer it at the PC, then pick \(app)'s Open window row. To avoid "
                 + "this, turn off \"Run as administrator\" for the app on the PC."
         case .declined:
-            return "\(app) needs administrator permission, and it was declined on \(host)."
+            return "\(app) needs administrator permission, and it was declined on \(host). "
+                + "Open it again and choose Yes on the PC, or turn off \"Run as administrator\" "
+                + "for it there."
         case .missing:
             // Not "uninstalled": a game on a drive that isn't plugged in, or
             // a network share that is down, looks the same from here.
@@ -913,6 +916,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "Windows wouldn't start \(app) on \(host). Open it on the PC once to see "
                 + "why, then try again."
         }
+    }
+
+    /// What to say when the PC agreed to stream but its picture would not
+    /// start. Its reason is written for the log -- "the hardware HEVC encoder
+    /// would not open at 4096x2560" -- so it is read for what to do, not shown.
+    static func startTroubleText(_ reason: String?, host: String) -> String {
+        let why = (reason ?? "").lowercased()
+        if why.contains("captur") {
+            return "\(host) couldn't capture the picture. Check the PC is unlocked with its "
+                + "screen on, then open the app again."
+        }
+        if why.contains("encoder") {
+            return "The PC's graphics card couldn't encode the picture. Choose H.264 or a lower "
+                + "quality in Settings, then open the app again."
+        }
+        if why.contains("port") {
+            return "Another program on \(host) is using SolStream's port. Restart the PC, then "
+                + "connect again."
+        }
+        return "\(host) couldn't start the picture. Restart SolStream on the PC, then open the "
+            + "app again."
     }
 
     /// What a failed open says when the connection is what failed.
@@ -1230,8 +1254,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.isCurrent(agent) { Updater.shared.isStreaming = wasStreaming }
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
-                self.failOpen("\(host) couldn't start streaming: "
-                              + (media.message ?? "it gave no reason") + ". Try again.", for: agent)
+                self.failOpen(Self.startTroubleText(media.message, host: host), for: agent)
                 return
             }
             // Agreed with a PC that has since been left: its connection is
@@ -1504,8 +1527,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // back by restarting it, and Try Again is the honest offer
                     // rather than a fourth "Reconnecting…" and a fifth.
                     self.showEnded("Lost the stream",
-                                   detail: "No picture from \(host) after three restarts. Try Again; "
-                                       + "if it keeps happening, check the PC's network.")
+                                   detail: "\(host) is connected but sent no picture. Check the "
+                                       + "PC isn't locked or showing a Windows prompt, then "
+                                       + "choose Try Again and open the app again.")
                     return
                 }
                 // With the agent channel down too, `onReconnected` recovers.

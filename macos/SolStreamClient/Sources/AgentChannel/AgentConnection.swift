@@ -1007,8 +1007,8 @@ public final class AgentConnection {
         case .posix(.EHOSTUNREACH), .posix(.ENETUNREACH):
             // This Mac's side: no route, or macOS keeping SolStream off the
             // local network.
-            return "This Mac has no way to \(host). Check its Wi-Fi or Tailscale, and that "
-                + "SolStream is allowed under Privacy & Security > Local Network."
+            return "This Mac can't reach \(host). Check the Mac's Wi-Fi or Tailscale, and that "
+                + "SolStream is on in System Settings > Privacy & Security > Local Network."
         case .posix(.ETIMEDOUT):
             return "No answer from \(host). Check the PC is awake, someone is signed in to "
                 + "Windows, and SolStream is running."
@@ -2219,7 +2219,7 @@ public final class AgentConnection {
             case .success(let reply) where reply["ok"] as? Bool == true:
                 reason = nil
             case .success(let reply):
-                reason = Self.quitRefusal(reply)
+                reason = Self.quitRefusal(reply, force: force)
             case .failure:
                 reason = "The PC couldn't be reached. Check that it's on and SolStream "
                     + "is running there."
@@ -2230,7 +2230,7 @@ public final class AgentConnection {
 
     /// What to say when the host would not quit an app. A host from before
     /// `quit` answers "unknown cmd", which is about updating, not the app.
-    static func quitRefusal(_ reply: [String: Any]) -> String {
+    static func quitRefusal(_ reply: [String: Any], force: Bool = false) -> String {
         if let reason = reply["reason"] as? String, !reason.isEmpty {
             return reason
         }
@@ -2241,7 +2241,11 @@ public final class AgentConnection {
         if reply["message"] as? String == "no such window" {
             return "The app's window has already closed on the PC."
         }
-        return "The PC didn't quit the app."
+        // Quit asks, as the close box does, and an app can say no: most
+        // often it is asking to save. Force Quit is Windows refusing.
+        return force
+            ? "Windows wouldn't end it. Close it at the PC, or restart the PC."
+            : "It may be asking to save on the PC. Answer it there, or use Force Quit."
     }
 
     // MARK: - Transport

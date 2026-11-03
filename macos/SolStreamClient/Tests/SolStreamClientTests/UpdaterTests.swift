@@ -426,11 +426,11 @@ final class UpdaterTests: XCTestCase {
 
         StubProtocol.serve(UpdateSource.latestRelease.absoluteString, status: 403, body: Data())
         await updater.check()
-        XCTAssertEqual(updater.state, .failed("GitHub is limiting requests for now."))
+        XCTAssertEqual(updater.state, .failed("GitHub is limiting checks. Check again in an hour."))
 
         StubProtocol.serve(UpdateSource.latestRelease.absoluteString, status: 502, body: Data())
         await updater.check()
-        XCTAssertEqual(updater.state, .failed("GitHub answered with error 502."))
+        XCTAssertEqual(updater.state, .failed("GitHub had a problem (error 502). Check again later."))
 
         StubProtocol.serve(UpdateSource.latestRelease.absoluteString, body: Data("<html>".utf8))
         await updater.check()
@@ -566,7 +566,7 @@ final class UpdaterTests: XCTestCase {
         var updater = makeUpdater(version: "1.0.0", target: target, key: P256.Signing.PrivateKey()
             .publicKey.x963Representation.base64EncodedString())
         await updater.check()
-        XCTAssertEqual(updater.state, .failed("The update's signature didn't verify."))
+        XCTAssertEqual(updater.state, .failed("The update couldn't be verified. Check again later."))
         XCTAssertNil(updater.downloaded)
         XCTAssertFalse(StubProtocol.requested(release.zipAddress), "fetched the archive before the signature held")
 
@@ -575,7 +575,7 @@ final class UpdaterTests: XCTestCase {
         release = try publish(version: "1.1.0", corruptArchive: true)
         updater = makeUpdater(version: "1.0.0", target: target, key: release.publicKey)
         await updater.check()
-        XCTAssertEqual(updater.state, .failed("The download didn't match its checksum."))
+        XCTAssertEqual(updater.state, .failed("The download was damaged. Check again."))
         XCTAssertNil(updater.downloaded)
         let leftovers = (try? FileManager.default.contentsOfDirectory(
             atPath: downloadsFolder.path)) ?? []
@@ -802,7 +802,7 @@ final class UpdaterTests: XCTestCase {
         try FileManager.default.copyItem(at: impostor, to: cached)
         updater.installAndRelaunch()
         await waitFor(updater) { if case .failed = $0 { return true } else { return false } }
-        XCTAssertEqual(updater.state, .failed("The download didn't match its checksum."))
+        XCTAssertEqual(updater.state, .failed("The download was damaged. Check again."))
         XCTAssertNil(updater.downloaded)
         XCTAssertEqual(try installedVersion(target), "1.0.0")
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(
