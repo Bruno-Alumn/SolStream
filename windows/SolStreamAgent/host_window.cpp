@@ -28,6 +28,7 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -139,7 +140,9 @@ UINT g_show_request = 0;
 /// Sent by an install or an uninstall that is about to replace this copy:
 /// kQuitHostMessage.
 UINT g_quit_request = 0;
-bool g_tray_added = false;
+/// Read by the status thread as well as the window's: atomic, not a plain bool
+/// one thread rewrites while the other reads it.
+std::atomic<bool> g_tray_added{false};
 /// Set by the tray's Quit, so the WM_CLOSE that follows ends the program
 /// instead of hiding the window again.
 bool g_quitting = false;
@@ -400,6 +403,37 @@ void Text(const std::wstring& text, IDWriteTextFormat* format,
     g_brush->SetColor(colour);
     g_target->DrawTextW(text.c_str(), (UINT32) text.size(), format, rect, g_brush,
                         D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+/// `text` on one line in `rect`, ending in "…" where it does not fit: a value
+/// that wrapped -- a long DNS name, a Tailscale name -- lost its top and bottom
+/// to the row's height, centred as every format here is.
+void TextOneLine(const std::wstring& text, IDWriteTextFormat* format,
+                 const D2D1_RECT_F& rect, const D2D1_COLOR_F& colour,
+                 DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING) {
+    if (!format || text.empty() || rect.right <= rect.left) {
+        return;
+    }
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(g_dwrite->CreateTextLayout(text.c_str(), (UINT32) text.size(), format,
+                                          rect.right - rect.left, rect.bottom - rect.top,
+                                          &layout))
+        || layout == nullptr) {
+        Text(text, format, rect, colour, align);
+        return;
+    }
+    layout->SetTextAlignment(align);
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    IDWriteInlineObject* ellipsis = nullptr;
+    if (SUCCEEDED(g_dwrite->CreateEllipsisTrimmingSign(format, &ellipsis)) && ellipsis) {
+        const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        layout->SetTrimming(&trimming, ellipsis);
+    }
+    g_brush->SetColor(colour);
+    g_target->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, g_brush,
+                             D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    if (ellipsis) { ellipsis->Release(); }
+    layout->Release();
 }
 
 /// How tall this text is when wrapped to `width`, in DIPs.
@@ -1730,7 +1764,12 @@ void LayoutAndPaint(HWND window) {
         const bool dot = screen.mark != Mark::None;
         const float text_left = pad + inset + (dot ? metric::kDot + space::kMd : 0.0f);
         const float text_w = right - inset - text_left;
-        const float what_h = MeasureHeight(screen.what, g_fmt_headline, text_w);
+        // The support code sits at the end of the headline's first line, so
+        // the headline stops short of it rather than running underneath.
+        const float code_room = screen.code.empty()
+            ? 0.0f : MeasureWidth(screen.code, g_fmt_caption) + space::kMd;
+        const float what_w = text_w - code_room;
+        const float what_h = MeasureHeight(screen.what, g_fmt_headline, what_w);
         const float why_h = MeasureHeight(screen.why, g_fmt_body, text_w);
         const bool has_fix = fix && !screen.fix.empty();
         const float top = y;
@@ -1744,7 +1783,7 @@ void LayoutAndPaint(HWND window) {
         DrawMark(pad + inset + metric::kDot / 2.0f,
                  inner + LineHeight(g_fmt_headline) / 2.0f, screen.mark);
         Text(screen.what, g_fmt_headline,
-             D2D1::RectF(text_left, inner, right - inset, inner + what_h),
+             D2D1::RectF(text_left, inner, text_left + what_w, inner + what_h),
              g_palette.text);
         inner += what_h;
         if (why_h > 0.0f) {
@@ -1771,7 +1810,7 @@ void LayoutAndPaint(HWND window) {
             // For support, not for the user: small, quiet, always there —
             // trailing on the first line, out of the sentence's way.
             Text(screen.code, g_fmt_caption,
-                 D2D1::RectF(right - inset - 80.0f, top + inset, right - inset,
+                 D2D1::RectF(right - inset - code_room, top + inset, right - inset,
                              top + inset + LineHeight(g_fmt_headline)),
                  g_palette.textMuted, DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
@@ -1838,13 +1877,18 @@ void LayoutAndPaint(HWND window) {
              D2D1::RectF(label_left, ry, value_left, ry + metric::kRowH),
              g_palette.textMuted);
         IDWriteTextFormat* format = row.mono ? g_fmt_mono : g_fmt_body;
-        Text(row.value, format,
-             D2D1::RectF(value_left, ry, value_right, ry + metric::kRowH),
-             row.dim || row.mark == Mark::Failed ? g_palette.textSecondary
-                                                 : g_palette.text,
-             DWRITE_TEXT_ALIGNMENT_TRAILING);
+        // Room for the dot beside a value that fills the column.
+        const float mark_room = row.mark != Mark::None ? metric::kDot + space::kSm : 0.0f;
+        TextOneLine(row.value, format,
+                    D2D1::RectF(value_left + mark_room, ry, value_right, ry + metric::kRowH),
+                    row.dim || row.mark == Mark::Failed ? g_palette.textSecondary
+                                                        : g_palette.text,
+                    DWRITE_TEXT_ALIGNMENT_TRAILING);
         if (row.mark != Mark::None) {
-            const float value_w = MeasureWidth(row.value, format);
+            // Beside the value as drawn: never wider than its column, or the
+            // dot landed on the label.
+            const float value_w = (std::min)(MeasureWidth(row.value, format),
+                                             value_right - value_left - mark_room);
             DrawMark(value_right - value_w - space::kSm - metric::kDot / 2.0f,
                      ry + metric::kRowH / 2.0f, row.mark);
         }
@@ -1987,6 +2031,8 @@ COLORREF ToColorRef(const D2D1_COLOR_F& colour) {
 /// took the system's own dark grey and the content looked like a panel set
 /// into somebody else's frame. Windows 10 ignores the caption and border
 /// colours and keeps the immersive dark frame, which is the nearest it has.
+void AccentCaret();
+
 void ApplyTheme(HWND window) {
     const bool dark = SystemPrefersDark();
     g_palette = dark ? DarkPalette() : LightPalette();
@@ -2002,6 +2048,10 @@ void ApplyTheme(HWND window) {
     InvalidateRect(window, nullptr, FALSE);
     if (g_token_edit) {
         InvalidateRect(g_token_edit, nullptr, TRUE);
+        // In the new theme's accent, if the field has the caret now.
+        if (GetFocus() == g_token_edit) {
+            AccentCaret();
+        }
     }
 }
 
@@ -2736,11 +2786,20 @@ void AddTrayIcon(HWND window) {
     // not opt into, so importing it stopped the program loading at all.
     // Loaded once and kept: the icon is added again each time Explorer
     // restarts, and a handle per re-add was never given back.
+    // Loaded again when the size the notification area wants has changed --
+    // a new scale on the main display -- rather than drawing the first size
+    // scaled, slightly blurred, for the rest of the session.
     static HICON tray_icon = nullptr;
-    if (tray_icon == nullptr) {
-        tray_icon = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
-                                       IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-                                       GetSystemMetrics(SM_CYSMICON), 0);
+    static int tray_icon_size = 0;
+    const int size = GetSystemMetrics(SM_CXSMICON);
+    if (tray_icon == nullptr || tray_icon_size != size) {
+        HICON fresh = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                         IMAGE_ICON, size, GetSystemMetrics(SM_CYSMICON), 0);
+        if (fresh) {
+            if (tray_icon) { DestroyIcon(tray_icon); }
+            tray_icon = fresh;
+            tray_icon_size = size;
+        }
     }
     data.hIcon = tray_icon;
     {
@@ -3313,6 +3372,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 g_target->SetDpi(g_dpi, g_dpi);
             }
             SetEditFont();
+            // The field rebuilds its caret with its font: the accent one again,
+            // not the default black.
+            if (GetFocus() == g_token_edit) {
+                AccentCaret();
+            }
+            // And the tray icon at the size the notification area now wants.
+            if (g_mode == WindowMode::Host && g_tray_added) {
+                AddTrayIcon(window);
+            }
             const RECT* suggested = (const RECT*) lparam;
             SetWindowPos(window, nullptr, suggested->left, suggested->top,
                          suggested->right - suggested->left,
