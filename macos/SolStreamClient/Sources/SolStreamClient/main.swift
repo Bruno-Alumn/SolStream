@@ -734,7 +734,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Each greeting is a connection to a PC that is awake: the time to
         // learn how to wake it later. See `WakeOnLAN`.
-        agent.onDisplays = { [weak agent] _ in
+        agent.onDisplays = { [weak self, weak agent, weak picker] _ in
+            // The host sends its displays only once it is satisfied: a token
+            // sheet still up over this picker is answering a question nobody
+            // is asking any more -- a stored token went through on a
+            // reconnect -- and its Cancel would put "needs its pairing token"
+            // over a connection that works.
+            if let window = picker?.window {
+                MainActor.assumeIsolated {
+                    if TokenPrompt.withdraw(over: window) {
+                        self?.tokenPromptOpen = false
+                        self?.tokenPromptParent = nil
+                    }
+                }
+            }
             fill(true)
             if let agent { WakeOnLAN.learn(from: agent, host: host) }
         }

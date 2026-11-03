@@ -47,10 +47,16 @@ enum TokenPrompt {
         Sheet(host: host, rejected: rejected, completion: completion).present(over: parent)
     }
 
-    /// Whether a token sheet is up over `parent`; for tests.
+    /// Take down the token sheet over `parent`, if there is one, without
+    /// answering it: the connection authenticated some other way. Whether
+    /// there was one.
     @MainActor
-    static func isShowing(over parent: NSWindow) -> Bool {
-        Sheet.showing(over: parent) != nil
+    @discardableResult
+    static func withdraw(over parent: NSWindow) -> Bool {
+        guard let showing = Sheet.showing(over: parent) else { return false }
+        Log.info("[agent] authenticated meanwhile; taking the token sheet down")
+        showing.withdraw()
+        return true
     }
 
     /// The sheet itself. Retained by its own completion handler until dismissed,
@@ -63,6 +69,7 @@ enum TokenPrompt {
         private var done = false
         private var keepAlive: Sheet?
         private let heading: NSTextField
+        private let body: NSTextField
         private weak var parent: NSWindow?
         /// Every sheet up now; see `TokenPrompt.present`.
         private static var live: [Sheet] = []
@@ -77,12 +84,40 @@ enum TokenPrompt {
 
         func retarget(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
             heading.stringValue = Self.headingText(host: host, rejected: rejected)
+            body.stringValue = Self.bodyText(rejected: rejected)
             self.completion = completion
+        }
+
+        func withdraw() {
+            completion = { _ in }
+            finish(nil)
+        }
+
+        static func bodyText(rejected: Bool) -> String {
+            // Points at the host window, which shows the token with a Copy
+            // button. The old text told people to open a Command Prompt and run
+            // `SolStreamAgent.exe --print-token` — an executable name that has
+            // not existed since the installed binary became SolStream.exe, for
+            // a token the window has been displaying all along.
+            rejected
+                ? """
+                The token may have changed on the PC, or part of it was missed. \
+                Open SolStream on the PC, press Copy beside "Pairing token", and \
+                paste it here.
+                """
+                : """
+                Open SolStream on the Windows PC. It shows the token under \
+                "Pairing token", with a Copy button beside it.
+
+                Paste it below — SolStream remembers it for this PC, so this \
+                is asked once.
+                """
         }
 
         init(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
             self.completion = completion
             heading = NSTextField(labelWithString: Self.headingText(host: host, rejected: rejected))
+            body = NSTextField(wrappingLabelWithString: Self.bodyText(rejected: rejected))
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 250),
                               styleMask: [.titled, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -97,24 +132,6 @@ enum TokenPrompt {
             heading.textColor = DS.text
             heading.lineBreakMode = .byTruncatingTail
 
-            // Points at the host window, which shows the token with a Copy
-            // button. The old text told people to open a Command Prompt and run
-            // `SolStreamAgent.exe --print-token` — an executable name that has
-            // not existed since the installed binary became SolStream.exe, for a
-            // token the window has been displaying all along.
-            let body = NSTextField(wrappingLabelWithString: rejected
-                ? """
-                The token may have changed on the PC, or part of it was missed. \
-                Open SolStream on the PC, press Copy beside "Pairing token", and \
-                paste it here.
-                """
-                : """
-                Open SolStream on the Windows PC. It shows the token under \
-                "Pairing token", with a Copy button beside it.
-
-                Paste it below — SolStream remembers it for this PC, so this \
-                is asked once.
-                """)
             body.font = DS.body
             body.textColor = DS.textSecondary
 
