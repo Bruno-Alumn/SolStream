@@ -129,36 +129,43 @@ public enum TokenStore {
     /// where an older build reading the token file would trip over it.
     private static let namesKey = "SolStream.pairedPCNames"
     /// Where they are kept: tests give their own, as they do the token file.
-    static var namesDefaults: UserDefaults = .standard
+    static var namesDefaults: UserDefaults = runningTests
+        ? UserDefaults(suiteName: FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-test-names-\(ProcessInfo.processInfo.processIdentifier)")
+            .path) ?? .standard
+        : .standard
     private static var defaults: UserDefaults { namesDefaults }
 
     /// Record that `host` is the PC called `name`.
     public static func setName(_ name: String, for host: String) {
+        lock.lock()
+        defer { lock.unlock() }
         var names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
         guard names[host] != name else { return }
         names[host] = name
         defaults.set(names, forKey: namesKey)
     }
 
-    /// The token proved at a PC called `name` -- any of its addresses -- when
-    /// every address with that name holds the same one. Nil when none does,
-    /// or when two PCs share the name and their tokens differ: a guess
+    /// The token proved at a PC called `name` -- any of its addresses that
+    /// still holds one -- when they all hold the same one. Nil when none
+    /// does, or when two PCs share the name and their tokens differ: a guess
     /// between them would be proving one PC's token to the other.
     public static func token(forPCNamed name: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
         let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
-        let hosts = names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
-        let tokens = Set(hosts.compactMap { token(for: $0) })
+        let tokens = Set(names
+            .filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }
+            .compactMap { stored($0.key) })
         return tokens.count == 1 ? tokens.first : nil
     }
 
     /// Whether `token(forPCNamed:)` would find one.
     public static func hasToken(forPCNamed name: String) -> Bool {
-        let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
-        let hosts = names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
-        return !hosts.isEmpty && hosts.allSatisfy { hasToken(for: $0) }
-            && token(forPCNamed: name) != nil
+        token(forPCNamed: name) != nil
     }
 
+    /// Call with `lock` held.
     private static func forgetName(for host: String) {
         var names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
         guard names.keys.contains(where: { sameHost($0, host) }) else { return }
@@ -167,27 +174,28 @@ public enum TokenStore {
     }
 
     public static func remove(for host: String) {
-        forgetName(for: host)
         lock.lock()
         defer { lock.unlock() }
+        forgetName(for: host)
         var current = loaded()
         for key in current.keys where sameHost(key, host) { current[key] = nil }
         save(current)
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
-        if !unguardedTest { SecItemDelete(keychainQuery(host) as CFDictionary) }
+        if !runningTests { SecItemDelete(keychainQuery(host) as CFDictionary) }
     }
 
     /// Forget every host.
     public static func removeAll() {
-        namesDefaults.removeObject(forKey: namesKey)
         lock.lock()
         defer { lock.unlock() }
+        namesDefaults.removeObject(forKey: namesKey)
         save([:])
-        guard !unguardedTest else { return }
+        // The test runner's own preferences, under a test: safe to clear.
         for key in UserDefaults.standard.dictionaryRepresentation().keys
         where key.hasPrefix(legacyPrefix) {
             UserDefaults.standard.removeObject(forKey: key)
         }
+        guard !runningTests else { return }
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service]
         while SecItemDelete(query as CFDictionary) == errSecSuccess {}
@@ -212,8 +220,14 @@ public enum TokenStore {
     /// paired again. Such a test gets a store of its own, in a folder of this
     /// process's, and the old keychain items are left alone.
     static var unguardedTest: Bool {
-        directoryOverride == nil && NSClassFromString("XCTestCase") != nil
+        directoryOverride == nil && runningTests
     }
+
+    /// Inside a test process at all. Then the old keychain items -- the
+    /// person's own, whatever folder a test gave the file -- are never read
+    /// for their tokens or deleted, and the name records go to a suite of
+    /// the process's own unless a test gave one.
+    static let runningTests = NSClassFromString("XCTestCase") != nil
 
     private static let unguardedTestDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("solstream-unguarded-test-\(ProcessInfo.processInfo.processIdentifier)",
@@ -259,7 +273,7 @@ public enum TokenStore {
         // failed leaves the old copy the only one that outlives this run.
         guard save(current) else { return false }
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
-        if !unguardedTest { SecItemDelete(keychainQuery(host) as CFDictionary) }
+        if !runningTests { SecItemDelete(keychainQuery(host) as CFDictionary) }
         return true
     }
 
@@ -323,8 +337,9 @@ public enum TokenStore {
     /// fails here, and the person types the token once more instead of meeting
     /// a password dialog at launch.
     private static func legacyKeychain(_ host: String) -> String? {
-        // Not read into a test's own store either.
-        guard !unguardedTest else { return nil }
+        // Not read into a test's store, nor deleted after: the keychain is the
+        // person's own whatever folder the test gave the file.
+        guard !runningTests else { return nil }
         var query = keychainQuery(host)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne

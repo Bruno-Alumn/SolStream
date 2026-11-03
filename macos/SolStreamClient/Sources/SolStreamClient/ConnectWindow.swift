@@ -414,7 +414,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let askedUnderAnotherTailscale = forgetAnswerFromAnotherTailscale()
         // "Paired" means one thing: this Mac holds the host's agent token.
         state.isPaired = AgentConnection.hasStoredToken(
-            for: state.address, named: state.name)
+            for: state.address, named: state.name.map { HostBrowser.baseName(of: $0) ?? $0 })
 
         var dotState: DS.Dot.State = .idle
         var parts: [HostDropdown.Detail] = []

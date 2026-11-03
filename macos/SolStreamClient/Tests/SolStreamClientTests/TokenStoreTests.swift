@@ -141,6 +141,11 @@ final class TokenStoreTests: XCTestCase {
         XCTAssertEqual(TokenStore.token(forPCNamed: "desktop-pc"), "00112233445566778899aabbccddee01")
         XCTAssertTrue(TokenStore.hasToken(forPCNamed: "DESKTOP-PC"))
         XCTAssertNil(TokenStore.token(forPCNamed: "LAPTOP"))
+        // An address that kept its name but lost its token doesn't hide the
+        // one that has it.
+        TokenStore.setName("DESKTOP-PC", for: "192.168.1.99")
+        XCTAssertTrue(TokenStore.hasToken(forPCNamed: "DESKTOP-PC"))
+        XCTAssertEqual(TokenStore.token(forPCNamed: "DESKTOP-PC"), "00112233445566778899aabbccddee01")
         // The same PC on Wi-Fi too, same token: still one answer.
         TokenStore.set("00112233445566778899aabbccddee01", for: "192.168.1.40")
         TokenStore.setName("DESKTOP-PC", for: "192.168.1.40")

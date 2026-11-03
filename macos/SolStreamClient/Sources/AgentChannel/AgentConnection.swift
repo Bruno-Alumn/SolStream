@@ -343,9 +343,15 @@ public final class AgentConnection {
     /// The PC's name from its greeting, cleaned: recorded beside the token
     /// once proved, so the PC is known by name at its next address.
     private var greetedName: String?
-    /// The token being proved was found by that name, not stored for this
-    /// address. Refused, it is not "the token you typed was wrong".
-    private var tokenFoundByName = false
+    /// The token found by that name, not stored for this address, while it
+    /// is being proved. Compared with the token at the refusal, so one typed
+    /// since is never taken for it: refused, a token found by name is "not
+    /// paired", a typed one "wrong".
+    private var nameToken: String?
+    /// One found by name that this PC refused: not proved again on the next
+    /// connection, which would spend one of the PC's three tries each time
+    /// and turn a "wrong token" back into "not paired".
+    private var refusedNameToken: String?
 
     /// Whether a token is held for `host`, without reading it -- or, given
     /// the name a PC answers discovery with, for that PC at another address:
@@ -2620,11 +2626,12 @@ public final class AgentConnection {
                 // only a PC that knows the token too gets past the check on
                 // the auth reply, and only then is it kept for this address.
                 if token?.isEmpty != false, let greetedName,
-                   let byName = TokenStore.token(forPCNamed: greetedName) {
+                   let byName = TokenStore.token(forPCNamed: greetedName),
+                   byName != refusedNameToken {
                     Log.info("[agent] \(self.host) answers as \(greetedName); trying the token "
                              + "paired with that PC at another address")
                     token = byName
-                    tokenFoundByName = true
+                    nameToken = byName
                 }
                 guard let token, !token.isEmpty else {
                     Log.error("[agent] \(host) requires a token and none is stored")
@@ -2779,7 +2786,8 @@ public final class AgentConnection {
                     Self.rememberToken(token, for: host)
                     if let greetedName { TokenStore.setName(greetedName, for: host) }
                 }
-                tokenFoundByName = false
+                nameToken = nil
+                refusedNameToken = nil
                 mayTalk = true
             } else if message["reason"] as? String == "seal" {
                 // The token was right; the encrypted channel was not agreed.
@@ -2794,12 +2802,13 @@ public final class AgentConnection {
                                + "Connect again; if it keeps happening, pair again."))
                 dropConnection(AgentError.protocolDesync, reconnect: false)
                 return
-            } else if tokenFoundByName {
+            } else if let nameToken, token == nameToken {
                 // Another PC by the same name, or this one paired again since:
                 // nothing typed was wrong, and nothing stored here is removed.
                 // Asked for, as any PC not paired yet is.
                 Log.info("[agent] the token paired with that name was not this PC's")
-                tokenFoundByName = false
+                refusedNameToken = nameToken
+                self.nameToken = nil
                 token = nil
                 awaitingToken = true
                 report(.needsToken(host: host, rejected: false))
