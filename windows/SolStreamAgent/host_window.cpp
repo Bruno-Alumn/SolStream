@@ -26,6 +26,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shellscalingapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1768,7 +1769,9 @@ void LayoutAndPaint(HWND window) {
         // the headline stops short of it rather than running underneath.
         const float code_room = screen.code.empty()
             ? 0.0f : MeasureWidth(screen.code, g_fmt_caption) + space::kMd;
-        const float what_w = text_w - code_room;
+        // Never narrower than half the line: a window squeezed that far wraps
+        // the headline rather than giving it no width at all.
+        const float what_w = (std::max)(text_w - code_room, text_w / 2.0f);
         const float what_h = MeasureHeight(screen.what, g_fmt_headline, what_w);
         const float why_h = MeasureHeight(screen.why, g_fmt_body, text_w);
         const bool has_fix = fix && !screen.fix.empty();
@@ -2775,6 +2778,63 @@ NOTIFYICONDATAW TrayData(HWND window) {
     return data;
 }
 
+/// The notification area's icon size: the main display's, at its scale now.
+/// GetSystemMetrics alone is fixed at the scale this per-monitor-aware process
+/// started with, so a later change of scale never showed in it.
+int TrayIconSize(int metric) {
+    UINT x = 0, y = 0;
+    const HMONITOR primary = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (primary && SUCCEEDED(GetDpiForMonitor(primary, MDT_EFFECTIVE_DPI, &x, &y)) && x != 0) {
+        return GetSystemMetricsForDpi(metric, x);
+    }
+    return GetSystemMetrics(metric);
+}
+
+/// The small artboard at the notification area's size now, and whether that
+/// was a new load. The one it replaces is given back by the caller, once the
+/// notification area has the new one.
+struct TrayIconLoad {
+    HICON icon = nullptr;
+    HICON replaced = nullptr;
+};
+
+TrayIconLoad TrayIcon() {
+    static HICON tray_icon = nullptr;
+    static int tray_icon_size = 0;
+    const int size = TrayIconSize(SM_CXSMICON);
+    TrayIconLoad load{tray_icon, nullptr};
+    if (tray_icon == nullptr || tray_icon_size != size) {
+        if (HICON fresh = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
+                                             IMAGE_ICON, size, TrayIconSize(SM_CYSMICON), 0)) {
+            load.replaced = tray_icon;
+            load.icon = fresh;
+            tray_icon = fresh;
+            tray_icon_size = size;
+        }
+    }
+    return load;
+}
+
+/// The icon again at the notification area's size, when that has changed --
+/// a new scale on the main display. Only the icon: whether there is one in
+/// the tray is not this to decide, and a busy Explorer refusing the change
+/// leaves the old icon showing, not the host thinking it has none.
+void RefreshTrayIcon(HWND window) {
+    if (!g_tray_added) {
+        return;
+    }
+    const TrayIconLoad load = TrayIcon();
+    if (load.replaced == nullptr) {
+        return;
+    }
+    NOTIFYICONDATAW data = TrayData(window);
+    data.uFlags = NIF_ICON;
+    data.hIcon = load.icon;
+    Shell_NotifyIconW(NIM_MODIFY, &data);
+    // Explorer keeps a copy of what it was given, so the old handle is ours.
+    DestroyIcon(load.replaced);
+}
+
 void AddTrayIcon(HWND window) {
     NOTIFYICONDATAW data = TrayData(window);
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
@@ -2784,24 +2844,10 @@ void AddTrayIcon(HWND window) {
     // that size picks it rather than shrinking the 256. Not LoadIconMetric,
     // which lives only in Common Controls 6 -- a version this executable does
     // not opt into, so importing it stopped the program loading at all.
-    // Loaded once and kept: the icon is added again each time Explorer
-    // restarts, and a handle per re-add was never given back.
-    // Loaded again when the size the notification area wants has changed --
-    // a new scale on the main display -- rather than drawing the first size
-    // scaled, slightly blurred, for the rest of the session.
-    static HICON tray_icon = nullptr;
-    static int tray_icon_size = 0;
-    const int size = GetSystemMetrics(SM_CXSMICON);
-    if (tray_icon == nullptr || tray_icon_size != size) {
-        HICON fresh = (HICON) LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1),
-                                         IMAGE_ICON, size, GetSystemMetrics(SM_CYSMICON), 0);
-        if (fresh) {
-            if (tray_icon) { DestroyIcon(tray_icon); }
-            tray_icon = fresh;
-            tray_icon_size = size;
-        }
-    }
-    data.hIcon = tray_icon;
+    // Kept, and loaded again only at a new size: the icon is added again each
+    // time Explorer restarts, and a handle per re-add was never given back.
+    const TrayIconLoad load = TrayIcon();
+    data.hIcon = load.icon;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
@@ -2813,6 +2859,10 @@ void AddTrayIcon(HWND window) {
     // the tooltip for the rest of the session.
     if (!g_tray_added) {
         g_tray_added = Shell_NotifyIconW(NIM_MODIFY, &data) != FALSE;
+    }
+    // Explorer copied the new one; the one it replaces is ours to give back.
+    if (load.replaced) {
+        DestroyIcon(load.replaced);
     }
     if (g_tray_added) {
         data.uVersion = NOTIFYICON_VERSION_4;
@@ -3364,7 +3414,18 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             if (lparam && wcscmp((const wchar_t*) lparam, L"ImmersiveColorSet") == 0) {
                 ApplyTheme(window);
             }
+            if (g_mode == WindowMode::Host) {
+                RefreshTrayIcon(window);
+            }
             return 0;
+
+        case WM_DISPLAYCHANGE:
+            // A display's scale changed, or the main display did: the tray
+            // icon at the size the notification area now draws.
+            if (g_mode == WindowMode::Host) {
+                RefreshTrayIcon(window);
+            }
+            break;
 
         case WM_DPICHANGED: {
             g_dpi = (float) HIWORD(wparam);
@@ -3376,10 +3437,6 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // not the default black.
             if (GetFocus() == g_token_edit) {
                 AccentCaret();
-            }
-            // And the tray icon at the size the notification area now wants.
-            if (g_mode == WindowMode::Host && g_tray_added) {
-                AddTrayIcon(window);
             }
             const RECT* suggested = (const RECT*) lparam;
             SetWindowPos(window, nullptr, suggested->left, suggested->top,
