@@ -742,7 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // over a connection that works.
             if let window = picker?.window {
                 MainActor.assumeIsolated {
-                    if TokenPrompt.withdraw(over: window) {
+                    if TokenPrompt.withdraw(over: window), self?.tokenPromptParent === window {
                         self?.tokenPromptOpen = false
                         self?.tokenPromptParent = nil
                     }
