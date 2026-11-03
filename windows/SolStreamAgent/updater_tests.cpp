@@ -19,7 +19,7 @@
 // clipboard's privacy markers and line endings, when the sound capture opens
 // its device again, when the encoder spends a frame id, when a Mac may take
 // back the session it left behind, how a key the Mac sends by position is
-// pressed here, and the other decisions of the host's that are kept in small
+// pressed here, which media packets the replay window turns away, and the other decisions of the host's that are kept in small
 // headers of their own so that they can be checked here.
 
 #include "updater.cpp"
@@ -52,6 +52,7 @@
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
+#include "media/smt.h"
 #include "media/video_codec.h"
 #include "quit_app.h"
 #include "links.h"
@@ -4118,6 +4119,91 @@ void TestAgentCrypto() {
 
 }  // namespace
 
+/// The media transport's 1024-packet replay window, and the shift under it.
+/// A wrong carry between words would accept a replayed packet, or drop real
+/// ones as replays, only once the window had slid past a word boundary.
+void TestReplayWindow() {
+    using solstream::smt::ReplayWindow;
+    using solstream::smt::SlideWindow;
+
+    // The shift itself, across a word, by whole words, and off the end.
+    uint64_t bits[16] = {};
+    bits[0] = 1ull << 63;
+    SlideWindow(bits, 1);
+    CHECK(bits[0] == 0 && bits[1] == 1);
+    bits[1] = 0; bits[0] = 0b101;
+    SlideWindow(bits, 64);
+    CHECK(bits[0] == 0 && bits[1] == 0b101);
+    SlideWindow(bits, 130);
+    CHECK(bits[1] == 0 && bits[3] == 0b10100);
+    bits[15] = 1ull << 63;
+    SlideWindow(bits, 1);
+    CHECK(bits[15] == 0);   // the oldest slot falls off, it does not wrap
+    SlideWindow(bits, 1024);
+    bool empty = true;
+    for (uint64_t word : bits) { empty = empty && word == 0; }
+    CHECK(empty);
+    // Zero changes nothing.
+    bits[7] = 0x1234;
+    SlideWindow(bits, 0);
+    CHECK(bits[7] == 0x1234);
+
+    // Nothing has been seen before the first packet, whatever its counter.
+    ReplayWindow window;
+    CHECK(!window.SeenOrTooOld(0));
+    CHECK(!window.SeenOrTooOld(5000));
+    window.Record(5000);
+    CHECK(window.SeenOrTooOld(5000));
+    CHECK(!window.SeenOrTooOld(5001));
+    // Reordered, not replayed: accepted once, then not again.
+    CHECK(!window.SeenOrTooOld(4990));
+    window.Record(4990);
+    CHECK(window.SeenOrTooOld(4990));
+    CHECK(!window.SeenOrTooOld(4991));
+    // The far edge of the window: 1023 behind is still remembered, 1024 is not.
+    CHECK(!window.SeenOrTooOld(5000 - 1023));
+    CHECK(window.SeenOrTooOld(5000 - 1024));
+
+    // Forward past a word boundary: what was recorded keeps its distance.
+    window.Record(5100);
+    CHECK(window.SeenOrTooOld(5100));
+    CHECK(window.SeenOrTooOld(5000));   // now 100 behind, in the second word
+    CHECK(window.SeenOrTooOld(4990));   // 110 behind
+    CHECK(!window.SeenOrTooOld(4995));
+    CHECK(!window.SeenOrTooOld(5050));
+    // Exactly to the far edge, then over it.
+    window.Record(5000 + 1023);
+    CHECK(window.SeenOrTooOld(5000));
+    window.Record(5000 + 1024);
+    CHECK(window.SeenOrTooOld(5000));   // too old now, still refused
+    CHECK(window.SeenOrTooOld(5100));   // 1024 - 100 = 924 behind: remembered
+    CHECK(!window.SeenOrTooOld(5101));
+
+    // A jump of more than the whole window forgets everything before it.
+    window.Record(1000000);
+    CHECK(window.SeenOrTooOld(1000000));
+    CHECK(!window.SeenOrTooOld(1000000 - 1));
+    CHECK(window.SeenOrTooOld(5000 + 1024));   // too old
+
+    // Every packet of a long in-order run is a replay the second time.
+    ReplayWindow run;
+    for (uint64_t counter = 0; counter < 3000; ++counter) {
+        CHECK(!run.SeenOrTooOld(counter));
+        run.Record(counter);
+    }
+    for (uint64_t counter = 3000 - 1024; counter < 3000; ++counter) {
+        CHECK(run.SeenOrTooOld(counter));
+    }
+    // Every other packet, then the gaps filled in late: each gap is new once.
+    ReplayWindow gaps;
+    for (uint64_t counter = 0; counter < 2000; counter += 2) { gaps.Record(counter); }
+    for (uint64_t counter = 1999 - 1022; counter < 1999; counter += 2) {
+        CHECK(!gaps.SeenOrTooOld(counter));
+        gaps.Record(counter);
+        CHECK(gaps.SeenOrTooOld(counter));
+    }
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -4292,6 +4378,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferEncoding();
     TestWake();
     TestFullScreen();
+    TestReplayWindow();
 
     RemoveTree(scratch);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
