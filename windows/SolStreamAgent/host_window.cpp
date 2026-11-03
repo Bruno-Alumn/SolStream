@@ -2255,8 +2255,9 @@ void StartDisplayJob(HWND window) {
             }
         }
         const bool ok = display.rfind("ready", 0) == 0;
-        // Not once the host is shutting down: choosing what to capture then
-        // would reach into a session that is being torn down.
+        // Not once the host is quitting -- an installer asked it to, mid-job:
+        // there is nothing left to capture for. Hidden in the tray is not
+        // closed, and still chooses.
         if (ok && g_display_ready && !HostWindowClosed()) {
             // This host chose what to capture as it started, when there was
             // no virtual display to choose.
