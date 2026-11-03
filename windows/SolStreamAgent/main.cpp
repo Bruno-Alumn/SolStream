@@ -7922,7 +7922,18 @@ int wmain(int argc, wchar_t** argv) {
         solstream::update::SchedulerHooks hooks;
         hooks.streaming_clients = [] { return g_clients_authenticated.load(); };
         hooks.finished = [](const solstream::update::CheckResult& result, bool asked) {
-            solstream::UpdateCheckFinished(result, asked);
+            // A scheduled find is downloaded and verified before it is said,
+            // on this, the scheduler's own thread: what the notification then
+            // offers is an install that goes straight to the prompt. Not
+            // while a Mac streams -- the check itself waits for that, but one
+            // may have connected since.
+            solstream::update::CheckResult said = result;
+            if (result.outcome == solstream::update::Outcome::Found && !asked
+                && g_clients_authenticated.load() == 0) {
+                std::string error;
+                said.downloaded = solstream::update::PrefetchUpdate(result.release, error);
+            }
+            solstream::UpdateCheckFinished(said, asked);
         };
         solstream::update::StartScheduler(hooks);
     }

@@ -104,6 +104,9 @@ struct CheckResult {
     std::string latest;    ///< the newest release seen, when one was
     Release release;       ///< when Found
     std::string error;     ///< when Failed: a sentence for a person
+    /// When Found by a scheduled check: the installer is already downloaded
+    /// and verified (PrefetchUpdate), so Install starts at the prompt.
+    bool downloaded = false;
 };
 
 /// One check, start to finish. Blocks on the network: never call it on the UI
@@ -129,6 +132,12 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
                    const std::function<bool()>& may_install,
                    const std::function<void(DWORD exit_code)>& installer_exited,
                    std::string& error);
+
+/// Download and verify the installer ahead of time, and leave it where
+/// InstallUpdate looks first, so Install goes straight to the prompt -- as the
+/// Mac has its update in hand before it says so. Never runs it. Skipped, and
+/// false, while an install is being prepared or started. Blocks on the network.
+bool PrefetchUpdate(const Release& release, std::string& error);
 
 /// True from just before the elevation prompt until the installer exits or
 /// fails to start. main.cpp turns new Macs away while it is: the prompt can stay

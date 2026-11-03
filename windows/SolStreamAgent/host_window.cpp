@@ -2552,6 +2552,69 @@ void PublishUpdateForTip(HWND window) {
     RefreshTrayTip(window);
 }
 
+/// The version the last update notification was about, kept beside the log:
+/// each version is announced once, not once a day until it is installed.
+std::wstring NotifiedUpdateFile() {
+    return LocalDataPath(L"update-notified.txt");
+}
+
+bool AlreadyNotified(const std::string& version) {
+    const std::wstring path = NotifiedUpdateFile();
+    HANDLE file = path.empty() ? INVALID_HANDLE_VALUE
+                               : CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    char text[32] = {};
+    DWORD read = 0;
+    ReadFile(file, text, sizeof(text) - 1, &read, nullptr);
+    CloseHandle(file);
+    return version == std::string(text, read);
+}
+
+void RememberNotified(const std::string& version) {
+    const std::wstring path = NotifiedUpdateFile();
+    HANDLE file = path.empty() ? INVALID_HANDLE_VALUE
+                               : CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    DWORD written = 0;
+    WriteFile(file, version.data(), (DWORD) version.size(), &written, nullptr);
+    CloseHandle(file);
+}
+
+/// Whether the notification on screen is the update's, so a click on it
+/// installs; anything else the tray says later is not.
+bool g_update_balloon_up = false;
+
+/// Say a scheduled find once, as a Windows notification: the host lives in the
+/// tray, and the tooltip was the only place it was said -- found at a quarter
+/// past, and not seen until somebody went looking. Never while a Mac streams,
+/// and never twice for one version.
+void NotifyUpdate(HWND window, const update::CheckResult& result) {
+    if (!g_tray_added || StreamingNow() || AlreadyNotified(result.release.version)) {
+        return;
+    }
+    NOTIFYICONDATAW data = TrayData(window);
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+    const std::wstring title = L"SolStream " + ToWide(result.release.version) + L" is ready";
+    const std::wstring text = result.downloaded
+        ? L"It's downloaded and checked. Click here to install it -- Windows will ask "
+          L"for permission."
+        : L"Click here to install it -- Windows will ask for permission.";
+    wcsncpy_s(data.szInfoTitle, title.c_str(), _TRUNCATE);
+    wcsncpy_s(data.szInfo, text.c_str(), _TRUNCATE);
+    if (Shell_NotifyIconW(NIM_MODIFY, &data)) {
+        g_update_balloon_up = true;
+        RememberNotified(result.release.version);
+        media::Log("[update] said %s is ready, in a notification", result.release.version.c_str());
+    }
+}
+
 void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, bool asked) {
     // While an update is being installed, a check's answer must not swap the
     // release out from under it.
@@ -2561,6 +2624,9 @@ void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, 
         if (result->outcome == update::Outcome::Found) {
             g_update_found = true;
             g_update = result->release;
+            if (!asked) {
+                NotifyUpdate(window, *result);
+            }
         } else if (result->outcome != update::Outcome::Failed) {
             // Withdrawn, or this copy has caught up. A failed check says
             // nothing either way, so it changes nothing.
@@ -3525,6 +3591,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 case NIN_SELECT:
                 case NIN_KEYSELECT:
                     ShowFromTray(window);
+                    break;
+                case NIN_BALLOONUSERCLICK:
+                    // "Click here to install it": the window, with the update
+                    // banner, and the install under way behind the prompt.
+                    if (g_update_balloon_up) {
+                        g_update_balloon_up = false;
+                        ShowFromTray(window);
+                        StartUpdateJob(window);
+                    }
+                    break;
+                case NIN_BALLOONTIMEOUT:
+                case NIN_BALLOONHIDE:
+                    g_update_balloon_up = false;
                     break;
                 case WM_CONTEXTMENU:
                     ShowTrayMenu(window);

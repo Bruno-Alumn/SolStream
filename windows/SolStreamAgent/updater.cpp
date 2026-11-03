@@ -2000,6 +2000,28 @@ int VerifySignatureCommand(int argc, wchar_t** argv) {
     return 1;
 }
 
+bool PrefetchUpdate(const Release& release, std::string& error) {
+    {
+        // Not alongside an install's own preparation, which writes the same
+        // file, nor once the installer is on its way.
+        std::lock_guard<std::mutex> lock(g_downloads_mutex);
+        if (g_preparing || InstallStarting()) {
+            error = "an install is already under way";
+            return false;
+        }
+    }
+    HANDLE held = INVALID_HANDLE_VALUE;
+    std::wstring path;
+    if (!PrepareInstaller(release, [](const std::wstring&) {}, held, path, error)) {
+        Log("[update] could not download %s ahead of time: %s", release.version.c_str(),
+            error.c_str());
+        return false;
+    }
+    CloseHandle(held);
+    Log("[update] %s is downloaded and verified, ready to install", release.version.c_str());
+    return true;
+}
+
 int CheckCommand(bool download) {
     const CheckResult result = CheckForUpdate();
     switch (result.outcome) {
