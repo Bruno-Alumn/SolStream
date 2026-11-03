@@ -233,6 +233,8 @@ public final class AgentConnection {
     /// connection can ask it something while the proof is on the wire, so
     /// those requests are held here and sent once the reply has landed.
     private var authInFlight = false
+    /// Which proof is out, so each timeout is that proof's alone.
+    private var authAttempt = 0
     private var heldWhileAuthenticating: [(id: UInt64, request: [String: Any],
                                            completion: (Result<[String: Any], Error>) -> Void)] = []
     /// Numbers held requests, for their time limit; see `hold`.
@@ -382,6 +384,16 @@ public final class AgentConnection {
             // host never asked for -- and would drop the connection, or have a
             // correct token reported as rejected.
             guard self.awaitingToken, !self.authInFlight, self.channel == nil else {
+                // Typed on a socket whose greeting has not come yet -- the
+                // last one closed under the sheet -- it is kept for that
+                // greeting rather than lost, which answers it with this token.
+                if !self.authInFlight, self.channel == nil, !self.sessionUp,
+                   Data(smtHex: trimmed) != nil {
+                    Log.info("[agent] keeping the token typed for \(self.host) for the "
+                             + "next greeting")
+                    self.token = trimmed
+                    return
+                }
                 Log.info("[agent] a token was typed for \(self.host) when none was asked "
                          + "for; ignoring it")
                 return
@@ -599,8 +611,28 @@ public final class AgentConnection {
     /// seconds for the old session to let go before it says anything.
     private static let takeoverTimeout: TimeInterval = 12
 
-    /// Whether the connection now open has completed its greeting.
-    private var sessionUp = false
+    /// Whether the connection now open has completed its greeting. Mirrored
+    /// under `stateLock` for `isSessionUp`.
+    private var sessionUp = false {
+        didSet {
+            stateLock.lock()
+            sessionUpMirror = sessionUp
+            stateLock.unlock()
+        }
+    }
+    private var sessionUpMirror = false
+
+    /// Whether the connection has greeted and can answer a request now.
+    ///
+    /// Not `isConnected`, which is a socket: true while TCP is still
+    /// connecting, sitting waiting for a PC that is asleep, or waiting for a
+    /// token -- and a request asked then comes back empty, shown as "0
+    /// windows" over the failure that follows it.
+    public var isSessionUp: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return sessionUpMirror
+    }
     /// When the last session this object held was lost without being asked
     /// to close. Nil while one is up, and before there has been one.
     private var sessionLostAt: Date?
@@ -870,7 +902,10 @@ public final class AgentConnection {
                 self.connectedIPv4 = reached
                 self.stateLock.unlock()
                 let reconnected = self.reconnectAttempt > 0
-                self.reconnectAttempt = 0
+                // Not reset here, but when the greeting completes: a host that
+                // takes the connection and closes it -- as one does while
+                // another socket holds its slot unauthenticated -- was retried
+                // every two seconds for as long as that lasted.
                 self.receive()
                 self.startHeartbeat()
                 if reconnected {
@@ -1202,12 +1237,17 @@ public final class AgentConnection {
         // a reply cannot arrive before this line has gone out.
         authInFlight = true
         awaitingToken = false
+        authAttempt &+= 1
+        let attempt = authAttempt
         connection.send(content: payload, completion: .contentProcessed { error in
             if let error { Log.error("[agent] could not send the auth proof: \(error)") }
         })
+        // This proof's own timeout: an earlier one, rejected at once and
+        // retyped, left its timer to drop the connection its successor had
+        // only just sent a proof on.
         queue.asyncAfter(deadline: .now() + Self.authTimeout) { [weak self, weak connection] in
             guard let self, let connection, self.connection === connection,
-                  self.authInFlight else { return }
+                  self.authInFlight, self.authAttempt == attempt else { return }
             Log.error("[agent] \(self.host) did not answer the auth proof; dropping the connection")
             self.dropConnection(AgentError.timedOut)
         }
@@ -2757,6 +2797,7 @@ public final class AgentConnection {
             // A session again: whatever was lost has been got back, and the
             // next `busy` starts a wait of its own.
             sessionUp = true
+            reconnectAttempt = 0
             sessionLostAt = nil
             busySince = nil
             busyRetries = 0

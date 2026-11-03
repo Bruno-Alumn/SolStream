@@ -53,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// or as the one reopened at launch -- waiting for the picker's lists to
     /// be found in. See `open(link:)`.
     private var pendingOpen: AppLink?
+    /// A pairing-token sheet is up; see `promptForToken`.
+    private var tokenPromptOpen = false
     /// The PC being woken for `pendingOpen`; see `LaunchWake`. Kept once it
     /// has given up, so one launcher click wakes the PC once.
     private var launchWake: LaunchWake?
@@ -403,7 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // or reconnecting fills the list when it greets, and asking now
             // would answer with two empty lists -- shown as "0 windows open"
             // over whatever the picker was saying.
-            if agent.isConnected { refillPicker?() }
+            if agent.isSessionUp { refillPicker?() }
             return
         }
         leaveHost()
@@ -696,9 +698,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refillPicker = { fill(false) }
         if existing == nil {
             agent.connect()
-        } else if agent.isConnected {
+        } else if agent.isSessionUp {
             // A reused socket produces no second `hello`, so the unprompted
             // `displays` push that normally drives the first fill never comes.
+            // Only over one that has greeted: a socket still connecting greets
+            // in its own time, and that greeting fills the list.
             fill(true)
         } else if !agent.willReconnect {
             // Refused for good (busy, impersonation) or already closed: nothing
@@ -717,7 +721,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func promptForToken(host: String, rejected: Bool, over parent: NSWindow?,
                                 agent: AgentConnection?,
                                 onRefused: @escaping (String) -> Void) {
-        TokenPrompt.present(host: host, rejected: rejected, over: parent) { token in
+        // One sheet at a time. A host drops a connection left waiting for a
+        // token after two minutes, and its reconnect asks again: a second sheet
+        // queued behind the first, and closing it after the first had paired
+        // put "needs its pairing token" over a connection that was working.
+        guard !tokenPromptOpen else { return }
+        tokenPromptOpen = true
+        TokenPrompt.present(host: host, rejected: rejected, over: parent) { [weak self] token in
+            self?.tokenPromptOpen = false
             guard let token else {
                 onRefused("\(host) needs its pairing token. It's on SolStream's window on "
                           + "the PC, under \"Pairing token\". Connect again to enter it.")
