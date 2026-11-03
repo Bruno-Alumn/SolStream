@@ -5285,9 +5285,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // A window that cannot be resized is moved and keeps its own size; see
         // MoveClientArea. Not a miss: the size it reports is the size it is.
         const bool fixed_size = !IsResizable(window);
+        const UINT dpi_before = GetDpiForWindow(window);
         const bool ok = fixed_size
             ? MoveClientArea(window, (int) x, (int) y, &client)
             : PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
+        // Carried onto a display at another scaling, the application is still
+        // handling WM_DPICHANGED -- laying itself out again, and changing its
+        // minimum -- when SetWindowPos returns. The reply read both mid-change:
+        // the Mac opened on a minimum twice what the window settled at, and
+        // corrected it only on its own second look, a second later. One round
+        // trip through the window's queue lets that finish first; at most
+        // 150 ms, and only on the move that changed the scaling.
+        if (ok && GetDpiForWindow(window) != dpi_before) {
+            DWORD_PTR ignored = 0;
+            SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 150, &ignored);
+            client = ClientAreaInScreen(window);
+        }
         // A miss that survived every correction is the application refusing the
         // size, and it is worth a line: it is the difference between "SolStream
         // sized this wrongly" and "this window will not be that shape", and until

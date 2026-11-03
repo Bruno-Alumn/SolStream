@@ -591,7 +591,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
         self.window = window
         session.attach(view)
-        setTile(tile)
+        // The picture starts on the rectangle the first `place` is about to
+        // ask for, not the whole tile: frames arrive before the host has
+        // answered, and the tile is the whole capture display, which showed
+        // the PC's entire desktop boxed into this window until the reply.
+        setTile(openingRequest() ?? tile)
         startPollingQuality()
 
         // Nothing may cover the tile: the crop would stream it as though it
@@ -675,7 +679,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
         syncGeometry(matchBack: settling) { [weak self] in
             guard let self else { return }
             self.resizeInFlight = false
-            if self.resizeAgain || self.wantsSettle { self.requestResize() }
+            if self.requestAgainForStrip {
+                self.requestAgainForStrip = false
+                self.requestResize(settle: true)
+            } else if self.resizeAgain || self.wantsSettle {
+                self.requestResize()
+            }
         }
     }
 
@@ -717,7 +726,34 @@ final class AppWindow: NSObject, NSWindowDelegate {
             // application still starting up the window is easy to close first.
             guard let self, !self.isClosing else { return }
             self.agent.setResizeLock(windowID: self.remoteWindowID, true)
+            self.firstPlacementLanded()
+            if self.requestAgainForStrip {
+                self.requestAgainForStrip = false
+                self.requestResize(settle: true)
+            }
             self.settleOnce()
+        }
+        // However long the host takes: the picture is not held back forever.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.firstPlacementLanded()
+        }
+    }
+
+    /// Set once the first `place` has an answer, or has taken too long; see
+    /// `hideStatus`.
+    private var firstPlacementDone = false
+    /// The stream went live before that, and the card is to go when it does.
+    private var hideStatusWhenPlaced = false
+    /// The first reply learnt that the picture leaves the program's title bar
+    /// out, too late for its request; see `syncGeometry`.
+    private var requestAgainForStrip = false
+
+    private func firstPlacementLanded() {
+        guard !firstPlacementDone else { return }
+        firstPlacementDone = true
+        if hideStatusWhenPlaced {
+            hideStatusWhenPlaced = false
+            metalView?.hideStatus()
         }
     }
 
@@ -741,6 +777,24 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The rectangle, in capture-display pixels, the host window is asked to
+    /// take for this window as it is now: its size at the backing scale, plus
+    /// the application's own title bar when the picture leaves it out, kept
+    /// on the display. Nil before there is a window or a size.
+    private func openingRequest() -> CGRect? {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return nil }
+        let scale = screen.backingScaleFactor
+        let size = window.contentView?.bounds.size ?? .zero
+        let maxWidth = CGFloat(display.width)
+        let maxHeight = CGFloat(display.height)
+        let wanted = CGSize(width: min((size.width * scale).rounded(), maxWidth),
+                            height: min((size.height * scale).rounded() + hiddenStrip, maxHeight))
+        let origin = CGPoint(x: min(tile.minX, CGFloat(display.x) + maxWidth - wanted.width),
+                             y: min(tile.minY, CGFloat(display.y) + maxHeight - wanted.height))
+        let requested = CGRect(origin: origin, size: wanted)
+        return requested.width >= 1 && requested.height >= 1 ? requested : nil
+    }
+
     /// - Parameter matchBack: whether to snap this window onto the size the host
     ///   actually achieved. Never mid-drag: the user's hand owns the window
     ///   then, and resizing it under them fights the drag.
@@ -753,22 +807,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // Retina window does not request half the pixels it can display -- and
         // with the application's own title bar on top when the picture leaves
         // it out, so what shows is as big as this window.
+        //
+        // Never more than the capture display holds. The host will happily
+        // size a window past the edge of its display, and the part that hangs
+        // off is simply not in the captured frame — so the crop ends up partly
+        // outside the canvas and the window fills with desktop.
         let scale = screen.backingScaleFactor
-        let size = window.contentView?.bounds.size ?? .zero
-        let strip = hiddenStrip
-
-        // Never ask for more than the capture display holds. The host will
-        // happily size a window past the edge of its display, and the part that
-        // hangs off is simply not in the captured frame — so the crop ends up
-        // partly outside the canvas and the window fills with desktop.
-        let maxWidth = CGFloat(display.width)
-        let maxHeight = CGFloat(display.height)
-        let wanted = CGSize(width: min((size.width * scale).rounded(), maxWidth),
-                            height: min((size.height * scale).rounded() + strip, maxHeight))
-        let origin = CGPoint(x: min(tile.minX, CGFloat(display.x) + maxWidth - wanted.width),
-                             y: min(tile.minY, CGFloat(display.y) + maxHeight - wanted.height))
-        let requested = CGRect(origin: origin, size: wanted)
-        guard requested.width >= 1, requested.height >= 1 else {
+        guard let requested = openingRequest() else {
             completion?()
             return
         }
@@ -790,7 +835,18 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
                 let visible = achieved.intersection(self.displayRect)
+                let hidingBefore = self.hiddenStrip
                 self.adoptTitleBar(placement)
+                // The program's title bar is left out by a choice kept from
+                // before, learnt only now that the host has named the program:
+                // this request had no room for the strip, so the picture would
+                // come up short and this window would shrink to it. Ask again
+                // with the strip on top instead -- the host window grows, and
+                // this one keeps the size it opened at.
+                let stripLearnt = self.hiddenStrip > 0 && hidingBefore == 0
+                if stripLearnt, !(self.window?.inLiveResize ?? false) {
+                    self.requestAgainForStrip = true
+                }
                 self.lastPlacement = placement
                 let shown = self.picture(of: visible)
                 self.applySizeLimits(placement, achieved: shown, scale: scale)
@@ -803,7 +859,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 self.setTile(visible)
                 // Never under a hand that took an edge again while the answer
                 // was on its way.
-                if matchBack, !(self.window?.inLiveResize ?? false) {
+                if matchBack, !stripLearnt, !(self.window?.inLiveResize ?? false) {
                     self.matchWindow(to: shown, scale: scale)
                 }
                 if visible != achieved {
@@ -1310,6 +1366,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func setStatus(_ title: String, detail: String? = nil) {
+        // A newer card is not the one a held hide was meant for.
+        hideStatusWhenPlaced = false
         metalView?.setStatus(title, detail: detail, busy: true)
     }
 
@@ -1318,10 +1376,19 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // ended, left the pointer hidden and frozen over a Try Again it could
         // not reach -- and the way to get it back is only said the first time.
         inputCapture?.streamEnded()
+        hideStatusWhenPlaced = false
         metalView?.setError(title, detail: detail)
     }
 
+    /// Take the status card away -- once the host has placed the window. The
+    /// first frames arrive before that, showing the application where and
+    /// as big as it was on the PC, about to be moved and laid out again; the
+    /// card stays over them for the fraction of a second that takes.
     func hideStatus() {
+        guard firstPlacementDone else {
+            hideStatusWhenPlaced = true
+            return
+        }
         metalView?.hideStatus()
     }
 
