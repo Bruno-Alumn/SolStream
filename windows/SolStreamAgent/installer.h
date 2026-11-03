@@ -146,9 +146,11 @@ std::wstring LogonTaskXml(const std::wstring& account, const std::wstring& desti
 std::vector<std::wstring> LogonTaskAccounts(const std::wstring& sid);
 
 /// The netsh command that writes one inbound allow rule for `program` on
-/// `ports`. Exposed for its tests.
+/// `ports`, from `remote` addresses only when given (netsh's `remoteip`, such
+/// as `localsubnet`). Exposed for its tests.
 std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& program,
-                                 const std::wstring& protocol, const std::wstring& ports);
+                                 const std::wstring& protocol, const std::wstring& ports,
+                                 const std::wstring& remote = std::wstring());
 
 /// The PowerShell command an uninstall runs to remove every firewall rule whose
 /// program is inside `directory`, whatever the rule is called. Exposed for its

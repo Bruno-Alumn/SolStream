@@ -34,9 +34,12 @@ and starting at logon, all three on by default and all three reversible.
    `%ProgramFiles%\SolStream\SolStream.exe`. This is the only step whose failure
    fails the install; everything after it can go wrong and still leave something
    a person can use.
-3. **Firewall** — two `netsh advfirewall` rules, each naming both the program and
-   its ports: TCP 47630 for the agent channel, and UDP 47631 and 47629 for the
-   media transport and discovery, on every profile (`profile=any`). The Domain
+3. **Firewall** — three `netsh advfirewall` rules, each naming both the program and
+   its ports: TCP 47630 for the agent channel, UDP 47631 for the media
+   transport, and UDP 47629 for discovery, that one from the PC's own subnets
+   only (`remoteip=localsubnet`: a broadcast never crosses a router, and a
+   café's Wi-Fi need not learn the PC's name). All on every profile
+   (`profile=any`). The Domain
    profile has to be there: a PC on a company network meets its default Block
    on it, and a rule that names the program stops Windows asking, so nothing
    would say why the Mac got no answer. Naming the program is what stops

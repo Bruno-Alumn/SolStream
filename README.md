@@ -125,8 +125,8 @@ Mac’s display awake during a stream. Everything else is in
 Discovery uses a broadcast on UDP 47629, which doesn't cross routers or VPNs.
 Enter the PC's name or IP address in the host list instead. To connect from
 another network, install Tailscale on both machines and sign in to the same
-account. Setup opens TCP 47630 and UDP 47629 and 47631 in Windows Firewall;
-third-party firewalls need the same ports open.
+account. Setup opens TCP 47630 and UDP 47631 in Windows Firewall, and UDP 47629
+to the PC's own network only; third-party firewalls need the same ports open.
 </details>
 
 <details>

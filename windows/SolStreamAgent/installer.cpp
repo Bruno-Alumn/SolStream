@@ -592,12 +592,13 @@ void DeleteRulesForProgram(const std::wstring& directory) {
 /// given the old name back keeps the temporary one, which lets the same traffic
 /// in; the uninstall's sweep finds it by program either way.
 bool AddRule(const std::wstring& name, const std::wstring& program,
-             const std::wstring& protocol, const std::wstring& ports) {
+             const std::wstring& protocol, const std::wstring& ports,
+             const std::wstring& remote = std::wstring()) {
     // Not cleared first: a rule left under the temporary name by an earlier
     // update may be the one letting traffic in. A second of that name is
     // harmless, and the rename below takes both.
     const std::wstring incoming = name + L" (updating)";
-    if (RunHidden(FirewallRuleCommand(incoming, program, protocol, ports)) != 0) {
+    if (RunHidden(FirewallRuleCommand(incoming, program, protocol, ports, remote)) != 0) {
         return false;
     }
     DeleteRule(name);
@@ -898,14 +899,21 @@ std::vector<std::wstring> LogonTaskAccounts(const std::wstring& sid_text) {
 /// the Mac's knock and connection went unanswered with nothing on the PC saying
 /// why. The program and the ports are what keep the rule narrow, not the
 /// profile.
+///
+/// `remote`, when given, limits who may reach the ports: the discovery port
+/// takes `localsubnet`, since a broadcast question never crosses a router, and
+/// otherwise anyone on a café's Wi-Fi could learn this PC's name and that it
+/// runs SolStream.
 std::wstring FirewallRuleCommand(const std::wstring& name, const std::wstring& program,
-                                 const std::wstring& protocol, const std::wstring& ports) {
+                                 const std::wstring& protocol, const std::wstring& ports,
+                                 const std::wstring& remote) {
     return L"netsh.exe advfirewall firewall add rule"
            L" name=\"" + name + L"\""
            L" dir=in action=allow"
            L" program=\"" + program + L"\""
            L" protocol=" + protocol +
            L" localport=" + ports +
+           (remote.empty() ? std::wstring() : L" remoteip=" + remote) +
            L" profile=any"
            L" description=\"SolStream remote application streaming\"";
 }
@@ -1984,17 +1992,25 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // one word anywhere saying why -- not in the window, not in the log.
     const bool agent_rule =
         AddRule(L"SolStream - agent", exe, L"TCP", std::to_wstring(kDefaultPort));
+    // Discovery in a rule of its own, open only to this PC's own networks;
+    // an install before 11-03 had it in the media rule, which this replaces.
     const bool media_rule =
-        AddRule(L"SolStream - media", exe, L"UDP",
-                std::to_wstring(kDefaultMediaPort) + L","
-                + std::to_wstring(kDiscoveryPort));
-    if (agent_rule && media_rule) {
+        AddRule(L"SolStream - media", exe, L"UDP", std::to_wstring(kDefaultMediaPort));
+    const bool discovery_rule = AddRule(L"SolStream - discovery", exe, L"UDP",
+                                        std::to_wstring(kDiscoveryPort), L"localsubnet");
+    if (agent_rule && media_rule && discovery_rule) {
         InstallLog("firewall rules written");
     } else {
-        const std::string which =
-            agent_rule ? "the rule for its media and discovery ports"
-                       : (media_rule ? "the rule for its agent port"
-                                     : "either of its rules");
+        std::string which;
+        for (const auto& [ok, rule] : {std::pair<bool, const char*>{agent_rule, "agent"},
+                                       {media_rule, "media"},
+                                       {discovery_rule, "discovery"}}) {
+            if (!ok) {
+                which += which.empty() ? std::string("the rule for its ") + rule
+                                       : std::string(" and ") + rule;
+            }
+        }
+        which += " port";
         InstallLog("firewall: netsh would not add " + which);
         warning = "Windows Firewall would not accept " + which
                 + ", so your Mac may not be able to reach this PC.";
@@ -2141,6 +2157,7 @@ bool UninstallSelf(std::string& error, std::string& left) {
     // build no longer installs and so cannot be found by path.
     DeleteRule(L"SolStream - agent");
     DeleteRule(L"SolStream - media");
+    DeleteRule(L"SolStream - discovery");
     DeleteRule(L"SolStream - Stream Media");
     DeleteRule(L"SolStream - Agent (program)");
     DeleteRule(L"SolStream - Sunshine TCP");

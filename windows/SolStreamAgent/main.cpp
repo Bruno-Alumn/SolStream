@@ -6545,8 +6545,12 @@ void StartDiscoveryResponder() {
         if (listener == INVALID_SOCKET) {
             return;
         }
-        BOOL reuse = TRUE;
-        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*) &reuse, sizeof(reuse));
+        // Exclusive, as the agent's TCP port is: shared, another program --
+        // an old build, anything running here -- could bind the port beside
+        // this one and take the questions, and "taken" below never said so.
+        BOOL exclusive = TRUE;
+        setsockopt(listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*) &exclusive,
+                   sizeof(exclusive));
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_addr.s_addr = INADDR_ANY;

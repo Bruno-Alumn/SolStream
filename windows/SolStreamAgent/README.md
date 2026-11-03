@@ -392,9 +392,9 @@ back when SolStream ran Sunshine beside it: with the binaries blocked this way,
 ports 47595–47630 were refused from the Mac while 22, 47984 and 47989 stayed
 open, and neither a program-scoped nor a port-scoped Allow rule reopened them.
 
-So the installer creates its rules **before** anything listens, two of them, each
-naming the program and its ports (TCP 47630, and UDP 47631 and 47629) on every
-profile. Uninstalling removes every rule that points into the install folder,
+So the installer creates its rules **before** anything listens, three of them,
+each naming the program and its ports (TCP 47630, UDP 47631, and UDP 47629 from
+the local subnet only) on every profile. Uninstalling removes every rule that points into the install folder,
 Windows' own included, rather than leaving a Block to out-rank the next install's
 Allow.
 

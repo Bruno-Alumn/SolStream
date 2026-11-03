@@ -714,6 +714,15 @@ void TestFirewallRule() {
           != std::wstring::npos);
     CHECK(rule.find(L" dir=in action=allow ") != std::wstring::npos);
     CHECK(rule.find(L" protocol=TCP localport=47630 ") != std::wstring::npos);
+    // Open to anyone who can reach it, unless told otherwise.
+    CHECK(rule.find(L"remoteip") == std::wstring::npos);
+    // Discovery answers this PC's own networks only.
+    const std::wstring discovery = FirewallRuleCommand(
+        L"SolStream - discovery", L"C:\\Program Files\\SolStream\\SolStream.exe", L"UDP",
+        L"47629", L"localsubnet");
+    CHECK(discovery.find(L" protocol=UDP localport=47629 remoteip=localsubnet ")
+          != std::wstring::npos);
+    CHECK(discovery.find(L" profile=any ") != std::wstring::npos);
 }
 
 /// The uninstall's sweep of rules pointing into the install folder: one query
