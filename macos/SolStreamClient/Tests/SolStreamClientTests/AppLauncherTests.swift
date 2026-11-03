@@ -80,7 +80,33 @@ final class AppLauncherTests: XCTestCase {
         XCTAssertEqual(AppLauncher.fileName("AC/DC: Live"), "AC-DC- Live")
         XCTAssertEqual(AppLauncher.fileName("..hidden"), "hidden")
         XCTAssertEqual(AppLauncher.fileName("  "), "App")
-        XCTAssertEqual(AppLauncher.fileName(String(repeating: "a", count: 100)).count, 60)
+        XCTAssertEqual(AppLauncher.fileName(String(repeating: "a", count: 200)).utf8.count, 120)
+        // Cut by bytes, which the file system counts, between characters.
+        let emoji = AppLauncher.fileName(String(repeating: "🎮", count: 60))
+        XCTAssertLessThanOrEqual(emoji.utf8.count, 120)
+        XCTAssertTrue(emoji.allSatisfy { $0 == "🎮" })
+        // Nothing that disguises a name.
+        XCTAssertEqual(AppLauncher.fileName("evil\u{202E}gpj.exe"), "evilgpj.exe")
+    }
+
+    /// An app the PC renamed keeps its launcher -- found by what it opens,
+    /// under its old name -- rather than gaining a second with the same id.
+    func testARenamedAppKeepsItsLauncher() throws {
+        let first = try AppLauncher.make(notepad, icon: nil, opener: "x", in: folder)
+        var renamed = notepad
+        renamed.name = "Notepad Classic"
+        let second = try AppLauncher.make(renamed, icon: nil, opener: "x", in: folder)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path).count, 1)
+    }
+
+    /// Forget Paired PCs takes SolStream's launchers, and only those.
+    func testRemovingLaunchersTakesOnlyOurs() throws {
+        _ = try AppLauncher.make(notepad, icon: nil, opener: "x", in: folder)
+        let foreign = folder.appendingPathComponent("Other.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+        XCTAssertEqual(AppLauncher.removeAll(in: folder), 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), ["Other.app"])
     }
 
     func testTheIdentifierIsTheSameEachTimeAndDiffersPerPC() {

@@ -97,8 +97,10 @@ public final class InputCapture {
     /// remembered across launches. 1 is the Mac's own feel.
     public static var gamingSensitivity: Double {
         get {
-            let stored = UserDefaults.standard.object(forKey: sensitivityKey) as? Double ?? 1
-            return min(max(stored, 0.25), 4)
+            let stored = (UserDefaults.standard.object(forKey: sensitivityKey) as? NSNumber)?
+                .doubleValue ?? 1
+            // NaN passes the clamps, and reached the motion's integer conversion.
+            return stored.isFinite ? min(max(stored, 0.25), 4) : 1
         }
         set {
             UserDefaults.standard.set(min(max(newValue, 0.25), 4), forKey: sensitivityKey)

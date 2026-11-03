@@ -94,14 +94,28 @@ enum AppLauncher {
     /// Menu apps of one name, or of names that clean up the same, had one
     /// launcher between them, and the Dock icon of the first opened the second.
     static func destination(for link: AppLink, in folder: URL) -> URL {
+        // Its own wherever it is, under any name: an app the PC renamed keeps
+        // the path its launcher hashes, and a second launcher under the new
+        // name shared the first one's bundle id -- two in Spotlight, and
+        // Launch Services choosing between them.
+        let existing = ((try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "app" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        if let own = existing.first(where: { Self.link(inLauncher: $0)?.sameApp(as: link) == true }) {
+            // Under the folder as the caller named it: a listing gives the
+            // resolved path (/private/var for /var), another spelling of the
+            // same place, which compared as a different launcher.
+            return folder.appendingPathComponent(own.lastPathComponent, isDirectory: true)
+        }
         let base = fileName(link.name)
         var candidates = ["\(base) (PC)", "\(base) (\(fileName(link.host)))"]
         candidates += (2...20).map { "\(base) (PC \($0))" }
+        // And never another app's, even with every one of those taken: a name
+        // of its own from what makes it unique.
+        candidates.append("\(base) (\(identifier(for: link, opener: "x").suffix(6)))")
         let urls = candidates.map { folder.appendingPathComponent("\($0).app", isDirectory: true) }
-        if let own = urls.first(where: { Self.link(inLauncher: $0)?.sameApp(as: link) == true }) {
-            return own
-        }
-        return urls.first { !FileManager.default.fileExists(atPath: $0.path) } ?? urls[0]
+        return urls.first { !FileManager.default.fileExists(atPath: $0.path) } ?? urls[urls.count - 1]
     }
 
     /// The link a launcher at `url` carries, if it is one of ours.
@@ -111,14 +125,40 @@ enum AppLauncher {
     }
 
     /// A name Finder takes: no slash, no colon, nothing hidden, not endless.
+    ///
+    /// Nothing that disguises a name either -- a right-to-left override would
+    /// make one app's launcher read as another's -- and cut by what the file
+    /// system counts, not by characters: 60 emoji are 240 bytes, past APFS's
+    /// 255 once " (PC 20).app" is added.
     static func fileName(_ name: String) -> String {
-        var cleaned = name.replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-")
-            .components(separatedBy: .controlCharacters).joined()
+        var cleaned = String(String.UnicodeScalarView(
+            name.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .unicodeScalars.filter {
+                    !CharacterSet.controlCharacters.contains($0)
+                        && $0.properties.generalCategory != .format
+                }))
             .trimmingCharacters(in: .whitespaces)
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
-        if cleaned.count > 60 { cleaned = String(cleaned.prefix(60)).trimmingCharacters(in: .whitespaces) }
+        var cut = ""
+        for character in cleaned {
+            if cut.utf8.count + character.utf8.count > 120 { break }
+            cut.append(character)
+        }
+        cleaned = cut.trimmingCharacters(in: .whitespaces)
         return cleaned.isEmpty ? "App" : cleaned
+    }
+
+    /// Remove every launcher this app made, for Forget Paired PCs: each
+    /// would only ask for a token now. Their Dock tiles stay until taken off.
+    static func removeAll(in folder: URL = AppLauncher.folder) -> Int {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil)) ?? []
+        var removed = 0
+        for item in items where item.pathExtension == "app" && link(inLauncher: item) != nil {
+            if (try? FileManager.default.removeItem(at: item)) != nil { removed += 1 }
+        }
+        return removed
     }
 
     /// Unique per application and PC, and the same every time it is made, so

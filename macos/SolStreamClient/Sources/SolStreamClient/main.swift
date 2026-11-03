@@ -354,8 +354,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// A launcher's link, handed over by the system: from a launcher in the
-    /// Dock, Spotlight or Launchpad (`AppLauncher`), or anything dropped on
-    /// SolStream's icon, which is ignored unless it is one.
+    /// Dock, Spotlight or Launchpad (`AppLauncher`), which opens it with
+    /// `open -b`, or any file `open` names -- ignored unless it is one. No
+    /// document types are declared, so Finder and the Dock hand SolStream
+    /// nothing dropped or double-clicked.
     func application(_ application: NSApplication, open urls: [URL]) {
         guard !testMode else { return }
         // One application at a time, so the last one asked for.
@@ -427,6 +429,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // over whatever the picker was saying.
             if agent.isSessionUp { refillPicker?() }
             return
+        }
+        // Another PC while one is streaming: said first, not done -- a
+        // misclick in Spotlight or a launcher left from another PC ended a
+        // game mid-session.
+        if !appWindows.isEmpty, let current = streamHost {
+            let alert = NSAlert()
+            alert.messageText = "Open \(link.name) on \(link.host)?"
+            alert.informativeText = "This ends the stream from \(current)"
+                + (streamLink.map { " (\($0.name))" } ?? "") + "."
+            alert.addButton(withTitle: "Open")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                Log.info("[app] kept the stream from \(current) rather than open \"\(link.name)\"")
+                return
+            }
         }
         leaveHost()
         pendingOpen = link
@@ -2427,7 +2444,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             """
         alert.addButton(withTitle: "Forget")
         alert.addButton(withTitle: "Cancel")
+        // The Dock launchers too, when asked: each would only ask for a token
+        // now. Asked rather than done, since they are icons someone placed.
+        let launchers = NSButton(checkboxWithTitle: "Also remove the Dock launchers for their apps",
+                                 target: nil, action: nil)
+        launchers.state = .off
+        alert.accessoryView = launchers
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if launchers.state == .on {
+            let removed = AppLauncher.removeAll()
+            Log.info("[launcher] removed \(removed) launcher(s) with the pairings")
+        }
         TokenStore.removeAll()
         // And how to wake each one: a PC's hardware address is about that PC.
         WakeOnLAN.forgetAll()

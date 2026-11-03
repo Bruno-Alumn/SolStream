@@ -242,7 +242,12 @@ final class StreamSettings {
 
     /// 0...1.
     var volume: Float {
-        get { min(max(defaults.object(forKey: Key.volume) as? Float ?? 1, 0), 1) }
+        // Read as a number of any width -- `defaults write -float` gives one
+        // a Float cast can refuse -- and never NaN, which passes the clamps.
+        get {
+            let stored = (defaults.object(forKey: Key.volume) as? NSNumber)?.floatValue ?? 1
+            return stored.isFinite ? min(max(stored, 0), 1) : 1
+        }
         set { set(min(max(newValue, 0), 1), Key.volume, restarts: false) }
     }
 

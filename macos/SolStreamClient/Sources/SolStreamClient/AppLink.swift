@@ -102,7 +102,7 @@ struct AppLink: Codable, Equatable {
     }
 
     /// Nil for anything that is not a link file this version understands:
-    /// SolStream is handed whatever was dropped on its icon, too.
+    /// `open` can hand SolStream any file at all.
     static func decode(_ data: Data) -> AppLink? {
         guard let file = try? JSONDecoder().decode(File.self, from: data),
               file.version == 1,
