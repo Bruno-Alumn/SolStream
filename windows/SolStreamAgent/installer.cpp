@@ -1981,7 +1981,7 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     // several can fire at once, and the sentence they go into is written below.
     std::string warning;
 
-    // Two rules, both for one executable. There used to be six, covering three
+    // Three rules, all for one executable. There used to be six, covering three
     // TCP and three UDP Sunshine ports derived from a base -- and a directory
     // that had to be created by hand because Sunshine exited 0 before its
     // logging was up if it could not write there.
@@ -2001,19 +2001,23 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
     if (agent_rule && media_rule && discovery_rule) {
         InstallLog("firewall rules written");
     } else {
-        std::string which;
-        for (const auto& [ok, rule] : {std::pair<bool, const char*>{agent_rule, "agent"},
-                                       {media_rule, "media"},
-                                       {discovery_rule, "discovery"}}) {
-            if (!ok) {
-                which += which.empty() ? std::string("the rule for its ") + rule
-                                       : std::string(" and ") + rule;
-            }
+        std::vector<std::string> refused;
+        if (!agent_rule) refused.push_back("agent");
+        if (!media_rule) refused.push_back("media");
+        if (!discovery_rule) refused.push_back("discovery");
+        std::string which = "the rule" + std::string(refused.size() > 1 ? "s" : "") + " for its ";
+        for (size_t i = 0; i < refused.size(); ++i) {
+            which += (i == 0 ? "" : i + 1 == refused.size() ? " and " : ", ") + refused[i];
         }
-        which += " port";
+        which += refused.size() > 1 ? " ports" : " port";
         InstallLog("firewall: netsh would not add " + which);
         warning = "Windows Firewall would not accept " + which
                 + ", so your Mac may not be able to reach this PC.";
+        // A media rule refused on an update leaves the old one in place, and
+        // before 11-03 that one opened discovery to every network as well.
+        if (!media_rule) {
+            warning += " Run setup again to keep discovery to your own network.";
+        }
     }
 
     WriteShortcuts(destination, options);

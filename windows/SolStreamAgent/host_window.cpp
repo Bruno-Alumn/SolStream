@@ -1080,18 +1080,18 @@ SetupCopy CopyForPhase() {
             } else {
                 copy.headline = L"Install SolStream on this PC.";
                 copy.lead = L"Afterwards your Mac can open one application from here.";
-                // What InstallSelf actually writes: two firewall rules, both
-                // naming SolStream.exe, one for the agent's TCP port and one for
-                // the media and discovery UDP ports. Taken from ports.h rather
+                // What InstallSelf actually writes: three firewall rules, all
+                // naming SolStream.exe -- the agent's TCP port, the media UDP
+                // port, and discovery's, from this PC's own network only. Taken
+                // from ports.h rather
                 // than typed out, so this sentence cannot drift from the rules
                 // the way "the five ports" did. No-break spaces after the
                 // protocols, so a wrap never strands "UDP" from its numbers.
                 copy.bullets = {
                     L"Copies SolStream to Program Files",
-                    L"Adds two firewall rules for SolStream alone: TCP\u00A0"
-                        + std::to_wstring(kDefaultPort) + L", UDP\u00A0"
-                        + std::to_wstring(kDefaultMediaPort) + L" and "
-                        + std::to_wstring(kDiscoveryPort),
+                    L"Opens TCP\u00A0" + std::to_wstring(kDefaultPort) + L" and UDP\u00A0"
+                        + std::to_wstring(kDefaultMediaPort) + L" for SolStream alone, and UDP\u00A0"
+                        + std::to_wstring(kDiscoveryPort) + L" to your own network only",
                     // Said because it is the promise the tray behaviour keeps,
                     // and the thing a person installing a host most worries about.
                     L"Waits beside the clock, so nothing on this PC is interrupted",

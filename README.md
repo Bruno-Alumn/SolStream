@@ -205,7 +205,7 @@ that doesn’t verify against the signing key built into both apps is discarded
 | Permission | Why it’s needed |
 |:--|:--|
 | **Local Network** (Mac) | Finds and connects to your PC on your network or VPN. |
-| **Windows Firewall rules** (PC) | Setup opens TCP 47630 and UDP 47629 and 47631 so the Mac can reach the host. |
+| **Windows Firewall rules** (PC) | Setup opens TCP 47630 and UDP 47631 so the Mac can reach the host, and UDP 47629 to the PC's own network so the Mac can find it. |
 
 ## Contribute
 

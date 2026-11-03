@@ -700,7 +700,7 @@ void TestLogonTaskAccountOrder() {
     CHECK(accounts.empty());
 }
 
-/// The two rules the installer writes. Every profile: on a PC at its
+/// The rules the installer writes. Every profile: on a PC at its
 /// company's office Windows uses the Domain profile, and a rule for only
 /// Private and Public left the Mac unanswered there.
 void TestFirewallRule() {
