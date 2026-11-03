@@ -26,6 +26,8 @@
 
 #include "updater.h"
 
+#include "installer.h"
+
 #include <winhttp.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -1163,7 +1165,7 @@ bool ReadSmallFile(const wchar_t* path, size_t cap, std::string& out) {
 /// installer stops this copy and starts the new one hidden, from the logon
 /// task, so this is the only thing that tells the new one somebody pressed
 /// Install a moment ago and is waiting to see SolStream come back.
-void WriteInstallNote(const std::string& version) {
+void WriteInstallNote(const std::string& version, const std::wstring& result_token = {}) {
     const std::wstring path = InstallNotePath();
     if (path.empty()) {
         return;
@@ -1173,7 +1175,10 @@ void WriteInstallNote(const std::string& version) {
     if (file == INVALID_HANDLE_VALUE) {
         return;
     }
-    const std::string line = version + "\n";
+    // The version, and the name the installer writes its answer under: the
+    // copy that started it is stopped by it, so the next one reads it.
+    const std::string line =
+        version + (result_token.empty() ? std::string() : " " + ToUtf8(result_token)) + "\n";
     DWORD written = 0;
     WriteFile(file, line.data(), (DWORD) line.size(), &written, nullptr);
     CloseHandle(file);
@@ -1780,7 +1785,11 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
     // process had let go of it -- reopening exactly the gap the held handle
     // closes. Who is at the keyboard travels in OptionArguments, as it does
     // from the setup window.
-    const std::wstring arguments = L"--install" + OptionArguments(options);
+    const std::wstring result_token = NewInstallResultToken();
+    std::wstring arguments = L"--install" + OptionArguments(options);
+    if (!result_token.empty()) {
+        arguments += L" --result-token " + result_token;
+    }
     wchar_t system[MAX_PATH] = {0};
     GetSystemDirectoryW(system, MAX_PATH);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -1801,7 +1810,7 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
     execute.nShow = SW_HIDE;
     // Before the start, not after: once the installer is running it can stop
     // this process at any moment.
-    WriteInstallNote(release.version);
+    WriteInstallNote(release.version, result_token);
     const BOOL started = ShellExecuteExW(&execute);
     const DWORD code = started ? 0 : GetLastError();
     if (SUCCEEDED(com)) {
@@ -1884,8 +1893,13 @@ InstallNote TakeInstallNote() {
     const bool read = ReadSmallFile(path.c_str(), 64, text);
     // Once: the next start has nothing to report.
     DeleteFileW(path.c_str());
+    // "version token", the token being newer than the note.
+    const std::string line = Trim(text);
+    const size_t space = line.find(' ');
+    const std::string version_text = line.substr(0, space);
+    const std::string token = space == std::string::npos ? std::string() : Trim(line.substr(space + 1));
     Version version;
-    if (!read || !ParseVersion(Trim(text), version)) {
+    if (!read || !ParseVersion(version_text, version)) {
         return note;
     }
     // Against the compiled version, never a pretended one: this is about which
@@ -1902,6 +1916,9 @@ InstallNote TakeInstallNote() {
     }
     note.version = VersionText(version);
     note.kind = compared == 0 ? InstallNote::Kind::Installed : InstallNote::Kind::NotInstalled;
+    if (note.kind == InstallNote::Kind::NotInstalled) {
+        ReadInstallFailure(token, note.reason);
+    }
     // Fresh means somebody pressed Install minutes ago and is waiting for the
     // answer. An older note is news for whenever the window is next opened, not
     // a reason to put it in front of somebody logging in days later.

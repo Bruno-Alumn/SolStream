@@ -7578,7 +7578,8 @@ int wmain(int argc, wchar_t** argv) {
         const solstream::update::InstallNote note = solstream::update::TakeInstallNote();
         if (note.kind != solstream::update::InstallNote::Kind::None) {
             solstream::SayInstallOutcome(
-                note.kind == solstream::update::InstallNote::Kind::Installed, note.version);
+                note.kind == solstream::update::InstallNote::Kind::Installed, note.version,
+                note.reason);
             if (note.recent) {
                 start_hidden = false;
             }

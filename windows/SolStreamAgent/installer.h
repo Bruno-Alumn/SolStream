@@ -213,4 +213,14 @@ void WriteInstallResult(bool ok, const std::string& error,
                         const std::string& display = std::string());
 bool ReadInstallResult(std::string& error, std::string* display = nullptr);
 
+/// A fresh name for an install's result file, for an update to pass the
+/// installer it starts: see ReadInstallFailure.
+std::wstring NewInstallResultToken();
+
+/// What the install that was given `token` said when it failed, read once:
+/// true with its reason when it wrote one and failed, false otherwise. For the
+/// host an update restarted -- the copy that asked for the install was stopped
+/// by it and never heard.
+bool ReadInstallFailure(const std::string& token, std::string& reason);
+
 }  // namespace solstream

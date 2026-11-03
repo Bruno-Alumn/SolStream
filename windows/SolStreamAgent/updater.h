@@ -149,6 +149,7 @@ struct InstallNote {
     Kind kind = Kind::None;
     std::string version;   ///< the version that was being installed
     bool recent = false;   ///< started in the last ten minutes: somebody is waiting
+    std::string reason;    ///< why it was not installed, when the installer said
 };
 InstallNote TakeInstallNote();
 

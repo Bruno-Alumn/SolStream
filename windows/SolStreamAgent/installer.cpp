@@ -1308,6 +1308,41 @@ void WriteInstallResult(bool ok, const std::string& error, const std::string& di
     CloseHandle(file);
 }
 
+std::wstring NewInstallResultToken() {
+    return NewResultToken();
+}
+
+bool ReadInstallFailure(const std::string& token, std::string& reason) {
+    // A name from a file in the user's own folder: only ever hex, so it can
+    // only ever name a result file.
+    if (token.empty() || token.size() > 64
+        || token.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+        return false;
+    }
+    const std::wstring path =
+        SharedDirectory() + L"solstream-install-result-" + ToWide(token) + L".txt";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    char buffer[8192] = {0};
+    DWORD read = 0;
+    ReadFile(file, buffer, sizeof(buffer) - 1, &read, nullptr);
+    CloseHandle(file);
+    DeleteFileW(path.c_str());
+    std::string text(buffer, read);
+    const size_t split = text.find(kDisplaySeparator);
+    if (split != std::string::npos) {
+        text.resize(split);
+    }
+    if (text.rfind("ERR", 0) != 0 || text.size() <= 4) {
+        return false;
+    }
+    reason = text.substr(4);
+    return true;
+}
+
 bool ReadInstallResult(std::string& error, std::string* display) {
     const std::wstring path = ResultPath();
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,

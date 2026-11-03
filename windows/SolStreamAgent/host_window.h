@@ -97,7 +97,8 @@ void UpdateCheckFinished(const update::CheckResult& result, bool asked);
 /// What became of the update an earlier copy started installing: `installed`
 /// when this copy is `version`, otherwise it did not finish. Said in the
 /// window's notice. Call before ShowHostWindow, on the thread that will run it.
-void SayInstallOutcome(bool installed, const std::string& version);
+void SayInstallOutcome(bool installed, const std::string& version,
+                       const std::string& reason = {});
 
 /// What to run once the window's "Set up" has installed a virtual display into
 /// this running host: choosing it as the display to capture. Called on a

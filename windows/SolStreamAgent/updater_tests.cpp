@@ -1002,6 +1002,13 @@ void TestInstallNote() {
     note = TakeInstallNote();
     CHECK(note.kind == InstallNote::Kind::NotInstalled);
     CHECK(note.version == VersionText(newer));
+    // With the installer's result token beside it, as an update writes it: the
+    // version still reads, and with no result written there is no reason.
+    WriteInstallNote(VersionText(newer), L"00ff00ff00ff00ff");
+    note = TakeInstallNote();
+    CHECK(note.kind == InstallNote::Kind::NotInstalled);
+    CHECK(note.version == VersionText(newer));
+    CHECK(note.reason.empty());
 
     // Older than this copy: something newer was installed since, some other
     // way, and an old note is not news.

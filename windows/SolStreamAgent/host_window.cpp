@@ -3456,15 +3456,20 @@ void SetDisplayReadyHandler(std::function<void()> handler) {
     g_display_ready = std::move(handler);
 }
 
-void SayInstallOutcome(bool installed, const std::string& version) {
+void SayInstallOutcome(bool installed, const std::string& version, const std::string& reason) {
     if (installed) {
         SetNotice(L"Updated to SolStream " + ToWide(version) + L".",
                   L"Your Mac can connect again.", Mark::Live, true);
     } else {
+        // The installer's own reason, when it gave one: the copy that started
+        // it was stopped by it, and only this one is left to say why.
         SetNotice(L"The update to SolStream " + ToWide(version) + L" didn't finish.",
-                  L"This PC is still running SolStream " + std::wstring(kVersion)
-                      + L". SolStream offers the update again when it next checks; what "
-                      L"happened is in " + InstallLogPath() + L".",
+                  reason.empty()
+                      ? L"This PC is still running SolStream " + std::wstring(kVersion)
+                            + L". SolStream offers the update again when it next checks; what "
+                              L"happened is in " + InstallLogPath() + L"."
+                      : ToWide(reason) + L" SolStream offers the update again when it next "
+                                         L"checks.",
                   Mark::Failed, true);
     }
 }
