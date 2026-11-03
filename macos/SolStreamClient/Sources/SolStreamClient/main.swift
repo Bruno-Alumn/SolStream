@@ -691,7 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let agent { WakeOnLAN.learn(from: agent, host: host) }
         }
         agent.onWindowsChanged = { fill(false) }
-        agent.onOpenLink = { Self.openLinkFromPC($0) }
+        agent.onOpenLink = { [weak self] in self?.openLinkFromPC($0) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
             self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
@@ -1358,6 +1358,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appWindows.first { $0.window?.isKeyWindow == true }?
                 .tell(ClipboardBridge.pictureTooLargeNote)
         }
+        bridge.onTextCut = { [weak self] note in
+            self?.appWindows.first { $0.window?.isKeyWindow == true }?.tell(note)
+        }
         if StreamSettings.shared.syncsClipboard {
             bridge.start(resuming: false)
         } else {
@@ -1463,7 +1466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .hostWindowClosed(noticedBy: "pushed by the host")
         }
 
-        agent.onOpenLink = { Self.openLinkFromPC($0) }
+        agent.onOpenLink = { [weak self] in self?.openLinkFromPC($0) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
             self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
@@ -2313,13 +2316,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A link clicked on the PC, with SolStream chosen as its browser there:
     /// opened in this Mac's own browser or mail app, if it is one it may open.
-    static func openLinkFromPC(_ text: String) {
+    /// At most ten a minute: the host already holds a burst to eight a
+    /// second, and this keeps a program on the PC from opening tab after tab
+    /// here. The first held back is said in the stream window.
+    private var linkLimit = LinkRateLimit()
+
+    func openLinkFromPC(_ text: String) {
         guard let url = AgentConnection.linkToOpen(text) else {
             Log.info("[links] the PC sent a link this Mac won't open; ignored")
             return
         }
-        Log.info("[links] opening a \(url.scheme ?? "") link from the PC")
-        NSWorkspace.shared.open(url)
+        switch linkLimit.take(at: Date()) {
+        case .open:
+            Log.info("[links] opening a \(url.scheme ?? "") link from the PC")
+            NSWorkspace.shared.open(url)
+        case .firstHeldBack:
+            Log.info("[links] more than ten links from the PC in a minute; holding the rest back")
+            appWindows.first { $0.window?.isKeyWindow == true }?.tell(LinkRateLimit.note)
+        case .heldBack:
+            Log.info("[links] held back a link from the PC")
+        }
     }
 
     @objc private func forgetHosts() {

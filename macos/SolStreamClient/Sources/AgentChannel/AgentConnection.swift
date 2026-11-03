@@ -2951,12 +2951,33 @@ public final class AgentConnection {
         }
         switch scheme {
         case "http", "https":
-            return url.host?.isEmpty == false ? url : nil
+            guard let host = url.host, !host.isEmpty,
+                  // A name and password in the link: a phishing disguise, and
+                  // nothing a clicked link needs.
+                  url.user == nil, url.password == nil,
+                  !Self.isThisMachine(host) else { return nil }
+            return url
         case "mailto":
             return text.count > "mailto:".count ? url : nil
         default:
             return nil
         }
+    }
+
+    /// Whether a link's host names the machine it is opened on: a PC's
+    /// "localhost" is the PC, and opened here it would reach whatever listens
+    /// on this Mac instead -- which a program on the PC could aim at.
+    static func isThisMachine(_ host: String) -> Bool {
+        let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
+        if name == "localhost" || name.hasSuffix(".localhost") || name == "0.0.0.0"
+            || name == "::1" || name == "::" || name == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        let octets = name.split(separator: ".", omittingEmptySubsequences: false)
+        if octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }), octets[0] == "127" {
+            return true
+        }
+        return name.hasPrefix("::ffff:127.")
     }
 
     static func read(line: Data) -> LineReading {

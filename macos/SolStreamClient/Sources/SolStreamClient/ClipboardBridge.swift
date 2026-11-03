@@ -420,6 +420,7 @@ final class ClipboardBridge {
             if let local, !local.text.isEmpty, local.text != lastSyncedText {
                 if local.truncated {
                     Log.info("[clipboard] trimmed to \(local.text.utf8.count) bytes for the host")
+                    onTextCut?(Self.cutForPCNote)
                 }
                 let sent = local.text
                 lastSyncedText = sent
@@ -549,6 +550,7 @@ final class ClipboardBridge {
                 if remote.wasTruncated {
                     Log.info("[clipboard] the host truncated its clipboard text to fit "
                              + "its transfer limit")
+                    self.onTextCut?(Self.cutFromPCNote)
                 }
             }
         }
@@ -621,6 +623,14 @@ final class ClipboardBridge {
     /// otherwise ⌘V on the PC pastes what was there before, and nothing says why.
     var onPictureTooLarge: (() -> Void)?
     private var toldTooLarge: Int?
+
+    /// Text too long to carry whole was cut to fit, with the note to show:
+    /// otherwise a paste of a long log silently loses its end.
+    var onTextCut: ((String) -> Void)?
+    static let cutForPCNote =
+        "The text you copied was too long to send whole. The PC has its first 256 KB."
+    static let cutFromPCNote =
+        "The text copied on the PC was too long to send whole. This Mac has its first 256 KB."
 
     /// What the stream window says when that happens.
     static let pictureTooLargeNote =
