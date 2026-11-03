@@ -1049,8 +1049,25 @@ void MediaSession::Impl::HandlePlaintext(const unsigned char* plaintext, size_t 
 void MediaSession::Impl::ReceiveLoop() {
     unsigned char buffer[2048];
     ComplaintLimiter complaints;
+    bool releasedForSilence = false;
     for (;;) {
         if (!running.load()) { break; }
+        // A Mac that crashed, slept or lost its network mid-press left the key
+        // down -- a game walking, a drag going on -- for the fifteen seconds
+        // until the session timed out. A Mac sends feedback fifty times a
+        // second, so two seconds of nothing is one that has gone; what it held
+        // is let go now, and the session waits on for it as before. Here, on
+        // the thread that applies input, so it cannot race an Apply.
+        const long long heard = lastHeardAt.load();
+        if (heard != 0 && MillisBetween(heard, Now()) > 2000.0) {
+            if (!releasedForSilence && input.Holding()) {
+                Log("[media] nothing from the client for 2 s; letting go of what it held");
+                input.ReleaseAll();
+            }
+            releasedForSilence = true;
+        } else {
+            releasedForSilence = false;
+        }
         sockaddr_in from{};
         int fromLen = sizeof(from);
         const int n = recvfrom(socket, (char*) buffer, sizeof(buffer), 0,

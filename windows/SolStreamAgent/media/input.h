@@ -97,6 +97,9 @@ public:
     /// button down forever.
     void ReleaseAll();
 
+    /// Whether any key or button is held down here. Receive thread only.
+    bool Holding() const { return keysDownCount_ > 0 || buttonsDown_ != 0; }
+
     /// Forget the sequence numbers. MUST be called when a session starts.
     ///
     /// THE CLIENT'S SEQUENCE RESTARTS AT 1 FOR EVERY SESSION and this window

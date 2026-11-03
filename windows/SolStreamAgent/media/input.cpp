@@ -64,6 +64,15 @@ bool IsExtended(unsigned short vk) {
         case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
         case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN:
         case VK_NUMLOCK: case VK_DIVIDE: case VK_SNAPSHOT: case VK_APPS:
+        // The Windows keys, and the media and browser keys, are E0 keys too:
+        // sent without the flag, an older Mac's Win key pressed nothing.
+        case VK_LWIN: case VK_RWIN:
+        case VK_VOLUME_MUTE: case VK_VOLUME_DOWN: case VK_VOLUME_UP:
+        case VK_MEDIA_NEXT_TRACK: case VK_MEDIA_PREV_TRACK: case VK_MEDIA_STOP:
+        case VK_MEDIA_PLAY_PAUSE:
+        case VK_BROWSER_BACK: case VK_BROWSER_FORWARD: case VK_BROWSER_REFRESH:
+        case VK_BROWSER_STOP: case VK_BROWSER_SEARCH: case VK_BROWSER_FAVORITES:
+        case VK_BROWSER_HOME:
             return true;
         default:
             return false;
@@ -101,6 +110,11 @@ bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) cons
         target = target_;
     }
     RECT area{};
+    // Not into a minimized window: its frame sits near (-32000, -32000), which
+    // clamped to the desktop's corner and clicked whatever was there.
+    if (target.window && IsWindow(target.window) && IsIconic(target.window)) {
+        return false;
+    }
     if (target.window && IsWindow(target.window)) {
         // The DWM frame bounds, not GetWindowRect. GetWindowRect includes the
         // invisible resize border Windows 10 and 11 put around a window, so
@@ -215,7 +229,14 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                         raise = popup;
                     }
                 }
-                if (raise && IsWindow(raise) && GetForegroundWindow() != raise) {
+                // Not when the window in front is one of its own -- a find
+                // box it owns but is not waiting on, which every click took
+                // the foreground from -- nor for a window that has stopped
+                // answering, which would hold this thread, and the input
+                // behind it, as ForceForeground takes care not to.
+                const HWND front = GetForegroundWindow();
+                if (raise && IsWindow(raise) && front != raise
+                    && GetWindow(front, GW_OWNER) != raise && !IsHungAppWindow(raise)) {
                     SetForegroundWindow(raise);
                 }
             }
