@@ -6761,8 +6761,21 @@ int wmain(int argc, wchar_t** argv) {
                 case 1:
                     return 0;
                 case 2:
-                    refusal = "SolStream couldn't send that file just now. Wait for the files "
-                              "already on their way to arrive, then try again.";
+                    // The host says no more than that. Its likely reason is
+                    // the cap; anything about the file itself is asked again.
+                    refusal = solstream::FileOfferRefusal(path);
+                    if (refusal.empty()) {
+                        refusal = "SolStream is already sending 16 files. Wait for them to "
+                                  "arrive on the Mac, then send the rest.";
+                    }
+                    break;
+                case -1:
+                    refusal = "SolStream isn't running on this PC. Start it, connect from "
+                              "your Mac, then try again.";
+                    break;
+                case -2:
+                    refusal = "SolStream on this PC isn't answering. Wait a moment, then try "
+                              "again.";
                     break;
                 default:
                     refusal = "No Mac is connected to send this file to. Open SolStream on "

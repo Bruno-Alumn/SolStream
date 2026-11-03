@@ -22,9 +22,9 @@ struct QuitCandidate {
     bool owned = false;  ///< has an owner: a dialog or palette, closed with it
 };
 
-/// The windows Quit closes: every visible top-level window of the process
-/// that nothing owns, so an application with several windows quits rather
-/// than losing one. Only `streamed` when the process is shared: Explorer's is
+/// The windows Quit closes: `streamed`, and every visible top-level window of
+/// the process that nothing owns, so an application with several windows
+/// quits rather than losing one. Only `streamed` when the process is shared: Explorer's is
 /// also the taskbar and the desktop -- closing those would end the shell or
 /// bring up "Shut down Windows" -- and ApplicationFrameHost draws the frame of
 /// every Store app at once. The shell's own windows are never closed, whatever

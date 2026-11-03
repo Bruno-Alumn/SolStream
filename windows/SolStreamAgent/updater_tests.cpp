@@ -1685,6 +1685,17 @@ void TestWindowsToClose() {
                                         {photos, L"ApplicationFrameWindow", true, false}},
                                        photos, L"ApplicationFrameHost.exe");
     CHECK(frames.size() == 1 && frames[0] == photos);
+    // A main window owned by a hidden one of the app's own, as Delphi and VB6
+    // make them, or a tool window: still closed when it is the one streamed.
+    const HWND owner = reinterpret_cast<HWND>(0x90);
+    const HWND owned_main = reinterpret_cast<HWND>(0xA0);
+    const auto delphi = WindowsToClose({{owner, L"TApplication", false, false},
+                                        {owned_main, L"TForm1", true, true}},
+                                       owned_main, L"legacy.exe");
+    CHECK(delphi.size() == 1 && delphi[0] == owned_main);
+    const auto palette = WindowsToClose({{owned_main, L"Tool", false, false}}, owned_main,
+                                        L"tool.exe");
+    CHECK(palette.size() == 1 && palette[0] == owned_main);
 }
 
 /// Force Quit ends the app's process, but never this host, another user's

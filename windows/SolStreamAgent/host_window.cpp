@@ -3557,7 +3557,7 @@ void SetFileHandler(int (*handler)(const std::wstring& path)) {
 int SendFileToRunningHost(const std::wstring& path) {
     HWND host = FindWindowW(kClassName, nullptr);
     if (!host) {
-        return 0;
+        return -1;
     }
     COPYDATASTRUCT data{};
     data.dwData = kFileCopyData;
@@ -3566,7 +3566,7 @@ int SendFileToRunningHost(const std::wstring& path) {
     DWORD_PTR answer = 0;
     if (!SendMessageTimeoutW(host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
                              SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &answer)) {
-        return 0;
+        return -2;
     }
     return static_cast<int>(answer);
 }

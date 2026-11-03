@@ -21,7 +21,38 @@ struct Offer {
     std::wstring path;
     unsigned long long size = 0;
     ULONGLONG made = 0;
+    /// Which file it was, and as it was, when offered: the path is opened
+    /// again for every chunk, and one saved over or swapped for another since
+    /// would otherwise arrive as a mix of the two and be called whole.
+    DWORD volume = 0;
+    unsigned long long index = 0;
+    FILETIME written{};
 };
+
+/// Opened to be read, sharing with whoever else has it open.
+HANDLE OpenForSending(const std::wstring& path) {
+    return CreateFileW(path.c_str(), GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+/// Why a file that exists can't be read, in words for the person who sent it.
+std::string UnreadableReason(DWORD error) {
+    switch (error) {
+        case ERROR_SHARING_VIOLATION:
+        case ERROR_LOCK_VIOLATION:
+            return "Another app on the PC has that file locked. Close it there, then send "
+                   "the file again.";
+        case ERROR_ACCESS_DENIED:
+            return "SolStream isn't allowed to read that file on the PC.";
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND:
+            return "The file was moved or deleted on the PC before it was sent.";
+        default:
+            return "SolStream couldn't read that file on the PC (error " + std::to_string(error)
+                 + ").";
+    }
+}
 
 std::mutex g_offers_cs;
 std::map<uint64_t, Offer> g_offers;  // guarded by g_offers_cs
@@ -37,6 +68,9 @@ void ForgetExpired(ULONGLONG now) {
         it = now - it->second.made >= kOfferLifetimeMs ? g_offers.erase(it) : std::next(it);
     }
 }
+
+constexpr char kChanged[] =
+    "The file changed on the PC while it was being sent. Send it again once it's saved.";
 
 std::string Fail(const std::string& message) {
     return "{\"type\":\"download\",\"ok\":false,\"message\":\"" + JsonEscape(message) + "\"}";
@@ -72,6 +106,14 @@ std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size_
     if (size > kMaxUploadBytes) {
         return "That file is too big to send to the Mac (the limit is 8 GB).";
     }
+    // Opened once now, so that a file another app keeps locked -- a mailbox, a
+    // database -- is turned down here, in words, rather than offered and then
+    // failing at its first chunk with nothing to say but "send it again".
+    HANDLE file = OpenForSending(path);
+    if (file == INVALID_HANDLE_VALUE) {
+        return UnreadableReason(GetLastError());
+    }
+    CloseHandle(file);
     if (size_out) {
         *size_out = size;
     }
@@ -84,6 +126,23 @@ uint64_t AddFileOffer(const std::wstring& path, std::string& error) {
     if (!error.empty()) {
         return 0;
     }
+    Offer offer{path, size, 0};
+    HANDLE file = OpenForSending(path);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (file == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file, &info)) {
+        error = UnreadableReason(GetLastError());
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        return 0;
+    }
+    CloseHandle(file);
+    offer.size = (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+    if (offer.size > kMaxUploadBytes) {
+        error = "That file is too big to send to the Mac (the limit is 8 GB).";
+        return 0;
+    }
+    offer.volume = info.dwVolumeSerialNumber;
+    offer.index = (static_cast<unsigned long long>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+    offer.written = info.ftLastWriteTime;
     std::lock_guard<std::mutex> lock(g_offers_cs);
     const ULONGLONG now = GetTickCount64();
     ForgetExpired(now);
@@ -93,7 +152,8 @@ uint64_t AddFileOffer(const std::wstring& path, std::string& error) {
         return 0;
     }
     const uint64_t id = g_next_offer++;
-    g_offers[id] = Offer{path, size, now};
+    offer.made = now;
+    g_offers[id] = offer;
     return id;
 }
 
@@ -117,22 +177,39 @@ std::string DownloadJson(long long id, long long offset) {
         ForgetExpired(GetTickCount64());
         const auto found = id > 0 ? g_offers.find(static_cast<uint64_t>(id)) : g_offers.end();
         if (found == g_offers.end()) {
-            return Fail("no such file on offer");
+            return Fail("The PC no longer has that file on offer. Send it again from the PC.");
         }
-        found->second.made = GetTickCount64();
+        // Every open offer, not only this one: the Mac fetches one file at a
+        // time, and a small file sent after a large one waits its turn for as
+        // long as the large one takes.
+        const ULONGLONG now = GetTickCount64();
+        for (auto& open : g_offers) {
+            open.second.made = now;
+        }
         offer = found->second;
     }
     if (offset < 0 || static_cast<unsigned long long>(offset) > offer.size
         || (offer.size > 0 && static_cast<unsigned long long>(offset) == offer.size)) {
-        return Fail("offset out of range");
+        return Fail("The Mac asked for a part of the file that isn't there. Send it again "
+                    "from the PC.");
     }
-    // Read where it is now, sharing with whoever has it open. Shorter than
-    // offered -- changed since -- is refused rather than sent as if whole.
-    HANDLE file = CreateFileW(offer.path.c_str(), GENERIC_READ,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Read where it is now, sharing with whoever has it open -- but only if it
+    // is still the file that was offered, as it was then.
+    HANDLE file = OpenForSending(offer.path);
     if (file == INVALID_HANDLE_VALUE) {
-        return Fail("the file can no longer be read");
+        return Fail(UnreadableReason(GetLastError()));
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    const bool same = GetFileInformationByHandle(file, &info)
+        && info.dwVolumeSerialNumber == offer.volume
+        && ((static_cast<unsigned long long>(info.nFileIndexHigh) << 32) | info.nFileIndexLow)
+               == offer.index
+        && ((static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow)
+               == offer.size
+        && CompareFileTime(&info.ftLastWriteTime, &offer.written) == 0;
+    if (!same) {
+        CloseHandle(file);
+        return Fail(kChanged);
     }
     const size_t length = static_cast<size_t>(
         (std::min)(static_cast<unsigned long long>(kTransferChunkBytes),
@@ -141,13 +218,17 @@ std::string DownloadJson(long long id, long long offset) {
     LARGE_INTEGER at{};
     at.QuadPart = offset;
     DWORD read = 0;
-    const bool ok = SetFilePointerEx(file, at, nullptr, FILE_BEGIN)
-                 && (length == 0
-                     || ReadFile(file, chunk.data(), static_cast<DWORD>(length), &read, nullptr))
-                 && read == length;
+    bool ok = SetFilePointerEx(file, at, nullptr, FILE_BEGIN) != FALSE;
+    const bool read_ok = ok && (length == 0
+        || ReadFile(file, chunk.data(), static_cast<DWORD>(length), &read, nullptr));
+    const DWORD error = read_ok ? 0 : GetLastError();
     CloseHandle(file);
-    if (!ok) {
-        return Fail("the file changed while it was being sent");
+    if (!read_ok) {
+        // A region another app holds locked fails here, not at the open.
+        return Fail(ok ? UnreadableReason(error) : kChanged);
+    }
+    if (read != length) {
+        return Fail(kChanged);
     }
     if (static_cast<unsigned long long>(offset) + length == offer.size) {
         std::lock_guard<std::mutex> lock(g_offers_cs);

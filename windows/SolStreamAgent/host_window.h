@@ -144,7 +144,8 @@ bool SendLinkToRunningHost(const std::string& url);
 void SetFileHandler(int (*handler)(const std::wstring& path));
 
 /// From `--send-to-mac`: hand the file to the host already running. Its
-/// answer as above, or 0 when there is no host.
+/// answer as above, -1 when there is no host, or -2 when it didn't answer
+/// within 3 seconds.
 int SendFileToRunningHost(const std::wstring& path);
 
 bool FocusExistingHostWindow();

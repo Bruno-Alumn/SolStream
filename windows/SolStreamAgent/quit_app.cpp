@@ -71,8 +71,11 @@ std::vector<HWND> WindowsToClose(const std::vector<QuitCandidate>& windows, HWND
             continue;
         }
         const bool shared = IsExplorer(image_name) || IsFrameHost(image_name);
-        if (shared ? candidate.window == streamed
-                                   : (candidate.visible && !candidate.owned)) {
+        // The streamed window always, even owned or a tool window: an app whose
+        // main window is owned by a hidden one of its own -- Delphi and VB6
+        // apps are made that way -- would otherwise close nothing at all.
+        if (candidate.window == streamed
+            || (!shared && candidate.visible && !candidate.owned)) {
             close.push_back(candidate.window);
         }
     }
@@ -174,11 +177,35 @@ std::string QuitAppJson(HWND streamed, bool force) {
             image = ImageName(pid);
         }
     }
+    const DWORD window_pid = pid;
     DWORD session = 0, own_session = 0;
-    ProcessIdToSessionId(pid, &session);
+    const bool session_known = ProcessIdToSessionId(pid, &session) != FALSE;
     ProcessIdToSessionId(GetCurrentProcessId(), &own_session);
     HANDLE process = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
                                  FALSE, pid);
+    // The id was read from the window before the process was opened. Had the
+    // app exited in between and Windows given its id to another process, the
+    // handle would be to that one: still the window's, or nothing is ended.
+    if (process) {
+        DWORD now_pid = 0;
+        GetWindowThreadProcessId(streamed, &now_pid);
+        const bool same = now_pid == window_pid
+            && (pid == window_pid || StoreAppInside(streamed, window_pid) == pid);
+        if (!same) {
+            CloseHandle(process);
+            return refused("The app's window has already closed on the PC.");
+        }
+    }
+    if (process && !session_known) {
+        // Unread, the session stayed 0 and every app read as another user's.
+        // Not known is not ended.
+        CloseHandle(process);
+        return refused("SolStream couldn't tell which user that app belongs to, so it "
+                       "wasn't ended. End it on the PC.");
+    }
+    if (!session_known) {
+        session = own_session;   // not opened either: refused below as not allowed
+    }
     BOOL critical = FALSE;
     if (process) {
         IsProcessCritical(process, &critical);

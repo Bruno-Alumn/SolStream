@@ -16,7 +16,8 @@ namespace solstream {
 
 /// Why `path` can't be sent, in words for the person who asked, or empty
 /// when it can: it has to be a file, not a folder, of at most
-/// kMaxUploadBytes. Asked by the click before the host is, and by the host
+/// kMaxUploadBytes, that this account can open while whatever else has it
+/// open does. Asked by the click before the host is, and by the host
 /// again when it makes the offer.
 std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size = nullptr);
 
@@ -29,9 +30,12 @@ uint64_t AddFileOffer(const std::wstring& path, std::string& error);
 std::string FileOfferJson(uint64_t id);
 
 /// The reply to `{"cmd":"download","id":N,"offset":O}`: up to
-/// kTransferChunkBytes of the offered file from O. The last chunk closes the
-/// offer, and each one served gives it another half hour, so a slow transfer
-/// of a large file doesn't run out of time.
+/// kTransferChunkBytes of the offered file from O, or `ok:false` with a
+/// `message` for the person who sent it. Refused once the file is not the one
+/// offered as it was then -- another file, a new size, saved since. The last
+/// chunk closes the offer, and each one served gives every open offer another
+/// half hour, so neither a slow transfer of a large file nor the files queued
+/// behind it run out of time.
 std::string DownloadJson(long long id, long long offset);
 
 /// Close offer `id`: the Mac gave up on it (`"cancel":1`), or it was never
