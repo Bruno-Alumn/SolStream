@@ -1729,6 +1729,7 @@ void TestForceQuitRefusal() {
 void TestPushFeatures() {
     CHECK(PushFeaturesFrom("") == 0);
     CHECK(PushFeaturesFrom("title") == kPushTitle);
+    CHECK(PushFeaturesFrom("title inputBlocked") == (kPushTitle | kPushInputBlocked));
     CHECK(PushFeaturesFrom("title attention") == (kPushTitle | kPushAttention));
     CHECK(PushFeaturesFrom("openURL,title") == (kPushOpenUrl | kPushTitle));
     CHECK(PushFeaturesFrom("titles attention nonsense") == kPushAttention);

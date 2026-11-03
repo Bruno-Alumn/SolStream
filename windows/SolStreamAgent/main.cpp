@@ -5631,13 +5631,76 @@ bool OnUserDesktop() {
     return named && _wcsicmp(name, L"Default") == 0;
 }
 
+/// A process's mandatory integrity level (SECURITY_MANDATORY_*_RID), or 0
+/// when it cannot be read.
+DWORD IntegrityOf(HANDLE process) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        return 0;
+    }
+    DWORD level = 0;
+    DWORD size = 0;
+    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &size);
+    std::vector<unsigned char> buffer(size);
+    if (size > 0 && GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), size, &size)) {
+        const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buffer.data());
+        const DWORD count = *GetSidSubAuthorityCount(label->Label.Sid);
+        level = count > 0 ? *GetSidSubAuthority(label->Label.Sid, count - 1) : 0;
+    }
+    CloseHandle(token);
+    return level;
+}
+
+/// Why the Mac's input cannot reach the PC now: "secureDesktop" -- a UAC
+/// prompt, Ctrl+Alt+Del or the lock screen has it -- or "elevated", with the
+/// app's name in `app`: the window in front runs at a higher integrity than
+/// this host, and Windows drops what is sent to it without a word, SendInput
+/// saying it worked. Empty when nothing is in the way.
+std::string InputBlockedReason(std::string& app) {
+    app.clear();
+    if (!OnUserDesktop()) {
+        return "secureDesktop";
+    }
+    static const DWORD own = IntegrityOf(GetCurrentProcess());
+    const HWND front = GetForegroundWindow();
+    DWORD pid = 0;
+    if (!front || !GetWindowThreadProcessId(front, &pid) || pid == 0
+        || pid == GetCurrentProcessId()) {
+        return {};
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return {};
+    }
+    const DWORD theirs = IntegrityOf(process);
+    if (own != 0 && theirs > own) {
+        wchar_t path[MAX_PATH] = {};
+        DWORD length = MAX_PATH;
+        if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+            const wchar_t* base = wcsrchr(path, L'\\');
+            app = ToUtf8(base ? base + 1 : path);
+        }
+        CloseHandle(process);
+        return "elevated";
+    }
+    CloseHandle(process);
+    return {};
+}
+
 DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
     const LONG mine = (LONG) (LONG_PTR) parameter;
     HCURSOR last = nullptr;
     bool last_hidden = false;
     bool logged_once = false;
+    // Whether input can reach the PC, said when it changes; see
+    // InputBlockedReason. Twice a second: it opens a desktop and a process.
+    std::string blocked_said;
+    std::string blocked_app_said;
+    int blocked_tick = 0;
     while (InterlockedCompareExchange(&g_cursor_generation, 0, 0) == mine) {
         if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+            blocked_said.clear();
+            blocked_app_said.clear();
             // Not authenticated yet. Forget the last state too, so the first
             // push after authentication carries the current one rather than
             // being skipped as unchanged.
@@ -5645,6 +5708,26 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
             last_hidden = false;
             Sleep(40);
             continue;
+        }
+        if (++blocked_tick >= 12) {
+            blocked_tick = 0;
+            std::string app;
+            const std::string reason = InputBlockedReason(app);
+            if (reason != blocked_said || app != blocked_app_said) {
+                // Only to a Mac that understands it; to any other this is
+                // nothing, and is tried again on the next change.
+                if (PushFeature(solstream::kPushInputBlocked,
+                                "{\"type\":\"inputBlocked\",\"reason\":\"" + reason
+                                    + "\",\"app\":\"" + JsonEscape(app) + "\"}")) {
+                    Log("[input] %s", reason.empty() ? "input reaches the PC again"
+                                       : reason == "secureDesktop"
+                                           ? "a secure desktop has the input"
+                                           : ("the window in front runs as administrator ("
+                                              + app + ")").c_str());
+                }
+                blocked_said = reason;
+                blocked_app_said = app;
+            }
         }
         CURSORINFO info{};
         info.cbSize = sizeof(info);

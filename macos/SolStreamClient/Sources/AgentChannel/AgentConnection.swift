@@ -303,6 +303,10 @@ public final class AgentConnection {
     public var onFullScreen: ((UInt64, Bool) -> Void)?
     /// A link clicked on the host, with SolStream chosen as its browser there,
     /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
+    /// The PC said its input is blocked -- "secureDesktop" or "elevated",
+    /// with the app's name -- or nil once it is not. Main queue.
+    public var onInputBlocked: ((String?, String?) -> Void)?
+
     public var onOpenLink: ((String) -> Void)?
     /// A file sent from the host with Send to Mac: its offer number, name
     /// and size, to fetch with `download`.
@@ -2889,6 +2893,15 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onOpenLink?(url) }
             }
             return
+        case "inputBlocked":
+            // Unsolicited, sent only to a Mac that listed it: why input cannot
+            // reach the PC now, or "" once it can.
+            let reason = message["reason"] as? String ?? ""
+            let app = message["app"] as? String
+            DispatchQueue.main.async { [weak self] in
+                self?.onInputBlocked?(reason.isEmpty ? nil : reason, app)
+            }
+            return
         case "fullScreen":
             // Unsolicited, sent only to a Mac that listed it among the pushes
             // it understands.
@@ -3015,11 +3028,11 @@ public final class AgentConnection {
     /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
                                                "title", "attention", "openURL",
-                                               "fileOffer", "fullScreen"]
+                                               "fileOffer", "fullScreen", "inputBlocked"]
 
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
-    static let understoodPushes = "title attention openURL fileOffer fullScreen"
+    static let understoodPushes = "title attention openURL fileOffer fullScreen inputBlocked"
 
     /// A link from the host that this Mac may open: web or mail, as the host
     /// registered for, and nothing else -- not a file, not a script, not an

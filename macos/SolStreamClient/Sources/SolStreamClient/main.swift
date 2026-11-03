@@ -740,6 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agent.onWindowsChanged = { fill(false) }
         agent.onOpenLink = { [weak self] in self?.openLinkFromPC($0) }
+        agent.onInputBlocked = { [weak self] reason, app in self?.inputBlocked(reason, app: app) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
             self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
@@ -1518,6 +1519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         agent.onOpenLink = { [weak self] in self?.openLinkFromPC($0) }
+        agent.onInputBlocked = { [weak self] reason, app in self?.inputBlocked(reason, app: app) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
             self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
@@ -2426,6 +2428,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// second, and this keeps a program on the PC from opening tab after tab
     /// here. The first held back is said in the stream window.
     private var linkLimit = LinkRateLimit()
+
+    /// What the stream window says when the PC says its input is blocked,
+    /// and when it is not any more. Said in the window in front, or the
+    /// first: input that goes nowhere looks like SolStream broken, and the
+    /// fix is always on the PC.
+    func inputBlocked(_ reason: String?, app: String?) {
+        guard let note = Self.inputBlockedNote(reason, app: app) else { return }
+        Log.info("[input] \(reason ?? "unblocked")\(app.map { " (\($0))" } ?? "")")
+        (appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first)?.tell(note)
+    }
+
+    static func inputBlockedNote(_ reason: String?, app: String?) -> String? {
+        switch reason {
+        case "secureDesktop":
+            return "Windows is showing a secure screen -- a permission prompt, Ctrl+Alt+Del or "
+                + "the lock screen -- that SolStream can't control. Answer it at the PC."
+        case "elevated":
+            let name = (app?.isEmpty == false ? app! : "The app in front")
+            return "\(name) runs as administrator on the PC, so SolStream can't control it. "
+                + "Use it at the PC, or click another app."
+        case nil:
+            return "SolStream can control the PC again."
+        default:
+            return nil
+        }
+    }
 
     func openLinkFromPC(_ text: String) {
         guard let url = AgentConnection.linkToOpen(text) else {
