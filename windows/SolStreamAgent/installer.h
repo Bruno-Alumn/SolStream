@@ -69,6 +69,10 @@ bool IsElevated();
 /// `may_prompt`: the elevated half may raise a prompt of Windows' own -- the
 /// driver install's "install this device software?" -- so it is started shown
 /// rather than hidden, and allowed to take the foreground.
+/// Hold this program's own file open, refusing anyone a rename or a delete,
+/// for as long as the process runs. Called first thing: see RelaunchElevated.
+void PinOwnExecutable();
+
 bool RelaunchElevated(const std::wstring& arguments, std::string& error,
                       bool may_prompt = false);
 

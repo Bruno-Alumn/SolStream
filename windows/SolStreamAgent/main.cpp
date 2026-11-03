@@ -6085,6 +6085,17 @@ void ServeClient(SOCKET client) {
             if (line.empty()) {
                 continue;
             }
+            // Not let in once an update has begun: a Mac accepted before it
+            // started -- at the token prompt, or part way through reconnecting --
+            // proved itself after, and was streaming when the installer stopped
+            // this host. Closed without a word, as a new connection is then, so
+            // its reconnect finds the new host; not refused, which would have it
+            // forget its token.
+            if (!authenticated && solstream::update::InstallStarting()) {
+                Log("[agent] closed an unauthenticated connection: an update is being "
+                    "installed");
+                return;
+            }
             const bool was_authenticated = authenticated;
             std::string channel_cnonce;
             const std::string reply =
@@ -6721,6 +6732,8 @@ void RaiseToNormalPriority() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    // Before anything can ask for administrator rights by this file's path.
+    solstream::PinOwnExecutable();
     // A link clicked with SolStream chosen as the browser (links.h). Before
     // anything else, and doing nothing else: this copy lives for one click.
     // "Send to Mac" on a file in Explorer (send_to_mac.h): one copy per file.
@@ -7698,6 +7711,7 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     solstream::SetShellFlashHandler(StreamedWindowFlashed);
+    solstream::SetLiveClientCount([] { return g_clients_authenticated.load(); });
     solstream::SetLinkHandler(QueueLinkForMac);
     solstream::SetFileHandler(QueueFileForMac);
     solstream::SetEndSessionHandler([] {

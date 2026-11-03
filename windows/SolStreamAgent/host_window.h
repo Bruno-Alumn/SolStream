@@ -125,6 +125,10 @@ void SetEndSessionHandler(void (*handler)());
 /// own is one.
 void SetShellFlashHandler(void (*handler)(HWND window));
 
+/// How many Macs have proved the token, now: what an update asks just before
+/// it stops this host. The window's own status is a copy a second old.
+void SetLiveClientCount(int (*count)());
+
 /// What to run with a link handed over by `--open-url` (links.h): whether it
 /// went on to a Mac. Runs on the window's thread.
 void SetLinkHandler(bool (*handler)(const std::string& url));

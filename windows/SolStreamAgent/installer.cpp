@@ -1355,8 +1355,62 @@ bool IsElevated() {
     return ok && elevation.TokenIsElevated != 0;
 }
 
+namespace {
+
+/// This program's own file, held from the start; see PinOwnExecutable.
+HANDLE g_self_pin = INVALID_HANDLE_VALUE;
+
+/// Where `held` really is, as a plain drive path, or empty.
+std::wstring HeldPath(HANDLE held) {
+    const DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+    const DWORD needed = GetFinalPathNameByHandleW(held, nullptr, 0, flags);
+    if (needed == 0) {
+        return {};
+    }
+    std::wstring path(needed, L'\0');
+    const DWORD length = GetFinalPathNameByHandleW(held, path.data(), needed, flags);
+    if (length == 0 || length >= needed) {
+        return {};
+    }
+    path.resize(length);
+    if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
+        return {};
+    }
+    if (path.rfind(L"\\\\?\\", 0) == 0) {
+        path.erase(0, 4);
+    }
+    return path;
+}
+
+}  // namespace
+
+void PinOwnExecutable() {
+    if (g_self_pin != INVALID_HANDLE_VALUE) {
+        return;
+    }
+    // Read is all it shares: no write, and above all no delete, which is what
+    // a rename needs. Windows will not let a running program be overwritten,
+    // but it will let one be renamed -- and a copy that asks for
+    // administrator rights by its path, as setup in Downloads and the
+    // uninstaller's copy in %TEMP% do, would then have Windows elevate
+    // whatever had been put at that path meanwhile by any program running as
+    // the same user: the prompt, and the administrator's password, given to
+    // someone else's program. Held, the name stays this file's.
+    g_self_pin = CreateFileW(ExePath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (g_self_pin == INVALID_HANDLE_VALUE) {
+        InstallLog("could not hold this program's own file open: error "
+                   + std::to_string(GetLastError()));
+    }
+}
+
 bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool may_prompt) {
-    const std::wstring exe = ExePath();
+    // By where the held file really is, when it is held: the same path, since
+    // nothing can rename it, but said by the file rather than by a name.
+    std::wstring exe = g_self_pin != INVALID_HANDLE_VALUE ? HeldPath(g_self_pin) : std::wstring();
+    if (exe.empty()) {
+        exe = ExePath();
+    }
     // The name of the postbox is settled here, in the process that is going to
     // read it, rather than agreed in advance by both halves — see ResultToken.
     // Here because this is the one place every elevated relaunch passes through,

@@ -164,6 +164,8 @@ void (*g_end_session_handler)() = nullptr;
 /// See SetShellFlashHandler. The message the shell hook arrives as, once
 /// registered.
 void (*g_shell_flash_handler)(HWND) = nullptr;
+/// See SetLiveClientCount.
+int (*g_live_client_count)() = nullptr;
 UINT g_shell_hook_message = 0;
 /// See SetLinkHandler, and the tag its WM_COPYDATA carries: "SOLL".
 bool (*g_link_handler)(const std::string&) = nullptr;
@@ -2277,6 +2279,12 @@ NOTIFYICONDATAW TrayData(HWND window);
 // "Install update". See docs/updates.md.
 
 bool StreamingNow() {
+    // The count as it is, when the host has said how to read it: the status
+    // is copied once a second, and a Mac that proved the token inside that
+    // second was cut off by the update that read the older copy.
+    if (g_live_client_count) {
+        return g_live_client_count() > 0;
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_status.connected_clients > 0;
 }
@@ -3477,6 +3485,10 @@ bool HostWindowClosed() {
 
 void SetShellFlashHandler(void (*handler)(HWND window)) {
     g_shell_flash_handler = handler;
+}
+
+void SetLiveClientCount(int (*count)()) {
+    g_live_client_count = count;
 }
 
 void SetEndSessionHandler(void (*handler)()) {
