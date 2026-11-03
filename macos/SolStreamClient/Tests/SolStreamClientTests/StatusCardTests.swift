@@ -35,4 +35,17 @@ final class StatusCardTests: XCTestCase {
         drainMain()
         XCTAssertFalse(view.isShowingStatus)
     }
+
+    /// An error says the stream has ended; a frame still arriving does not
+    /// take it, or its Try Again, away.
+    func testAFrameLeavesAnErrorUp() throws {
+        let view = MetalView(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        view.setError("Lost the connection")
+        view.displayFrame(try pixelBuffer())
+        drainMain()
+        XCTAssertTrue(view.isShowingStatus)
+        // Taken down when the app says so.
+        view.hideStatus()
+        XCTAssertFalse(view.isShowingStatus)
+    }
 }

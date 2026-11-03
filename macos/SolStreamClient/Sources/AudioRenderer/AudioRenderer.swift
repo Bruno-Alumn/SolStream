@@ -721,12 +721,25 @@ final class AudioRingBuffer {
         }
     }
 
+    /// How much has to have arrived before playback starts, for a device that
+    /// asks for `read` at a time.
+    static func primedAt(prefill: Int, read: Int, ceiling: Int) -> Int {
+        min(prefill + (read > prefill ? read : 0), ceiling)
+    }
+
     /// Fill `destination`, padding with silence on underrun.
     func read(into destination: UnsafeMutablePointer<Int16>, count: Int) {
         guard count > 0 else { return }
         let now = mach_absolute_time()
         os_unfair_lock_lock(lock)
-        if priming && filled >= prefill { priming = false }
+        // A device that asks for more at a time than the cushion holds would
+        // drain it in one read and prime again, over and over, and the sound
+        // broke up for the whole session: the cushion is a whole read past it.
+        // Never past the ceiling, above which the ring trims itself: a cushion
+        // it can never reach would keep the sound primed, and silent, for good.
+        if priming && filled >= Self.primedAt(prefill: prefill, read: count, ceiling: ceiling) {
+            priming = false
+        }
         let take = priming ? 0 : min(count, filled)
         if !priming && take < count { priming = true }   // underrun: re-cushion
         if take > 0 {

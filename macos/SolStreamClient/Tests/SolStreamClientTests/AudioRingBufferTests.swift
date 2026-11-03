@@ -245,4 +245,13 @@ final class AudioRingBufferTests: XCTestCase {
         write(stereo(frames: 48 * 35, startingAt: 48 * 30), to: ring)
         XCTAssertEqual(read(4, from: ring), Array(stereo(frames: 2)))
     }
+
+    /// A device that reads more at a time than the cushion holds starts once a
+    /// whole read past it has arrived -- and never later than the ceiling,
+    /// above which the ring trims itself and the cushion could never be met.
+    func testTheCushionAllowsForTheDevicesRead() {
+        XCTAssertEqual(AudioRingBuffer.primedAt(prefill: 2400, read: 1024, ceiling: 11520), 2400)
+        XCTAssertEqual(AudioRingBuffer.primedAt(prefill: 2400, read: 4096, ceiling: 11520), 6496)
+        XCTAssertEqual(AudioRingBuffer.primedAt(prefill: 2400, read: 16384, ceiling: 11520), 11520)
+    }
 }

@@ -1536,6 +1536,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch liveness {
             case .live:
                 self.mediaRecoveryAttempts = 0
+                // Not over a connection that has ended for good: its pictures
+                // are the last of a stream that is about to stop, and Try
+                // Again is still the only way back.
+                guard !self.connectionLostShown else { return }
                 self.appWindows.forEach { $0.hideStatus() }
                 // Pictures again after an error said the stream had ended.
                 self.stayAwake.hold()
@@ -1674,18 +1678,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mediaRecoveryAttempts += 1
         let attempt = mediaRecoveryAttempts
         Log.info("[app] restarting the stream from \(host) (attempt \(attempt))")
-        let status = status ?? ("Reconnecting…", "Restarting the stream from \(host)")
-        appWindows.forEach {
-            $0.setStatus(status.title, detail: status.detail)
-        }
         // Handlers off first: stopping the old session reports `.failed`
-        // asynchronously, which would land in here again.
+        // asynchronously, which would land in here again. And stopped before
+        // the card goes up: a frame of the old stream handed over after it
+        // took "Applying settings…" down, over a picture that had stopped.
         if let old = session {
             old.onPhase = nil
             old.onLiveness = nil
             old.stop()
         }
         session = nil
+        let status = status ?? ("Reconnecting…", "Restarting the stream from \(host)")
+        appWindows.forEach {
+            $0.setStatus(status.title, detail: status.detail)
+        }
 
         Task { @MainActor [weak self, weak agent] in
             guard let self, let agent else { return }

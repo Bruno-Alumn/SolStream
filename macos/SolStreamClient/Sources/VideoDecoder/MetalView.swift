@@ -40,6 +40,12 @@ public final class MetalView: NSView {
     /// Bumped each time a card goes up, and taken with each frame: a frame
     /// handed over before the card does not take it down. Under pendingLock.
     private var statusEpoch = 0
+    /// The card up is an error: the stream has ended and Try Again is the way
+    /// on. A frame does not take it down -- a host still sending over a
+    /// connection that has gone took "Lost the connection" down sixteen
+    /// milliseconds after it went up, and when the frames then stopped there
+    /// was nothing on the window at all. Main thread only.
+    private var showingError = false
     private var pendingEpoch = 0
     /// When the texture cache was last flushed; see `present`.
     private var lastFlush = Date.distantPast
@@ -207,6 +213,7 @@ public final class MetalView: NSView {
     /// Update the overlay.
     public func setStatus(_ title: String, detail: String? = nil, busy: Bool = true) {
         bumpStatusEpoch()
+        showingError = false
         overlay.update(title: title, detail: detail, busy: busy, isError: false)
     }
 
@@ -219,6 +226,7 @@ public final class MetalView: NSView {
     /// Show a terminal error, with a Retry button if a handler is provided.
     public func setError(_ title: String, detail: String? = nil) {
         bumpStatusEpoch()
+        showingError = true
         overlay.update(title: title, detail: detail, busy: false, isError: true)
     }
 
@@ -228,6 +236,7 @@ public final class MetalView: NSView {
     }
 
     public func hideStatus() {
+        showingError = false
         overlay.setHidden(true)
     }
 
@@ -269,7 +278,7 @@ public final class MetalView: NSView {
     }
 
     private func present(_ pixelBuffer: CVPixelBuffer, hidesStatus: Bool) {
-        if hidesStatus { overlay.setHidden(true) }
+        if hidesStatus && !showingError { overlay.setHidden(true) }
 
         guard let metalLayer = layer as? CAMetalLayer, let textureCache else { return }
         // Nothing to see: minimised, on another Space, or covered. The newest
