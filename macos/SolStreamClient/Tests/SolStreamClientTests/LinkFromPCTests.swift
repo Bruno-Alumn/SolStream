@@ -45,4 +45,16 @@ final class LinkFromPCTests: XCTestCase {
             XCTAssertNotNil(AgentConnection.linkToOpen(text), text)
         }
     }
+
+    /// A host asking for no token may be talked to only at this machine's
+    /// own loopback -- judged by the address dialled.
+    func testOnlyLoopbackMayGoWithoutAToken() {
+        for address in ["127.0.0.1", "::1", "localhost", "127.0.0.2"] {
+            XCTAssertTrue(AgentConnection.mayGoWithoutToken(dialled: address), address)
+        }
+        for address in ["192.168.1.5", "100.64.0.7", "desktop-pc", "desktop-pc.local",
+                        "fd7a:115c::1", "10.0.0.1"] {
+            XCTAssertFalse(AgentConnection.mayGoWithoutToken(dialled: address), address)
+        }
+    }
 }

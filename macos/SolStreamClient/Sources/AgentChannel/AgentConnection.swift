@@ -2636,7 +2636,7 @@ public final class AgentConnection {
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
-            } else if !Self.isThisMachine(self.host) {
+            } else if !Self.mayGoWithoutToken(dialled: self.host) {
                 // A host that wants no token is only ever one listening on its
                 // own loopback: the agent refuses `--no-auth` on any other
                 // address, and an installed one always asks. Anything on the
@@ -2980,6 +2980,14 @@ public final class AgentConnection {
         default:
             return nil
         }
+    }
+
+    /// Whether a host that asks for no token may be talked to, by the address
+    /// this Mac dialled -- never by the name a greeting gives, which is
+    /// whatever answered says about itself. Only this machine's own loopback:
+    /// the agent refuses `--no-auth` on any other address.
+    static func mayGoWithoutToken(dialled address: String) -> Bool {
+        isThisMachine(address)
     }
 
     /// Whether a link's host names the machine it is opened on: a PC's

@@ -241,6 +241,42 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(titles, ["Notepad"])
     }
 
+    /// Something on the network that asks for no token -- and calls itself
+    /// "localhost" in its greeting -- is refused, and nothing is asked of it:
+    /// the address dialled decides, and only this machine's own loopback may
+    /// go without a token.
+    func testAHostOnTheNetworkThatAsksForNoTokenIsRefused() throws {
+        guard let address = ownNetworkAddress() else {
+            throw XCTSkip("no network address on this Mac")
+        }
+        let seen = Observations()
+        let host = ScriptedHost { _, connection in
+            connection.send(#"{"type":"hello","version":2,"host":"localhost","needsAuth":false}"#)
+            connection.send(ScriptedHost.displays)
+            seen.set("asked", connection.readLine(timeout: 2))
+        }
+        let port = try host.start(on: NWEndpoint.Host(address))
+        defer { host.stop() }
+        let agent = AgentConnection(host: address, port: port)
+        defer { agent.disconnect() }
+        let record = StateRecord(agent)
+        let refused = expectation(description: "refused")
+        record.onFailure = { _ in refused.fulfill() }
+        agent.connect()
+        agent.windows { _ in }
+        let outcome = XCTWaiter().wait(for: [refused], timeout: 8)
+        if outcome != .completed, host.connections == 0 {
+            throw XCTSkip("this test runner can't reach its own network address "
+                          + "(macOS Local Network access); the decision is tested on its own")
+        }
+        XCTAssertTrue(record.failures.first?.contains("didn't ask for a pairing token") == true,
+                      "\(record.failures)")
+        XCTAssertTrue(record.failures.first?.hasPrefix(address) == true,
+                      "named by the greeting, not the address: \(record.failures)")
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertNil(seen.get("asked"), "a request reached a host that asked for no token")
+    }
+
     /// Back during a slow launch, and the same PC chosen again: the host is
     /// still letting go of this Mac's own session, so even a first connection
     /// waits for it rather than being told another Mac is streaming.
@@ -643,6 +679,29 @@ final class AgentReconnectLoopbackTests: XCTestCase {
     }
 }
 
+/// An IPv4 address of this Mac's that is not loopback, to reach a local
+/// listener by a route `isThisMachine` doesn't recognise -- as a PC on the
+/// network would be. Nil on a Mac with no network up.
+private func ownNetworkAddress() -> String? {
+    var list: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&list) == 0, let head = list else { return nil }
+    defer { freeifaddrs(list) }
+    var entry: UnsafeMutablePointer<ifaddrs>? = head
+    while let current = entry {
+        entry = current.pointee.ifa_next
+        let flags = Int32(current.pointee.ifa_flags)
+        guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0,
+              let address = current.pointee.ifa_addr,
+              address.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+        var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        var raw = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+        if inet_ntop(AF_INET, &raw, &text, socklen_t(INET_ADDRSTRLEN)) != nil {
+            return String(cString: text)
+        }
+    }
+    return nil
+}
+
 /// What a connection reported, in order. Its callbacks arrive on the main
 /// queue, where the test reads it.
 private final class StateRecord {
@@ -716,9 +775,11 @@ private final class ScriptedHost {
         return accepted.count
     }
 
-    func start() throws -> UInt16 {
+    /// - Parameter address: where to listen; IPv6 loopback unless a test
+    ///   needs an address that is not this machine's loopback.
+    func start(on address: NWEndpoint.Host = "::1") throws -> UInt16 {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: "::1", port: .any)
+        parameters.requiredLocalEndpoint = .hostPort(host: address, port: .any)
         let listener = try NWListener(using: parameters)
         self.listener = listener
         let ready = DispatchSemaphore(value: 0)
