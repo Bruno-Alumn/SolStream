@@ -2654,6 +2654,13 @@ void AddTrayIcon(HWND window) {
         wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
     }
     g_tray_added = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    // Already there -- the taskbar can announce itself again without having
+    // lost its icons -- or briefly too busy: updated in place, rather than
+    // left marked absent, which turned the window's x into Quit and stopped
+    // the tooltip for the rest of the session.
+    if (!g_tray_added) {
+        g_tray_added = Shell_NotifyIconW(NIM_MODIFY, &data) != FALSE;
+    }
     if (g_tray_added) {
         data.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &data);
@@ -3347,6 +3354,12 @@ bool ShowHostWindow(WindowMode mode, bool start_hidden) {
     if (!g_window) {
         return false;
     }
+    // Let through from programs with fewer rights. A host started as
+    // administrator -- setup run that way, then "Open SolStream" -- otherwise
+    // never hears that Explorer restarted, and loses its tray icon, nor a
+    // second launch asking it to come forward.
+    ChangeWindowMessageFilterEx(g_window, g_taskbar_created, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(g_window, g_show_request, MSGFLT_ALLOW, nullptr);
     // Told of taskbar flashes, for a streamed app's Mac window to bounce in
     // the Dock. Only the host's window: setup has nothing streaming.
     if (mode == WindowMode::Host) {

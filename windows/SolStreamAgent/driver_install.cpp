@@ -589,6 +589,31 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                           bool& already, bool& restart, std::string& note,
                           std::string& error) {
     restart = false;
+    // One install at a time, across this PC: setup's tick box and the host
+    // window's Set up could both find no driver and both make a device, the
+    // second record over the first -- two virtual displays, one of them
+    // remembered by nothing.
+    HANDLE one_at_a_time = CreateMutexW(nullptr, FALSE, L"Global\\SolStream.DisplayDriverInstall");
+    if (!one_at_a_time) {
+        one_at_a_time = CreateMutexW(nullptr, FALSE, L"Local\\SolStream.DisplayDriverInstall");
+    }
+    if (one_at_a_time) {
+        const DWORD waited = WaitForSingleObject(one_at_a_time, 0);
+        if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+            CloseHandle(one_at_a_time);
+            error = "The virtual display is already being set up. Wait for that to finish.";
+            return false;
+        }
+    }
+    struct Release {
+        HANDLE handle;
+        ~Release() {
+            if (handle) {
+                ReleaseMutex(handle);
+                CloseHandle(handle);
+            }
+        }
+    } release{one_at_a_time};
     ForgetGoneDevice();
     const DriverState state = CurrentDriverState();
     already = state == DriverState::Ready;
@@ -687,7 +712,26 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         bool staged_here = false;
         const std::wstring settings_folder = VddSettingsFolder();
         const std::wstring settings = settings_folder + L"\\vdd_settings.xml";
+        // What was recorded before this run, put back if it is undone: each
+        // record is written the moment its step succeeds, so a process killed
+        // part way -- by a restart, a sign-out, a crash -- leaves behind only
+        // what it recorded, and an uninstall finds it. Written at the end, a
+        // package and a device added before the kill were remembered by
+        // nothing, and never removed.
+        const std::wstring earlier_inf = ReadState(kInfValue);
+        const std::wstring earlier_device = ReadState(kDeviceValue);
+        const std::wstring earlier_mark = ReadState(kDeviceMarkValue);
+        auto restore = [](const wchar_t* name, const std::wstring& value) {
+            if (value.empty()) {
+                DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
+            } else {
+                WriteState(name, value);
+            }
+        };
         auto undo = [&] {
+            restore(kInfValue, earlier_inf);
+            restore(kDeviceValue, earlier_device);
+            restore(kDeviceMarkValue, earlier_mark);
             if (staged_here && IsOemInfName(staged)) {
                 SetupUninstallOEMInfW(staged.c_str(), 0, nullptr);
             }
@@ -735,6 +779,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             return false;
         }
         staged = oem_name ? oem_name : L"";
+        if (staged_here && !staged.empty()) {
+            WriteState(kInfValue, staged);
+        }
         // Past the one call that can ask. What follows -- making the device,
         // binding the driver, waiting for the display -- never does, and a
         // slow one must not send somebody looking for a prompt that isn't there.
@@ -748,6 +795,12 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         if (!CreateDevice(created, created_set, instance, error)) {
             undo();
             return false;
+        }
+        if (!instance.empty()) {
+            // Without its mark yet, so it is taken at its word if this run
+            // ends before the mark is set.
+            DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, kDeviceMarkValue);
+            WriteState(kDeviceValue, instance);
         }
         // The owner is the window waiting on this, so whatever Windows asks
         // about the driver comes up over it rather than behind it.

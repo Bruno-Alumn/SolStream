@@ -88,8 +88,12 @@ bool IsSwitchedOff(unsigned long problem) {
 
 bool IsSolStreamDisplayDriver(const std::wstring& name) {
     const std::wstring folded = FoldCase(name);
+    // Not "IddSampleDriver": that is the sample driver many other products
+    // ship -- Sunshine set-ups among them -- and taken for SolStream's, setup
+    // never offered its own, and every logon resized that display, set its
+    // scale and turned its HDR off. The driver SolStream installs calls itself
+    // the Virtual Display Driver.
     if (folded.find(L"virtual display driver") != std::wstring::npos
-        || folded.find(L"iddsample") != std::wstring::npos
         || folded.find(L"solstream") != std::wstring::npos) {
         return true;
     }

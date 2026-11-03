@@ -1631,7 +1631,8 @@ void TestSolStreamDisplays() {
         return d;
     };
     CHECK(IsSolStreamDisplayDriver(L"Virtual Display Driver"));
-    CHECK(IsSolStreamDisplayDriver(L"IddSampleDriver Device"));
+    // The sample driver other products ship is theirs, not SolStream's.
+    CHECK(!IsSolStreamDisplayDriver(L"IddSampleDriver Device"));
     CHECK(IsSolStreamDisplayDriver(L"VDD by MTT"));
     CHECK(!IsSolStreamDisplayDriver(L"Parsec Virtual Display Adapter"));
     CHECK(!IsSolStreamDisplayDriver(L"spacedesk Graphics Adapter"));
