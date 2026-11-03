@@ -502,16 +502,16 @@ void MediaSession::Impl::CaptureLoop() {
         // not a reason to end the session.
         const bool rebuildFailed = recovering && encodingSince == 0;
         recovering = false;
+        // This pass's cause first, so the line below names the last one.
+        if (deviceLost || encoderFailed) {
+            lastCauseEncoder = encoderFailed;
+        }
         if ((deviceLost || rebuildFailed) && running.load() && !retargetWanted.load()
             && recoveries >= 3) {
             // Said, not left as the session simply ending.
             Log("[media] giving up after 3 rebuilds in a minute (the last: %s); "
                 "ending the session",
-                encoderFailed || lastCauseEncoder ? "the encoder failing"
-                                                  : "the graphics device being lost");
-        }
-        if (deviceLost || encoderFailed) {
-            lastCauseEncoder = encoderFailed;
+                lastCauseEncoder ? "the encoder failing" : "the graphics device being lost");
         }
         if ((deviceLost || rebuildFailed) && running.load() && !retargetWanted.load()
             && recoveries < 3) {
@@ -556,6 +556,17 @@ void MediaSession::Impl::RunCapture() {
             if (now != active.monitor) {
                 Log("[media] %ls has a new handle; capturing it by that",
                     active.monitorDevice.c_str());
+                // And input with it: clicks were placed on the old handle,
+                // which Windows no longer knows, and silently dropped.
+                {
+                    std::lock_guard<std::mutex> guard(configLock);
+                    if (!config.window && config.monitorDevice == active.monitorDevice) {
+                        config.monitor = now;
+                    }
+                }
+                InputTarget target;
+                target.monitor = now;
+                input.SetTarget(target);
             }
             active.monitor = now;
         }
@@ -750,6 +761,11 @@ void MediaSession::Impl::RunCapture() {
     uint64_t picturesSeen = encoder->Pictures();
     long long picturesMovedAt = Now();
     long long deviceCheckedAt = Now();
+    // Frames the encoder took since a picture last came out: no picture is
+    // only a stall once something went in. An encoder starved of textures on a
+    // still screen -- every Submit refused until its leases are given up --
+    // took nothing, and was rebuilt for it, three times, ending the session.
+    int fedSincePicture = 0;
     while (running.load() && !retargetWanted.load() && capture->Running()) {
         if (MillisBetween(deviceCheckedAt, Now()) >= 1000.0) {
             deviceCheckedAt = Now();
@@ -760,11 +776,19 @@ void MediaSession::Impl::RunCapture() {
                 deviceLost = true;
                 break;
             }
+            // The software encoder sets this inside a Submit that still says
+            // true: looked at here, it is said for what it is, at once.
+            if (encoder->Failed()) {
+                deviceLost = true;
+                encoderFailed = true;
+                break;
+            }
             const uint64_t pictures = encoder->Pictures();
             if (pictures != picturesSeen) {
                 picturesSeen = pictures;
                 picturesMovedAt = Now();
-            } else if (MillisBetween(picturesMovedAt, Now()) >= 3000.0) {
+                fedSincePicture = 0;
+            } else if (MillisBetween(picturesMovedAt, Now()) >= 3000.0 && fedSincePicture >= 8) {
                 // Frames go in at least every 250 ms, so three seconds of none
                 // coming out is an encoder that has stopped.
                 Log("[media] the encoder has produced nothing for 3 s; rebuilding it");
@@ -801,8 +825,12 @@ void MediaSession::Impl::RunCapture() {
         // Never more than a slot behind, so a long still spell does not leave
         // a run of pictures owed at once when things move again.
         nextDue = (std::max)(nextDue + frameTicks, lastEncodedAt - frameTicks);
-        if (!encoder->Submit(current.texture, current.width, current.height,
-                             current.isNew ? current.capturedAt : Now(), false)) {
+        const bool fed = encoder->Submit(current.texture, current.width, current.height,
+                                         current.isNew ? current.capturedAt : Now(), false);
+        if (fed) {
+            ++fedSincePicture;
+        }
+        if (!fed) {
             // A driver reset, update or crash removes the device without the
             // capture ever saying its source closed: frames stop, Submit fails
             // on every retained one, and the Mac showed the last picture for
