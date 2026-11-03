@@ -52,6 +52,7 @@
 #include "media/audio_reopen.h"
 #include "media/audio_source.h"
 #include "media/audio_downmix.h"
+#include "media/audio_tree.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
@@ -4391,6 +4392,30 @@ void TestDownmix() {
     CHECK(SoftLimit(1.0f) < 1.0f);
 }
 
+/// Two streamed apps where one started the other: only the one that started
+/// it is captured, since Windows captures an app with everything it started.
+void TestAudioTree() {
+    using solstream::media::ProcessEntry;
+    using solstream::media::WithoutDescendants;
+    // steam (100) started game (200), which started a helper (300); notepad
+    // (400) is on its own. All started by explorer (10).
+    std::map<uint32_t, ProcessEntry> all = {
+        {10, {1, 1}}, {100, {10, 5}}, {200, {100, 9}}, {300, {200, 12}}, {400, {10, 7}},
+    };
+    CHECK((WithoutDescendants({100, 200}, all) == std::vector<uint32_t>{100}));
+    CHECK((WithoutDescendants({100, 300}, all) == std::vector<uint32_t>{100}));
+    CHECK((WithoutDescendants({200, 400}, all) == std::vector<uint32_t>{200, 400}));
+    CHECK((WithoutDescendants({400}, all) == std::vector<uint32_t>{400}));
+    // A parent id that came back as another process -- started after the
+    // child -- is not its parent.
+    std::map<uint32_t, ProcessEntry> reused = {{100, {10, 50}}, {200, {100, 9}}};
+    CHECK((WithoutDescendants({100, 200}, reused) == std::vector<uint32_t>{100, 200}));
+    // A process missing from the snapshot, and a loop, keep it.
+    CHECK((WithoutDescendants({100, 999}, all) == std::vector<uint32_t>{100, 999}));
+    std::map<uint32_t, ProcessEntry> loop = {{1, {2, 0}}, {2, {1, 0}}};
+    CHECK((WithoutDescendants({1}, loop) == std::vector<uint32_t>{1}));
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -4565,6 +4590,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferEncoding();
     TestWake();
     TestFullScreen();
+    TestAudioTree();
     TestDownmix();
     TestContrastPalette();
     TestReplayWindow();
