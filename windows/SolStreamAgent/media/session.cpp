@@ -699,7 +699,7 @@ void MediaSession::Impl::RunCapture() {
         lastEncodedAt = Now();
         // Never more than a slot behind, so a long still spell does not leave
         // a run of pictures owed at once when things move again.
-        nextDue = std::max(nextDue + frameTicks, lastEncodedAt - frameTicks);
+        nextDue = (std::max)(nextDue + frameTicks, lastEncodedAt - frameTicks);
         if (!encoder->Submit(current.texture, current.width, current.height,
                              current.isNew ? current.capturedAt : Now(), false)) {
             // A driver reset, update or crash removes the device without the
