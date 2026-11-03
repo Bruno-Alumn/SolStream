@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import SolStreamLogging
 
@@ -253,8 +254,11 @@ final class Updater {
     /// something is already found, downloading or going in.
     func automaticCheck() {
         guard checksAutomatically, checksOnItsOwn else { return }
+        // From an update found and not yet installed too: a copy left open at
+        // "1.0.5 is ready" learns of the 1.0.6 that replaced it. A failed
+        // check keeps what was found.
         switch state {
-        case .idle, .upToDate, .failed: break
+        case .idle, .upToDate, .failed, .available, .ready, .manualInstall: break
         default: return
         }
         Task { await check() }
@@ -285,7 +289,11 @@ final class Updater {
         askedThisRun = Date()
         do {
             let outcome = try await latest()
-            defaults.set(Date(), forKey: Key.lastCheck)
+            // Stamped here only when there is nothing to fetch: a release found
+            // is stamped once its download is in (see `download`), so one
+            // whose download failed is tried again within the hour rather
+            // than a day later.
+            if case .newer = outcome {} else { defaults.set(Date(), forKey: Key.lastCheck) }
             switch outcome {
             case .nothingVisible:
                 Log.info("[update] checked: nothing published that this Mac can see "
@@ -408,6 +416,7 @@ final class Updater {
         do {
             let (zip, sha256) = try await fetchVerified(release)
             downloaded = (version, zip, sha256)
+            defaults.set(Date(), forKey: Key.lastCheck)
             let size = (try? zip.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0
             Log.info("[update] \(version) downloaded and verified "
                      + "(\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)))")
@@ -459,6 +468,20 @@ final class Updater {
                                                 attributes: owner)
         try FileManager.default.setAttributes(owner, ofItemAtPath: downloadsFolder.path)
         let file = downloadsFolder.appendingPathComponent(zipName)
+        // Anything else in there is an older release's, and goes.
+        for leftover in (try? FileManager.default.contentsOfDirectory(
+            at: downloadsFolder, includingPropertiesForKeys: nil)) ?? []
+            where leftover.lastPathComponent != zipName {
+            try? FileManager.default.removeItem(at: leftover)
+        }
+        // Kept from an earlier run, and still the bytes the signed sums name:
+        // not fetched again. Every launch used to delete it, and a copy that
+        // was not installed at once -- or that cannot replace itself --
+        // downloaded the whole release again each time it opened.
+        if Self.sha256(of: file) == expected {
+            Log.info("[update] \(version) is already downloaded and still verifies")
+            return (file, expected)
+        }
         // Whole percents only: a byte count per packet would be thousands of
         // trips to the main thread to redraw the same figure.
         var shown = -1
@@ -496,6 +519,20 @@ final class Updater {
             throw UpdateError.checksumMismatch
         }
         return (file, expected)
+    }
+
+    /// A file's SHA-256 as lowercase hex, or nil when it cannot be read.
+    static func sha256(of file: URL) -> String? {
+        guard let input = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? input.close() }
+        var hasher = SHA256()
+        var read: Int64 = 0
+        while let chunk = try? input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            read += Int64(chunk.count)
+            guard read <= UpdateSource.maximumAssetBytes else { return nil }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func fetchSmall(_ asset: Release.Asset) async throws -> Data {
@@ -539,6 +576,17 @@ final class Updater {
     }
 
     private func install(version: String, zip: URL, sha256: String) {
+        // Gone while it waited -- macOS empties Caches when the disk runs low,
+        // and "install when the stream closes" comes here without the button's
+        // look -- it is downloaded again rather than failed as one that would
+        // not unpack.
+        guard FileManager.default.fileExists(atPath: zip.path) else {
+            Log.info("[update] the download of \(version) has gone; downloading it again")
+            downloaded = nil
+            state = .available(version)
+            Task { await download() }
+            return
+        }
         guard let target = installTarget else {
             state = Self.cannotReplaceItself(version)
             return
@@ -555,7 +603,7 @@ final class Updater {
                 // Deleted by the copy that starts next, once it has started:
                 // until then this one is the way back.
                 defaults.set(replaced.path, forKey: Key.replacedBundle)
-                try? FileManager.default.removeItem(at: zip)
+                removeIfOurs(zip)
                 downloaded = nil
                 Log.info("[update] installed \(version) at \(target.path)")
                 // "Install when the stream closes" runs as the stream closes,
@@ -575,13 +623,21 @@ final class Updater {
                     state = .manualInstall(version, reason: failure.reason)
                 } else {
                     // A download that fails its checks is not kept, so it
-                    // cannot be offered a second time.
-                    try? FileManager.default.removeItem(at: zip)
+                    // cannot be offered a second time -- but only from our
+                    // own folder: one moved to Downloads is the person's.
+                    removeIfOurs(zip)
                     downloaded = nil
                     state = .failed(failure.reason)
                 }
             }
         }
+    }
+
+    /// Delete `file` only when it is in the updater's own folder.
+    private func removeIfOurs(_ file: URL) {
+        guard file.deletingLastPathComponent().resolvingSymlinksInPath().path
+                == downloadsFolder.resolvingSymlinksInPath().path else { return }
+        try? FileManager.default.removeItem(at: file)
     }
 
     /// Quit, and have the new copy at the same path start once this one has
@@ -594,7 +650,10 @@ final class Updater {
             try relaunch(target)
         } catch {
             Log.error("[update] could not relaunch: \(error.localizedDescription)")
-            state = .failed("Installed. Quit and open SolStream again to finish.")
+            // Installed, not failed: a failure invites the next check, which
+            // would fetch this same release again only to be told it was
+            // already here.
+            state = .installed(version)
             return
         }
         terminate()
@@ -633,6 +692,7 @@ final class Updater {
     /// folder as the running bundle: a value in the defaults is not reason
     /// enough to delete anything else.
     func cleanUpAfterUpdate() {
+        let justUpdated = defaults.string(forKey: Key.replacedBundle) != nil
         if let path = defaults.string(forKey: Key.replacedBundle) {
             // Forgotten once it is gone, not before: a copy that could be
             // neither deleted nor trashed this time -- another account's, or
@@ -671,7 +731,9 @@ final class Updater {
                 }
             }
         }
-        if FileManager.default.fileExists(atPath: downloadsFolder.path) {
+        // Only once an update has gone in: a download kept for one that has
+        // not is used again, once it still verifies -- see fetchVerified.
+        if justUpdated, FileManager.default.fileExists(atPath: downloadsFolder.path) {
             try? FileManager.default.removeItem(at: downloadsFolder)
         }
     }

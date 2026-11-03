@@ -542,6 +542,28 @@ final class UpdaterTests: XCTestCase {
         XCTAssertEqual(StubProtocol.requests.count, requestsBefore + 1, "fetched the update again")
     }
 
+    /// The next launch -- a new updater over the same folder -- finds the
+    /// download still verifying and does not fetch the archive again: only the
+    /// release, the sums and their signature.
+    @MainActor
+    func testADownloadKeptFromAnEarlierLaunchIsUsedAgain() async throws {
+        let target = try makeInstalledApp(version: "1.0.0")
+        let release = try publish(version: "1.1.0")
+        let first = makeUpdater(version: "1.0.0", target: target, key: release.publicKey)
+        await first.check()
+        XCTAssertEqual(first.state, .ready("1.1.0"))
+
+        let second = makeUpdater(version: "1.0.0", target: target, key: release.publicKey)
+        second.cleanUpAfterUpdate()
+        let requestsBefore = StubProtocol.requests.count
+        await second.check()
+        XCTAssertEqual(second.state, .ready("1.1.0"))
+        let zipName = UpdateSource.zipName(for: "1.1.0")
+        let fetched = StubProtocol.requests.dropFirst(requestsBefore)
+            .filter { $0.url?.lastPathComponent == zipName }
+        XCTAssertTrue(fetched.isEmpty, "downloaded the archive again")
+    }
+
     @MainActor
     func testDownloadsFollowGitHubsRedirectToStorage() async throws {
         let target = try makeInstalledApp(version: "1.0.0")
