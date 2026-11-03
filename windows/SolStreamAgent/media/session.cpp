@@ -715,6 +715,14 @@ void MediaSession::Impl::RunCapture() {
                 deviceLost = true;
                 break;
             }
+            // The encoder itself gave up. Rebuilt as a lost device is: until
+            // now it was fed for the rest of the session with nothing coming
+            // out, and only the Mac's own watchdog, restarting everything,
+            // ended the frozen picture.
+            if (encoder->Failed()) {
+                deviceLost = true;
+                break;
+            }
         }
     }
     if (running.load() && !retargetWanted.load() && !deviceLost && !capture->Running()) {

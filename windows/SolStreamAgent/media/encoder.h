@@ -89,6 +89,9 @@ public:
     void RequestIdr();
     /// A keyframe has been asked for and not yet produced.
     bool IdrPending() const;
+    /// The encoder reported an error, or stopped reporting events: nothing
+    /// submitted will come out, and it has to be rebuilt.
+    bool Failed() const;
 
     /// Diagnostics. `extraSamples` counts output samples that arrived for a
     /// picture already emitted -- if it is not zero, one encoder output is not

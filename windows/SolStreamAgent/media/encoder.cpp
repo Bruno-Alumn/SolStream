@@ -150,6 +150,8 @@ struct Encoder::Impl {
     /// software one does neither: it is fed and drained inline.
     bool async = true;
     std::atomic<bool> running{false};
+    /// The encoder said it had failed, or stopped saying anything: see Failed.
+    std::atomic<bool> failed{false};
 
     std::vector<unsigned char> sequenceHeader;
 
@@ -215,12 +217,28 @@ HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
         return S_OK;
     }
     IMFMediaEvent* event = nullptr;
-    if (FAILED(self->events->EndGetEvent(result, &event)) || !event) {
+    const HRESULT ended = self->events->EndGetEvent(result, &event);
+    if (FAILED(ended) || !event) {
+        // Not asked again, so nothing more will come: said, so the capture
+        // side rebuilds the encoder, rather than feeding one that is silent
+        // for good while the Mac's picture stays frozen. A shutdown is ours.
+        if (ended != MF_E_SHUTDOWN) {
+            Log("[media] the encoder stopped reporting events (0x%08lx)", (unsigned long) ended);
+            self->failed.store(true);
+        }
         return S_OK;
     }
     MediaEventType type = 0;
     event->GetType(&type);
+    HRESULT status = S_OK;
+    event->GetStatus(&status);
     event->Release();
+
+    if (type == MEError) {
+        Log("[media] the encoder reported an error (0x%08lx)", (unsigned long) status);
+        self->failed.store(true);
+        return S_OK;
+    }
 
     if (type == METransformNeedInput) {
         std::lock_guard<std::mutex> guard(self->lock);
@@ -236,8 +254,10 @@ HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
         self->Drain();
     }
 
-    if (self->running.load() && self->events) {
-        self->events->BeginGetEvent(this, nullptr);
+    if (self->running.load() && self->events
+        && FAILED(self->events->BeginGetEvent(this, nullptr))) {
+        Log("[media] the encoder would not take another event request");
+        self->failed.store(true);
     }
     return S_OK;
 }
@@ -1103,7 +1123,10 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
     if (s.async && SUCCEEDED(s.mft->QueryInterface(IID_PPV_ARGS(&s.events)))) {
         s.callback = new EncoderCallback();
         s.callback->owner = &s;
-        s.events->BeginGetEvent(s.callback, nullptr);
+        if (FAILED(s.events->BeginGetEvent(s.callback, nullptr))) {
+            Log("[media] the encoder would not take its first event request");
+            s.failed.store(true);
+        }
     } else {
         // Synchronous: nothing will ask for input, so Submit feeds and drains
         // on the caller's thread.
@@ -1228,6 +1251,10 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
         s.Drain();
         return true;
     }
+    // Failed: nothing fed to it comes out, and the capture side rebuilds it.
+    if (s.failed.load()) {
+        return false;
+    }
     if (s.needInput > 0 && s.FeedLocked()) {
         // Spent only on a frame the MFT took. Decrementing first and feeding
         // afterwards threw the credit away whenever the feed failed, and the
@@ -1251,6 +1278,8 @@ uint32_t Encoder::NextFrameId() const {
 void Encoder::RequestIdr() { impl_->ledger.RequestIdr(); }
 
 bool Encoder::IdrPending() const { return impl_->ledger.IdrPending(); }
+
+bool Encoder::Failed() const { return impl_->failed.load(); }
 
 uint64_t Encoder::Submitted() const { return impl_->submitted.load(); }
 uint64_t Encoder::Pictures() const { return impl_->pictures.load(); }
