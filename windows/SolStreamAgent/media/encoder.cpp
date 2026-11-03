@@ -10,10 +10,17 @@
 #include <codecapi.h>
 #include <icodecapi.h>
 #include <d3d11.h>
-#ifdef __MINGW32__
-// mingw's import library has MFCreateTrackedSample but its mfapi.h does not
-// declare it, and its IMFTrackedSample is in evr.h rather than mfidl.h.
-#include <evr.h>
+#if defined(__MINGW32__) && !defined(__IMFTrackedSample_INTERFACE_DEFINED__)
+// The Windows SDK has both in mfidl.h. mingw has the interface only in evr.h,
+// which redefines what icodecapi.h defines, and does not declare the function
+// at all, though its mfplat import library has it.
+MIDL_INTERFACE("245BF8E9-0755-40f7-88A5-AE0F18D55E17")
+IMFTrackedSample : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetAllocator(IMFAsyncCallback* allocator,
+                                                   IUnknown* state) = 0;
+};
+__CRT_UUID_DECL(IMFTrackedSample, 0x245bf8e9, 0x0755, 0x40f7,
+                0x88, 0xa5, 0xae, 0x0f, 0x18, 0xd5, 0x5e, 0x17)
 extern "C" HRESULT WINAPI MFCreateTrackedSample(IMFTrackedSample** sample);
 #endif
 
@@ -80,6 +87,11 @@ HRESULT SetUi4(ICodecAPI* codec, const GUID& key, ULONG value) {
 // One of these per texture. It is the sample's allocator callback, so the
 // sample holds a reference and the callback can arrive after Close; all it
 // touches is its own flag.
+//
+// What it tracks is the sample, not the texture. A driver that kept the buffer
+// after releasing the sample would be painted over as before, and reuse is
+// ordered on the GPU only because the encoder and the conversion share the
+// device manager's device and immediate context. Neither can be seen from here.
 struct SurfaceLease : public IMFAsyncCallback {
     std::atomic<ULONG> refs{1};
     /// Converted into, and not yet given back: waiting to be fed, or inside
@@ -111,8 +123,8 @@ struct SurfaceLease : public IMFAsyncCallback {
     }
 };
 
-/// How many frames in a row may find every texture still held before the
-/// leases stop being believed. An encoder that keeps its input samples until a
+/// How many frames in a row may find every texture held by the encoder -- none
+/// free and none waiting to be fed -- before the leases stop being believed. An encoder that keeps its input samples until a
 /// flush would otherwise freeze the picture for good; painting over a texture
 /// it holds, as before, is the lesser fault.
 constexpr int kStarvedFrames = 60;
@@ -252,8 +264,11 @@ struct Encoder::Impl {
     bool ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
                       IMFMediaBuffer** out);
     bool Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight, int slot);
-    /// A texture nothing is using, claimed; -1 when the encoder holds them all.
+    /// A texture nothing is using, claimed; -1 when none is free.
     int ClaimSlot();
+    /// No texture free and none waiting to be fed: counted, and after
+    /// kStarvedFrames the leases are given up on. Capture thread.
+    void Starved();
     void FreeSlot(int slot) {
         if (lease[slot]) { lease[slot]->held.store(false); }
     }
@@ -1313,8 +1328,20 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     if (!s.cpuOnly) {
         slot = s.ClaimSlot();
         if (slot < 0) {
-            // The encoder is behind by a whole ring. The frame waiting to be
-            // fed is newer than anything that could be taken back.
+            // None free, but the frame waiting to be fed holds one that the
+            // encoder has not got: latest wins, so this frame takes it. Taken
+            // off `havePending` first so the event thread cannot feed it while
+            // it is being painted.
+            std::lock_guard<std::mutex> guard(s.lock);
+            if (s.havePending) {
+                s.havePending = false;
+                slot = s.pendingSlot;
+                s.dropped.fetch_add(1);
+            }
+        }
+        if (slot < 0) {
+            // The encoder has all six.
+            s.Starved();
             s.dropped.fetch_add(1);
             return false;
         }
@@ -1379,22 +1406,29 @@ int Encoder::Impl::ClaimSlot() {
             return slot;
         }
     }
-    if (++starved < kStarvedFrames || untracked) {
-        return -1;
+    return -1;
+}
+
+void Encoder::Impl::Starved() {
+    if (++starved < kStarvedFrames) {
+        return;
     }
-    // Every texture held for a second: the encoder keeps its samples rather
-    // than releasing them as it goes. Take them all back but the one waiting
-    // to be fed, and stop waiting on releases for the rest of this pass.
+    std::lock_guard<std::mutex> guard(lock);
+    if (untracked) {
+        return;
+    }
+    // Every texture held for a second's worth of frames: the encoder keeps its
+    // samples rather than releasing them as it goes. Take them all back --
+    // nothing is waiting to be fed, or this would not have been called -- and
+    // stop waiting on releases for the rest of this pass.
     Log("[media] the encoder keeps hold of every NV12 texture; reusing them without waiting");
     untracked = true;
     starved = 0;
-    std::lock_guard<std::mutex> guard(lock);
     for (int i = 0; i < kRing; ++i) {
         if (!(havePending && i == pendingSlot)) {
             FreeSlot(i);
         }
     }
-    return -1;
 }
 
 void Encoder::StartFrameIdsAt(uint32_t next) {
