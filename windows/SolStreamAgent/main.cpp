@@ -6100,6 +6100,14 @@ void ServeClient(SOCKET client) {
             std::string channel_cnonce;
             const std::string reply =
                 HandleCommand(line, authenticated, challenge, channel_cnonce, auth_failures);
+            // Counted in before this looks, and the updater sets its flag
+            // before it counts: so one of the two always sees the other. A Mac
+            // that proved itself as an update began is let go here, unanswered,
+            // as above; the count comes back down as this returns.
+            if (authenticated && !was_authenticated && solstream::update::InstallStarting()) {
+                Log("[agent] let go of a Mac that authenticated as an update began");
+                return;
+            }
             // The reply and the switch to sealed records under one hold of the
             // send lock: in between, a push -- authorised from the start on
             // loopback -- went out as a plain line after the Mac had begun

@@ -1,6 +1,7 @@
 #include "installer.h"
 
 #include <windows.h>
+#include <psapi.h>
 #include <shlobj.h>
 #include <shellapi.h>
 #include <objbase.h>
@@ -1360,9 +1361,10 @@ namespace {
 /// This program's own file, held from the start; see PinOwnExecutable.
 HANDLE g_self_pin = INVALID_HANDLE_VALUE;
 
-/// Where `held` really is, as a plain drive path, or empty.
-std::wstring HeldPath(HANDLE held) {
-    const DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
+/// Where `held` really is: a plain drive path or a \\\\server\\share one, or
+/// empty when Windows will not say.
+std::wstring HeldPath(HANDLE held, DWORD volume = VOLUME_NAME_DOS) {
+    const DWORD flags = FILE_NAME_NORMALIZED | volume;
     const DWORD needed = GetFinalPathNameByHandleW(held, nullptr, 0, flags);
     if (needed == 0) {
         return {};
@@ -1373,13 +1375,44 @@ std::wstring HeldPath(HANDLE held) {
         return {};
     }
     path.resize(length);
+    if (volume != VOLUME_NAME_DOS) {
+        return path;
+    }
     if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
-        return {};
+        return L"\\\\" + path.substr(8);
     }
     if (path.rfind(L"\\\\?\\", 0) == 0) {
         path.erase(0, 4);
     }
     return path;
+}
+
+/// Whether `held` is the file this process is running from. Opened by name
+/// after the process started, it need not be: the running file can be renamed
+/// away and another put at its name before the first line of wmain, and the
+/// hold would then be on that one.
+bool HoldsRunningImage(HANDLE held) {
+    // By identity, not by name: the name the image was mapped by can be a
+    // short or otherwise different spelling of the same file.
+    wchar_t mapped[MAX_PATH * 4] = {0};
+    const DWORD length = K32GetMappedFileNameW(GetCurrentProcess(), GetModuleHandleW(nullptr),
+                                               mapped, MAX_PATH * 4);
+    if (length == 0) {
+        return false;
+    }
+    HANDLE running = CreateFileW((L"\\\\?\\GLOBALROOT" + std::wstring(mapped, length)).c_str(), 0,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (running == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION a{}, b{};
+    const bool same = GetFileInformationByHandle(running, &a)
+        && GetFileInformationByHandle(held, &b)
+        && a.dwVolumeSerialNumber == b.dwVolumeSerialNumber
+        && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
+    CloseHandle(running);
+    return same;
 }
 
 }  // namespace
@@ -1401,14 +1434,31 @@ void PinOwnExecutable() {
     if (g_self_pin == INVALID_HANDLE_VALUE) {
         InstallLog("could not hold this program's own file open: error "
                    + std::to_string(GetLastError()));
+        return;
+    }
+    if (!HoldsRunningImage(g_self_pin)) {
+        InstallLog("the file at this program's name is not the one running; not holding it");
+        CloseHandle(g_self_pin);
+        g_self_pin = INVALID_HANDLE_VALUE;
     }
 }
 
 bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool may_prompt) {
-    // By where the held file really is, when it is held: the same path, since
-    // nothing can rename it, but said by the file rather than by a name.
+    // By where the held file really is: the same path, since nothing can
+    // rename it, but said by the file rather than by a name. Not held -- or
+    // held and not this program -- it is not asked for at all, outside
+    // Program Files: a hold that failed is one another program can make fail
+    // on purpose, by opening the file first, and the name would then be
+    // theirs to fill. Program Files is administrators' alone, so there the
+    // name is as good as the file.
     std::wstring exe = g_self_pin != INVALID_HANDLE_VALUE ? HeldPath(g_self_pin) : std::wstring();
     if (exe.empty()) {
+        if (!RunningInstalled()) {
+            error = "SolStream couldn't make sure it was asking Windows about itself. Run "
+                    "setup again from where you downloaded it.";
+            InstallLog("not elevating: this program's own file is not held");
+            return false;
+        }
         exe = ExePath();
     }
     // The name of the postbox is settled here, in the process that is going to
@@ -1496,15 +1546,19 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
             return false;
         }
     } else {
-        folder = TempDirectory();
+        // A folder of its own, named afresh and made here -- failing if the
+        // name is taken -- rather than a fixed name in %TEMP% that anyone
+        // running as this user could make first and keep open.
+        const std::string name = RandomHex(8);
+        const std::wstring candidate = TempDirectory() + L"SolStream-uninstall-" + ToWide(name);
+        if (name.empty() || !CreateDirectoryW(candidate.c_str(), nullptr)) {
+            error = "Could not make a temporary folder to uninstall from.";
+            InstallLog(error);
+            return false;
+        }
+        folder = candidate + L"\\";
     }
     const std::wstring copy = folder + L"SolStreamUninstall.exe";
-    if (!IsElevated()) {
-        // Best effort: a copy left behind by an earlier attempt is still running
-        // or still locked often enough that overwriting has to be allowed to
-        // fail without taking the uninstall with it.
-        DeleteFileW(copy.c_str());
-    }
     if (!CopyFileW(ExePath().c_str(), copy.c_str(), FALSE)) {
         const DWORD code = GetLastError();
         error = "Could not make a temporary copy to uninstall from.";
@@ -1524,11 +1578,30 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     if (!token.empty()) {
         parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + token;
     }
+    // Held from here until it has started, sharing read only, and started by
+    // where the held file is: between the copy and the start, nothing can
+    // swap it for another. A hold that cannot be had is somebody else holding
+    // it, and nothing is started.
+    HANDLE held = CreateFileW(copy.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::wstring start = held != INVALID_HANDLE_VALUE ? HeldPath(held) : std::wstring();
+    if (start.empty()) {
+        if (held != INVALID_HANDLE_VALUE) {
+            CloseHandle(held);
+        }
+        error = "Could not hold the temporary copy to uninstall from.";
+        InstallLog(error);
+        return false;
+    }
+    struct Release {
+        HANDLE handle;
+        ~Release() { CloseHandle(handle); }
+    } release{held};
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS;
     execute.lpVerb = L"open";
-    execute.lpFile = copy.c_str();
+    execute.lpFile = start.c_str();
     execute.lpParameters = parameters.c_str();
     execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
