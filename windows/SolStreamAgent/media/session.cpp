@@ -232,6 +232,9 @@ struct MediaSession::Impl {
     /// Set by a pass that ended because the graphics device was lost; see
     /// RunCapture. Capture thread only.
     bool deviceLost = false;
+    /// The pass ended because the encoder failed, not the device: rebuilt the
+    /// same way, and said as what it was. Capture thread only.
+    bool encoderFailed = false;
     /// When this pass started encoding, or 0 when it never got that far: a
     /// rebuild that fails before then is retried too. Capture thread only.
     long long encodingSince = 0;
@@ -449,6 +452,7 @@ void MediaSession::Impl::CaptureLoop() {
     while (running.load()) {
         retargetWanted.store(false);
         deviceLost = false;
+        encoderFailed = false;
         encodingSince = 0;
         RunCapture();
         // A minute of pictures since the last rebuild starts the count again,
@@ -465,8 +469,10 @@ void MediaSession::Impl::CaptureLoop() {
             && recoveries < 3) {
             recovering = true;
             ++recoveries;
-            Log("[media] reopening the capture after losing the graphics device "
-                "(%d of 3)", recoveries);
+            Log(encoderFailed ? "[media] rebuilding the encoder after it failed (%d of 3)"
+                              : "[media] reopening the capture after losing the graphics "
+                                "device (%d of 3)",
+                recoveries);
             Sleep(1000);
             continue;
         }
@@ -721,6 +727,7 @@ void MediaSession::Impl::RunCapture() {
             // ended the frozen picture.
             if (encoder->Failed()) {
                 deviceLost = true;
+                encoderFailed = true;
                 break;
             }
         }

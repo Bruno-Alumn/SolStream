@@ -234,7 +234,8 @@ HRESULT STDMETHODCALLTYPE EncoderCallback::Invoke(IMFAsyncResult* result) {
     event->GetStatus(&status);
     event->Release();
 
-    if (type == MEError) {
+    // An error event with a success status is not one: carried on with.
+    if (type == MEError && FAILED(status)) {
         Log("[media] the encoder reported an error (0x%08lx)", (unsigned long) status);
         self->failed.store(true);
         return S_OK;
@@ -872,6 +873,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
                    UINT bitrateBps, VideoCodec codec) {
     Impl& s = *impl_;
     Close();
+    impl_->failed.store(false);
 
     s.videoCodec = codec;
     const bool hevc = codec == VideoCodec::Hevc;
