@@ -311,11 +311,18 @@ final class Updater {
                 offered = release
                 if let downloaded, downloaded.version == version,
                    FileManager.default.fileExists(atPath: downloaded.zip.path) {
-                    // Already here: not fetched again.
+                    // Already here: not fetched again, and checked for today.
+                    defaults.set(Date(), forKey: Key.lastCheck)
                     state = readyState(version)
                 } else {
                     state = .available(version)
-                    if !isStreaming, installTarget != nil { await download() }
+                    if !isStreaming, installTarget != nil {
+                        await download()
+                    } else {
+                        // Nothing to fetch now: stamped, or a copy sitting on
+                        // this release would ask GitHub again every hour.
+                        defaults.set(Date(), forKey: Key.lastCheck)
+                    }
                 }
             }
             return outcome
@@ -430,6 +437,15 @@ final class Updater {
         } catch {
             let failure = UpdateError(error)
             Log.error("[update] \(version) discarded: \(failure.detail)")
+            // Tried again within the hour only when trying again could help:
+            // the network, or GitHub's own trouble. A release that will never
+            // verify -- a bad signature, a missing file -- is not fetched
+            // whole every hour; it waits for the next day's check.
+            switch failure {
+            case .transport: break
+            case .http(let status) where status >= 500: break
+            default: defaults.set(Date(), forKey: Key.lastCheck)
+            }
             state = .failed(failure.reason)
         }
     }
@@ -464,6 +480,11 @@ final class Updater {
         // other programs: the installer hashes the archive again before it
         // unpacks it, which catches one swapped while it waited here.
         let owner: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        // A folder of its own, not a link to somewhere else: the permissions
+        // below and the sweep after would act on wherever it pointed.
+        if (try? downloadsFolder.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+            try? FileManager.default.removeItem(at: downloadsFolder)
+        }
         try FileManager.default.createDirectory(at: downloadsFolder, withIntermediateDirectories: true,
                                                 attributes: owner)
         try FileManager.default.setAttributes(owner, ofItemAtPath: downloadsFolder.path)
@@ -471,14 +492,17 @@ final class Updater {
         // Anything else in there is an older release's, and goes.
         for leftover in (try? FileManager.default.contentsOfDirectory(
             at: downloadsFolder, includingPropertiesForKeys: nil)) ?? []
-            where leftover.lastPathComponent != zipName {
+            where leftover.lastPathComponent != zipName
+                && leftover.lastPathComponent.hasPrefix("SolStream-")
+                && leftover.pathExtension == "zip" {
             try? FileManager.default.removeItem(at: leftover)
         }
         // Kept from an earlier run, and still the bytes the signed sums name:
         // not fetched again. Every launch used to delete it, and a copy that
         // was not installed at once -- or that cannot replace itself --
         // downloaded the whole release again each time it opened.
-        if Self.sha256(of: file) == expected {
+        let kept = await Task.detached(priority: .utility) { Self.sha256(of: file) }.value
+        if kept == expected {
             Log.info("[update] \(version) is already downloaded and still verifies")
             return (file, expected)
         }
@@ -522,7 +546,7 @@ final class Updater {
     }
 
     /// A file's SHA-256 as lowercase hex, or nil when it cannot be read.
-    static func sha256(of file: URL) -> String? {
+    nonisolated static func sha256(of file: URL) -> String? {
         guard let input = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? input.close() }
         var hasher = SHA256()
@@ -769,7 +793,8 @@ final class Updater {
             return "Installing \(version)…"
         case .installed(let version):
             // Two lines beside the button at most, even for 10.10.10.
-            return "Update \(version) is installed. Restarts after the stream."
+            return isStreaming ? "Update \(version) is installed. Restarts after the stream."
+                               : "Update \(version) is installed. Quit and reopen SolStream to finish."
         case .manualInstall(_, let reason), .failed(let reason):
             return reason
         }
