@@ -474,8 +474,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = !discovered.isEmpty
                 ? "Found \(names) on this network."
                 : cannotAskNetwork
-                ? "This Mac can't look for PCs on the network. Check SolStream's Local "
-                    + "Network access in System Settings, or type the PC's address."
+                ? "This Mac can't look for PCs on the network. Check it's on Wi-Fi and "
+                    + "SolStream's Local Network access in System Settings, or type the PC's "
+                    + "address."
                 : "The first connection asks for the token shown on the PC."
             connectButton.title = "Connect"
         }
@@ -660,8 +661,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                              ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil,
                              ai_addr: nil, ai_next: nil)
         var info: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, String(port), &hints, &info) == 0, let head = info else {
-            return .unknownName
+        let looked = getaddrinfo(host, String(port), &hints, &info)
+        guard looked == 0, let head = info else {
+            // Only a name the resolver says is no name at all. A .local name
+            // whose PC is asleep fails to resolve too, as does any name while
+            // the Mac's network is still coming up -- those are "not
+            // answering", not a misspelling.
+            let local = host.lowercased().hasSuffix(".local") || host.lowercased().hasSuffix(".local.")
+            return looked == EAI_NONAME && !local ? .unknownName : .silent
         }
         // The IPv4 address when there is one: the PC listens on IPv4 only, and
         // macOS puts a .local name's link-local IPv6 address first, so a working
@@ -724,9 +731,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             }
             self.refresh()
         }
-        browser.onCannotAsk = { [weak self] _ in
-            self?.cannotAskNetwork = true
-            self?.refresh()
+        browser.onCanAsk = { [weak self] canAsk in
+            guard let self, self.browser.isRunning else { return }
+            self.cannotAskNetwork = !canAsk
+            self.refresh()
         }
         browser.start()
     }
@@ -904,10 +912,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.textColor = DS.danger
             return
         }
-        // Not a host that has just been found not to answer: a typo would push
-        // a good one out of the five kept. One that answers was remembered by
-        // its probe already.
-        if state.isReachable != false { remember(host: host) }
+        // Not a name that was found to lead nowhere: a typo would push a good
+        // host out of the five kept. A PC that is merely slow to answer its
+        // probe -- through a relay, or still waking -- is kept.
+        if state.addressProblem == nil { remember(host: host) }
         close()
         onConnect(host)
     }
@@ -961,8 +969,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // PC waiting at the sign-in screen usually looks the same as one
         // asleep.
         if state.addressProblem == .unknownName {
-            return "Couldn't find a PC called \(state.address). Check the spelling, or use the "
-                + "address shown on SolStream's window on the PC."
+            return "Couldn't find a PC called \(state.address). Check the spelling and that "
+                + "this Mac is online, or use the address shown on SolStream's window on the PC."
         }
         if state.addressProblem == .ipv6Only {
             return "SolStream on the PC listens on IPv4 only. Use its IPv4 address, or its "
@@ -1131,7 +1139,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         let colons = text.filter { $0 == ":" }.count
         if colons == 1, let colon = text.firstIndex(of: ":"),
-           text[text.index(after: colon)...].allSatisfy(\.isNumber) {
+           text[text.index(after: colon)...].allSatisfy({ $0.isASCII && $0.isNumber }) {
             return String(text[..<colon])
         }
         return text

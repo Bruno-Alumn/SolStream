@@ -18,6 +18,8 @@ final class DialableAddressTests: XCTestCase {
         XCTAssertEqual(ConnectWindow.dialable("desktop:pc"), "desktop:pc")
         XCTAssertEqual(ConnectWindow.dialable("100.64.0.7"), "100.64.0.7")
         XCTAssertEqual(ConnectWindow.dialable("   "), "")
+        // Only ASCII digits are a port.
+        XCTAssertEqual(ConnectWindow.dialable("pc:4²"), "pc:4²")
     }
 
     /// One broadcast address per IPv4 network the Mac is up on, never the
@@ -27,5 +29,16 @@ final class DialableAddressTests: XCTestCase {
         XCTAssertEqual(Set(found).count, found.count)
         XCTAssertFalse(found.contains(INADDR_BROADCAST))
         XCTAssertFalse(found.contains(0))
+    }
+
+    /// The peer reached decides too: a name in /etc/hosts for an SSH tunnel
+    /// leads to loopback, and a token-less agent there is this machine's.
+    func testTheReachedPeerIsLoopbackOnlyAt127OrColonColon1() {
+        XCTAssertTrue(AgentConnection.isLoopback(.hostPort(host: "127.0.0.1", port: 47630)))
+        XCTAssertTrue(AgentConnection.isLoopback(.hostPort(host: "127.9.9.9", port: 47630)))
+        XCTAssertTrue(AgentConnection.isLoopback(.hostPort(host: "::1", port: 47630)))
+        XCTAssertFalse(AgentConnection.isLoopback(.hostPort(host: "192.168.1.5", port: 47630)))
+        XCTAssertFalse(AgentConnection.isLoopback(.hostPort(host: "fd7a:115c::1", port: 47630)))
+        XCTAssertFalse(AgentConnection.isLoopback(nil))
     }
 }

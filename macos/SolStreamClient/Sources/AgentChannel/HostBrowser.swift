@@ -61,10 +61,11 @@ public final class HostBrowser {
 
     public var onChange: (([DiscoveredHost]) -> Void)?
 
-    /// Every question failed to go out -- macOS keeping SolStream off the
-    /// local network, most often -- with the error. Said once a run, on the
-    /// main queue: without it the list stayed empty and nothing said why.
-    public var onCannotAsk: ((Int32) -> Void)?
+    /// Whether the questions can go out, said on the main queue each time it
+    /// changes: false when every one failed -- macOS keeping SolStream off the
+    /// local network, or no network up yet -- and true again once one goes.
+    /// Without it the list stayed empty and nothing said why.
+    public var onCanAsk: ((Bool) -> Void)?
     private var toldCannotAsk = false
 
     public var isRunning: Bool {
@@ -202,13 +203,14 @@ public final class HostBrowser {
             }
             if result >= 0 { sent = true } else { lastError = errno }
         }
-        if sent {
+        if sent, toldCannotAsk {
             toldCannotAsk = false
-        } else if !toldCannotAsk {
+            Log.info("[browse] asking the local network again")
+            DispatchQueue.main.async { [weak self] in self?.onCanAsk?(true) }
+        } else if !sent, !toldCannotAsk {
             toldCannotAsk = true
             Log.error("[browse] could not ask the local network for PCs (errno \(lastError))")
-            let error = lastError
-            DispatchQueue.main.async { [weak self] in self?.onCannotAsk?(error) }
+            DispatchQueue.main.async { [weak self] in self?.onCanAsk?(false) }
         }
     }
 

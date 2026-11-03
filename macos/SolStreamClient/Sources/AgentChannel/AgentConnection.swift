@@ -906,9 +906,11 @@ public final class AgentConnection {
                 guard self.connection === connection else { return }
                 Log.info("[agent] connected to \(self.host):\(self.port)")
                 let reached = Self.dottedIPv4(connection.currentPath?.remoteEndpoint)
+                let loopback = Self.isLoopback(connection.currentPath?.remoteEndpoint)
                 self.stateLock.lock()
                 self.failureMightBeAsleep = false
                 self.connectedIPv4 = reached
+                self.connectedLoopback = loopback
                 self.stateLock.unlock()
                 let reconnected = self.reconnectAttempt > 0
                 // Not reset here, but when the greeting completes: a host that
@@ -1372,6 +1374,15 @@ public final class AgentConnection {
     /// and Wi-Fi, found as pc.local -- could give the other one first, and
     /// the host takes the stream only on the address its channel came in on.
     private var connectedIPv4: String?
+    /// The connection reached this machine's own loopback, whatever the name
+    /// dialled: an alias in /etc/hosts for an SSH tunnel is one.
+    private var connectedLoopback = false
+
+    private var reachedLoopback: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connectedLoopback
+    }
 
     /// The IPv4 address the connection reached, when it reached one.
     public var reachedIPv4: String? { currentIPv4() }
@@ -1380,6 +1391,16 @@ public final class AgentConnection {
         stateLock.lock()
         defer { stateLock.unlock() }
         return connectedIPv4
+    }
+
+    /// Whether `endpoint` is this machine's loopback: 127/8 or ::1.
+    static func isLoopback(_ endpoint: NWEndpoint?) -> Bool {
+        guard case .hostPort(let host, _)? = endpoint else { return false }
+        switch host {
+        case .ipv4(let address): return address.rawValue.first == 127
+        case .ipv6(let address): return address == .loopback
+        default: return false
+        }
     }
 
     static func dottedIPv4(_ endpoint: NWEndpoint?) -> String? {
@@ -2636,7 +2657,7 @@ public final class AgentConnection {
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
-            } else if !Self.mayGoWithoutToken(dialled: self.host) {
+            } else if !Self.mayGoWithoutToken(dialled: self.host), !reachedLoopback {
                 // A host that wants no token is only ever one listening on its
                 // own loopback: the agent refuses `--no-auth` on any other
                 // address, and an installed one always asks. Anything on the
