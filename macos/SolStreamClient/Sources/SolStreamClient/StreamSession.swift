@@ -282,16 +282,36 @@ final class StreamSession {
             self.counters.latencyMs = stats.rttMs > 0 ? Int(stats.rttMs.rounded()) : nil
             self.counterLock.unlock()
         }
-        media.onEnded = { [weak self] in
+        media.onEnded = { [weak self] reason in
             DispatchQueue.main.async {
-                self?.onPhase?(.failed("The PC stopped sending the picture. Try Again to go back and "
-                                          + "open the app again."))
+                // Said as what happened: the PC ending the stream is not the
+                // same as it going quiet, and the second is the network's.
+                self?.onPhase?(.failed(reason == .hostEnded
+                    ? "The PC ended the stream. Try Again to open the app again."
+                    : "The PC stopped sending the picture. Try Again to go back and "
+                        + "open the app again."))
             }
         }
         // Holding as well as asking: until the IDR, every P-frame would only
         // fail in a decoder that has lost what it refers to.
         decoder.onKeyframeNeeded = { [weak self] in
             self?.media.holdUntilKeyframe()
+        }
+    }
+
+    /// What to say when the stream could not be opened, by why.
+    static func startFailureText(_ failure: MediaClient.StartFailure?, host: String) -> String {
+        switch failure {
+        case .unresolved:
+            return "This Mac couldn't find \(host) to open the stream. Check the Mac is "
+                + "online, then Try Again."
+        case .noIPv4:
+            return "\(host) can only be reached over IPv6 here, and the stream needs IPv4. "
+                + "Connect by the PC's IPv4 address, or its Tailscale address starting "
+                + "100., then Try Again."
+        case .socket, nil:
+            return "This Mac couldn't open the stream. Try Again; if it keeps happening, "
+                + "quit and reopen SolStream."
         }
     }
 
@@ -321,8 +341,7 @@ final class StreamSession {
 
         onPhase?(.waitingForVideo)
         guard media.start() else {
-            onPhase?(.failed("This Mac couldn't open the stream. Try Again; if it keeps "
-                               + "happening, quit and reopen SolStream."))
+            onPhase?(.failed(Self.startFailureText(media.startFailure, host: host)))
             isRunning = false
             // Hand the output device back here, because nothing else ever will.
             // `stop()` returns immediately while `isRunning` is false — which it

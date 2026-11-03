@@ -39,7 +39,16 @@ public final class MediaClient {
     public var onAudio: ((SMTAudioPacket) -> Void)?
     public var onStats: ((Stats) -> Void)?
     /// Called when the session gives up: the host stopped answering.
-    public var onEnded: (() -> Void)?
+    public var onEnded: ((EndReason) -> Void)?
+
+    /// Why a stream ended by itself: the host said so, or it went quiet.
+    public enum EndReason: Equatable { case hostEnded, silent }
+
+    /// Why `start()` returned false, for words that say what to do: a name
+    /// that does not resolve is not an address with no IPv4, and neither is
+    /// "quit and reopen SolStream".
+    public enum StartFailure: Equatable { case unresolved, noIPv4, socket }
+    public private(set) var startFailure: StartFailure?
 
     private let host: String
     private let port: UInt16
@@ -210,6 +219,7 @@ public final class MediaClient {
         guard resolution == 0, let first = resolved else {
             Log.error("[media] cannot resolve \(host): "
                       + String(cString: gai_strerror(resolution)))
+            startFailure = .unresolved
             return false
         }
         defer { freeaddrinfo(resolved) }
@@ -230,12 +240,14 @@ public final class MediaClient {
         guard haveAddress else {
             Log.error("[media] \(host) resolved, but to no IPv4 address; "
                       + "this transport cannot use the result")
+            startFailure = .noIPv4
             return false
         }
 
         fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else {
             Log.error("[media] no UDP socket: \(String(cString: strerror(errno)))")
+            startFailure = .socket
             return false
         }
         var receiveBuffer: Int32 = 4 << 20
@@ -406,7 +418,7 @@ public final class MediaClient {
     /// here — that is what gets both of them to unwind — and the teardown goes
     /// somewhere neither of them is. `onEnded` fires after it, so by the time
     /// anyone hears the session ended, it has actually finished ending.
-    private func endedByItself() {
+    private func endedByItself(_ reason: EndReason) {
         stateLock.lock()
         guard running else { stateLock.unlock(); return }
         running = false
@@ -415,7 +427,7 @@ public final class MediaClient {
         // nothing else is holding it up while the callback runs.
         DispatchQueue.global(qos: .userInitiated).async {
             self.stop()
-            self.onEnded?()
+            self.onEnded?(reason)
         }
     }
 
@@ -731,7 +743,7 @@ public final class MediaClient {
             let silentMs = Self.millis(since: heardAt)
             if silentMs > 5000 {
                 Log.error("[media] the host has been silent for 5 s")
-                self.endedByItself()
+                self.endedByItself(.silent)
             }
             if ticks % 5 == 0 { self.onStats?(snapshot) }
         }
@@ -868,7 +880,7 @@ public final class MediaClient {
             stateLock.unlock()
         case SMT.typeBye:
             Log.info("[media] the host ended the session")
-            endedByItself()
+            endedByItself(.hostEnded)
         default:
             break
         }

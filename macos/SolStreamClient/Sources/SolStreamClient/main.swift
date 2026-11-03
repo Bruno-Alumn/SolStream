@@ -45,6 +45,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var streamHost: String?
     private var recoveringMedia = false
     private var mediaRecoveryAttempts = 0
+    /// When the stream was last restarted to recover it, newest last. The
+    /// attempts above count from zero again at each first picture, so a PC
+    /// that ends the stream a few seconds after every restart was restarted
+    /// for ever; this counts them across pictures, in a window of time.
+    private var mediaRestarts: [Date] = []
+    /// See `mediaRestarts`.
+    static let restartLimit = (count: 5, within: TimeInterval(120))
     /// The agent channel's final failure is on the stream windows, and the
     /// picture's own troubles must not paint over it. See `notice(for:)`.
     private var connectionLostShown = false
@@ -98,6 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dropdownWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A Mac that slept stopped hearing the PC, and the stream's watchdog
+        // counts awake time only: five seconds of "Reconnecting…" after every
+        // wake. Restarted at once instead, when there is a stream to restart.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartStreamAfterWake() }
+        }
         NSApp.setActivationPolicy(.regular)
         buildMenu()
         observeSettings()
@@ -1381,6 +1396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         streamDisplay = display
         streamHost = host
         mediaRecoveryAttempts = 0
+        mediaRestarts = []
         // Nothing downloads or installs while this is set; see Updater.
         MainActor.assumeIsolated { Updater.shared.isStreaming = true }
 
@@ -1678,6 +1694,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// After the Mac wakes: the stream again, from a fresh media session,
+    /// when there is one on screen and the channel is up -- otherwise the
+    /// channel's own reconnect brings it back.
+    private func restartStreamAfterWake() {
+        guard session != nil, !appWindows.isEmpty, !connectionLostShown,
+              let host = streamHost, let agent, agent.isConnected else { return }
+        Log.info("[app] the Mac woke; restarting the stream from \(host)")
+        recoverMedia(host: host, agent: agent)
+    }
+
+    /// Whether a recovering restart now would be one too many, given those in
+    /// `restarts` -- which is pruned to the window and, when not, has now added.
+    static func restartsExhausted(_ restarts: inout [Date], now: Date) -> Bool {
+        restarts.removeAll { now.timeIntervalSince($0) > restartLimit.within }
+        guard restarts.count < restartLimit.count else { return true }
+        restarts.append(now)
+        return false
+    }
+
     /// Open a new media session for the windows already on screen.
     ///
     /// A `StreamSession` cannot be restarted in place — `stop()` releases the
@@ -1715,6 +1750,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showEnded("Lost the stream",
                       detail: "\(host)'s display changed. Try Again to pick the app again.")
             return
+        }
+
+        // A restart to recover, not one to apply settings: counted, and given
+        // up on when the PC keeps ending the stream however often it starts.
+        if status == nil {
+            let now = Date()
+            if Self.restartsExhausted(&mediaRestarts, now: now) {
+                Log.error("[app] \(Self.restartLimit.count) restarts in "
+                          + "\(Int(Self.restartLimit.within)) s; not restarting again")
+                showEnded("The stream keeps stopping",
+                          detail: "\(host) ended the stream \(Self.restartLimit.count) times in two "
+                              + "minutes. Check the PC isn't locked, asleep or short of memory, "
+                              + "then choose Try Again.")
+                return
+            }
         }
 
         recoveringMedia = true
