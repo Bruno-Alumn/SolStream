@@ -3454,6 +3454,21 @@ DWORD WINAPI WatcherProc(LPVOID) {
                     ShowWindow(window, SW_RESTORE);
                 }
             } else {
+                // Said, at most every five seconds: a window pulled back over
+                // and over is a fight with something -- the application, or a
+                // `place` -- and the log was silent about it.
+                static ULONGLONG said_at = 0;
+                const ULONGLONG tick = GetTickCount64();
+                if (tick - said_at >= 5000) {
+                    said_at = tick;
+                    const std::string title = WindowTitleForLog(window);
+                    Log("[watcher] \"%s\" was %ldx%ld at %ld,%ld; putting it back at "
+                        "%ldx%ld at %ld,%ld",
+                        title.empty() ? "(untitled)" : title.c_str(),
+                        now.right - now.left, now.bottom - now.top, now.left, now.top,
+                        desired.right - desired.left, desired.bottom - desired.top,
+                        desired.left, desired.top);
+                }
                 PlaceClientArea(window, desired.left, desired.top,
                                 desired.right - desired.left, desired.bottom - desired.top,
                                 nullptr, nullptr, kWatcherAnswerMs);
@@ -3660,8 +3675,13 @@ bool LockWindow(HWND window) {
     // Un-maximise only now that the placement is recorded, or the restore would
     // believe the window had always been this size. Synchronous, because the
     // client area is measured next.
-    if (IsZoomed(window)) {
+    const bool was_zoomed = IsZoomed(window) != FALSE;
+    if (was_zoomed) {
         ShowWindow(window, SW_RESTORE);
+        // Carried back across displays at another scaling, it is still laying
+        // itself out when ShowWindow returns; see the same wait in `place`.
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 150, &ignored);
     }
 
     // Against the style as it is now -- after the restore above -- and only the
@@ -3677,7 +3697,17 @@ bool LockWindow(HWND window) {
         return false;
     }
     g_locks[slot].geometry_locked = true;
-    g_locks[slot].desired = ClientAreaInScreen(window);
+    // Where the window is -- unless the restore above just moved it, back to
+    // its pre-maximise rectangle on another display. Holding THAT is what left
+    // Firefox at 16,3 on the real monitor while the Mac streamed an empty
+    // virtual display: the watcher kept it there and every later `place` lost
+    // to it. A `place` has already said where it belongs; the watcher puts it
+    // there on its next pass.
+    const RECT& placed = g_locks[slot].desired;
+    const bool has_place = placed.right > placed.left && placed.bottom > placed.top;
+    if (!(was_zoomed && has_place)) {
+        g_locks[slot].desired = ClientAreaInScreen(window);
+    }
     g_locks[slot].removed_style |= removing;
     LeaveCriticalSection(&g_lock_cs);
     RecordOwedWindows();
@@ -5285,6 +5315,14 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // A window that cannot be resized is moved and keeps its own size; see
         // MoveClientArea. Not a miss: the size it reports is the size it is.
         const bool fixed_size = !IsResizable(window);
+        // The target before the move, not after: the watcher drags a locked
+        // window back to `desired` every 120 ms, and while the correction loop
+        // below ran it was still the OLD rectangle -- each attempt was undone,
+        // the loop saw no progress and gave up, and the old place was locked
+        // in again. A window that cannot be resized keeps its size.
+        if (!fixed_size) {
+            SetLockedGeometry(window, RECT{(LONG) x, (LONG) y, (LONG) (x + w), (LONG) (y + h)});
+        }
         const UINT dpi_before = GetDpiForWindow(window);
         const bool ok = fixed_size
             ? MoveClientArea(window, (int) x, (int) y, &client)
@@ -5317,9 +5355,21 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 client.right - client.left, client.bottom - client.top,
                 client.left, client.top, missed);
         }
+        // Maximised again by the time the move was done -- a restore from the
+        // minimised state that a `focus` started, finishing late, brings back
+        // the maximised one -- it fills the display, not the rectangle asked
+        // for. Un-maximised and placed once more; a maximised rectangle is
+        // never what is held.
+        if (ok && !fixed_size && IsZoomed(window)) {
+            Log("[place] the window was maximised again; restoring it and placing it once more");
+            ShowWindow(window, SW_RESTORE);
+            PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
+        }
         // The Mac asked for this, so it is the new truth — otherwise the watcher
         // would immediately drag the window back to the previous size.
-        SetLockedGeometry(window, client);
+        if (!IsZoomed(window)) {
+            SetLockedGeometry(window, client);
+        }
         char buffer[384];
         const ClientLimits limits = ClientSizeLimits(window);
         std::snprintf(buffer, sizeof(buffer),
