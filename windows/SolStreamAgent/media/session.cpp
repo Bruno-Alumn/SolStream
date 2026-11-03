@@ -54,6 +54,38 @@ static_assert(solstream::media::kWsaTimedOut == WSAETIMEDOUT);
 namespace solstream::media {
 namespace {
 
+/// A display's device name (\\.\DISPLAY3), which outlives its handle: a
+/// driver update or a display reset hands out new HMONITORs, and a recovery
+/// pass that reused the old one failed to capture the very display it was
+/// recovering. Empty for a handle Windows no longer knows.
+std::wstring MonitorDevice(HMONITOR monitor) {
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    return monitor && GetMonitorInfoW(monitor, &info) ? std::wstring(info.szDevice)
+                                                     : std::wstring();
+}
+
+/// The display with that device name now, or null.
+HMONITOR MonitorByDevice(const std::wstring& device) {
+    struct Search {
+        const std::wstring* wanted;
+        HMONITOR found = nullptr;
+    } search{&device};
+    EnumDisplayMonitors(nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM param) -> BOOL {
+            auto* state = reinterpret_cast<Search*>(param);
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof(info);
+            if (GetMonitorInfoW(monitor, &info) && *state->wanted == info.szDevice) {
+                state->found = monitor;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
+
 constexpr int kVideoHeader = 16;
 constexpr int kVideoPayload = smt::kMaxPlaintext - kVideoHeader;   // 1432
 constexpr size_t kSendQueueDepth = 24;
@@ -451,6 +483,9 @@ void MediaSession::Impl::CaptureLoop() {
     // spinning on it.
     int recoveries = 0;
     bool recovering = false;
+    // What the last rebuild was for, kept across a pass that failed to open --
+    // which resets the flags -- so the give-up line names it.
+    bool lastCauseEncoder = false;
     while (running.load()) {
         retargetWanted.store(false);
         deviceLost = false;
@@ -468,10 +503,22 @@ void MediaSession::Impl::CaptureLoop() {
         const bool rebuildFailed = recovering && encodingSince == 0;
         recovering = false;
         if ((deviceLost || rebuildFailed) && running.load() && !retargetWanted.load()
+            && recoveries >= 3) {
+            // Said, not left as the session simply ending.
+            Log("[media] giving up after 3 rebuilds in a minute (the last: %s); "
+                "ending the session",
+                encoderFailed || lastCauseEncoder ? "the encoder failing"
+                                                  : "the graphics device being lost");
+        }
+        if (deviceLost || encoderFailed) {
+            lastCauseEncoder = encoderFailed;
+        }
+        if ((deviceLost || rebuildFailed) && running.load() && !retargetWanted.load()
             && recoveries < 3) {
             recovering = true;
             ++recoveries;
-            Log(encoderFailed ? "[media] rebuilding the encoder after it failed (%d of 3)"
+            Log(encoderFailed || (rebuildFailed && lastCauseEncoder)
+                    ? "[media] rebuilding the encoder after it failed (%d of 3)"
                               : "[media] reopening the capture after losing the graphics "
                                 "device (%d of 3)",
                 recoveries);
@@ -502,6 +549,16 @@ void MediaSession::Impl::RunCapture() {
     {
         std::lock_guard<std::mutex> guard(configLock);
         active = config;
+    }
+    // The display by its name, now: see MonitorDevice.
+    if (!active.window && !active.monitorDevice.empty()) {
+        if (HMONITOR now = MonitorByDevice(active.monitorDevice)) {
+            if (now != active.monitor) {
+                Log("[media] %ls has a new handle; capturing it by that",
+                    active.monitorDevice.c_str());
+            }
+            active.monitor = now;
+        }
     }
     {
         std::lock_guard<std::mutex> guard(mediaLock);
@@ -548,7 +605,10 @@ void MediaSession::Impl::RunCapture() {
     // known until something has been captured from it.
     Frame frame{};
     // Not past a retarget asked for meanwhile: the next pass is the one wanted.
-    for (int tries = 0; tries < 100 && running.load() && !retargetWanted.load(); ++tries) {
+    // And not past the source closing: a window shut just after it was picked
+    // cost the full five seconds before the error came back.
+    for (int tries = 0; tries < 100 && running.load() && !retargetWanted.load()
+                        && capture->Running(); ++tries) {
         if (capture->Acquire(frame, 0, 50) && frame.width > 0) { break; }
     }
     if (retargetWanted.load()) {
@@ -590,10 +650,12 @@ void MediaSession::Impl::RunCapture() {
         }
     }
     if (!encoding) {
-        Log("[media] the hardware %s encoder would not open at %ux%u",
+        // Hardware and the software fallback both: "hardware" said less than
+        // was tried.
+        Log("[media] no %s encoder would open at %ux%u",
             VideoCodecName(passCodec), encodeWidth, encodeHeight);
-        ReportOpened(std::string("the hardware ") + VideoCodecName(passCodec)
-                     + " encoder would not open at "
+        ReportOpened(std::string("no ") + VideoCodecName(passCodec)
+                     + " encoder would open at "
                      + std::to_string(encodeWidth) + "x"
                      + std::to_string(encodeHeight));
         return;
@@ -679,7 +741,38 @@ void MediaSession::Impl::RunCapture() {
     // closing, and the pass -- and with no retarget pending, the session --
     // ends.
     encodingSince = Now();
+    // Whether pictures are coming out at all. Submit only says the frame was
+    // converted: an encoder that stops asking for input, or whose output
+    // calls all fail, took every frame and gave nothing, and the Mac froze
+    // until its own watchdog restarted everything. And the device, looked at
+    // every second whatever Submit says: some drivers go on converting on a
+    // device that has been removed.
+    uint64_t picturesSeen = encoder->Pictures();
+    long long picturesMovedAt = Now();
+    long long deviceCheckedAt = Now();
     while (running.load() && !retargetWanted.load() && capture->Running()) {
+        if (MillisBetween(deviceCheckedAt, Now()) >= 1000.0) {
+            deviceCheckedAt = Now();
+            ID3D11Device* device = capture->Device();
+            const HRESULT removed = device ? device->GetDeviceRemovedReason() : S_OK;
+            if (FAILED(removed)) {
+                Log("[media] the graphics device was lost (0x%08lx)", (unsigned long) removed);
+                deviceLost = true;
+                break;
+            }
+            const uint64_t pictures = encoder->Pictures();
+            if (pictures != picturesSeen) {
+                picturesSeen = pictures;
+                picturesMovedAt = Now();
+            } else if (MillisBetween(picturesMovedAt, Now()) >= 3000.0) {
+                // Frames go in at least every 250 ms, so three seconds of none
+                // coming out is an encoder that has stopped.
+                Log("[media] the encoder has produced nothing for 3 s; rebuilding it");
+                deviceLost = true;
+                encoderFailed = true;
+                break;
+            }
+        }
         Frame current{};
         if (!capture->Acquire(current, lastSerial, idleMs)) {
             if (!capture->Running()) { break; }
@@ -1086,6 +1179,7 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     }
 
     s.config = config;
+    s.config.monitorDevice = MonitorDevice(config.monitor);
     s.toClient.key = smt::MakeKey(okm);
     s.fromClient.key = smt::MakeKey(okm + 32);
     memcpy(s.toClient.fixed, okm + 64, 6);
@@ -1358,6 +1452,7 @@ bool MediaSession::Retarget(HWND window, HMONITOR monitor) {
         std::lock_guard<std::mutex> guard(s.configLock);
         s.config.window = window;
         s.config.monitor = monitor;
+        s.config.monitorDevice = MonitorDevice(monitor);
         // The CANVAS SURVIVES A RETARGET. These two used to be zeroed here, with
         // a note saying the new source decides the size -- and the new source is
         // exactly the thing that must not. The Mac asks for a canvas because

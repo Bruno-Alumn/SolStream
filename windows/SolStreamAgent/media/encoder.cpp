@@ -234,6 +234,8 @@ struct Encoder::Impl {
     /// beats logging: the first version of that line wrote 396 entries during a
     /// session that delivered every picture it captured.
     uint64_t drainFailures = 0;
+    /// Drain failures since one last succeeded. Drain-thread only.
+    int drainFailuresInARow = 0;
     long long lastDrainComplaint = 0;
     std::vector<unsigned char> picture;   ///< assembled coded picture
 
@@ -657,7 +659,12 @@ bool Encoder::Impl::FeedLocked() {
     const bool idr = ledger.TakeIdr(pendingIdr);
     if (idr && codec) {
         if (FAILED(SetUi4(codec, CODECAPI_AVEncVideoForceKeyFrame, 1))) {
-            Log("[media] could not force a keyframe");
+            // Once: an encoder that refuses one refuses them all.
+            static std::atomic<bool> said{false};
+            if (!said.exchange(true)) {
+                Log("[media] this encoder will not force a keyframe; the next one comes "
+                    "when it chooses");
+            }
         }
     }
 
@@ -778,6 +785,13 @@ void Encoder::Impl::Drain() {
             // seconds, carrying how many were swallowed, keeps a persistent
             // problem visible without letting it push everything else out.
             ++drainFailures;
+            // Every drain failing is an encoder that has stopped: said as
+            // failed, so the capture side rebuilds it, rather than logged for
+            // the rest of the session.
+            if (++drainFailuresInARow >= 30 && !failed.load()) {
+                Log("[media] the encoder failed 30 output calls in a row (0x%08lX)", got);
+                failed.store(true);
+            }
             const long long complainedAt = Now();
             if (lastDrainComplaint == 0
                 || (complainedAt - lastDrainComplaint) > QpcFrequency() * 5) {
@@ -789,6 +803,7 @@ void Encoder::Impl::Drain() {
             }
             break;
         }
+        drainFailuresInARow = 0;
         IMFSample* result = out.pSample;
         if (!result) {
             // Success with nothing handed over. Dereferencing that is the same

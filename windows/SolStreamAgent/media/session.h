@@ -30,6 +30,9 @@ namespace solstream::media {
 struct MediaConfig {
     HWND window = nullptr;
     HMONITOR monitor = nullptr;
+    /// The display's device name, kept beside its handle and looked up again
+    /// each pass; set by the session from `monitor`.
+    std::wstring monitorDevice;
     UINT width = 0;          ///< encode size; 0 means "whatever the source is"
     UINT height = 0;
     UINT fps = 60;

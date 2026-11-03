@@ -258,8 +258,18 @@ void Capture::Impl::OnFrame(Direct3D11CaptureFramePool const& sender) {
             }
         }
     } catch (winrt::hresult_error const& e) {
-        Log("[media] frame callback failed: 0x%08X",
-            static_cast<unsigned>(static_cast<int32_t>(e.code())));
+        // At most every five seconds, with how many: one that throws on every
+        // frame -- a surface gone with the device -- logged 60 to 144 lines a
+        // second and nothing else.
+        static std::atomic<unsigned long long> failures{0};
+        static std::atomic<unsigned long long> saidAt{0};
+        const unsigned long long count = ++failures;
+        const unsigned long long now = GetTickCount64();
+        if (count == 1 || now - saidAt.load() >= 5000) {
+            saidAt.store(now);
+            Log("[media] frame callback failed: 0x%08X (%llu so far)",
+                static_cast<unsigned>(static_cast<int32_t>(e.code())), count);
+        }
     } catch (...) {
         Log("[media] frame callback failed: unknown exception");
     }
