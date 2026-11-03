@@ -339,6 +339,12 @@ public final class AgentConnection {
     /// host reads exactly one line before its verdict -- is never a ping, and
     /// a takeover is never refused for one sitting in the queue.
     private var heardFromHost = false
+    /// When this socket's path stopped being viable, while it still is not.
+    private var unviableSince: Date?
+    /// How long a path may be gone before the socket on it is given up: long
+    /// enough for Wi-Fi to roam between access points of one network, which
+    /// the socket survives.
+    private static let unviableGrace: TimeInterval = 6
     /// Heartbeats that found the host still silent; see `startHeartbeat`.
     private var silentBeats = 0
     /// Whether this socket reached `.ready`: once it has, the host was
@@ -898,6 +904,7 @@ public final class AgentConnection {
         mayTalk = false
         heardFromHost = false
         silentBeats = 0
+        unviableSince = nil
         socketWasReady = false
         awaitingToken = false
         buffer.removeAll()
@@ -928,6 +935,28 @@ public final class AgentConnection {
         let parameters = NWParameters(tls: nil, tcp: options)
         let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
+
+        // The path under a socket that is up can go -- Wi-Fi to another
+        // network, a cable pulled -- with the socket still `.ready`: TCP says
+        // nothing until something it sends times out, and the only thing
+        // that noticed here was the request at the head of the queue, after
+        // up to a minute behind a transfer. Gone for a few seconds, it is
+        // dropped instead, and the reconnect knocks and takes the session
+        // back on whatever path there is now.
+        connection.viabilityUpdateHandler = { [weak self] viable in
+            guard let self, self.connection === connection else { return }
+            self.unviableSince = viable ? nil : (self.unviableSince ?? Date())
+            guard !viable else { return }
+            self.queue.asyncAfter(deadline: .now() + Self.unviableGrace) { [weak self] in
+                // A socket still connecting has its own timeout and `.waiting`.
+                guard let self, self.connection === connection, connection.state == .ready,
+                      let since = self.unviableSince,
+                      Date().timeIntervalSince(since) >= Self.unviableGrace - 0.1 else { return }
+                Log.error("[agent] the network path to \(self.host) has been gone for "
+                          + "\(Int(Self.unviableGrace)) s; reconnecting")
+                self.dropConnection(AgentError.disconnected)
+            }
+        }
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
