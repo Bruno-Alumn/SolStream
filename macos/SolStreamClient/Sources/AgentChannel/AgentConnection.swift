@@ -414,6 +414,7 @@ public final class AgentConnection {
             }
             if !self.authenticate(with: trimmed) {
                 Log.error("[agent] \(self.host) offered no auth challenge; refusing to send the token")
+                self.wantsConnection = false
                 self.report(.failed("\(self.host) is running an older version of SolStream, or "
                                     + "something is impersonating it. Update SolStream on that PC."))
                 self.dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
@@ -1108,6 +1109,10 @@ public final class AgentConnection {
             // run through paths that would otherwise queue a reconnect to a host
             // the user has just left.
             self.wantsConnection = false
+            // Left on purpose: nothing it said before is why it ended.
+            self.stateLock.lock()
+            self.lastFailureText = nil
+            self.stateLock.unlock()
             self.stopHeartbeat()
             self.connection?.cancel()
             self.connection = nil
@@ -2573,6 +2578,7 @@ public final class AgentConnection {
                         pendingEphemeral = nil
                         // Said, not only logged: without it the picker spun on
                         // and a stream's windows never said the link was gone.
+                        wantsConnection = false
                         report(.failed("\(host) could not agree a key with this Mac. "
                                        + "Connect again; if it keeps happening, pair again."))
                         dropConnection(AgentError.protocolDesync, reconnect: false)
@@ -2631,6 +2637,7 @@ public final class AgentConnection {
                 Log.error("[agent] \(host) took the token but could not agree an "
                           + "encrypted channel: \(message["message"] as? String ?? "")")
                 pendingEphemeral = nil
+                wantsConnection = false
                 report(.failed("\(host) could not agree a key with this Mac. "
                                + "Connect again; if it keeps happening, pair again."))
                 dropConnection(AgentError.protocolDesync, reconnect: false)
