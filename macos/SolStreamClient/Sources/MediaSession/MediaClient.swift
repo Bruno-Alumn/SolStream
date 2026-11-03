@@ -514,7 +514,7 @@ public final class MediaClient {
         releasesKeptSince = out.keptSince
         lastInputSentAt = now
         stateLock.unlock()
-        sendInputBatch(out.batch)
+        sendInputBatch(out.batch, whole: out.whole)
     }
 
     /// How many of the newest events every input datagram carries.
@@ -544,7 +544,7 @@ public final class MediaClient {
     static func inputBatch(_ pending: [(seq: UInt32, blob: Data)],
                            keptSince: [UInt32: UInt64], now: UInt64)
         -> (batch: [(seq: UInt32, blob: Data)], unacked: [(seq: UInt32, blob: Data)],
-            keptSince: [UInt32: UInt64]) {
+            keptSince: [UInt32: UInt64], whole: Bool) {
         let owed = Set(SMTInput.releasesStillOwed(pending).map(\.seq))
         let windowStart = max(0, pending.count - inputWindow)
         let tailStart = max(0, pending.count - inputTail)
@@ -572,7 +572,11 @@ public final class MediaClient {
             if carried { batch.append(event) }
             if carried || index >= tailStart { kept.append(event) }
         }
-        return (fitted(batch, owed: owed), kept, since)
+        // Whole, when nothing had to be cut to fit: only then is the first
+        // event the lowest that may be sent again (see inputFloorFlag) -- one
+        // cut is still eligible, and lies below it.
+        let fit = fitted(batch, owed: owed)
+        return (fit, kept, since, fit.count == batch.count)
     }
 
     /// `batch`, cut to what one datagram holds. It fits with room to spare:
@@ -633,25 +637,34 @@ public final class MediaClient {
                            sinceSentMs: Double, keptSince: [UInt32: UInt64],
                            tick: Int, now: UInt64)
         -> (unacked: [(seq: UInt32, blob: Data)], keptSince: [UInt32: UInt64],
-            repeats: [(seq: UInt32, blob: Data)]) {
+            repeats: [(seq: UInt32, blob: Data)], whole: Bool) {
         let pending = unacked.filter { $0.seq > inputAck }
-        guard !pending.isEmpty else { return (unacked, keptSince, []) }
+        guard !pending.isEmpty else { return (unacked, keptSince, [], false) }
         guard sinceSentMs > 300 else {
             let out = inputBatch(pending, keptSince: keptSince, now: now)
-            return (out.unacked, out.keptSince, out.batch)
+            return (out.unacked, out.keptSince, out.batch, out.whole)
         }
         let kept = keptPastGivingUp(pending, keptSince: keptSince, now: now)
-        let repeats = tick % 10 == 0
-            ? inputBatch(kept.events, keptSince: kept.keptSince, now: now).batch : []
-        return (kept.events, kept.keptSince, repeats)
+        guard tick % 10 == 0 else { return (kept.events, kept.keptSince, [], false) }
+        let out = inputBatch(kept.events, keptSince: kept.keptSince, now: now)
+        return (kept.events, kept.keptSince, out.batch, out.whole)
     }
 
-    private func sendInputBatch(_ events: [(seq: UInt32, blob: Data)]) {
+    /// Header flag: nothing below this datagram's first sequence will be sent
+    /// again. Every batch goes in sequence order, and what is older than its
+    /// first event has been given up -- fallen out of the window, or a release
+    /// past its five seconds -- so the host may count those as done. Without
+    /// it, one loss the window never repeated was a hole its count-up
+    /// acknowledgement could never step over, for the rest of the session.
+    static let inputFloorFlag: UInt8 = 0x01
+
+    /// - Parameter whole: nothing was cut to fit; see `inputFloorFlag`.
+    private func sendInputBatch(_ events: [(seq: UInt32, blob: Data)], whole: Bool) {
         guard !events.isEmpty else { return }
         var packet = Data(capacity: 4 + events.reduce(0) { $0 + $1.blob.count + 4 })
         packet.append(SMT.typeInput)
         packet.append(UInt8(min(events.count, 255)))
-        packet.append(0)
+        packet.append(whole ? Self.inputFloorFlag : 0)
         packet.append(0)
         for event in events {
             packet.append(SMTPacket.be(UInt64(event.seq), 4))
@@ -719,7 +732,7 @@ public final class MediaClient {
             self.unacked = step.unacked
             self.releasesKeptSince = step.keptSince
             self.stateLock.unlock()
-            if !step.repeats.isEmpty { self.sendInputBatch(step.repeats) }
+            if !step.repeats.isEmpty { self.sendInputBatch(step.repeats, whole: step.whole) }
 
             // Still holding for a keyframe a quarter-second after asking, with
             // none of it arriving: the request or the IDR was lost. Ask again

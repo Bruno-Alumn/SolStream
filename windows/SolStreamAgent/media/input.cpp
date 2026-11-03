@@ -364,7 +364,14 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     // Each event needs at least a 4-byte sequence, kind, and body-length byte,
     // so the count cannot honestly exceed this; ignore an implausible one.
     const int count =
-        std::min<int>(plaintext[1], static_cast<int>((length - 4) / 6));
+        (std::min)(static_cast<int>(plaintext[1]), static_cast<int>((length - 4) / 6));
+    // A Mac since 11-03 says nothing below this datagram's first sequence will
+    // come again (see MediaClient.inputFloorFlag): those are done, applied or
+    // not, and the acknowledgement may step over them. An older Mac sends 0.
+    if ((plaintext[2] & kInputFloorFlag) != 0 && count > 0 && length >= 10) {
+        const uint32_t first = (uint32_t) smt::ReadBE(plaintext + 4, 4);
+        if (first > floor_) { floor_ = first; }
+    }
     size_t at = 4;
     for (int i = 0; i < count && at + 6 <= length; ++i) {
         const uint32_t seq = (uint32_t) smt::ReadBE(plaintext + at, 4);
@@ -388,7 +395,9 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
         // after the last new event, so the event was gone from both machines and
         // a key-up lost that way left the key down with nothing to release it.
         // Recording now happens below, after ApplyOne has had its attempt.
-        if (seen_.SeenOrTooOld(seq)) {
+        // Below the floor is given up on: one that arrives late -- reordered
+        // behind the datagram that said so -- is not applied after its time.
+        if (seq < floor_ || seen_.SeenOrTooOld(seq)) {
             duplicates_.fetch_add(1);
             continue;
         }
@@ -441,6 +450,10 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
     //
     // Not wrap-aware, nor needs to be: see `seen_` in input.h.
     uint32_t acked = acked_.load();
+    // Everything below the floor is done; see above.
+    if (floor_ > 0 && acked < floor_ - 1) {
+        acked = floor_ - 1;
+    }
     while (seen_.started && acked < seen_.highest) {
         const uint64_t behind = seen_.highest - (acked + 1);
         if (behind >= 1024) { break; }
@@ -453,6 +466,7 @@ uint32_t InputInjector::Apply(const unsigned char* plaintext, size_t length) {
 
 void InputInjector::Reset() {
     seen_ = {};
+    floor_ = 0;
     acked_.store(0);
     applied_.store(0);
     duplicates_.store(0);

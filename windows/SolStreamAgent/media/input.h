@@ -143,6 +143,9 @@ private:
     /// unbroken session -- 49 days of a thousand events a second, and the Mac
     /// sends far fewer. Past it, input would stop until the next session.
     smt::ReplayWindow seen_;
+    /// The lowest sequence the Mac may still send: see Apply. Receive thread.
+    uint32_t floor_ = 0;
+    static constexpr unsigned char kInputFloorFlag = 0x01;
     /// Each key's and button's newest event applied, so an older one that
     /// arrives after it is passed over. See keys.h; cleared with the above.
     HoldOrder holdOrder_;

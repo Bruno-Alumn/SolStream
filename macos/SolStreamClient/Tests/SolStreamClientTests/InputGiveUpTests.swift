@@ -201,6 +201,27 @@ final class InputGiveUpTests: XCTestCase {
         XCTAssertEqual(batch.count, 1 + 5)
     }
 
+    /// A batch says nothing below its first event will come again -- so the
+    /// host may count those as done -- only when nothing was cut to fit: one
+    /// cut is still eligible, and lies below it.
+    func testABatchIsWholeOnlyWhenNothingWasCut() {
+        let small: [(seq: UInt32, blob: Data)] = (UInt32(1)...5).map { ($0, wUp) }
+        XCTAssertTrue(MediaClient.inputBatch(small, keptSince: [:], now: 0).whole)
+        let text = SMTInput.text(String(repeating: "a", count: 127))[0]
+        var big: [(seq: UInt32, blob: Data)] = [(1, wUp)]
+        for seq in UInt32(2)...9 { big.append((seq, text)) }
+        XCTAssertFalse(MediaClient.inputBatch(big, keptSince: [:], now: 0).whole)
+        // The repeat timer says the same of what it sends, and nothing when
+        // it sends nothing.
+        let step = MediaClient.repeatStep(small, inputAck: 0, sinceSentMs: 0, keptSince: [:],
+                                          tick: 1, now: 0)
+        XCTAssertTrue(step.whole)
+        let quiet = MediaClient.repeatStep(small, inputAck: 0, sinceSentMs: 301, keptSince: [:],
+                                           tick: 1, now: 0)
+        XCTAssertTrue(quiet.repeats.isEmpty)
+        XCTAssertFalse(quiet.whole)
+    }
+
     // MARK: - The timer
 
     /// What the timer does over `ticks`, `sinceSentMs` after the last new
