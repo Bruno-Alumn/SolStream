@@ -10,6 +10,12 @@
 #include <codecapi.h>
 #include <icodecapi.h>
 #include <d3d11.h>
+#ifdef __MINGW32__
+// mingw's import library has MFCreateTrackedSample but its mfapi.h does not
+// declare it, and its IMFTrackedSample is in evr.h rather than mfidl.h.
+#include <evr.h>
+extern "C" HRESULT WINAPI MFCreateTrackedSample(IMFTrackedSample** sample);
+#endif
 
 #include <atomic>
 #include <mutex>
@@ -61,6 +67,55 @@ HRESULT SetUi4(ICodecAPI* codec, const GUID& key, ULONG value) {
 }
 
 }  // namespace
+
+// ── The NV12 ring ────────────────────────────────────────────────────────────
+//
+// Which of the NV12 textures the hardware encoder still has. Submit converted
+// every frame into the next texture round the ring, and an encoder that was
+// still reading one six frames later -- a busy GPU, a driver that queues --
+// had it painted over underneath it: a picture made of two frames, which the
+// Mac decodes without complaint. Each texture now goes to the encoder in a
+// tracked sample, and the sample says when the encoder has let go of it.
+//
+// One of these per texture. It is the sample's allocator callback, so the
+// sample holds a reference and the callback can arrive after Close; all it
+// touches is its own flag.
+struct SurfaceLease : public IMFAsyncCallback {
+    std::atomic<ULONG> refs{1};
+    /// Converted into, and not yet given back: waiting to be fed, or inside
+    /// the encoder.
+    std::atomic<bool> held{false};
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override {
+        if (riid == IID_IUnknown || riid == __uuidof(IMFAsyncCallback)) {
+            *out = static_cast<IMFAsyncCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG left = --refs;
+        if (left == 0) { delete this; }
+        return left;
+    }
+    HRESULT STDMETHODCALLTYPE GetParameters(DWORD*, DWORD*) override {
+        return E_NOTIMPL;
+    }
+    /// The encoder has released the sample, and with it the texture.
+    HRESULT STDMETHODCALLTYPE Invoke(IMFAsyncResult*) override {
+        held.store(false);
+        return S_OK;
+    }
+};
+
+/// How many frames in a row may find every texture still held before the
+/// leases stop being believed. An encoder that keeps its input samples until a
+/// flush would otherwise freeze the picture for good; painting over a texture
+/// it holds, as before, is the lesser fault.
+constexpr int kStarvedFrames = 60;
 
 // ── The event pump ───────────────────────────────────────────────────────────
 //
@@ -126,7 +181,13 @@ struct Encoder::Impl {
     /// the CPU.
     bool cpuOnly = false;
     ID3D11VideoProcessorOutputView* nv12View[kRing] = {};
+    /// Whether each NV12 texture is free to convert into: see SurfaceLease.
+    SurfaceLease* lease[kRing] = {};
     int nextSlot = 0;
+    /// Capture-thread only: frames in a row that found no texture free, and
+    /// whether the encoder's releases are no longer waited for.
+    int starved = 0;
+    bool untracked = false;
 
     ID3D11Texture2D* sourceTexture = nullptr;   ///< weak, only for cache identity
     ID3D11VideoProcessorInputView* sourceView = nullptr;
@@ -191,6 +252,11 @@ struct Encoder::Impl {
     bool ConvertOnCpu(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
                       IMFMediaBuffer** out);
     bool Convert(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight, int slot);
+    /// A texture nothing is using, claimed; -1 when the encoder holds them all.
+    int ClaimSlot();
+    void FreeSlot(int slot) {
+        if (lease[slot]) { lease[slot]->held.store(false); }
+    }
     /// True only when the MFT took the frame. The caller owns a need-input
     /// credit and must not spend it on a false.
     bool FeedLocked();
@@ -500,11 +566,13 @@ bool Encoder::Impl::FeedLocked() {
     meta[frameId % kMetaRing].emitted = false;
 
     IMFMediaBuffer* buffer = nullptr;
+    IMFSample* sample = nullptr;
     if (async) {
         // THE POINT OF THE WHOLE PATH: the encoder is handed the texture, and
         // the frame never touches the CPU.
         if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12[pendingSlot],
                                              0, FALSE, &buffer))) {
+            FreeSlot(pendingSlot);
             return false;
         }
         IMF2DBuffer* two = nullptr;
@@ -525,13 +593,30 @@ bool Encoder::Impl::FeedLocked() {
         // The software encoder is not D3D-aware, so the NV12 has to come back
         // across the bus. This is exactly the copy the hardware path exists to
         // avoid, and it is why this mode is a fallback rather than an option.
-        if (!ReadBackNv12(pendingSlot, &buffer)) {
+        // The copy is the texture's last use.
+        const bool read = ReadBackNv12(pendingSlot, &buffer);
+        FreeSlot(pendingSlot);
+        if (!read) {
             return false;
         }
     }
 
-    IMFSample* sample = nullptr;
-    if (FAILED(MFCreateSample(&sample))) {
+    if (async && !untracked) {
+        // The texture is given back when the encoder releases the sample --
+        // or when this function does, if the encoder never takes it.
+        IMFTrackedSample* tracked = nullptr;
+        if (SUCCEEDED(MFCreateTrackedSample(&tracked))) {
+            if (SUCCEEDED(tracked->SetAllocator(lease[pendingSlot], nullptr))) {
+                tracked->QueryInterface(__uuidof(IMFSample), (void**) &sample);
+            }
+            tracked->Release();
+        }
+    }
+    if (async && !sample) {
+        // Untracked: nothing will say when the encoder is done with it.
+        FreeSlot(pendingSlot);
+    }
+    if (!sample && FAILED(MFCreateSample(&sample))) {
         Release(buffer);
         return false;
     }
@@ -920,6 +1005,7 @@ bool Encoder::Open(ID3D11Device* device, UINT width, UINT height, UINT fps,
             Close();
             return false;
         }
+        s.lease[i] = new SurfaceLease();
     }
 
     // ── The transform ────────────────────────────────────────────────────────
@@ -1180,10 +1266,17 @@ void Encoder::Close() {
     Release(s.staging);
     Release(s.stagingBgra);
     s.stagingBgraWidth = s.stagingBgraHeight = 0;
+    // After the transform is shut down, which lets go of its samples. A lease
+    // a sample still holds outlives this, and its late callback touches only
+    // the lease.
     for (int i = 0; i < kRing; ++i) {
         Release(s.nv12View[i]);
         Release(s.nv12[i]);
+        Release(s.lease[i]);
     }
+    s.nextSlot = 0;
+    s.starved = 0;
+    s.untracked = false;
     Release(s.processor);
     Release(s.enumerator);
     Release(s.videoContext);
@@ -1218,9 +1311,15 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     }
     int slot = 0;
     if (!s.cpuOnly) {
-        slot = s.nextSlot;
-        s.nextSlot = (s.nextSlot + 1) % kRing;
+        slot = s.ClaimSlot();
+        if (slot < 0) {
+            // The encoder is behind by a whole ring. The frame waiting to be
+            // fed is newer than anything that could be taken back.
+            s.dropped.fetch_add(1);
+            return false;
+        }
         if (!s.Convert(bgra, srcWidth, srcHeight, slot)) {
+            s.FreeSlot(slot);
             s.dropped.fetch_add(1);
             return false;
         }
@@ -1242,6 +1341,9 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
     s.pendingSrcHeight = srcHeight;
     if (s.havePending) {
         s.dropped.fetch_add(1);   // latest wins
+        if (!s.cpuOnly) {
+            s.FreeSlot(s.pendingSlot);
+        }
     }
     s.havePending = true;
     s.pendingSlot = slot;
@@ -1265,6 +1367,34 @@ bool Encoder::Submit(ID3D11Texture2D* bgra, UINT srcWidth, UINT srcHeight,
         --s.needInput;
     }
     return true;
+}
+
+int Encoder::Impl::ClaimSlot() {
+    for (int i = 0; i < kRing; ++i) {
+        const int slot = (nextSlot + i) % kRing;
+        bool expected = false;
+        if (lease[slot] && lease[slot]->held.compare_exchange_strong(expected, true)) {
+            nextSlot = (slot + 1) % kRing;
+            starved = 0;
+            return slot;
+        }
+    }
+    if (++starved < kStarvedFrames || untracked) {
+        return -1;
+    }
+    // Every texture held for a second: the encoder keeps its samples rather
+    // than releasing them as it goes. Take them all back but the one waiting
+    // to be fed, and stop waiting on releases for the rest of this pass.
+    Log("[media] the encoder keeps hold of every NV12 texture; reusing them without waiting");
+    untracked = true;
+    starved = 0;
+    std::lock_guard<std::mutex> guard(lock);
+    for (int i = 0; i < kRing; ++i) {
+        if (!(havePending && i == pendingSlot)) {
+            FreeSlot(i);
+        }
+    }
+    return -1;
 }
 
 void Encoder::StartFrameIdsAt(uint32_t next) {
