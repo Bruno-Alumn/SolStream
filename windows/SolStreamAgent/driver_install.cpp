@@ -718,20 +718,31 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         // what it recorded, and an uninstall finds it. Written at the end, a
         // package and a device added before the kill were remembered by
         // nothing, and never removed.
-        const std::wstring earlier_inf = ReadState(kInfValue);
-        const std::wstring earlier_device = ReadState(kDeviceValue);
-        const std::wstring earlier_mark = ReadState(kDeviceMarkValue);
-        auto restore = [](const wchar_t* name, const std::wstring& value) {
-            if (value.empty()) {
-                DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, name);
-            } else {
-                WriteState(name, value);
-            }
+        // Whether each was there, as well as what it said: an empty device
+        // record is one ForgetGoneDevice left on purpose, and means "ours
+        // has gone, do not go looking by package". Deleted by an undo, the
+        // package's other devices would be taken for ours.
+        struct Earlier {
+            const wchar_t* name;
+            bool present;
+            std::wstring value;
         };
-        auto undo = [&] {
-            restore(kInfValue, earlier_inf);
-            restore(kDeviceValue, earlier_device);
-            restore(kDeviceMarkValue, earlier_mark);
+        Earlier earlier[] = {
+            {kInfValue, HasStateIn(HKEY_LOCAL_MACHINE, kStateKey, kInfValue), ReadState(kInfValue)},
+            {kDeviceValue, HasStateIn(HKEY_LOCAL_MACHINE, kStateKey, kDeviceValue),
+             ReadState(kDeviceValue)},
+            {kDeviceMarkValue, HasStateIn(HKEY_LOCAL_MACHINE, kStateKey, kDeviceMarkValue),
+             ReadState(kDeviceMarkValue)},
+            {kSettingsValue, HasStateIn(HKEY_LOCAL_MACHINE, kStateKey, kSettingsValue),
+             ReadState(kSettingsValue)},
+            {kSettingsFileValue, HasStateIn(HKEY_LOCAL_MACHINE, kStateKey, kSettingsFileValue),
+             ReadState(kSettingsFileValue)},
+        };
+        // `keep_device`: the device this run made could not be removed, and
+        // stays recorded so an uninstall finds it.
+        auto undo = [&](bool keep_device = false) {
+            // Cleaned up first, the records put back after: killed in between,
+            // what is left is still what the records say.
             if (staged_here && IsOemInfName(staged)) {
                 SetupUninstallOEMInfW(staged.c_str(), 0, nullptr);
             }
@@ -739,6 +750,16 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                 RemoveDriverSettingsFolder(settings_folder);
             } else if (wrote_settings) {
                 RemoveDriverSettingsFile(settings);
+            }
+            for (const Earlier& was : earlier) {
+                if (keep_device && (was.name == kDeviceValue || was.name == kDeviceMarkValue)) {
+                    continue;
+                }
+                if (was.present) {
+                    WriteState(was.name, was.value);
+                } else {
+                    DeleteStateIn(HKEY_LOCAL_MACHINE, kStateKey, was.name);
+                }
             }
         };
 
@@ -752,8 +773,14 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
                     "another account, so SolStream did not write to it.\n";
         } else if (!Exists(settings)) {
             made_folder = !Exists(settings_folder) && MakeSettingsFolder(settings_folder);
+            if (made_folder) {
+                WriteState(kSettingsValue, settings_folder);
+            }
             wrote_settings = CopyFileW((package_dir + L"\\vdd_settings.xml").c_str(),
                                        settings.c_str(), TRUE) != FALSE;
+            if (wrote_settings && !made_folder) {
+                WriteState(kSettingsFileValue, settings);
+            }
             if (!wrote_settings) {
                 note += "Couldn't write the display driver's settings to "
                       + ToUtf8(settings_folder) + ", so it starts with its own sizes.\n";
@@ -809,9 +836,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             const DWORD code = GetLastError();
             // A device with no driver is a yellow triangle in Device Manager
             // and nothing else; take back the one this just made.
-            SetupDiCallClassInstaller(DIF_REMOVE, created_set, &created);
+            const bool removed = SetupDiCallClassInstaller(DIF_REMOVE, created_set, &created) != FALSE;
             SetupDiDestroyDeviceInfoList(created_set);
-            undo();
+            undo(!removed);
             error = InstallProblem("install the driver", code);
             return false;
         }

@@ -128,21 +128,12 @@ std::vector<VirtualDisplay> SolStreamDisplays(const std::vector<VirtualDisplay>&
 }
 
 bool HasVirtualDisplay() {
-    // When SolStream's own driver is installed, only it counts. Another
-    // product's display running beside a stopped one of ours is not a display
-    // SolStream will capture, and answering yes for it told the window and the
-    // Mac that a virtual display was ready when it was not. Without ours, any
-    // running one still counts, as it always did.
-    const auto displays = FindVirtualDisplays();
-    const bool ours_present = std::any_of(
-        displays.begin(), displays.end(), [](const VirtualDisplay& display) {
-            return IsSolStreamDisplayDriver(display.friendly_name);
-        });
-    for (const VirtualDisplay& display : displays) {
-        if (ours_present && !IsSolStreamDisplayDriver(display.friendly_name)) {
-            continue;
-        }
-        if (display.running) {
+    // Only SolStream's own, running: the only kind it captures. Another
+    // product's -- a phone-as-monitor's, a hand-installed sample driver's --
+    // counted while ours was absent, so the window said a virtual display
+    // was ready, offered no Set up, and the real screen was streamed.
+    for (const VirtualDisplay& display : FindVirtualDisplays()) {
+        if (display.running && IsSolStreamDisplayDriver(display.friendly_name)) {
             return true;
         }
     }
