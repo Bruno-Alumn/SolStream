@@ -2,6 +2,8 @@
 
 #include <windows.h>
 #include <psapi.h>
+
+#include <cstring>
 #include <shlobj.h>
 #include <shellapi.h>
 #include <objbase.h>
@@ -1364,8 +1366,14 @@ HANDLE g_self_pin = INVALID_HANDLE_VALUE;
 /// Where `held` really is: a plain drive path or a \\\\server\\share one, or
 /// empty when Windows will not say.
 std::wstring HeldPath(HANDLE held, DWORD volume = VOLUME_NAME_DOS) {
-    const DWORD flags = FILE_NAME_NORMALIZED | volume;
-    const DWORD needed = GetFinalPathNameByHandleW(held, nullptr, 0, flags);
+    DWORD flags = FILE_NAME_NORMALIZED | volume;
+    DWORD needed = GetFinalPathNameByHandleW(held, nullptr, 0, flags);
+    if (needed == 0) {
+        // Some network file systems cannot normalise a name; the name it was
+        // opened by is still that file's while it is held.
+        flags = FILE_NAME_OPENED | volume;
+        needed = GetFinalPathNameByHandleW(held, nullptr, 0, flags);
+    }
     if (needed == 0) {
         return {};
     }
@@ -1391,9 +1399,10 @@ std::wstring HeldPath(HANDLE held, DWORD volume = VOLUME_NAME_DOS) {
 /// after the process started, it need not be: the running file can be renamed
 /// away and another put at its name before the first line of wmain, and the
 /// hold would then be on that one.
-bool HoldsRunningImage(HANDLE held) {
-    // By identity, not by name: the name the image was mapped by can be a
-    // short or otherwise different spelling of the same file.
+/// The same question by the image's current name and the file's ID: asked
+/// only when Windows' own comparison says no, in case a file system answers it
+/// wrongly -- a setup that refused to install over that would be worse.
+bool SameFileByMappedName(HANDLE held) {
     wchar_t mapped[MAX_PATH * 4] = {0};
     const DWORD length = K32GetMappedFileNameW(GetCurrentProcess(), GetModuleHandleW(nullptr),
                                                mapped, MAX_PATH * 4);
@@ -1413,6 +1422,53 @@ bool HoldsRunningImage(HANDLE held) {
         && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
     CloseHandle(running);
     return same;
+}
+
+bool HoldsRunningImage(HANDLE held) {
+    // By the files themselves, with no name in it: the held file mapped, and
+    // Windows asked whether that mapping and this process's image are views
+    // of one file -- what the loader itself asks. Through a name, the name
+    // could change between the asking and the opening.
+    using AreSame = LONG(NTAPI*)(PVOID, PVOID);
+    const auto are_same = reinterpret_cast<AreSame>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtAreMappedFilesTheSame")));
+    if (!are_same) {
+        return false;
+    }
+    HANDLE mapping = CreateFileMappingW(held, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping) {
+        return false;
+    }
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    const bool same = view && are_same(GetModuleHandleW(nullptr), view) == 0;
+    if (view) {
+        UnmapViewOfFile(view);
+    }
+    CloseHandle(mapping);
+    return same || SameFileByMappedName(held);
+}
+
+/// Whether two held files have the same bytes, read through their handles.
+bool SameBytes(HANDLE a, HANDLE b) {
+    LARGE_INTEGER size_a{}, size_b{}, start{};
+    if (!GetFileSizeEx(a, &size_a) || !GetFileSizeEx(b, &size_b)
+        || size_a.QuadPart != size_b.QuadPart
+        || !SetFilePointerEx(a, start, nullptr, FILE_BEGIN)
+        || !SetFilePointerEx(b, start, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    std::vector<char> one(1 << 16), two(1 << 16);
+    for (;;) {
+        DWORD got_a = 0, got_b = 0;
+        if (!ReadFile(a, one.data(), (DWORD) one.size(), &got_a, nullptr)
+            || !ReadFile(b, two.data(), (DWORD) two.size(), &got_b, nullptr)
+            || got_a != got_b || std::memcmp(one.data(), two.data(), got_a) != 0) {
+            return false;
+        }
+        if (got_a == 0) {
+            return true;
+        }
+    }
 }
 
 }  // namespace
@@ -1451,11 +1507,14 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool ma
     // on purpose, by opening the file first, and the name would then be
     // theirs to fill. Program Files is administrators' alone, so there the
     // name is as good as the file.
+    // Tried again first: what held the file at start -- a sync client, a
+    // scanner looking at a fresh download -- has usually let go by the click.
+    PinOwnExecutable();
     std::wstring exe = g_self_pin != INVALID_HANDLE_VALUE ? HeldPath(g_self_pin) : std::wstring();
     if (exe.empty()) {
         if (!RunningInstalled()) {
-            error = "SolStream couldn't make sure it was asking Windows about itself. Run "
-                    "setup again from where you downloaded it.";
+            error = "SolStream couldn't make sure it was asking Windows about itself. Close "
+                    "anything that has SolStream's file open, then try again.";
             InstallLog("not elevating: this program's own file is not held");
             return false;
         }
@@ -1578,10 +1637,9 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     if (!token.empty()) {
         parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + token;
     }
-    // Held from here until it has started, sharing read only, and started by
-    // where the held file is: between the copy and the start, nothing can
-    // swap it for another. A hold that cannot be had is somebody else holding
-    // it, and nothing is started.
+    // Held from here until it has started, sharing read only, checked to be
+    // this program, and started by where the held file is. A hold that cannot
+    // be had is somebody else holding it, and nothing is started.
     HANDLE held = CreateFileW(copy.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     const std::wstring start = held != INVALID_HANDLE_VALUE ? HeldPath(held) : std::wstring();
@@ -1597,6 +1655,13 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
         HANDLE handle;
         ~Release() { CloseHandle(handle); }
     } release{held};
+    // And it is this program, byte for byte: between the copy and the hold, a
+    // program running as this user could have put its own file there.
+    if (g_self_pin == INVALID_HANDLE_VALUE || !SameBytes(held, g_self_pin)) {
+        error = "Could not check the temporary copy to uninstall from.";
+        InstallLog(error);
+        return false;
+    }
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS;

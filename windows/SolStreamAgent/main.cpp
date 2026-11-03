@@ -5967,6 +5967,11 @@ void ServeClient(SOCKET client) {
         // Loopback, which needs no token and is therefore already a session.
         // It names nobody, so nothing can take it over.
         g_clients_authenticated.fetch_add(1);
+        // Counted in, then checked, as an authenticated Mac is below.
+        if (solstream::update::InstallStarting()) {
+            Log("[agent] let go of a loopback session: an update is being installed");
+            return;
+        }
         BecomeHolder(client, std::string());
         if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
             return;
