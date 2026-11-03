@@ -31,8 +31,8 @@ static_assert(solstream::media::kWsaTimedOut == WSAETIMEDOUT);
 #include <winrt/Windows.Foundation.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -315,6 +315,27 @@ size_t MediaSession::Impl::SendSealed(const unsigned char* plaintext, size_t len
     return total;
 }
 
+/// Wait until `deadline` (QPC ticks) on `timer`, a high-resolution waitable
+/// timer, or on 1 ms sleeps where there is none (Windows before 1803).
+void WaitOnTimer(HANDLE timer, long long deadline) {
+    for (;;) {
+        const long long now = Now();
+        if (now >= deadline) { return; }
+        const long long remainingUs =
+            (deadline - now) * 1000000 / g_frequency.QuadPart;
+        if (remainingUs < 200) { return; }
+        if (timer) {
+            LARGE_INTEGER due{};
+            due.QuadPart = -(remainingUs * 10);   // relative, in 100 ns units
+            if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+                WaitForSingleObject(timer, 50);
+                continue;
+            }
+        }
+        Sleep(1);
+    }
+}
+
 void MediaSession::Impl::WaitUntil(long long deadline) {
     // Slept on a high-resolution waitable timer, never spun. The pacing slot is
     // about 300 us per datagram, so the old last-two-milliseconds spin ran for
@@ -323,22 +344,7 @@ void MediaSession::Impl::WaitUntil(long long deadline) {
     // absolute (nextSlot advances by each datagram's cost, not from "now"), so
     // a late wake sends the next one or two at once and the average rate is
     // unchanged. Anything under 200 us is sent now rather than slept for.
-    for (;;) {
-        const long long now = Now();
-        if (now >= deadline) { return; }
-        const long long remainingUs =
-            (deadline - now) * 1000000 / g_frequency.QuadPart;
-        if (remainingUs < 200) { return; }
-        if (pacingTimer) {
-            LARGE_INTEGER due{};
-            due.QuadPart = -(remainingUs * 10);   // relative, in 100 ns units
-            if (SetWaitableTimerEx(pacingTimer, &due, 0, nullptr, nullptr, nullptr, 0)) {
-                WaitForSingleObject(pacingTimer, 50);
-                continue;
-            }
-        }
-        Sleep(1);
-    }
+    WaitOnTimer(pacingTimer, deadline);
 }
 
 void MediaSession::Impl::SendPicture(const Picture& picture) {
@@ -642,7 +648,21 @@ void MediaSession::Impl::RunCapture() {
     // spends bitrate/fps on each, so the stream ran at two or more times the
     // bitrate asked for, the sender fell behind, and its queue was thrown
     // away with a keyframe over and over whenever anything moved.
-    const double frameMs = 1000.0 / (double) (active.fps ? active.fps : 60);
+    const long long frameTicks = g_frequency.QuadPart / (long long) (active.fps ? active.fps : 60);
+    const long long slackTicks = g_frequency.QuadPart / 1000;   // 1 ms
+    // Its own high-resolution timer, as the sender has: a plain Sleep is held
+    // to the system tick -- 15.6 ms for a process whose window is hidden in
+    // the tray, which this host's usually is -- and a 16.7 ms slot became 31.
+    HANDLE frameTimer = CreateWaitableTimerExW(nullptr, nullptr,
+                                               CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                               TIMER_ALL_ACCESS);
+    struct CloseTimer {
+        HANDLE handle;
+        ~CloseTimer() { if (handle) { CloseHandle(handle); } }
+    } closeTimer{frameTimer};
+    // When the next picture is due: an absolute schedule, advanced by a slot
+    // each time, so a wake a little late is not added to every slot after.
+    long long nextDue = Now();
     long long lastEncodedAt = Now();
     // capture->Running() as well, because Acquire never says the source has
     // gone: once a frame exists it hands back the retained one for ever. A
@@ -671,15 +691,15 @@ void MediaSession::Impl::RunCapture() {
         // there is -- this one, or a later one. Not dropped: the last change
         // before the screen goes still is still the picture that goes out. A
         // keyframe being waited for goes now.
-        if (current.isNew && !encoder->IdrPending()) {
-            const double since = MillisBetween(lastEncodedAt, Now());
-            if (since < frameMs - 1.0) {
-                Sleep((DWORD) std::ceil(frameMs - since));
-                continue;
-            }
+        if (current.isNew && !encoder->IdrPending() && Now() < nextDue - slackTicks) {
+            WaitOnTimer(frameTimer, nextDue);
+            continue;
         }
         lastSerial = current.serial;
         lastEncodedAt = Now();
+        // Never more than a slot behind, so a long still spell does not leave
+        // a run of pictures owed at once when things move again.
+        nextDue = std::max(nextDue + frameTicks, lastEncodedAt - frameTicks);
         if (!encoder->Submit(current.texture, current.width, current.height,
                              current.isNew ? current.capturedAt : Now(), false)) {
             // A driver reset, update or crash removes the device without the
