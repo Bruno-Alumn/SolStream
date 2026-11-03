@@ -1073,8 +1073,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let files = dropped.map(\.url)
         let names = dropped.map(\.name)
         guard !files.isEmpty else {
-            say("Folders, and apps and documents that are folders inside, can't be sent. "
-                + "Compress them first (Control-click > Compress), then drop the .zip.", for: 6)
+            say("Only files can be sent, not folders -- apps and some documents are folders "
+                + "inside -- nor links to nothing. Compress a folder first (Control-click > "
+                + "Compress), then drop the .zip.", for: 6)
             return false
         }
         // Said when the rest have gone, not swallowed: a folder dropped with
@@ -1143,12 +1144,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
             }
         }
         func finish() {
-            // Nothing on the PC's clipboard for a stream that has ended: the
-            // window was closed while the last file's answer was on its way.
-            guard !isClosing else {
-                AppWindow.isSendingFiles = false
-                return
-            }
             agent.setClipboardFiles(received) { [weak self] sequence in
                 DispatchQueue.main.async {
                     AppWindow.isSendingFiles = false
@@ -1281,6 +1276,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // A placement answered during the animation left no guard.
         inputCapture?.edgeGuard = canvasPixels(lastPlacement?.resizeBorder ?? 0)
         fullScreenTransitionEnded()
+        // Limits and size were left alone in full screen (see matchWindow):
+        // asked for afresh now the window is its own size again, so what
+        // changed meanwhile -- the title bar hidden, the app's own limits --
+        // is applied and the window snapped to what the host reached.
+        requestResize(settle: true)
     }
 
     func windowDidFailToEnterFullScreen(_ window: NSWindow) {
@@ -1300,7 +1300,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // The mouse back first: a game that had it, and a stream that has
         // ended, left the pointer hidden and frozen over a Try Again it could
         // not reach -- and the way to get it back is only said the first time.
-        inputCapture?.releasePointer("the stream ended")
+        inputCapture?.streamEnded()
         metalView?.setError(title, detail: detail)
     }
 
@@ -1323,10 +1323,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// and is silently clipped to nothing. AppKit sizes and truncates the
     /// subtitle itself, next to the title, and cannot lose it.
     func setOccludedBy(_ name: String?) {
-        // What the poll compares with: told by the host's push alone, a cover
-        // that went away before the next poll -- its "clear" push lost --
-        // left the subtitle up for good, the poll seeing nothing change.
-        wasOccluded = !(name ?? "").isEmpty
         guard let name, !name.isEmpty else {
             window?.subtitle = ""
             return

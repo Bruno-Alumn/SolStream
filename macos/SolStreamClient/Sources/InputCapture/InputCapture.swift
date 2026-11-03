@@ -1027,6 +1027,7 @@ public final class InputCapture {
     /// (`keyStateAnswers`), since a key it wrongly calls held would be
     /// pressed on the PC with nothing ever to release it.
     public func inputBecameLive() {
+        pointerHeldBack = false
         guard isCapturing else { return }
         // Anything still kept back for the PC's focus is dropped, not sent.
         // It was made for the session that has gone: the owner has already
@@ -1839,8 +1840,21 @@ public final class InputCapture {
 
     // MARK: - Captured pointer
 
+    /// The stream has ended: the mouse is given back and not taken again --
+    /// by a move over the picture, a click, or the host's cursor -- until
+    /// input is live once more (`inputBecameLive`). Released alone, the next
+    /// move over the error card took it straight back, the policy still
+    /// seeing a hidden cursor and a pointer inside the picture.
+    public func streamEnded() {
+        pointerHeldBack = true
+        releasePointer("the stream ended")
+    }
+
+    /// See `streamEnded`.
+    private var pointerHeldBack = false
+
     private func capturePointer(_ reason: String) {
-        guard !isPointerCaptured else { return }
+        guard !isPointerCaptured, !pointerHeldBack else { return }
         isPointerCaptured = true
         relativeResidual = .zero
         sensitivity = CGFloat(Self.gamingSensitivity)
