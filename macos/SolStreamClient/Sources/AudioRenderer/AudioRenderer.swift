@@ -171,17 +171,27 @@ public final class AudioRenderer {
     }
 
     /// When packets started arriving with nothing played, in uptime
-    /// nanoseconds; zero while sound is being played. Receive thread only.
+    /// nanoseconds; zero while sound is being played. And when the last
+    /// packet came. Receive thread only.
     private var stallSince: UInt64 = 0
+    private var lastPacketAt: UInt64 = 0
 
     /// Whether output has stalled: nothing read out for two seconds of
-    /// packets arriving. `since` is the caller's to keep between calls.
-    static func stalled(playedLately: Bool, since: inout UInt64, now: UInt64) -> Bool {
-        if playedLately {
+    /// packets arriving -- arriving all along, not two sounds with a silence
+    /// between: the host sends nothing while the PC is quiet, and a short
+    /// sound ended before the device read it was measured across the silence
+    /// to the next one. Nor before the device has read anything at all since
+    /// the unit started: a slow one is starting, not stalled. `since` and
+    /// `lastPacket` are the caller's to keep between calls.
+    static func stalled(playedLately: Bool, hasPlayed: Bool, since: inout UInt64,
+                        lastPacket: inout UInt64, now: UInt64) -> Bool {
+        let paused = lastPacket != 0 && now &- lastPacket > 250_000_000
+        lastPacket = now
+        if playedLately || !hasPlayed {
             since = 0
             return false
         }
-        if since == 0 {
+        if since == 0 || paused {
             since = now
             return false
         }
@@ -201,7 +211,8 @@ public final class AudioRenderer {
         let now = state.withLock { $0 }
         if now.running {
             guard Self.stalled(playedLately: ringBuffer.wasPlayed(within: 1.5),
-                               since: &stallSince,
+                               hasPlayed: ringBuffer.hasPlayed,
+                               since: &stallSince, lastPacket: &lastPacketAt,
                                now: DispatchTime.now().uptimeNanoseconds) else { return true }
             // Running by its own account, and nothing read out for seconds
             // while packets arrive: CoreAudio stopped calling -- its server
@@ -302,6 +313,10 @@ public final class AudioRenderer {
     /// that number is the only thing that distinguishes "no output device" from
     /// "format refused" after the fact.
     private func setupAudio() {
+        // A new unit: what the last one read says nothing about this one, and
+        // a device slow to start -- a headset changing profile, an AirPlay
+        // speaker connecting -- is not stalled before it has read once.
+        ringBuffer.forgetPlayed()
         // Describe the audio unit.
         var componentDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
@@ -678,6 +693,21 @@ final class AudioRingBuffer {
     /// merely written in -- within the last `seconds`. CoreAudio stopping the
     /// callback (a sound server restart, a device gone with nothing to fall back
     /// on) leaves writes arriving and nothing read.
+    /// Forget when the sound was last played: a new unit has not read any
+    /// yet, and must not be judged by the one before it.
+    func forgetPlayed() {
+        os_unfair_lock_lock(lock)
+        lastPlayed = 0
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Whether the device has read anything since `forgetPlayed`.
+    var hasPlayed: Bool {
+        os_unfair_lock_lock(lock)
+        defer { os_unfair_lock_unlock(lock) }
+        return lastPlayed > 0
+    }
+
     func wasPlayed(within seconds: Double) -> Bool {
         os_unfair_lock_lock(lock)
         let last = lastPlayed

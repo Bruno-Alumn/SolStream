@@ -361,8 +361,14 @@ public final class VideoDecoder {
             // new IDR they decode against something that never existed, and
             // the picture smears until the host happens to send one. Asked
             // for, waiting longer each time it goes on failing.
-            if status != noErr {
-                requestKeyframe(after: recovery.frameLost(Self.keyframeRequestInterval))
+            // Not when the frame in hand is an IDR: that repairs it already.
+            if status != noErr, !beforeIdr {
+                let wait = recovery.frameLost(Self.keyframeRequestInterval)
+                if wait == 0 || Date().timeIntervalSince(lastKeyframeRequest) >= wait {
+                    Log.info("[decode] a frame was lost (\(status)); asking for an IDR"
+                             + (recovery.framesLost > 1 ? " (\(recovery.framesLost) in a row)" : ""))
+                    requestKeyframeNow(throttled: false)
+                }
             }
             return
         }
