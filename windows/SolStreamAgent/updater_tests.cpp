@@ -1738,6 +1738,16 @@ void TestForwardableLinks() {
     CHECK(!IsForwardableLink("https://example.com/a b"));
     CHECK(!IsForwardableLink("https://example.com/\nx"));
     CHECK(!IsForwardableLink("https://example.com/" + std::string(8200, 'a')));
+    // A space some app left unencoded is encoded, as a browser would.
+    CHECK(EncodeSpaces("https://example.com/a b c") == "https://example.com/a%20b%20c");
+    CHECK(IsForwardableLink(EncodeSpaces("https://example.com/a b")));
+    CHECK(EncodeSpaces("") .empty());
+    // The scheme in any case: a "Mailto:" with no Mac must not go to Edge,
+    // which hands it straight back.
+    CHECK(IsMailLink("mailto:a@b") && IsMailLink("Mailto:a@b") && IsMailLink("MAILTO:a@b"));
+    CHECK(!IsMailLink("mailto") && !IsMailLink("https://mailto:x") && !IsMailLink(""));
+    CHECK(IsWebLink("https://x") && IsWebLink("HtTp://x") && !IsWebLink("httpx://x"));
+    CHECK(!IsWebLink("file:///C:/x") && !IsWebLink("https") && !IsWebLink("mailto:x"));
 }
 
 /// A paired Mac can't fill the PC's disk: no file over 8 GB, and none that
@@ -2039,6 +2049,16 @@ void TestClipboardHtml() {
           != std::string::npos);
     const std::string marked = "<html><body><p><!--StartFragment-->y<!--EndFragment--></p></body></html>";
     CHECK(HtmlFromCfHtml(CfHtmlFromHtml(marked)) == marked);
+    // Markers out of order -- the end first -- are dropped and the body
+    // marked afresh: a header with EndFragment before StartFragment is one
+    // Word and Excel refuse.
+    const std::string backwards =
+        "<html><body><!--EndFragment-->w<!--StartFragment--></body></html>";
+    const std::string wrapped = CfHtmlFromHtml(backwards);
+    CHECK(wrapped.find("<body><!--StartFragment-->w<!--EndFragment--></body>") != std::string::npos);
+    const size_t from = std::stoul(wrapped.substr(wrapped.find("StartFragment:") + 14, 10));
+    const size_t to = std::stoul(wrapped.substr(wrapped.find("EndFragment:") + 12, 10));
+    CHECK(from < to && wrapped.compare(from, to - from, "w") == 0);
     // Upper-case tags find the body too.
     CHECK(CfHtmlFromHtml("<HTML><BODY>z</BODY></HTML>").find("<BODY><!--StartFragment-->z<!--EndFragment--></BODY>")
           != std::string::npos);

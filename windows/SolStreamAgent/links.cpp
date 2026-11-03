@@ -2,6 +2,8 @@
 
 #include "links.h"
 
+#include <cstring>
+
 #include <windows.h>
 #include <shlobj.h>
 
@@ -61,6 +63,44 @@ bool IsForwardableLink(const std::string& url) {
     // A web link has somewhere to go: "https://" and a host.
     return (scheme == "http" || scheme == "https")
         && url.compare(colon, 3, "://") == 0 && colon + 3 < url.size();
+}
+
+std::string EncodeSpaces(const std::string& url) {
+    std::string out;
+    out.reserve(url.size());
+    for (const char c : url) {
+        if (c == ' ') {
+            out += "%20";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+namespace {
+
+bool HasScheme(const std::string& url, const char* scheme) {
+    const size_t length = std::strlen(scheme);
+    if (url.size() <= length || url[length] != ':') {
+        return false;
+    }
+    for (size_t i = 0; i < length; ++i) {
+        if (std::tolower(static_cast<unsigned char>(url[i])) != scheme[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool IsMailLink(const std::string& url) {
+    return HasScheme(url, "mailto");
+}
+
+bool IsWebLink(const std::string& url) {
+    return HasScheme(url, "http") || HasScheme(url, "https");
 }
 
 void RegisterLinkHandler(const std::wstring& exe) {

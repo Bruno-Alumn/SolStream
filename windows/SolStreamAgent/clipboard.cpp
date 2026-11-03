@@ -245,13 +245,24 @@ std::string HtmlFromCfHtml(const std::string& cf_html) {
 
 std::string CfHtmlFromHtml(const std::string& html) {
     std::string document;
-    if (html.find(kStartFragment) != std::string::npos
-        && html.find(kEndFragment) != std::string::npos) {
+    // Marked already, and in order: an end marker before the start would make
+    // a header Word and Excel refuse, so that is wrapped like an unmarked one.
+    const size_t marked_start = html.find(kStartFragment);
+    const size_t marked_end = marked_start == std::string::npos
+        ? std::string::npos : html.find(kEndFragment, marked_start);
+    if (marked_end != std::string::npos) {
         document = html;
     } else {
+        // Any stray marker goes, so the ones added below are the only ones.
+        std::string clean = html;
+        for (const char* marker : {kStartFragment, kEndFragment}) {
+            for (size_t at = clean.find(marker); at != std::string::npos; at = clean.find(marker)) {
+                clean.erase(at, std::strlen(marker));
+            }
+        }
         // The body's contents are the fragment when there is a body; a Mac
         // copy is often a whole document without the markers.
-        std::string lower = html;
+        std::string lower = clean;
         for (char& c : lower) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
@@ -260,11 +271,11 @@ std::string CfHtmlFromHtml(const std::string& html) {
         const size_t body_close = lower.rfind("</body>");
         if (body_open_end != std::string::npos && body_close != std::string::npos
             && body_close > body_open_end) {
-            document = html.substr(0, body_open_end + 1) + kStartFragment
-                     + html.substr(body_open_end + 1, body_close - body_open_end - 1)
-                     + kEndFragment + html.substr(body_close);
+            document = clean.substr(0, body_open_end + 1) + kStartFragment
+                     + clean.substr(body_open_end + 1, body_close - body_open_end - 1)
+                     + kEndFragment + clean.substr(body_close);
         } else {
-            document = std::string("<html><body>") + kStartFragment + html + kEndFragment
+            document = std::string("<html><body>") + kStartFragment + clean + kEndFragment
                      + "</body></html>";
         }
     }
@@ -278,7 +289,8 @@ std::string CfHtmlFromHtml(const std::string& html) {
     const size_t start = static_cast<size_t>(header_length);
     const size_t fragment_start =
         start + document.find(kStartFragment) + std::strlen(kStartFragment);
-    const size_t fragment_end = start + document.find(kEndFragment);
+    const size_t fragment_end =
+        start + document.find(kEndFragment, document.find(kStartFragment));
     char header[160];
     std::snprintf(header, sizeof(header), kHeader, start, start + document.size(),
                   fragment_start, fragment_end);

@@ -225,6 +225,13 @@ bool PngToDib(const std::vector<unsigned char>& png, std::vector<unsigned char>&
 }
 
 /// The bytes a clipboard format holds. The caller has the clipboard open.
+/// The most of one clipboard format read: a DIB of the largest picture a Mac
+/// takes (33 megapixels, 4 bytes each) and its header.
+constexpr size_t kMaxClipboardFormatBytes = 160u * 1024 * 1024;
+
+/// A clipboard format's bytes, or none past `kMaxClipboardFormatBytes`: a
+/// picture bigger than any that could be sent is not copied whole to find
+/// that out, and an allocation that size failing would end the host.
 std::vector<unsigned char> FormatBytes(UINT format) {
     std::vector<unsigned char> bytes;
     HANDLE handle = GetClipboardData(format);
@@ -232,10 +239,18 @@ std::vector<unsigned char> FormatBytes(UINT format) {
         return bytes;
     }
     const size_t size = GlobalSize(handle);
+    if (size > kMaxClipboardFormatBytes) {
+        Log("[transfer] the clipboard holds a %zu-byte picture; too big to read", size);
+        return bytes;
+    }
     const void* data = GlobalLock(handle);
     if (data && size > 0) {
-        bytes.assign(static_cast<const unsigned char*>(data),
-                     static_cast<const unsigned char*>(data) + size);
+        try {
+            bytes.assign(static_cast<const unsigned char*>(data),
+                         static_cast<const unsigned char*>(data) + size);
+        } catch (const std::bad_alloc&) {
+            bytes.clear();
+        }
     }
     if (data) {
         GlobalUnlock(handle);
@@ -386,6 +401,9 @@ void AbandonTransfers() {
     // the host's life after the Mac that was sending it left.
     std::vector<unsigned char>().swap(g_incoming);
     g_incoming_total = 0;
+    // And the last PC picture made for a Mac, up to 32 MB, kept until a
+    // different one was asked for -- by a Mac that may never come back.
+    g_outgoing = OutgoingImage{};
 }
 
 std::string Base64Encode(const unsigned char* bytes, size_t size) {

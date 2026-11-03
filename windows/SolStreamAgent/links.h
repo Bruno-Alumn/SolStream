@@ -18,6 +18,14 @@ namespace solstream {
 /// characters, and at most a few kilobytes.
 bool IsForwardableLink(const std::string& url);
 
+/// `url` with each space written %20, as a browser would: some apps hand a
+/// link over unencoded, and the click's one quoted argument keeps it whole.
+std::string EncodeSpaces(const std::string& url);
+
+/// Whether `url`'s scheme -- in any case -- is mailto, or http or https.
+bool IsMailLink(const std::string& url);
+bool IsWebLink(const std::string& url);
+
 /// Offer SolStream in Settings > Default apps for http, https and mailto,
 /// opening links with `exe --open-url`. Machine-wide, as the install is; the
 /// choice of default stays each user's. Logged, never fatal.
