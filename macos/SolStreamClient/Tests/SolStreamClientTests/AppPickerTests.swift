@@ -256,5 +256,12 @@ final class AppPickerTests: XCTestCase {
             .contains("reconnecting"))
         XCTAssertTrue(AppDelegate.openFailedOffline(host: "pc", reconnecting: false)
             .contains("connect again"))
+        // What ended it, said again rather than a guess.
+        let busy = "pc is already streaming to another Mac. Disconnect there first."
+        XCTAssertEqual(AppDelegate.openFailedOffline(host: "pc", reconnecting: false,
+                                                     lastFailure: busy), busy)
+        // Reconnecting says so, whatever failed last.
+        XCTAssertTrue(AppDelegate.openFailedOffline(host: "pc", reconnecting: true,
+                                                    lastFailure: busy).contains("reconnecting"))
     }
 }

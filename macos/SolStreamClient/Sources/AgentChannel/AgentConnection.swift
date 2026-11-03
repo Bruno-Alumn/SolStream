@@ -177,6 +177,11 @@ public final class AgentConnection {
     /// asleep, rather than one that refused or a name that did not resolve.
     /// Guarded by `stateLock`; see `lastFailureMightBeAsleep`.
     private var failureMightBeAsleep = false
+    /// The last failure said, until the connection is up again: the reason a
+    /// connection that will not come back by itself ended -- another Mac
+    /// streaming, a PC that may be impersonated -- for whoever asks after the
+    /// screen that showed it has gone. Guarded by `stateLock`.
+    private var lastFailureText: String?
     private var buffer = Data()
     /// Replies arrive in request order, so a FIFO of continuations is enough —
     /// no request ids needed in the protocol.
@@ -2789,7 +2794,22 @@ public final class AgentConnection {
     }
 
     private func report(_ state: State) {
+        stateLock.lock()
+        switch state {
+        case .failed(let message): lastFailureText = message
+        case .connected: lastFailureText = nil
+        default: break
+        }
+        stateLock.unlock()
         DispatchQueue.main.async { [weak self] in self?.onState?(state) }
+    }
+
+    /// The last failure this connection reported, while it has not come back
+    /// since; see `lastFailureText`.
+    public var lastFailureMessage: String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastFailureText
     }
 
     // MARK: - Parsing

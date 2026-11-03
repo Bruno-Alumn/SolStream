@@ -703,7 +703,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !agent.willReconnect {
             // Refused for good (busy, impersonation) or already closed: nothing
             // is coming, so do not leave the spinner up.
-            picker.showFailure("The connection to \(host) was lost. Go back and connect again.")
+            picker.showFailure(Self.openFailedOffline(host: host, reconnecting: false,
+                                                      lastFailure: agent.lastFailureMessage))
         }
         // Otherwise the connection is in its reconnect backoff: the spinner
         // stays, the reconnect's own greeting fills the list, and `onState`
@@ -887,7 +888,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // own words -- restart SolStream on the PC, the app opened no
             // window -- blamed the PC or the app for a dropped connection.
             picker?.showFailure(Self.openFailedOffline(host: agent.hostName,
-                                                       reconnecting: agent.willReconnect),
+                                                       reconnecting: agent.willReconnect,
+                                                       lastFailure: agent.lastFailureMessage),
                                 isConnection: true)
         }
     }
@@ -953,11 +955,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// What a failed open says when the connection is what failed.
-    static func openFailedOffline(host: String, reconnecting: Bool) -> String {
-        reconnecting
-            ? "The connection to \(host) dropped. SolStream is reconnecting; "
-              + "try again once the list refreshes."
-            : "The connection to \(host) was lost. Go back and connect again."
+    /// - Parameter lastFailure: what ended a connection that will not come
+    ///   back, said again: shown a moment before, on a screen that has gone,
+    ///   it is the one thing that says whether connecting again can help --
+    ///   it cannot while another Mac is streaming.
+    static func openFailedOffline(host: String, reconnecting: Bool,
+                                  lastFailure: String? = nil) -> String {
+        if reconnecting {
+            return "The connection to \(host) dropped. SolStream is reconnecting; "
+                + "try again once the list refreshes."
+        }
+        if let lastFailure, !lastFailure.isEmpty { return lastFailure }
+        return "The connection to \(host) ended. Choose Back, then connect again."
     }
 
     /// Stream one window, keeping the picker up until there is one to look at.
