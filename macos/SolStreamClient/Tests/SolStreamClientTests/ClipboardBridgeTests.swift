@@ -683,7 +683,8 @@ final class ClipboardBridgeTests: XCTestCase {
         fake.answerImageRead(picture)
         settle()
         XCTAssertEqual(pasteboard.data(forType: .png), picture)
-        XCTAssertNotNil(pasteboard.data(forType: .tiff), "for what reads only TIFF")
+        XCTAssertNotNil(pasteboard.data(forType: .tiff),
+                        "macOS offers the PNG as TIFF, for what reads only that")
 
         // Not sent back: it is the PC's own.
         streamHasKeyboard = true

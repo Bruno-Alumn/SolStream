@@ -130,9 +130,6 @@ final class ClipboardBridge {
     /// The Mac copy that the host failed to take once and is sent again; see
     /// `sendAgainOnce`.
     private var retriedChangeCount: Int?
-    /// Kept while the PC's picture is on the pasteboard, so its TIFF can still
-    /// be made when asked for; see `TIFFProvider`.
-    private var tiffProvider: TIFFProvider?
     private var inFlight = false
     /// A sync asked for while a request was on the wire, run as soon as it is
     /// answered rather than left to the next tick.
@@ -748,36 +745,14 @@ final class ClipboardBridge {
                 self.lastSyncedImage = digest
                 self.lastSyncedText = nil
                 self.pasteboard.clearContents()
-                // PNG, and TIFF beside it for what reads only that -- made
-                // when something asks for it. Made here, on the main thread,
-                // a picture near the host's limit decoded into a TIFF of a
-                // hundred megabytes and held the stream for as long, for the
-                // many apps that only ever read the PNG.
-                let item = NSPasteboardItem()
-                item.setData(png, forType: .png)
-                let provider = TIFFProvider(png: png)
-                item.setDataProvider(provider, forTypes: [.tiff])
-                self.tiffProvider = provider
-                self.pasteboard.writeObjects([item])
+                // PNG alone. macOS offers it as TIFF to whatever reads only
+                // that, converting in the reader's process. A TIFF made here,
+                // on the main thread, was a hundred-odd megabytes for a
+                // picture near the host's limit and held the stream as long.
+                self.pasteboard.setData(png, forType: .png)
                 self.lastLocalChangeCount = self.pasteboard.changeCount
                 Log.info("[clipboard] brought a picture from the host (\(png.count) bytes)")
             }
         }
-    }
-}
-
-/// The TIFF of a picture from the PC, made only when an app asks the pasteboard
-/// for one. Holds the PNG it is made from.
-final class TIFFProvider: NSObject, NSPasteboardItemDataProvider {
-    private let png: Data
-
-    init(png: Data) {
-        self.png = png
-    }
-
-    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem,
-                    provideDataForType type: NSPasteboard.PasteboardType) {
-        guard type == .tiff, let tiff = NSImage(data: png)?.tiffRepresentation else { return }
-        item.setData(tiff, forType: .tiff)
     }
 }
