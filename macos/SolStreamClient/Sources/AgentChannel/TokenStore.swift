@@ -228,6 +228,15 @@ public enum TokenStore {
     /// for their tokens or deleted, and the name records go to a suite of
     /// the process's own unless a test gave one.
     static let runningTests = NSClassFromString("XCTestCase") != nil
+        || environmentDirectory != nil
+
+    /// A folder for the token file given in the environment, as the UI tests
+    /// give the app they launch: that app is the real binary, without XCTest
+    /// loaded, and otherwise read the person's tokens and moved -- deleting --
+    /// the old keychain items. Set, the keychain is left alone too.
+    static let environmentDirectory: URL? = ProcessInfo.processInfo
+        .environment["SOLSTREAM_TOKEN_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+        .map { URL(fileURLWithPath: $0, isDirectory: true) }
 
     private static let unguardedTestDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("solstream-unguarded-test-\(ProcessInfo.processInfo.processIdentifier)",
@@ -236,6 +245,9 @@ public enum TokenStore {
     static var fileURL: URL {
         if let directoryOverride {
             return directoryOverride.appendingPathComponent("pairing-tokens.json")
+        }
+        if let environmentDirectory {
+            return environmentDirectory.appendingPathComponent("pairing-tokens.json")
         }
         if unguardedTest {
             return unguardedTestDirectory.appendingPathComponent("pairing-tokens.json")

@@ -101,7 +101,17 @@ final class SolStreamClientUITests: XCTestCase {
         let process = Process()
         process.executableURL = app
         process.currentDirectoryURL = URL(fileURLWithPath: workDir)
-        process.arguments = args
+        // The app is the real binary: without these it read this Mac's own
+        // pairing tokens, moved -- deleting -- older builds' keychain items,
+        // and opened on the last PC used and knocked on it. A token folder of
+        // its own, and no last PC, by the argument domain, which is read
+        // before the app's own preferences.
+        let tokens = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-uitest-\(UUID().uuidString)", isDirectory: true)
+        var environment = ProcessInfo.processInfo.environment
+        environment["SOLSTREAM_TOKEN_DIR"] = tokens.path
+        process.environment = environment
+        process.arguments = args + ["-SolStream.lastHost", "", "-SolStream.recentHosts", "()"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
