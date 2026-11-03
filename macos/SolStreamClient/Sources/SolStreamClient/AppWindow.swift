@@ -1031,7 +1031,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let files = dropped.map(\.url)
         let names = dropped.map(\.name)
         guard !files.isEmpty else {
-            say("Folders can't be sent. Compress it first (Control-click > Compress), then "
+            say("Folders can't be sent. Compress them first (Control-click > Compress), then "
                 + "drop the .zip.", for: 6)
             return false
         }

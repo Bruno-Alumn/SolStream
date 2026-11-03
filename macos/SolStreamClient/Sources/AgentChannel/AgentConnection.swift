@@ -1007,8 +1007,8 @@ public final class AgentConnection {
         case .posix(.EHOSTUNREACH), .posix(.ENETUNREACH):
             // This Mac's side: no route, or macOS keeping SolStream off the
             // local network.
-            return "This Mac can't reach \(host). Check the Mac's Wi-Fi or Tailscale, and that "
-                + "SolStream is on in System Settings > Privacy & Security > Local Network."
+            return "This Mac can't reach \(host). Check the Mac's Wi-Fi or Tailscale, and "
+                + "SolStream's Local Network access in System Settings."
         case .posix(.ETIMEDOUT):
             return "No answer from \(host). Check the PC is awake, someone is signed in to "
                 + "Windows, and SolStream is running."
@@ -2241,11 +2241,11 @@ public final class AgentConnection {
         if reply["message"] as? String == "no such window" {
             return "The app's window has already closed on the PC."
         }
-        // Quit asks, as the close box does, and an app can say no: most
-        // often it is asking to save. Force Quit is Windows refusing.
+        // Every refusal from a current PC carries its own reason; this is an
+        // older or unexpected answer.
         return force
             ? "Windows wouldn't end it. Close it at the PC, or restart the PC."
-            : "It may be asking to save on the PC. Answer it there, or use Force Quit."
+            : "The PC didn't quit it. Check it on the PC, or use Force Quit."
     }
 
     // MARK: - Transport

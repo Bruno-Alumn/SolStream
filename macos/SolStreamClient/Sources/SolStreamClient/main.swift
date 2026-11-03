@@ -861,9 +861,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.failOpen("\(app.name) closed its first window, often a splash or "
-                                          + "update screen. When it has finished on the PC, pick it "
-                                          + "from the open windows.", for: agent)
+                            self.failOpen("\(app.name) closed its first window, a splash or "
+                                          + "update screen. Once it's ready, pick it from the open "
+                                          + "windows.", for: agent)
                             return
                         }
                         self.attach(target, host: host, agent: agent)
@@ -904,9 +904,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 + "here. Answer it at the PC, then pick \(app)'s Open window row. To avoid "
                 + "this, turn off \"Run as administrator\" for the app on the PC."
         case .declined:
-            return "\(app) needs administrator permission, and it was declined on \(host). "
-                + "Open it again and choose Yes on the PC, or turn off \"Run as administrator\" "
-                + "for it there."
+            return "\(app) needs administrator permission and \(host) declined. Open it again "
+                + "and choose Yes on the PC."
         case .missing:
             // Not "uninstalled": a game on a drive that isn't plugged in, or
             // a network share that is down, looks the same from here.
@@ -923,15 +922,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// would not open at 4096x2560" -- so it is read for what to do, not shown.
     static func startTroubleText(_ reason: String?, host: String) -> String {
         let why = (reason ?? "").lowercased()
-        if why.contains("captur") {
+        if why.contains("graphics.capture is not available") {
+            return "\(host)'s Windows can't capture apps. Update Windows on the PC, then open "
+                + "the app again."
+        }
+        if why.contains("window could not be captured") {
+            return "\(host) couldn't capture the app's window. Check it's still open and the PC "
+                + "is unlocked, then open the app again."
+        }
+        if why.contains("could not be captured") || why.contains("nothing was ever captured") {
             return "\(host) couldn't capture the picture. Check the PC is unlocked with its "
                 + "screen on, then open the app again."
         }
         if why.contains("encoder") {
-            return "The PC's graphics card couldn't encode the picture. Choose H.264 or a lower "
-                + "quality in Settings, then open the app again."
+            // HEVC that will not open falls back to H.264 on the PC before
+            // it answers, so H.264 is worth saying only while HEVC failed.
+            return why.contains("hevc")
+                ? "The PC's graphics card couldn't encode HEVC. Choose H.264 in Settings, then "
+                    + "open the app again."
+                : "The PC's graphics card couldn't start encoding. Close anything recording "
+                    + "on the PC, then open the app again."
         }
-        if why.contains("port") {
+        // Not a bare "port": "the media keys would not import" has one.
+        if why.contains("udp port") || why.contains("is taken") {
             return "Another program on \(host) is using SolStream's port. Restart the PC, then "
                 + "connect again."
         }
@@ -1527,9 +1540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // back by restarting it, and Try Again is the honest offer
                     // rather than a fourth "Reconnecting…" and a fifth.
                     self.showEnded("Lost the stream",
-                                   detail: "\(host) is connected but sent no picture. Check the "
-                                       + "PC isn't locked or showing a Windows prompt, then "
-                                       + "choose Try Again and open the app again.")
+                                   detail: "No picture from \(host). Check the PC isn't locked "
+                                       + "or showing a Windows prompt, and that nothing on the "
+                                       + "network blocks SolStream, then choose Try Again.")
                     return
                 }
                 // With the agent channel down too, `onReconnected` recovers.

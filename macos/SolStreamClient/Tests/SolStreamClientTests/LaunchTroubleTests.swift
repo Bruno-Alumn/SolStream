@@ -38,8 +38,17 @@ final class LaunchTroubleTests: XCTestCase {
             "the hardware HEVC encoder would not open at 4096x2560", host: "pc")
         XCTAssertTrue(encoder.contains("H.264"))
         XCTAssertFalse(encoder.contains("4096"))
-        let port = AppDelegate.startTroubleText("UDP port 47999 is taken", host: "pc")
+        // Fallen back to H.264 already: choosing it would change nothing.
+        let h264 = AppDelegate.startTroubleText(
+            "the hardware H264 encoder would not open at 4096x2560", host: "pc")
+        XCTAssertFalse(h264.contains("Choose H.264"))
+        let port = AppDelegate.startTroubleText("UDP port 47631 is taken", host: "pc")
         XCTAssertTrue(port.contains("Restart the PC"))
+        // "import" is not a port.
+        let keys = AppDelegate.startTroubleText("the media keys would not import", host: "pc")
+        XCTAssertFalse(keys.contains("port"))
+        let window = AppDelegate.startTroubleText("the window could not be captured", host: "pc")
+        XCTAssertTrue(window.contains("still open"))
         let other = AppDelegate.startTroubleText(nil, host: "pc")
         XCTAssertTrue(other.contains("Restart SolStream on the PC"))
     }
