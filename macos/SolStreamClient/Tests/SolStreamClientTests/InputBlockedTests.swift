@@ -7,6 +7,8 @@ final class InputBlockedTests: XCTestCase {
     func testEachReasonSaysWhatToDo() {
         let secure = AppDelegate.inputBlockedNote("secureDesktop", app: nil)
         XCTAssertTrue(secure?.contains("Answer it at the PC") == true)
+        XCTAssertTrue(AppDelegate.inputBlockedNote("screenSaver", app: nil)?
+            .contains("screen saver") == true)
         let elevated = AppDelegate.inputBlockedNote("elevated", app: "Taskmgr.exe")
         XCTAssertTrue(elevated?.hasPrefix("Taskmgr.exe runs as administrator") == true)
         XCTAssertTrue(AppDelegate.inputBlockedNote("elevated", app: "")?

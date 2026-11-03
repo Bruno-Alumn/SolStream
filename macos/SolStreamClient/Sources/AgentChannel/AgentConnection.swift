@@ -301,12 +301,11 @@ public final class AgentConnection {
     /// A streamed application went full screen on the host (true), or came
     /// out of it (false).
     public var onFullScreen: ((UInt64, Bool) -> Void)?
+    /// The PC said its input is blocked -- "secureDesktop", "screenSaver" or
+    /// "elevated", with the app's name -- or nil once it is not. Main queue.
+    public var onInputBlocked: ((String?, String?) -> Void)?
     /// A link clicked on the host, with SolStream chosen as its browser there,
     /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
-    /// The PC said its input is blocked -- "secureDesktop" or "elevated",
-    /// with the app's name -- or nil once it is not. Main queue.
-    public var onInputBlocked: ((String?, String?) -> Void)?
-
     public var onOpenLink: ((String) -> Void)?
     /// A file sent from the host with Send to Mac: its offer number, name
     /// and size, to fetch with `download`.

@@ -740,6 +740,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         agent.onWindowsChanged = { fill(false) }
         agent.onOpenLink = { [weak self] in self?.openLinkFromPC($0) }
+        if existing == nil {
+            // A new connection: the host says again what blocks it, if anything.
+            inputBlockedNow = nil
+            inputBlockedShown = false
+        }
         agent.onInputBlocked = { [weak self] reason, app in self?.inputBlocked(reason, app: app) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
@@ -1488,6 +1493,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
             }
             appWindow.show()
+            if let note = inputBlockedNow {
+                appWindow.tell(note)
+                inputBlockedShown = true
+            }
 
             // Size the host window to this one and pin it there. The window owns
             // its own geometry so the initial placement and a later drag go
@@ -2429,6 +2438,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// here. The first held back is said in the stream window.
     private var linkLimit = LinkRateLimit()
 
+    /// What the PC last said blocks its input, kept so a stream window opened
+    /// while it lasts says it too. Nil when nothing is in the way.
+    var inputBlockedNow: String?
+    /// Whether a blocked note was shown, so "can control again" is said only
+    /// after one.
+    var inputBlockedShown = false
+
     /// What the stream window says when the PC says its input is blocked,
     /// and when it is not any more. Said in the window in front, or the
     /// first: input that goes nowhere looks like SolStream broken, and the
@@ -2436,11 +2452,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func inputBlocked(_ reason: String?, app: String?) {
         guard let note = Self.inputBlockedNote(reason, app: app) else { return }
         Log.info("[input] \(reason ?? "unblocked")\(app.map { " (\($0))" } ?? "")")
-        (appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first)?.tell(note)
+        inputBlockedNow = reason == nil ? nil : note
+        if reason == nil && !inputBlockedShown { return }
+        let window = appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
+        window?.tell(note)
+        inputBlockedShown = reason != nil && window != nil
     }
 
     static func inputBlockedNote(_ reason: String?, app: String?) -> String? {
         switch reason {
+        case "screenSaver":
+            return "The PC's screen saver is on, and SolStream can't control it. Wake the PC at "
+                + "its own mouse or keyboard."
         case "secureDesktop":
             return "Windows is showing a secure screen -- a permission prompt, Ctrl+Alt+Del or "
                 + "the lock screen -- that SolStream can't control. Answer it at the PC."

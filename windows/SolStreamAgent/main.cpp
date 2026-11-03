@@ -5617,26 +5617,34 @@ bool HiddenByApplication(const CURSORINFO& info) {
     return GetSystemMetrics(SM_MOUSEPRESENT) != 0;
 }
 
-/// Whether the desktop taking input is the user's own, rather than the lock
-/// screen, Ctrl+Alt+Del or a UAC prompt -- which a process in the user's
-/// session cannot open, or finds under another name.
-bool OnUserDesktop() {
+/// The input desktop's name -- "Default" for the user's own, "Winlogon" for
+/// UAC, Ctrl+Alt+Del and the lock screen, "Screen-saver" -- or empty when it
+/// cannot be opened, which only those secure ones do to us.
+std::wstring InputDesktopName() {
     HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
     if (!input) {
-        return false;
+        return {};
     }
     wchar_t name[64] = {};
     const BOOL named = GetUserObjectInformationW(input, UOI_NAME, name, sizeof(name), nullptr);
     CloseDesktop(input);
-    return named && _wcsicmp(name, L"Default") == 0;
+    return named ? name : L"";
 }
 
-/// A process's mandatory integrity level (SECURITY_MANDATORY_*_RID), or 0
-/// when it cannot be read.
+/// Whether the desktop taking input is the user's own, rather than the lock
+/// screen, Ctrl+Alt+Del or a UAC prompt -- which a process in the user's
+/// session cannot open, or finds under another name.
+bool OnUserDesktop() {
+    return _wcsicmp(InputDesktopName().c_str(), L"Default") == 0;
+}
+
+/// A process's mandatory integrity level (SECURITY_MANDATORY_*_RID); 0 when
+/// it cannot be read, and MAXDWORD when the token is refused us -- another
+/// user's elevated app, or SYSTEM's: either way above this host.
 DWORD IntegrityOf(HANDLE process) {
     HANDLE token = nullptr;
     if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
-        return 0;
+        return GetLastError() == ERROR_ACCESS_DENIED ? MAXDWORD : 0;
     }
     DWORD level = 0;
     DWORD size = 0;
@@ -5651,40 +5659,62 @@ DWORD IntegrityOf(HANDLE process) {
     return level;
 }
 
+/// What InputBlockedReason says when it cannot tell: no window in front for
+/// a moment, a process gone. The last answer stands.
+constexpr const char* kBlockedUnknown = "?";
+
 /// Why the Mac's input cannot reach the PC now: "secureDesktop" -- a UAC
-/// prompt, Ctrl+Alt+Del or the lock screen has it -- or "elevated", with the
-/// app's name in `app`: the window in front runs at a higher integrity than
-/// this host, and Windows drops what is sent to it without a word, SendInput
-/// saying it worked. Empty when nothing is in the way.
+/// prompt, Ctrl+Alt+Del or the lock screen has it -- "screenSaver", or
+/// "elevated", with the app's name in `app`: the window in front runs at a
+/// higher integrity than this host, and Windows drops what is sent to it
+/// without a word, SendInput saying it worked. Empty when nothing is in the
+/// way, kBlockedUnknown when it cannot be told.
 std::string InputBlockedReason(std::string& app) {
     app.clear();
-    if (!OnUserDesktop()) {
+    const std::wstring desktop = InputDesktopName();
+    if (_wcsicmp(desktop.c_str(), L"Screen-saver") == 0) {
+        return "screenSaver";
+    }
+    if (_wcsicmp(desktop.c_str(), L"Default") != 0) {
         return "secureDesktop";
     }
-    static const DWORD own = IntegrityOf(GetCurrentProcess());
+    // Read until it works: one failed read must not turn the check off for
+    // the life of the host.
+    static DWORD own = 0;
+    if (own == 0) {
+        own = IntegrityOf(GetCurrentProcess());
+        if (own == 0 || own == MAXDWORD) {
+            own = 0;
+            return kBlockedUnknown;
+        }
+    }
     const HWND front = GetForegroundWindow();
     DWORD pid = 0;
-    if (!front || !GetWindowThreadProcessId(front, &pid) || pid == 0
-        || pid == GetCurrentProcessId()) {
+    if (!front || !GetWindowThreadProcessId(front, &pid) || pid == 0) {
+        return kBlockedUnknown;
+    }
+    if (pid == GetCurrentProcessId()) {
         return {};
     }
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) {
-        return {};
+        return kBlockedUnknown;
     }
     const DWORD theirs = IntegrityOf(process);
-    if (own != 0 && theirs > own) {
+    std::string reason;
+    if (theirs == 0) {
+        reason = kBlockedUnknown;
+    } else if (theirs > own) {
         wchar_t path[MAX_PATH] = {};
         DWORD length = MAX_PATH;
         if (QueryFullProcessImageNameW(process, 0, path, &length)) {
             const wchar_t* base = wcsrchr(path, L'\\');
             app = ToUtf8(base ? base + 1 : path);
         }
-        CloseHandle(process);
-        return "elevated";
+        reason = "elevated";
     }
     CloseHandle(process);
-    return {};
+    return reason;
 }
 
 DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
@@ -5713,17 +5743,20 @@ DWORD WINAPI CursorWatcherProc(LPVOID parameter) {
             blocked_tick = 0;
             std::string app;
             const std::string reason = InputBlockedReason(app);
-            if (reason != blocked_said || app != blocked_app_said) {
-                // Only to a Mac that understands it; to any other this is
-                // nothing, and is tried again on the next change.
-                if (PushFeature(solstream::kPushInputBlocked,
-                                "{\"type\":\"inputBlocked\",\"reason\":\"" + reason
-                                    + "\",\"app\":\"" + JsonEscape(app) + "\"}")) {
+            if (reason != kBlockedUnknown
+                && (reason != blocked_said || app != blocked_app_said)) {
+                // Only to a Mac that understands it, and only from this
+                // watcher's own session; to any other this is nothing, and
+                // is tried again on the next change.
+                if (PushLine("{\"type\":\"inputBlocked\",\"reason\":\"" + reason
+                                 + "\",\"app\":\"" + JsonEscape(app) + "\"}",
+                             mine, solstream::kPushInputBlocked)) {
                     Log("[input] %s", reason.empty() ? "input reaches the PC again"
-                                       : reason == "secureDesktop"
-                                           ? "a secure desktop has the input"
-                                           : ("the window in front runs as administrator ("
-                                              + app + ")").c_str());
+                                       : reason == "elevated"
+                                           ? ("the window in front runs as administrator ("
+                                              + app + ")").c_str()
+                                           : ("the input is on another desktop (" + reason
+                                              + ")").c_str());
                 }
                 blocked_said = reason;
                 blocked_app_said = app;
