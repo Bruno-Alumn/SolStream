@@ -2586,9 +2586,9 @@ void RememberNotified(const std::string& version) {
     CloseHandle(file);
 }
 
-/// Whether the notification on screen is the update's, so a click on it
-/// installs; anything else the tray says later is not.
-bool g_update_balloon_up = false;
+/// Whether this copy has put an update notification up: the only one the tray
+/// ever shows, so a click on a notification is a click on it.
+bool g_update_balloon_said = false;
 
 /// Say a scheduled find once, as a Windows notification: the host lives in the
 /// tray, and the tooltip was the only place it was said -- found at a quarter
@@ -2600,16 +2600,16 @@ void NotifyUpdate(HWND window, const update::CheckResult& result) {
     }
     NOTIFYICONDATAW data = TrayData(window);
     data.uFlags = NIF_INFO;
-    data.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+    data.dwInfoFlags = NIIF_USER;
     const std::wstring title = L"SolStream " + ToWide(result.release.version) + L" is ready";
     const std::wstring text = result.downloaded
-        ? L"It's downloaded and checked. Click here to install it -- Windows will ask "
+        ? L"It's downloaded and checked. Click here to install it \u2014 Windows will ask "
           L"for permission."
-        : L"Click here to install it -- Windows will ask for permission.";
+        : L"Click here to download and install it \u2014 Windows will ask for permission.";
     wcsncpy_s(data.szInfoTitle, title.c_str(), _TRUNCATE);
     wcsncpy_s(data.szInfo, text.c_str(), _TRUNCATE);
     if (Shell_NotifyIconW(NIM_MODIFY, &data)) {
-        g_update_balloon_up = true;
+        g_update_balloon_said = true;
         RememberNotified(result.release.version);
         media::Log("[update] said %s is ready, in a notification", result.release.version.c_str());
     }
@@ -3594,16 +3594,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                     break;
                 case NIN_BALLOONUSERCLICK:
                     // "Click here to install it": the window, with the update
-                    // banner, and the install under way behind the prompt.
-                    if (g_update_balloon_up) {
-                        g_update_balloon_up = false;
+                    // banner, and the install under way behind the prompt --
+                    // also from the notification centre, long after the
+                    // pop-up went, as long as the update is still on offer.
+                    // StartUpdateJob refuses while a Mac streams or anything
+                    // else is under way.
+                    if (g_update_balloon_said && g_update_found) {
                         ShowFromTray(window);
                         StartUpdateJob(window);
                     }
-                    break;
-                case NIN_BALLOONTIMEOUT:
-                case NIN_BALLOONHIDE:
-                    g_update_balloon_up = false;
                     break;
                 case WM_CONTEXTMENU:
                     ShowTrayMenu(window);

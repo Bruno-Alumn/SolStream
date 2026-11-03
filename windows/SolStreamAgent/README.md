@@ -56,7 +56,7 @@ avoid this; listening turned out simpler and needs no knowledge of the Mac's
 address.) An installed host does not prompt: the installer has written its
 rules by then (see Installing). Run from a build it needs no admin rights, no
 driver and no service. What it leaves behind is a few small files in
-`%LOCALAPPDATA%\SolStream` (the token, a log, a counter) and, if the PC has a
+`%LOCALAPPDATA%\SolStream` (the token, a log, a counter, the last update announced, a crash dump if it crashed, and an installed copy's update download) and, if the PC has a
 virtual display, that display set up the way it streams.
 
 ## It must run in the interactive session

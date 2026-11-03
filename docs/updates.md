@@ -120,5 +120,7 @@ between. The installer asks for elevation
   once, stops the running host, replaces it and starts the new one.
   A scheduled check that finds one downloads and verifies the installer
   straight away, when no Mac is streaming, and then says so once per version
-  in a Windows notification; clicking it starts the install, so the next thing
-  is the elevation prompt. The download is checked again, held, at install.
+  in a Windows notification; clicking it -- on the pop-up or later in the
+  notification centre, while the update is still on offer -- starts the
+  install, so the next thing is the elevation prompt (or the download, when
+  that failed ahead of time). The download is checked again, held, at install.

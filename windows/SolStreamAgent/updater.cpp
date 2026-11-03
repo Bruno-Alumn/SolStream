@@ -905,11 +905,18 @@ std::atomic<bool> g_install_starting{false};
 /// Everything in Updates except `keep` and the install note: installers that
 /// have already been installed, and anything an interrupted download left. Best
 /// effort -- a file still in use is simply tried again after the next check.
+void CleanDownloadsHeld(const std::wstring& keep);
+
 void CleanDownloads(const std::wstring& keep) {
     std::lock_guard<std::mutex> lock(g_downloads_mutex);
     if (g_preparing) {
         return;
     }
+    CleanDownloadsHeld(keep);
+}
+
+/// CleanDownloads, with g_downloads_mutex already held by the caller.
+void CleanDownloadsHeld(const std::wstring& keep) {
     const std::wstring directory = UpdatesDirectory(false);
     if (directory.empty()) {
         return;
@@ -1042,10 +1049,29 @@ bool PrepareInstaller(const Release& release,
         return false;
     }
     const std::wstring name = ToWide(release.installer.name);
-    CleanDownloads(name);
-    {
-        std::lock_guard<std::mutex> lock(g_downloads_mutex);
-        g_preparing = true;
+    // One preparation at a time: an Install pressed while the scheduler's
+    // download ahead of time is writing the same file waits for it -- it then
+    // finds the file there and only checks it -- rather than failing to open
+    // a file the other holds without sharing.
+    for (int waited = 0;; waited += 250) {
+        {
+            std::lock_guard<std::mutex> lock(g_downloads_mutex);
+            if (!g_preparing) {
+                // Cleared under the same hold that claims the folder, so
+                // nothing is cleaned while another preparation writes there.
+                CleanDownloadsHeld(name);
+                g_preparing = true;
+                break;
+            }
+        }
+        if (waited == 0) {
+            step(L"Finishing the download already under way.");
+        }
+        if (waited >= 120000) {
+            error = kUpdateNotSaved;
+            return false;
+        }
+        Sleep(250);
     }
     struct Prepared {
         ~Prepared() { g_preparing = false; }
