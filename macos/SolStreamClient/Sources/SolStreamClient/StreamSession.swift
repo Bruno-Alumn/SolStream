@@ -237,8 +237,13 @@ final class StreamSession {
         }
         self.decoder = decoder
 
-        media.onVideo = { [weak decoder] annexB, isIdr in
-            decoder?.decode(annexB, isIDR: isIdr)
+        // Decoded on a queue of its own, not on the receive thread, which
+        // carries the sound too: a decoder rebuild -- 8-11 ms, longer after a
+        // wake -- or a decode waiting on a full hardware queue held up every
+        // sound packet behind it, and the 25 ms cushion of low-latency sound
+        // clicked. In order, since every frame builds on the one before.
+        media.onVideo = { [weak self] annexB, isIdr in
+            self?.enqueueVideo(annexB, isIdr: isIdr)
         }
         media.onAudio = { [weak self] packet in
             guard let self else { return }
@@ -315,6 +320,43 @@ final class StreamSession {
         case .socket, nil:
             return "This Mac couldn't open the stream. Try Again; if it keeps happening, "
                 + "quit and reopen SolStream."
+        }
+    }
+
+    // MARK: - Decoding off the receive thread
+
+    private let decodeQueue = DispatchQueue(label: "solstream.decode", qos: .userInteractive)
+    private let pendingLock = NSLock()
+    private var pending = PendingFrames()   // guarded by pendingLock
+    private var draining = false            // guarded by pendingLock
+
+    /// From the receive thread: queued, and the queue woken if it is idle.
+    private func enqueueVideo(_ annexB: Data, isIdr: Bool) {
+        pendingLock.lock()
+        let verdict = pending.push(annexB, isIdr: isIdr)
+        let wake = !draining && pending.hasFrames
+        if wake { draining = true }
+        pendingLock.unlock()
+        if verdict == .droppedBacklog {
+            // Fallen too far behind to catch up in order: what waited is gone,
+            // so nothing built on it decodes until the next IDR, asked for now.
+            Log.error("[decode] fell \(PendingFrames.maxBacklog) frames behind; waiting for an IDR")
+            media.holdUntilKeyframe()
+        }
+        guard wake else { return }
+        decodeQueue.async { [weak self] in self?.drainVideo() }
+    }
+
+    private func drainVideo() {
+        while true {
+            pendingLock.lock()
+            let frames = pending.takeAll()
+            if frames.isEmpty { draining = false }
+            pendingLock.unlock()
+            guard !frames.isEmpty else { return }
+            for frame in frames {
+                decoder?.decode(frame.data, isIDR: frame.isIdr)
+            }
         }
     }
 
@@ -425,6 +467,11 @@ final class StreamSession {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        // Nothing more for the decoder: what waits is dropped, and the one it
+        // is decoding finishes before the decoder is shut down below.
+        pendingLock.lock()
+        pending.stop()
+        pendingLock.unlock()
         watchdog?.cancel()
         watchdog = nil
         // The windows go first of all. Whatever this session decodes from here
@@ -446,6 +493,7 @@ final class StreamSession {
         // and dereferences `audioRenderer`; stopping the client first is what
         // makes releasing it afterwards safe rather than probably safe.
         media.stop()
+        decodeQueue.sync {}
         decoder?.shutdown()
         decoder = nil
         releaseAudioRenderer()
