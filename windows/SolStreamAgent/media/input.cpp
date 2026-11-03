@@ -298,7 +298,7 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
         }
     } else if (!trackedDown) {
         // A release refused is owed, not forgotten; see RetryOwedReleases.
-        if (trackedKey != 0 && owedKeysCount_ < 16) {
+        if (trackedKey != 0 && owedKeysCount_ < 256) {
             bool already = false;
             for (int i = 0; i < owedKeysCount_; ++i) {
                 if (owedKeys_[i] == trackedKey) { already = true; break; }
@@ -513,9 +513,11 @@ void InputInjector::RetryOwedReleases() {
 void InputInjector::ReleaseAll() {
     // A release Windows refuses -- an elevated window, Task Manager say, has
     // the foreground -- stays held and owed, rather than forgotten: the
-    // injector outlives the session, and the next one's first input retries
-    // it (RetryOwedReleases). Cleared regardless, Ctrl and Shift stayed down
-    // for everyone at the PC's own keyboard until someone pressed them.
+    // injector outlives the session, so Stop() and the next session's first
+    // input retry it (RetryOwedReleases). Cleared regardless, nothing ever
+    // tried again, and Ctrl and Shift stayed down at the PC's own keyboard.
+    // Until a Mac connects again it is still down: nothing retries between
+    // sessions.
     int held = 0;
     int owed = 0;
     for (int i = 0; i < keysDownCount_; ++i) {
@@ -525,7 +527,7 @@ void InputInjector::ReleaseAll() {
             continue;
         }
         keysDown_[held++] = key;
-        if (owed < 16) { owedKeys_[owed++] = key; }
+        owedKeys_[owed++] = key;
     }
     if (held > 0) {
         Log("[input] Windows refused %d key release(s); retried with the next input", held);

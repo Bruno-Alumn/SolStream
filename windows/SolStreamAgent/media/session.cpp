@@ -968,7 +968,7 @@ void MediaSession::Impl::ReceiveLoop() {
     // drop or for the next session to start. Until then a key or button the
     // Mac had down stayed down on the host. This is the thread that applies
     // input, so releasing here cannot race an Apply; Stop() releases again
-    // after joining it, which finds nothing held and does nothing.
+    // after joining it, which retries only a release Windows refused here.
     input.ReleaseAll();
     // Said either way, as the protocol has it: a session this end stopped --
     // silence, the captured window closing, the host asked to stop -- left

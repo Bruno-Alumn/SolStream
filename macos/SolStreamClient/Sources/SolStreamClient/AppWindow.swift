@@ -1227,6 +1227,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowDidExitFullScreen(_ notification: Notification) {
         fullScreenForHost = false
+        // A placement answered during the animation left no guard.
+        inputCapture?.edgeGuard = lastPlacement?.resizeBorder ?? 0
         fullScreenTransitionEnded()
     }
 

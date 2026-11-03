@@ -5299,7 +5299,7 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                       // borderless game, a dialog -- has none inside its
                       // client area, and the guard only cost it its edges:
                       // an RTS could not pan by touching them.
-                      IsResizable(window) ? ResizeBorderThickness(window) : 0, missed);
+                      limits.resizable ? ResizeBorderThickness(window) : 0, missed);
         // The title strip the application draws, for the Mac to leave out of
         // the picture when asked, and the program, to remember that by.
         std::string reply(buffer);

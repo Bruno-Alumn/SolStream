@@ -150,7 +150,7 @@ private:
     /// Manager or a UAC prompt is not held for the rest of the session once
     /// focus comes back. Keys as in `keysDown_`; buttons as in `buttonsDown_`.
     void RetryOwedReleases();
-    uint32_t owedKeys_[16] = {};
+    uint32_t owedKeys_[256] = {};  // as many as keysDown_: ReleaseAll may owe them all
     int owedKeysCount_ = 0;
     unsigned char owedButtons_ = 0;
     /// The input that lets go of a held key, the way it was pressed.

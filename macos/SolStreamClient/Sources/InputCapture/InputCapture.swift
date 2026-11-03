@@ -1079,18 +1079,6 @@ public final class InputCapture {
         }
     }
 
-    /// Bring the host's modifier keys to what `flags` says is held, sending
-    /// only what changed.
-    ///
-    /// Called for every modifier change, and also for every key and every
-    /// click, with the flags that event carries. A modifier's own
-    /// `.flagsChanged` is not always seen: local monitors miss what a nested
-    /// tracking loop takes -- hold ⌥, open a menu in the menu bar, let go of
-    /// ⌥ there -- and a modifier already held when the window took the
-    /// keyboard sent nothing at all. Either way the host was left with Alt
-    /// held, or without the Shift the letter was typed with, until that key
-    /// was pressed again. Every event says what is really held, so the next
-    /// one puts it right.
     /// What a move or a drag can say: that a modifier is no longer held.
     ///
     /// Its release can go to another app -- Spotlight or Raycast taking the
@@ -1105,6 +1093,18 @@ public final class InputCapture {
         syncModifiers(to: flags)
     }
 
+    /// Bring the host's modifier keys to what `flags` says is held, sending
+    /// only what changed.
+    ///
+    /// Called for every modifier change, and also for every key and every
+    /// click, with the flags that event carries. A modifier's own
+    /// `.flagsChanged` is not always seen: local monitors miss what a nested
+    /// tracking loop takes -- hold ⌥, open a menu in the menu bar, let go of
+    /// ⌥ there -- and a modifier already held when the window took the
+    /// keyboard sent nothing at all. Either way the host was left with Alt
+    /// held, or without the Shift the letter was typed with, until that key
+    /// was pressed again. Every event says what is really held, so the next
+    /// one puts it right.
     private func syncModifiers(to flags: NSEvent.ModifierFlags) {
         let held = Self.heldModifierBits(flags.rawValue, last: lastDeviceFlags)
         if held != lastDeviceFlags {
@@ -1409,6 +1409,11 @@ public final class InputCapture {
             droppedWhileResizing &+= 1
             return
         }
+        // Every path a move or drag takes below, captured or over a game or
+        // not the PC's at all, is one that may follow a release sent elsewhere.
+        if Self.drags.contains(event.type) || event.type == .mouseMoved {
+            releaseModifiersLetGo(event.modifierFlags)
+        }
 
         if event.type == .mouseMoved, !heldButtons.isEmpty, buttonsPressedNow() == 0 {
             releaseStrandedButtons("a move with no button down")
@@ -1435,7 +1440,6 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             if event.type == .mouseMoved { mouseMovedSeen += 1 }
-            releaseModifiersLetGo(event.modifierFlags)
             // A drag follows the pointer out of the window; a bare move does not,
             // so letting go of the mouse outside leaves the host cursor exactly
             // where the drag left it.
@@ -1871,7 +1875,6 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             mouseMovedSeen += 1
-            releaseModifiersLetGo(event.modifierFlags)
             let perPoint = view.bounds.width > 0 ? source(for: view).width / view.bounds.width : 1
             let motion = Self.relativeMotion(deltaX: event.deltaX, deltaY: event.deltaY,
                                              pixelsPerPoint: perPoint, sensitivity: sensitivity,
