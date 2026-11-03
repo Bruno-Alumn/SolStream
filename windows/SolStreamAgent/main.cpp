@@ -2040,23 +2040,28 @@ bool HeldWindow(HWND window, bool* any) {
 /// slot, so every later Mac was turned away until the host was restarted. So
 /// every cross-process window write below asks first, and the ones whose result
 /// nothing measures afterwards are made asynchronous as well.
-/// How long a window has to answer before the host leaves it alone; see
-/// Unresponsive.
-constexpr UINT kAnswerWithinMs = 250;
-
 bool Unresponsive(HWND window) {
+    return IsHungAppWindow(window) != FALSE;
+}
+
+/// How long a command waits for a window to answer before calls that wait on
+/// its thread with no limit of their own; see AnswersWithin.
+constexpr UINT kCommandAnswerMs = 2000;
+/// The same for the watcher, which looks at every held window every tick.
+constexpr UINT kWatcherAnswerMs = 250;
+
+/// Whether `window` answers within `ms`. Asked before ShowWindow and
+/// SetWindowPos, which wait on the window's thread for as long as it takes:
+/// Windows calls a window hung only after five seconds, and an app that had
+/// just stopped answering held `place` there -- and the connection's thread,
+/// whose slot then never came free, so every Mac after it was turned away
+/// until the host restarted. Long enough for an app busy starting up.
+bool AnswersWithin(HWND window, UINT ms) {
     if (IsHungAppWindow(window) != FALSE) {
-        return true;
+        return false;
     }
-    // Windows calls a window hung only after five seconds without an answer,
-    // and the calls that follow this -- ShowWindow, SetWindowPos -- wait on
-    // its thread with no time limit. A window that had just stopped answering
-    // held `place` there, and the connection's thread with it: its slot never
-    // came free, and every Mac after it was turned away until the host
-    // restarted. So it is asked, briefly, as well.
     DWORD_PTR result = 0;
-    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, kAnswerWithinMs,
-                               &result) == 0;
+    return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, ms, &result) != 0;
 }
 
 /// When a process started (GetProcessTimes, in 100 ns units), or 0 when it
@@ -2074,7 +2079,8 @@ uint64_t ProcessCreationTime(DWORD pid) {
 }
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
-                     RECT* out_client = nullptr, long long* out_error = nullptr);
+                     RECT* out_client = nullptr, long long* out_error = nullptr,
+                     UINT answer_ms = kCommandAnswerMs);
 void RecordOwedWindows();
 
 /// How wide the window's resize grab area is, in pixels, at its own DPI.
@@ -3418,13 +3424,17 @@ DWORD WINAPI WatcherProc(LPVOID) {
                 continue;
             }
             if (zoomed) {
-                // Un-maximised asynchronously, and placed on a later tick once
-                // the restore has landed: measuring straight after an
-                // asynchronous restore would measure the maximised window.
-                ShowWindowAsync(window, SW_RESTORE);
+                // Un-maximised here, under the mark, and placed on the next
+                // tick. Posted instead, the restore could land after a
+                // release had put the window back, and un-maximise a window
+                // that was maximised before the session.
+                if (AnswersWithin(window, kWatcherAnswerMs)) {
+                    ShowWindow(window, SW_RESTORE);
+                }
             } else {
                 PlaceClientArea(window, desired.left, desired.top,
-                                desired.right - desired.left, desired.bottom - desired.top);
+                                desired.right - desired.left, desired.bottom - desired.top,
+                                nullptr, nullptr, kWatcherAnswerMs);
             }
             EnterCriticalSection(&g_lock_cs);
             g_watcher_acting = nullptr;
@@ -3614,7 +3624,7 @@ bool WaitForRestoreToFinish(HWND window) {
 
 /// Take away a window's ability to be resized from the host side.
 bool LockWindow(HWND window) {
-    if (Unresponsive(window)) {
+    if (!AnswersWithin(window, kCommandAnswerMs)) {
         return false;
     }
     EnterCriticalSection(&g_lock_cs);
@@ -4094,11 +4104,12 @@ long long PlacementError(const RECT& got, int x, int y, int width, int height) {
 }
 
 bool PlaceClientArea(HWND window, int x, int y, int width, int height,
-                     RECT* out_client, long long* out_error) {   // NOLINT: see declaration
+                     RECT* out_client, long long* out_error,      // NOLINT: see declaration
+                     UINT answer_ms) {
     // Synchronous below, because each attempt measures where the last one
     // landed -- so a hung window is not attempted at all. Reported as a miss of
     // whatever distance it is from the request.
-    if (Unresponsive(window)) {
+    if (!AnswersWithin(window, answer_ms)) {
         const RECT client = ClientAreaInScreen(window);
         if (out_client) { *out_client = client; }
         if (out_error) { *out_error = PlacementError(client, x, y, width, height); }
@@ -4197,11 +4208,16 @@ bool PlaceClientArea(HWND window, int x, int y, int width, int height,
 /// changes its DPI also changes its frame, and with it where the client area
 /// sits inside the frame.
 bool MoveClientArea(HWND window, int x, int y, RECT* out_client) {
-    if (Unresponsive(window)) {
+    if (!AnswersWithin(window, kCommandAnswerMs)) {
         if (out_client) { *out_client = ClientAreaInScreen(window); }
         return false;
     }
     if (IsIconic(window)) {
+        ShowWindow(window, SW_RESTORE);
+    }
+    // As in PlaceClientArea: not left maximised for `lock` to restore to the
+    // real monitor.
+    if (IsZoomed(window)) {
         ShowWindow(window, SW_RESTORE);
     }
     bool moved = false;
