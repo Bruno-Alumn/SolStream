@@ -7526,6 +7526,16 @@ int wmain(int argc, wchar_t** argv) {
             break;
         }
         const int error = WSAGetLastError();
+        // Started by the last copy's crash: its port can take a while to come
+        // free -- a connection it had to a Mac lingers -- so keep trying it.
+        if (after_crash != 0 && (error == WSAEADDRINUSE || error == WSAEACCES)) {
+            if (attempt == 0) {
+                Log("[agent] port %u is still held by the copy that crashed; waiting",
+                    port);
+            }
+            Sleep(1000);
+            continue;
+        }
         if (error != WSAEADDRNOTAVAIL) {
             Log("[agent] bind(%u) failed: %d", port, error);
             // 10013 is what SO_EXCLUSIVEADDRUSE answers when the port is taken,
@@ -7942,6 +7952,9 @@ int wmain(int argc, wchar_t** argv) {
         UnlockAll();
     });
     const int code = solstream::RunHostWindowLoop();
+    // On its way out by request from here: a crash in the shutdown below is
+    // still said, but must not bring the host back.
+    solstream::DisableCrashRestart();
     Log("[agent] the window has closed; stopping (exit code %d)", code);
     if (cloak_hook) { UnhookWinEvent(cloak_hook); }
     if (minimise_hook) { UnhookWinEvent(minimise_hook); }

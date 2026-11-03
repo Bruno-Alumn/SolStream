@@ -16,6 +16,7 @@
 // hand-rolling text selection to get them back would be absurd.
 
 #include "host_window.h"
+#include "crash_report.h"
 
 #include "media/log.h"
 
@@ -3574,6 +3575,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                                 : (lparam & ENDSESSION_LOGOFF)   ? "sign-out"
                                                                  : "restart or shut down";
                 media::Log("[window] Windows is ending this program (%s)", why);
+                // Ending by request: a crash on the way out is not restarted.
+                DisableCrashRestart();
             }
             if (wparam && g_end_session_handler) {
                 // Give back what the session holds -- the windows it locked,
