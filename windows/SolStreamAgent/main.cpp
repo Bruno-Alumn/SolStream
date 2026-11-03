@@ -5300,6 +5300,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
             DWORD_PTR ignored = 0;
             SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, 150, &ignored);
             client = ClientAreaInScreen(window);
+            if (!fixed_size) {
+                missed = PlacementError(client, (int) x, (int) y, (int) w, (int) h);
+            }
         }
         // A miss that survived every correction is the application refusing the
         // size, and it is worth a line: it is the difference between "SolStream

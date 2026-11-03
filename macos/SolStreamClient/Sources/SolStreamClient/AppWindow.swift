@@ -726,10 +726,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
             // application still starting up the window is easy to close first.
             guard let self, !self.isClosing else { return }
             self.agent.setResizeLock(windowID: self.remoteWindowID, true)
-            self.firstPlacementLanded()
             if self.requestAgainForStrip {
+                // The card stays one round trip more: until the host window
+                // has grown by the strip, the picture is short of this window.
                 self.requestAgainForStrip = false
-                self.requestResize(settle: true)
+                self.syncGeometry { [weak self] in self?.firstPlacementLanded() }
+            } else {
+                self.firstPlacementLanded()
             }
             self.settleOnce()
         }
