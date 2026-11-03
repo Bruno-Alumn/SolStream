@@ -4371,6 +4371,24 @@ void TestDownmix() {
     w = DownmixWeights(2, 0x3F);
     CHECK(w.left.size() == 2 && w.left[0] == 1.0f && w.right[1] == 1.0f);
     CHECK(DownmixWeights(0, 0x3).left.empty());
+    // 5.1 with side speakers (FL FR FC LFE SL SR), quad, and 2.1.
+    w = DownmixWeights(6, 0x60F);
+    CHECK(w.left[4] > 0.7f && w.right[4] == 0.0f && w.right[5] > 0.7f);
+    w = DownmixWeights(4, 0x33);
+    CHECK(w.left[2] > 0.7f && w.right[3] > 0.7f && w.left[0] == 1.0f);
+    w = DownmixWeights(3, 0x0B);
+    CHECK(w.left[2] == 0.0f && w.right[2] == 0.0f && w.right[1] == 1.0f);
+    // Only bits it doesn't know: the first two, never silence.
+    w = DownmixWeights(2, 0x80000000u);
+    CHECK(w.left[0] == 1.0f && w.right[1] == 1.0f);
+
+    // The limiter: nothing changes below the knee, nothing passes full scale.
+    using solstream::media::SoftLimit;
+    CHECK(SoftLimit(0.5f) == 0.5f && SoftLimit(-0.75f) == -0.75f && SoftLimit(0.0f) == 0.0f);
+    CHECK(SoftLimit(3.12f) <= 1.0f && SoftLimit(3.12f) > 0.99f);
+    CHECK(SoftLimit(-3.12f) >= -1.0f && SoftLimit(-3.12f) < -0.99f);
+    CHECK(SoftLimit(0.9f) > 0.8f && SoftLimit(0.9f) < 0.9f);
+    CHECK(SoftLimit(1.0f) < 1.0f);
 }
 
 void TestFullScreen() {

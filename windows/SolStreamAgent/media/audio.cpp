@@ -66,6 +66,14 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
     const uint32_t mask = format->wFormatTag == WAVE_FORMAT_EXTENSIBLE
         ? (uint32_t) ((const WAVEFORMATEXTENSIBLE*) format)->dwChannelMask : 0u;
     const StereoWeights weights = DownmixWeights(channels, mask);
+    // More than one source channel on a side: a mixdown, which can pass full
+    // scale and is brought within it gently (SoftLimit). Plain stereo is left
+    // exactly as it came.
+    int sources = 0;
+    for (int c = 0; c < channels; ++c) {
+        sources += weights.left[(size_t) c] != 0.0f ? 1 : 0;
+    }
+    const bool mixed = sources > 1;
 
     // The extensible subformat GUID's first word IS the old format tag --
     // {00000003-0000-0010-8000-00aa00389b71} is IEEE float -- so this needs
@@ -110,8 +118,8 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
             left += sample * wl;
             right += sample * wr;
         }
-        out[(size_t) i * 2] = left;
-        out[(size_t) i * 2 + 1] = right;
+        out[(size_t) i * 2] = mixed ? SoftLimit(left) : left;
+        out[(size_t) i * 2 + 1] = mixed ? SoftLimit(right) : right;
     }
 }
 
@@ -243,7 +251,13 @@ public:
         const size_t samples = frames_ * 2;
         size_t at = 0;
         for (; pending.size() - at >= samples; at += samples) {
-            const float* chunk = pending.data() + at;
+            float* chunk = pending.data() + at;
+            // Within full scale before either encoder, which Opus is not built
+            // to take past: a plain clamp, which changes nothing in range. A
+            // surround mixdown was already brought in gently (Convert).
+            for (size_t i = 0; i < samples; ++i) {
+                chunk[i] = std::clamp(chunk[i], -1.0f, 1.0f);
+            }
             if (std::all_of(chunk, chunk + samples, [](float v) { return v == 0.0f; })) {
                 silent_.fetch_add(1);
                 continue;
@@ -424,8 +438,10 @@ HRESULT OpenTap(DWORD pid, ProcessTap& tap) {
         format.wBitsPerSample = 32;
         format.nBlockAlign = 8;
         format.nAvgBytesPerSec = kWireRate * 8;
-        // Event-driven, as a process tap has to be, with 20 ms of buffer:
-        // twice the engine's period, drained every period.
+        // Event-driven, as a process tap has to be, with 100 ms of buffer --
+        // drained every period, so it adds no delay; it is room for the thread
+        // being held off (a busy PC, a new app's capture opening) without
+        // Windows dropping the sound.
         hr = tap.client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                     AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
                                         | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM

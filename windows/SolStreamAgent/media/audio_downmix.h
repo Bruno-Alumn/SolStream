@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -74,7 +75,34 @@ inline StereoWeights DownmixWeights(int channels, uint32_t mask) {
         }
         ++index;
     }
+    // A mask that named no speaker this knows -- only SPEAKER_ALL, or
+    // reserved bits, as some drivers report -- left every weight at zero and
+    // the stream silent. The first two channels instead, as with no mask.
+    bool any = false;
+    for (int c = 0; c < channels; ++c) {
+        any = any || weights.left[(size_t) c] != 0.0f || weights.right[(size_t) c] != 0.0f;
+    }
+    if (!any) {
+        weights.left[0] = 1.0f;
+        weights.right[1] = 1.0f;
+    }
     return weights;
+}
+
+/// A sample brought within full scale, gently: unchanged up to 0.75, then
+/// bent toward 1.0 and never past it. For a surround mix summed to two
+/// channels only, which can reach three times full scale on a loud 7.1 scene,
+/// and a hard clip is not kind to listen to; plain stereo is never put
+/// through it, so a loud master keeps its peaks.
+inline float SoftLimit(float sample) {
+    constexpr float kKnee = 0.75f;
+    constexpr float kRoom = 1.0f - kKnee;
+    const float size = std::fabs(sample);
+    if (size <= kKnee) {
+        return sample;
+    }
+    const float bent = kKnee + kRoom * std::tanh((size - kKnee) / kRoom);
+    return sample < 0.0f ? -bent : bent;
 }
 
 }  // namespace solstream::media
