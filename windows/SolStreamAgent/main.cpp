@@ -5469,6 +5469,15 @@ bool SendAll(SOCKET client, const std::string& payload) {
     return true;
 }
 
+/// A line to a socket no session has yet: a knock being answered, or turned
+/// away at the door. Never through g_send_cs, which a send to a Mac whose
+/// network had gone holds for up to the 30 s send timeout: the knock's own
+/// `busy` line waited behind it, and with it the shutdown that would have
+/// ended that stuck send.
+bool SendKnockLine(SOCKET client, const std::string& text) {
+    return SendAll(client, text + '\n');
+}
+
 bool SendLine(SOCKET client, const std::string& text) {
     EnterCriticalSection(&g_send_cs);
     // The lock is for the sockets more than one thread writes to: the session's
@@ -6514,10 +6523,10 @@ bool ReadOnlyLine(SOCKET socket, DWORD budget_ms, size_t max_bytes, std::string&
 bool ListenForTakeover(SOCKET client) {
     const std::string challenge = RandomHex(32);
     if (challenge.empty()) {
-        SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
+        SendKnockLine(client, BusyLine(AnotherMacMessage(), std::string()));
         return false;
     }
-    if (!SendLine(client, BusyLine(AnotherMacMessage(),
+    if (!SendKnockLine(client, BusyLine(AnotherMacMessage(),
                                    ",\"takeover\":1,\"challenge\":\"" + challenge + "\""))) {
         return false;
     }
@@ -6566,17 +6575,17 @@ bool ListenForTakeover(SOCKET client) {
     switch (verdict) {
         case solstream::TakeoverVerdict::Refused:
             Log("[agent] refused a takeover that did not prove the token");
-            SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
+            SendKnockLine(client, BusyLine(AnotherMacMessage(), std::string()));
             return false;
         case solstream::TakeoverVerdict::Another:
             Log("[agent] refused a takeover: the session belongs to another Mac");
-            SendLine(client, BusyLine(AnotherMacMessage(), ",\"holder\":\"other\""));
+            SendKnockLine(client, BusyLine(AnotherMacMessage(), ",\"holder\":\"other\""));
             return false;
         case solstream::TakeoverVerdict::NotYet:
             Log("[agent] the Mac that holds the session reconnected while it was still "
                 "live (heard %llus ago); asking it to try again",
                 silent_ms / 1000);
-            SendLine(client, BusyLine(SameMacMessage(), ",\"holder\":\"self\""));
+            SendKnockLine(client, BusyLine(SameMacMessage(), ",\"holder\":\"self\""));
             return false;
         case solstream::TakeoverVerdict::Take:
             break;
@@ -6623,7 +6632,7 @@ bool ListenForTakeover(SOCKET client) {
         another = g_holder_socket != INVALID_SOCKET && g_holder_id != id;
     }
     Log("[agent] the session did not let go within %lus", (unsigned long) (kTakeoverWaitMs / 1000));
-    SendLine(client, another ? BusyLine(AnotherMacMessage(), ",\"holder\":\"other\"")
+    SendKnockLine(client, another ? BusyLine(AnotherMacMessage(), ",\"holder\":\"other\"")
                              : BusyLine(SameMacMessage(), ",\"holder\":\"self\""));
     return false;
 }
@@ -7693,7 +7702,7 @@ int wmain(int argc, wchar_t** argv) {
                     continue;
                 }
                 Log("[agent] refused a second client: one is already connected");
-                SendLine(client, BusyLine(AnotherMacMessage(), std::string()));
+                SendKnockLine(client, BusyLine(AnotherMacMessage(), std::string()));
                 closesocket(client);
                 continue;
             }

@@ -334,6 +334,13 @@ public final class AgentConnection {
     /// reconnect, before the greeting, crossed the network unencrypted.
     /// Pings alone go before it: the host answers them unauthenticated.
     private var mayTalk = false
+    /// Whether this socket has had a byte from the host: its greeting, or a
+    /// `busy`. No ping goes out before, so a knock's one-line answer -- the
+    /// host reads exactly one line before its verdict -- is never a ping, and
+    /// a takeover is never refused for one sitting in the queue.
+    private var heardFromHost = false
+    /// Heartbeats that found the host still silent; see `startHeartbeat`.
+    private var silentBeats = 0
     /// The greeting asked for a token this Mac does not have, and the
     /// question is with the user. A token supplied at any other time --
     /// from a second sheet, after the connection authenticated, before a new
@@ -886,6 +893,8 @@ public final class AgentConnection {
         // The last socket's challenge is no proof for this one's.
         authChallenge = nil
         mayTalk = false
+        heardFromHost = false
+        silentBeats = 0
         awaitingToken = false
         buffer.removeAll()
         authInFlight = false
@@ -949,9 +958,15 @@ public final class AgentConnection {
                 self.noteFailure(error)
                 Log.error("[agent] connection failed: \(error)")
                 // Not the error's own words, which are a socket's; and it is
-                // coming back by itself, which they did not say.
-                self.report(.failed("The connection to \(self.host) dropped. "
-                                    + "SolStream is reconnecting."))
+                // coming back by itself, which they did not say. A first
+                // connection that never got going is told what went wrong
+                // instead: there was nothing to reconnect to.
+                if !self.sessionUp && self.reconnectAttempt == 0 {
+                    self.report(.failed(Self.explain(error, host: self.host, port: self.port)))
+                } else {
+                    self.report(.failed("The connection to \(self.host) dropped. "
+                                        + "SolStream is reconnecting."))
+                }
                 self.failPending(error)
                 self.noteConnectionLost()
                 // Nil it, or `connect()` early-returns on a dead NWConnection
@@ -1017,6 +1032,16 @@ public final class AgentConnection {
                        repeating: Self.heartbeatInterval, leeway: .seconds(1))
         timer.setEventHandler { [weak self] in
             guard let self, self.connection != nil else { return }
+            guard self.heardFromHost else {
+                // In place of the ping's own timeout, which bounded a host
+                // that took the socket and never said a word.
+                self.silentBeats += 1
+                if self.silentBeats >= 3 {
+                    Log.error("[agent] \(self.host) took the connection but said nothing for 30 s")
+                    self.dropConnection(AgentError.timedOut)
+                }
+                return
+            }
             self.send(["cmd": "ping"]) { _ in }
         }
         heartbeat = timer
@@ -2479,10 +2504,14 @@ public final class AgentConnection {
     }
 
     private func receive() {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
+        guard let connection else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            // A socket `retryUnanswered` has replaced says nothing more: its
+            // cancellation must not drop the one that took its place.
+            guard let self, self.connection === connection else { return }
 
             if let data, !data.isEmpty {
+                self.heardFromHost = true
                 self.buffer.append(data)
                 self.drainLines()
             }
