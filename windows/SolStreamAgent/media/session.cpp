@@ -1099,8 +1099,8 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.sessTag = okm[79];   // low byte of the 32-bit session id at 76..80
     // Two BCrypt key handles now exist, and every failure path from here down
     // has to destroy them itself. Stop() cannot do it: its guard turns Stop into
-    // a no-op when `running` was never set and the socket was never opened,
-    // which is exactly the state a failure below leaves behind. The next Start
+    // a no-op when nothing is running, no socket is open and no thread is left
+    // to join, which is exactly the state a failure below leaves behind. The next Start
     // overwrites both handles with fresh ones, so whatever leaked can never be
     // reached again -- a port that is taken, retried a few times, quietly costs
     // a key handle per attempt.
