@@ -1384,9 +1384,10 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool ma
         // Neither half of the sentence has to name the operation -- the window
         // that raised the prompt is already saying which one it is.
         error = GetLastError() == ERROR_CANCELLED
-                    ? "Windows' permission prompt was dismissed, so nothing was "
-                      "changed."
-                    : "Could not restart SolStream with administrator rights.";
+                    ? "Nothing changed, because Windows' permission prompt was closed. "
+                      "Try again, and choose Yes when Windows asks."
+                    : "Windows wouldn't let SolStream ask for permission. Restart this PC, "
+                      "then try again.";
         // An uninstall started from Add/Remove Programs has no console and, with
         // --quiet, no window either, so this is the only place the reason exists.
         InstallLog("could not elevate: " + error);
@@ -1605,8 +1606,10 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
 
     if (!CreateDirectoryW(destination.c_str(), nullptr)
         && GetLastError() != ERROR_ALREADY_EXISTS) {
-        error = "Could not create " + ToUtf8(destination);
-        InstallLog("copy failed: " + error);
+        InstallLog("could not create " + ToUtf8(destination) + ": error "
+                   + std::to_string(GetLastError()));
+        error = "SolStream couldn't create its folder in Program Files. Restart this PC, "
+                "then run setup again.";
         return false;
     }
     // The executable, not its directory. Copying the DIRECTORY -- which this
@@ -1639,9 +1642,8 @@ bool InstallSelf(const InstallOptions& options, std::string& error) {
         // is started again just below. Something else holds the file.
         error = "Couldn't copy SolStream into " + ToUtf8(destination)
               + ". Something on this PC is holding its files, often antivirus checking "
-                "them. Try again in a minute, or restart this PC first. (error "
-              + std::to_string(failure) + ")";
-        InstallLog("copy failed: " + error);
+                "them. Try again in a minute, or restart this PC first.";
+        InstallLog("copy failed (error " + std::to_string(failure) + "): " + error);
         if (GetFileAttributesW(installed.c_str()) != INVALID_FILE_ATTRIBUTES) {
             // The old copy is intact: bring it back rather than leave the PC
             // with no host. A first install has no old copy and no task.
@@ -1858,8 +1860,8 @@ bool UninstallSelf(std::string& error, std::string& left) {
     InstallLog("shortcuts and the Add/Remove Programs entry removed");
     RemoveTree(destination);
     if (GetFileAttributesW(destination.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        error = "Removed what it could, but " + ToUtf8(destination)
-              + " is still there — something in it was in use.";
+        error = "SolStream is removed, but its folder was in use and is still there. "
+                "Restart this PC, then delete " + ToUtf8(destination) + ".";
         InstallLog("uninstall incomplete: " + error);
         return false;
     }

@@ -62,7 +62,7 @@ bool SetString(HKEY root, const std::wstring& key, const wchar_t* name,
 std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size_out) {
     WIN32_FILE_ATTRIBUTE_DATA info{};
     if (path.empty() || !GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) {
-        return "SolStream couldn't find that file.";
+        return "SolStream couldn't find that file. It may have been moved or renamed.";
     }
     if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         return "SolStream sends files, not folders. Zip the folder first, then send that.";

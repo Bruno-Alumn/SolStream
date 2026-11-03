@@ -7429,7 +7429,8 @@ int wmain(int argc, wchar_t** argv) {
                     ? L"streaming" : L"ready";
             if (!status.streaming_ready) {
                 status.streaming_detail =
-                    L"This PC's Windows is too old for the capture SolStream uses.";
+                    L"This PC's Windows is too old for SolStream. Update Windows in "
+                    L"Settings > Windows Update, then open SolStream again.";
                 // The version that added capturing one window or one display
                 // by its handle, which is how media/capture.cpp starts every
                 // capture. The calls that came later are tried and survived.

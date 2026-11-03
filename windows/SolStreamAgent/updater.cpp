@@ -58,6 +58,17 @@
 namespace solstream::update {
 namespace {
 
+/// What a check that could not reach GitHub says. Shown after Check for
+/// updates as much as after a check of its own, so it names both.
+constexpr const char* kGitHubUnreachable =
+    "SolStream couldn't reach GitHub. Check that this PC is online; SolStream also "
+    "checks again later.";
+/// What an update that could not be stored says.
+constexpr const char* kUpdateNotSaved =
+    "SolStream couldn't save the update on this PC. Check that its drive has free space, "
+    "then choose Install update again.";
+
+
 using media::Log;
 
 constexpr unsigned long long kMaxInstallerBytes = 200ull * 1024 * 1024;
@@ -1010,7 +1021,8 @@ bool Pin(HANDLE& held, std::wstring& path, std::string& error) {
     CloseHandle(held);
     held = INVALID_HANDLE_VALUE;
     Log("[update] not using the download: %s", detail.c_str());
-    error = "SolStream couldn't check where the update was saved, so it wasn't installed.";
+    error = "SolStream couldn't check where the update was saved, so it wasn't installed. "
+            "Choose Install update again.";
     return false;
 }
 
@@ -1025,7 +1037,7 @@ bool PrepareInstaller(const Release& release,
     const std::wstring directory = UpdatesDirectory(true);
     if (directory.empty()) {
         Log("[update] could not create %%LOCALAPPDATA%%\\SolStream\\Updates");
-        error = "SolStream couldn't make a folder to download the update into.";
+        error = kUpdateNotSaved;
         return false;
     }
     const std::wstring name = ToWide(release.installer.name);
@@ -1063,7 +1075,7 @@ bool PrepareInstaller(const Release& release,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
     if (out == INVALID_HANDLE_VALUE) {
         Log("[update] could not create the download (error %lu)", GetLastError());
-        error = "SolStream couldn't save the update on this PC.";
+        error = kUpdateNotSaved;
         return false;
     }
     std::string detail;
@@ -1101,7 +1113,7 @@ bool PrepareInstaller(const Release& release,
     if (!MoveFileExW(partial.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         Log("[update] could not rename the finished download (error %lu)", GetLastError());
         DeleteFileW(partial.c_str());
-        error = "SolStream couldn't save the update on this PC.";
+        error = kUpdateNotSaved;
         return false;
     }
 
@@ -1109,8 +1121,8 @@ bool PrepareInstaller(const Release& release,
     held = OpenHeld(path);
     if (held == INVALID_HANDLE_VALUE) {
         Log("[update] could not open the download to check it (error %lu)", GetLastError());
-        error = "Something else on this PC is using the update's file, so it wasn't "
-                "installed.";
+        error = "Something on this PC is using the update's file, often antivirus. Wait a "
+                "minute, then choose Install update again.";
         return false;
     }
     if (!Matches(held, release, detail)) {
@@ -1119,8 +1131,8 @@ bool PrepareInstaller(const Release& release,
         DeleteFileW(path.c_str());
         Log("[update] %s does not match SHA256SUMS, discarded: %s",
             release.installer.name.c_str(), detail.c_str());
-        error = "The download didn't match the checksum SolStream signed, so it wasn't "
-                "installed.";
+        error = "The download arrived damaged, so it wasn't installed. Choose Install "
+                "update again to download it fresh.";
         return false;
     }
     Log("[update] %s downloaded; its SHA-256 matches the signed SHA256SUMS",
@@ -1589,16 +1601,14 @@ CheckResult CheckForUpdate() {
     std::string error;
     Internet session = OpenSession(error);
     if (!session) {
-        return CheckFailed(result, "SolStream couldn't reach GitHub. It will try again later.",
-                      error);
+        return CheckFailed(result, kGitHubUnreachable, error);
     }
     const std::string url =
         std::string("https://api.github.com/repos/") + kRepository + "/releases/latest";
     std::string body;
     DWORD status = 0;
     if (!GetText(session.get(), url, Accept::Api, kMaxReleaseJson, body, status, error)) {
-        return CheckFailed(result, "SolStream couldn't reach GitHub. It will try again later.",
-                      error);
+        return CheckFailed(result, kGitHubUnreachable, error);
     }
     if (status == 404) {
         // Not an error: it is what a repository says before its first
@@ -1615,14 +1625,17 @@ CheckResult CheckForUpdate() {
     }
     if (status != 200) {
         return CheckFailed(result,
-                      "GitHub answered with an error (HTTP " + std::to_string(status)
-                          + "). SolStream will try again later.",
+                      "GitHub had a problem. SolStream checks again later, or choose Check "
+                      "for updates in a few minutes.",
                       "HTTP " + std::to_string(status));
     }
 
     ReleaseInfo info;
     if (!ParseRelease(body, info, error)) {
-        return CheckFailed(result, "GitHub's answer didn't make sense, so it was ignored.", error);
+        return CheckFailed(result,
+                           "GitHub didn't answer properly. SolStream checks again later, or "
+                           "choose Check for updates in a few minutes.",
+                           error);
     }
     if (info.draft || info.prerelease) {
         Log("[update] the latest release is a %s; ignoring it",
@@ -1847,9 +1860,10 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
         CloseHandle(held);
         Log("[update] the installer did not start (error %lu)", code);
         error = code == ERROR_CANCELLED
-                    ? "Windows' permission prompt was dismissed, so nothing was changed."
-                    : "Windows wouldn't start the installer (error " + std::to_string(code)
-                          + ").";
+                    ? "Nothing changed, because Windows' permission prompt was closed. "
+                      "Choose Install update again, and choose Yes when Windows asks."
+                    : "Windows wouldn't start the update. Restart this PC, then choose "
+                      "Install update again.";
         return false;
     }
     Log("[update] the installer for %s has started; it stops this copy and starts the "

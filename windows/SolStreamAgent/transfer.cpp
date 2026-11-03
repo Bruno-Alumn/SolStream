@@ -730,7 +730,8 @@ std::string UploadJson(const std::string& name, long long offset, long long tota
                 return true;
             });
         if (folder.empty()) {
-            return Refused("The PC has no Downloads folder SolStream can write to.");
+            return Refused("SolStream couldn't save it in the PC's Downloads folder. Check "
+                           "that folder on the PC, then send it again.");
         }
         if (path.empty() && odd_error == ERROR_FILENAME_EXCED_RANGE) {
             return Refused("Its name is too long for the PC. Rename it shorter, then send it "

@@ -26,6 +26,7 @@ extern "C" WINSETUPAPI WINBOOL WINAPI SetupDiSetDevicePropertyW(
 #include <vector>
 
 #include "display_setup.h"
+#include "media/log.h"
 #include "updater.h"
 #include "util.h"
 #include "vdd.h"
@@ -449,15 +450,16 @@ std::string InstallProblem(const char* what, DWORD code) {
         case ERROR_CANCELLED:
         case ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED:
         case ERROR_AUTHENTICODE_PUBLISHER_NOT_TRUSTED:
-            return "Windows asked whether to install the driver and the answer was no, so "
-                   "nothing was installed.";
+            return "The driver wasn't installed, because Windows' driver prompt was "
+                   "declined. Set it up again and click Install when Windows asks.";
         case ERROR_INVALID_IMAGE_HASH:
         case (DWORD) TRUST_E_NOSIGNATURE:
             return "Windows would not accept the driver's signature, so nothing was "
                    "installed.";
         default:
-            return std::string("Windows could not ") + what + " (error "
-                 + std::to_string(code) + ").";
+            media::Log("[driver] Windows could not %s: error %lu", what, code);
+            return std::string("Windows couldn't ") + what + ". Restart this PC, then set "
+                   "it up again.";
     }
 }
 
@@ -626,15 +628,18 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             // project's page offers needs the same connection.
             // What to do next is said by whoever shows this: setup adds where
             // to set it up again.
-            error = "Couldn't download the virtual display driver. Check this PC's "
-                    "internet connection. (" + fetch_error + ")";
+            media::Log("[driver] download failed: %s", fetch_error.c_str());
+            error = "Couldn't download the virtual display driver. Check that this PC is "
+                    "online.";
             return false;
         }
 
         std::string folder_error;
         const std::wstring work = PrivateDirectory(folder_error);
         if (work.empty()) {
-            error = "Couldn't unpack the virtual display driver: " + folder_error + ".";
+            media::Log("[driver] no folder to unpack into: %s", folder_error.c_str());
+            error = "Couldn't unpack the virtual display driver. Restart this PC, then set it "
+                    "up again.";
             return false;
         }
         struct Cleanup {
@@ -656,8 +661,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
         const std::wstring inf = package_dir + L"\\MttVDD.inf";
         if (unpacked != 0 || !Exists(inf) || !Exists(package_dir + L"\\MttVDD.dll")
             || !Exists(package_dir + L"\\mttvdd.cat")) {
-            error = "Couldn't unpack the virtual display driver (tar " + RunOutcome(unpacked)
-                  + ").";
+            media::Log("[driver] unpacking failed: tar %s", RunOutcome(unpacked).c_str());
+            error = "Couldn't unpack the virtual display driver. Restart this PC, then set it "
+                    "up again.";
             return false;
         }
 

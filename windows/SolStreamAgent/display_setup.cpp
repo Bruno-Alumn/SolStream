@@ -1,5 +1,7 @@
 #include "display_setup.h"
 
+#include "media/log.h"
+
 #include <windows.h>
 #include <aclapi.h>
 #include <shlobj.h>
@@ -578,15 +580,16 @@ bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& 
     LONG rc = ChangeDisplaySettingsExW(gdi_name.c_str(), &mode, nullptr,
                                        CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
+        media::Log("[display] setting the size failed: %ld", rc);
         error = "The virtual display is installed, but Windows wouldn't set its size. "
-                "Restarting this PC usually fixes it. (code " + std::to_string((int) rc) + ")";
+                "Restarting this PC usually fixes it.";
         return false;
     }
     rc = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
+        media::Log("[display] applying the settings failed: %ld", rc);
         error = "The virtual display is installed, but Windows wouldn't apply its "
-                "settings. Restarting this PC usually fixes it. (code "
-              + std::to_string((int) rc) + ")";
+                "settings. Restarting this PC usually fixes it.";
         return false;
     }
     return true;
@@ -841,8 +844,8 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
         }
     }
     if (adapter.gdi_name.empty()) {
-        error = "No virtual display adapter is present. Install the display "
-                "driver first, or restart this PC if you just did.";
+        error = "The virtual display isn't on this PC yet. Set it up, or restart this PC "
+                "if you just did.";
         return false;
     }
     // Another product's virtual display -- Parsec's, Sunshine's, spacedesk's --
