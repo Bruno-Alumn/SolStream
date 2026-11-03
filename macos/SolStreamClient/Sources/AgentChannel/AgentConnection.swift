@@ -339,12 +339,18 @@ public final class AgentConnection {
     /// host reads exactly one line before its verdict -- is never a ping, and
     /// a takeover is never refused for one sitting in the queue.
     private var heardFromHost = false
-    /// When this socket's path stopped being viable, while it still is not.
-    private var unviableSince: Date?
+    /// When this socket's path stopped being viable (system uptime), while
+    /// it still is not.
+    private var unviableSince: TimeInterval?
+    /// Watches for a network to come back after a path was lost, so the
+    /// reconnect does not sit out the rest of a backoff of up to 30 s.
+    private var pathWatch: NWPathMonitor?
+    /// Bumped to call off a backoff already scheduled.
+    private var reconnectGeneration = 0
     /// How long a path may be gone before the socket on it is given up: long
     /// enough for Wi-Fi to roam between access points of one network, which
     /// the socket survives.
-    private static let unviableGrace: TimeInterval = 6
+    private static let unviableGrace: TimeInterval = 8
     /// Heartbeats that found the host still silent; see `startHeartbeat`.
     private var silentBeats = 0
     /// Whether this socket reached `.ready`: once it has, the host was
@@ -943,18 +949,25 @@ public final class AgentConnection {
         // up to a minute behind a transfer. Gone for a few seconds, it is
         // dropped instead, and the reconnect knocks and takes the session
         // back on whatever path there is now.
+        //
+        // Only with a token: the takeover needs one, and without it the
+        // reconnect waits out the host's own 30 s instead -- longer than TCP
+        // riding out a short gap by itself.
         connection.viabilityUpdateHandler = { [weak self] viable in
             guard let self, self.connection === connection else { return }
-            self.unviableSince = viable ? nil : (self.unviableSince ?? Date())
-            guard !viable else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            self.unviableSince = viable ? nil : (self.unviableSince ?? now)
+            guard !viable, self.token?.isEmpty == false else { return }
             self.queue.asyncAfter(deadline: .now() + Self.unviableGrace) { [weak self] in
                 // A socket still connecting has its own timeout and `.waiting`.
                 guard let self, self.connection === connection, connection.state == .ready,
                       let since = self.unviableSince,
-                      Date().timeIntervalSince(since) >= Self.unviableGrace - 0.1 else { return }
+                      ProcessInfo.processInfo.systemUptime - since >= Self.unviableGrace - 0.1
+                else { return }
                 Log.error("[agent] the network path to \(self.host) has been gone for "
                           + "\(Int(Self.unviableGrace)) s; reconnecting")
                 self.dropConnection(AgentError.disconnected)
+                self.reconnectWhenThePathReturns()
             }
         }
 
@@ -1097,6 +1110,32 @@ public final class AgentConnection {
     /// - Parameter fixedDelay: when to try, in place of the backoff -- for a
     ///   host that is known to be about to let go, where doubling the wait
     ///   only delays the moment it has.
+    /// After a lost path: the moment a network is back, the backoff is called
+    /// off and the host tried at once. Given up after two minutes, or once a
+    /// socket is up again.
+    private func reconnectWhenThePathReturns() {
+        pathWatch?.cancel()
+        let monitor = NWPathMonitor()
+        pathWatch = monitor
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+            guard let self, let monitor, self.pathWatch === monitor,
+                  path.status == .satisfied else { return }
+            monitor.cancel()
+            self.pathWatch = nil
+            guard self.wantsConnection, self.connection == nil, self.reconnectPending else { return }
+            Log.info("[agent] the network is back; trying \(self.host) now")
+            self.reconnectGeneration += 1
+            self.reconnectPending = false
+            self.openConnection()
+        }
+        monitor.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 120) { [weak self, weak monitor] in
+            guard let self, let monitor, self.pathWatch === monitor else { return }
+            monitor.cancel()
+            self.pathWatch = nil
+        }
+    }
+
     private func scheduleReconnect(after fixedDelay: TimeInterval? = nil) {
         // Two paths report the same death — the receive completion and the
         // connection's own state handler — and both call this. Without the
@@ -1107,8 +1146,9 @@ public final class AgentConnection {
         reconnectAttempt += 1
         let delay = fixedDelay ?? min(pow(2.0, Double(min(reconnectAttempt, 5))), 30.0)
         Log.info("[agent] reconnecting to \(host) in \(Int(delay))s (attempt \(reconnectAttempt))")
+        let generation = reconnectGeneration
         queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self else { return }
+            guard let self, self.reconnectGeneration == generation else { return }
             self.reconnectPending = false
             guard self.wantsConnection, self.connection == nil else { return }
             // Straight to the body: this is already on `queue`, and going
