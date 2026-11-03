@@ -1595,6 +1595,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so a reconnect has to say it all again.
         agent.onReconnected = { [weak self, weak agent] in
             guard let self, let agent else { return }
+            // Fired only once the greeting's display list is in, so the host is
+            // satisfied: a token sheet still up over a stream window asks a
+            // question nobody is asking any more, and its Cancel would end a
+            // stream that just came back. As the picker does; see `showPicker`.
+            MainActor.assumeIsolated {
+                for window in self.appWindows.compactMap(\.window)
+                where TokenPrompt.withdraw(over: window) && self.tokenPromptParent === window {
+                    self.tokenPromptOpen = false
+                    self.tokenPromptParent = nil
+                }
+            }
             self.appWindows.forEach { $0.reassertOnHost() }
             // The host ends the media session whenever the agent channel drops
             // — a Wi-Fi blip, a missed heartbeat, a host restart — so the
