@@ -2106,13 +2106,22 @@ void CopyToClipboard(const std::wstring& text) {
 // by posting a string, which the UI thread takes ownership of and deletes; that
 // is the whole synchronisation, and there is nothing to lock.
 
+/// Post `payload` to the job's window, which takes ownership; when the window
+/// has gone -- closed mid-job, as an installer closes it during an update --
+/// the post fails and the payload is freed here instead of left behind.
+template <typename Payload>
+void PostOwned(HWND window, UINT message, WPARAM wparam, Payload* payload) {
+    if (!PostMessageW(window, message, wparam, (LPARAM) payload)) {
+        delete payload;
+    }
+}
+
 void PostStep(HWND window, const std::wstring& text) {
-    PostMessageW(window, WM_SOLSTREAM_JOB_STEP, 0, (LPARAM) new std::wstring(text));
+    PostOwned(window, WM_SOLSTREAM_JOB_STEP, 0, new std::wstring(text));
 }
 
 void PostDone(HWND window, bool ok, const std::wstring& text) {
-    PostMessageW(window, WM_SOLSTREAM_JOB_DONE, ok ? 1 : 0,
-                 (LPARAM) new std::wstring(text));
+    PostOwned(window, WM_SOLSTREAM_JOB_DONE, ok ? 1 : 0, new std::wstring(text));
 }
 
 void StartInstallJob(HWND window) {
@@ -2166,8 +2175,7 @@ void StartInstallJob(HWND window) {
             }
         }
         if (!display.empty()) {
-            PostMessageW(window, WM_SOLSTREAM_JOB_DISPLAY, 0,
-                         (LPARAM) new std::string(display));
+            PostOwned(window, WM_SOLSTREAM_JOB_DISPLAY, 0, new std::string(display));
         }
         // On success `error` is InstallSelf's warning, or empty; the summary
         // says the rest.
@@ -2247,7 +2255,9 @@ void StartDisplayJob(HWND window) {
             }
         }
         const bool ok = display.rfind("ready", 0) == 0;
-        if (ok && g_display_ready) {
+        // Not once the host is shutting down: choosing what to capture then
+        // would reach into a session that is being torn down.
+        if (ok && g_display_ready && !HostWindowClosed()) {
             // This host chose what to capture as it started, when there was
             // no virtual display to choose.
             g_display_ready();
@@ -2258,7 +2268,7 @@ void StartDisplayJob(HWND window) {
         const bool restart = display.rfind("ready-restart", 0) == 0;
         // Ahead of the answer, from the same thread, so it has arrived by the
         // time the answer's headline is chosen from it.
-        PostMessageW(window, WM_SOLSTREAM_JOB_DISPLAY, 0, (LPARAM) new std::string(display));
+        PostOwned(window, WM_SOLSTREAM_JOB_DISPLAY, 0, new std::string(display));
         PostDone(window, ok,
                  ok ? (restart ? L"Windows finishes installing it when this PC restarts, "
                                  L"and SolStream sets it up for your Mac after that."
