@@ -1911,7 +1911,13 @@ bool PushLine(const std::string& line, LONG generation = 0, long feature = 0) {
     bool sent = true;
     EnterCriticalSection(&g_send_cs);
     const SOCKET client = g_push_client;
-    if (feature != 0 && (InterlockedCompareExchange(&g_push_features, 0, 0) & feature) == 0) {
+    // Again, under the lock that a new session's socket is published under:
+    // read before it, a push queued behind a long send could go to the next
+    // client before that one had proved anything, and in the clear.
+    if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0) {
+        sent = feature == 0;
+    } else if (feature != 0
+               && (InterlockedCompareExchange(&g_push_features, 0, 0) & feature) == 0) {
         sent = false;
     } else if (client != INVALID_SOCKET
                && (generation == 0
@@ -5435,8 +5441,36 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 // A line torn in half by another thread's send() is a protocol desync the Mac
 // cannot recover from -- it has no request ids to resynchronise against, so it
 // drops the connection. `g_send_cs` is declared with the push channel, above.
+/// Write all of `payload`, or false.
+bool SendAll(SOCKET client, const std::string& payload) {
+    size_t sent = 0;
+    while (sent < payload.size()) {
+        const int n = send(client, payload.data() + sent, (int) (payload.size() - sent), 0);
+        if (n <= 0) {
+            return false;
+        }
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
 bool SendLine(SOCKET client, const std::string& text) {
     EnterCriticalSection(&g_send_cs);
+    // The lock is for the sockets more than one thread writes to: the session's
+    // own, which the watchers push on, and the channel's keys. A knock being
+    // turned away, or a refusal at the door, has its socket to itself -- and
+    // waiting here for a send to a Mac whose network had gone, up to the 30 s
+    // send timeout, held the takeover's own `busy` line, and with it the
+    // shutdown that would have ended that stuck send: the takeover built for a
+    // network change failed in exactly that case.
+    bool shared = client == g_push_client;
+#ifdef SOLSTREAM_MEDIA
+    shared = shared || client == g_channel_socket;
+#endif
+    if (!shared) {
+        LeaveCriticalSection(&g_send_cs);
+        return SendAll(client, text + '\n');
+    }
     struct Unlock {
         ~Unlock() { LeaveCriticalSection(&g_send_cs); }
     } unlock;
@@ -5451,6 +5485,7 @@ bool SendLine(SOCKET client, const std::string& text) {
         if (!solstream::media::SealMessage(g_channel, text, record)) {
             Log("[agent] could not seal a %zu-byte message; dropping the client",
                 text.size());
+            shutdown(client, SD_BOTH);
             return false;
         }
         payload.assign((const char*) record.data(), record.size());
@@ -5463,13 +5498,14 @@ bool SendLine(SOCKET client, const std::string& text) {
     payload += '\n';
 #endif
 
-    size_t sent = 0;
-    while (sent < payload.size()) {
-        const int n = send(client, payload.data() + sent, (int) (payload.size() - sent), 0);
-        if (n <= 0) {
-            return false;
-        }
-        sent += static_cast<size_t>(n);
+    if (!SendAll(client, payload)) {
+        // Ended, not carried on: sealing has already moved the channel's
+        // counter, so a record that did not all go leaves the Mac a torn one
+        // or a counter ahead, and every message after fails its tag -- a
+        // session that looks alive and can say nothing. Shut down, the serving
+        // thread's next read fails at once and both ends see a plain close.
+        shutdown(client, SD_BOTH);
+        return false;
     }
     return true;
 }
@@ -5664,9 +5700,9 @@ void StartCursorWatcher(SOCKET client, bool authorised) {
     // being assigned could see neither the old value nor the new one.
     EnterCriticalSection(&g_send_cs);
     g_push_client = client;
-    LeaveCriticalSection(&g_send_cs);
     InterlockedExchange(&g_push_features, 0);
     InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
+    LeaveCriticalSection(&g_send_cs);
     const LONG generation = InterlockedIncrement(&g_cursor_generation);
     g_cursor_thread = CreateThread(nullptr, 0, CursorWatcherProc,
                                    (LPVOID) (LONG_PTR) generation, 0, nullptr);
@@ -5687,9 +5723,17 @@ void StopCursorWatcher() {
     // cannot be holding this socket while it is retired.
     EnterCriticalSection(&g_send_cs);
     g_push_client = INVALID_SOCKET;
-    LeaveCriticalSection(&g_send_cs);
     InterlockedExchange(&g_push_authorised, 0);
     InterlockedExchange(&g_push_features, 0);
+    LeaveCriticalSection(&g_send_cs);
+    // A link clicked or a file offered for this session is not the next one's:
+    // that may be another Mac.
+    std::lock_guard<std::mutex> lock(g_links_cs);
+    g_links_pending.clear();
+    for (const uint64_t id : g_offers_pending) {
+        solstream::ForgetFileOffer(id);
+    }
+    g_offers_pending.clear();
 }
 
 /// A session that has proved the token may go this long without saying anything.
@@ -5737,6 +5781,8 @@ constexpr DWORD kPreAuthTimeoutMs = 15000;
 /// reconnects — what this is worth is that the hold is now finite and logged,
 /// not that it is prevented.
 constexpr ULONGLONG kPreAuthDeadlineMs = 120000;
+/// The longest line a client may send before it has proved the token.
+constexpr size_t kMaxPreAuthLineBytes = 16 * 1024;
 
 /// How many rejected proofs one connection may make before it is dropped.
 ///
@@ -5928,6 +5974,8 @@ void ServeClient(SOCKET client) {
     }
 
     std::string buffer;
+    /// How far into `buffer` a newline has already been looked for.
+    size_t scanned = 0;
     char chunk[4096];
     // Per connection, deliberately: a fresh socket is a fresh three guesses, and
     // the point is not to make guessing hard — the token is 16 random bytes —
@@ -5990,9 +6038,11 @@ void ServeClient(SOCKET client) {
             const size_t end = buffer.find('\n');
             if (end == std::string::npos) {
                 buffer.clear();
+                scanned = 0;
                 continue;
             }
             buffer.erase(0, end + 1);
+            scanned = 0;
             discarding = false;
         }
 
@@ -6017,12 +6067,17 @@ void ServeClient(SOCKET client) {
             } else
 #endif
             {
-                const size_t newline = buffer.find('\n');
+                // From where the last look stopped: searched from the start
+                // every time, a long line cost a scan of all of it per 4 KB
+                // that arrived -- some 2 GB of scanning for one 4 MB line.
+                const size_t newline = buffer.find('\n', scanned);
                 if (newline == std::string::npos) {
+                    scanned = buffer.size();
                     break;
                 }
                 line = buffer.substr(0, newline);
                 buffer.erase(0, newline + 1);
+                scanned = 0;
             }
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
@@ -6094,7 +6149,16 @@ void ServeClient(SOCKET client) {
         // watching. The Mac does reconnect and re-assert every window now, but
         // the media session does not come back with it -- so what this costs is
         // still a live picture of a window that has been moved out from under it.
-        if (buffer.size() > solstream::kMaxLineBytes) {
+        // Before the token is proved, a line is an auth request, well under a
+        // kilobyte: a peer that has proved nothing gets no 4 MB to make this
+        // host hold and scan. A sealed record is bounded by what may be sealed.
+        size_t limit = authenticated ? solstream::kMaxLineBytes : kMaxPreAuthLineBytes;
+#ifdef SOLSTREAM_MEDIA
+        if (g_channel.encrypted) {
+            limit = 4 + solstream::media::kMaxChannelMessage + solstream::smt::kOverhead;
+        }
+#endif
+        if (buffer.size() > limit) {
 #ifdef SOLSTREAM_MEDIA
             // Newline framing only. Everything above -- clearing the buffer,
             // then resynchronising on the next '\n' -- describes a line, and on
@@ -6107,12 +6171,13 @@ void ServeClient(SOCKET client) {
             // recovered from, so drop the connection instead.
             if (g_channel.encrypted) {
                 Log("[agent] a record on the encrypted channel passed %zu bytes "
-                    "without framing; dropping the client", solstream::kMaxLineBytes);
+                    "without framing; dropping the client", limit);
                 return;
             }
 #endif
-            Log("[agent] request over %zu bytes, skipping it", solstream::kMaxLineBytes);
+            Log("[agent] request over %zu bytes, skipping it", limit);
             buffer.clear();
+            scanned = 0;
             discarding = true;
             // Exactly one line, because the Mac pops one waiting completion per
             // reply. Zero or two desynchronises every later reply on this
