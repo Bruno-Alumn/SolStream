@@ -1052,27 +1052,27 @@ void MediaSession::Impl::ReceiveLoop() {
     bool releasedForSilence = false;
     for (;;) {
         if (!running.load()) { break; }
-        // A Mac that crashed, slept or lost its network mid-press left the key
-        // down -- a game walking, a drag going on -- for the fifteen seconds
-        // until the session timed out. A Mac sends feedback fifty times a
-        // second, so two seconds of nothing is one that has gone; what it held
-        // is let go now, and the session waits on for it as before. Here, on
-        // the thread that applies input, so it cannot race an Apply.
-        const long long heard = lastHeardAt.load();
-        if (heard != 0 && MillisBetween(heard, Now()) > 2000.0) {
-            if (!releasedForSilence && input.Holding()) {
-                Log("[media] nothing from the client for 2 s; letting go of what it held");
-                input.ReleaseAll();
-            }
-            releasedForSilence = true;
-        } else {
-            releasedForSilence = false;
-        }
         sockaddr_in from{};
         int fromLen = sizeof(from);
         const int n = recvfrom(socket, (char*) buffer, sizeof(buffer), 0,
                                (sockaddr*) &from, &fromLen);
         if (n <= 0) {
+            // A Mac that crashed, slept or lost its network mid-press left the
+            // key down -- a game walking, a drag going on -- for the fifteen
+            // seconds until the session timed out. A Mac sends feedback fifty
+            // times a second, so three seconds of nothing is one that has gone;
+            // what it held is let go, and the session waits on for it. Only
+            // here, where the receive has just come back empty: checked before
+            // reading, a stall of this thread's own was taken for the Mac's
+            // silence with its packets waiting in the socket.
+            const long long heard = lastHeardAt.load();
+            if (heard != 0 && MillisBetween(heard, Now()) > 3000.0) {
+                if (!releasedForSilence && input.Holding()) {
+                    Log("[media] nothing from the client for 3 s; letting go of what it held");
+                    input.ReleaseAll();
+                }
+                releasedForSilence = true;
+            }
             // The expected case is the 200 ms receive timeout, which is what lets
             // this loop notice `running` going false. Everything else has to be
             // told apart from it: an error that does NOT block returns here
@@ -1154,6 +1154,7 @@ void MediaSession::Impl::ReceiveLoop() {
             AskEncoderForIdr(false);
         }
         lastHeardAt.store(Now());
+        releasedForSilence = false;
         HandlePlaintext(plaintext, plaintextLen);
     }
     // Let go of whatever the client was holding, here and now. A session ends

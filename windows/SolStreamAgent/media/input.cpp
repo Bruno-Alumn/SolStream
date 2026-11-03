@@ -110,11 +110,6 @@ bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) cons
         target = target_;
     }
     RECT area{};
-    // Not into a minimized window: its frame sits near (-32000, -32000), which
-    // clamped to the desktop's corner and clicked whatever was there.
-    if (target.window && IsWindow(target.window) && IsIconic(target.window)) {
-        return false;
-    }
     if (target.window && IsWindow(target.window)) {
         // The DWM frame bounds, not GetWindowRect. GetWindowRect includes the
         // invisible resize border Windows 10 and 11 put around a window, so
@@ -146,6 +141,15 @@ bool InputInjector::ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) cons
     return true;
 }
 
+bool InputInjector::TargetIsIconic() const {
+    HWND window = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(targetLock_);
+        window = target_.window;
+    }
+    return window && IsWindow(window) && IsIconic(window);
+}
+
 bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                              size_t length) {
     INPUT input{};
@@ -154,6 +158,17 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
     uint32_t trackedKey = 0;
     unsigned char trackedButton = 0;
     bool trackedDown = false;
+    // Nothing at a minimized target but a release: its frame sits near
+    // (-32000, -32000), and a move refused there left a press or a scroll to
+    // land wherever the pointer last was, on some other window. A release
+    // still goes, so nothing held is left down.
+    if (TargetIsIconic()) {
+        // Keys too: a press would go to whatever is in front on the PC.
+        const bool release = (kind == kInputButton && length >= 2 && body[1] == 0)
+                          || ((kind == kInputKey || kind == kInputKeyScan) && length >= 3
+                              && body[2] == 0);
+        if (!release) { return false; }
+    }
     switch (kind) {
         case kInputMouseAbs: {
             if (length < 4) { return false; }
@@ -235,8 +250,14 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                 // answering, which would hold this thread, and the input
                 // behind it, as ForceForeground takes care not to.
                 const HWND front = GetForegroundWindow();
-                if (raise && IsWindow(raise) && front != raise
-                    && GetWindow(front, GW_OWNER) != raise && !IsHungAppWindow(raise)) {
+                const HWND frontRoot = front ? GetAncestor(front, GA_ROOTOWNER) : nullptr;
+                HWND target = nullptr;
+                {
+                    std::lock_guard<std::mutex> guard(targetLock_);
+                    target = target_.window;
+                }
+                if (raise && IsWindow(raise) && front != raise && frontRoot != raise
+                    && (!target || frontRoot != target) && !IsHungAppWindow(raise)) {
                     SetForegroundWindow(raise);
                 }
             }

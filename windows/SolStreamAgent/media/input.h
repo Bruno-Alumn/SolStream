@@ -115,6 +115,8 @@ public:
 private:
     bool ApplyOne(unsigned char kind, const unsigned char* body, size_t length);
     bool ScreenPoint(uint16_t nx, uint16_t ny, LONG* x, LONG* y) const;
+    /// The target is a window, minimized: see ApplyOne.
+    bool TargetIsIconic() const;
 
     /// Retarget rewrites the target from the agent's command thread while the
     /// receive thread is turning coordinates into screen pixels with it. Two
