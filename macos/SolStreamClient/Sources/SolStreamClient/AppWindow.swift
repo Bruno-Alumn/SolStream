@@ -831,7 +831,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// - Parameter achieved: what the picture shows of the host window.
     private func applySizeLimits(_ placement: AgentConnection.Placement,
                                  achieved: CGRect, scale: CGFloat) {
-        guard let window, scale > 0 else { return }
+        // The window's style and limits are left alone in full screen, as its
+        // size is (see matchWindow); they are set on the way back out.
+        guard let window, scale > 0, !window.styleMask.contains(.fullScreen),
+              !fullScreenTransition else { return }
         let strip = hiddenStrip
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame.size
         func points(_ pixels: CGSize) -> NSSize {
@@ -898,7 +901,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// keeps the two in step — including when the host refuses a size, which is
     /// common: applications have minimum sizes and some resize in whole rows.
     func matchWindow(to achieved: CGRect, scale: CGFloat) {
-        guard let window, scale > 0 else { return }
+        // Not in full screen, nor on the way in or out of it: the window is the
+        // display's there, and a size the host could reach -- smaller than the
+        // Mac's screen -- left a small window inside a black Space.
+        guard let window, scale > 0, !window.styleMask.contains(.fullScreen),
+              !fullScreenTransition else { return }
         let target = NSSize(width: (achieved.width / scale).rounded(),
                             height: (achieved.height / scale).rounded())
         let current = window.contentView?.bounds.size ?? .zero
@@ -1066,8 +1073,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let files = dropped.map(\.url)
         let names = dropped.map(\.name)
         guard !files.isEmpty else {
-            say("Folders can't be sent. Compress them first (Control-click > Compress), then "
-                + "drop the .zip.", for: 6)
+            say("Folders, and apps and documents that are folders inside, can't be sent. "
+                + "Compress them first (Control-click > Compress), then drop the .zip.", for: 6)
             return false
         }
         // Said when the rest have gone, not swallowed: a folder dropped with
@@ -1120,9 +1127,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
                             : " The \(received.count == 1 ? "file" : "\(received.count) files") "
                               + "before it \(received.count == 1 ? "is" : "are") in "
                               + "Downloads\\SolStream on the PC."
+                        let skipped = leftOut == 0 ? ""
+                            : " \(leftOut == 1 ? "One item was" : "\(leftOut) items were") "
+                              + "left out too: only files can be sent, not folders."
                         self.say("Couldn't send \(name) to the PC. "
                                  + (reason ?? "Check that the PC has room and SolStream there "
-                                    + "is up to date.") + kept,
+                                    + "is up to date.") + kept + skipped,
                                  for: 8)
                         return
                     }
@@ -1133,6 +1143,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
             }
         }
         func finish() {
+            // Nothing on the PC's clipboard for a stream that has ended: the
+            // window was closed while the last file's answer was on its way.
+            guard !isClosing else {
+                AppWindow.isSendingFiles = false
+                return
+            }
             agent.setClipboardFiles(received) { [weak self] sequence in
                 DispatchQueue.main.async {
                     AppWindow.isSendingFiles = false
@@ -1144,7 +1160,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
                           + "out: only files can be sent, not folders."
                     self.say((sequence != nil
                               ? "\(what) copied to the PC. Press ⌘V to paste."
-                              : "\(what) saved in Downloads on the PC.") + skipped, for: 6)
+                              : "\(what) saved in Downloads\\SolStream on the PC.") + skipped,
+                             for: 6)
                     Log.info("[transfer] \(what) on the host's clipboard: \(sequence != nil)")
                 }
             }
@@ -1280,6 +1297,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func setError(_ title: String, detail: String? = nil) {
+        // The mouse back first: a game that had it, and a stream that has
+        // ended, left the pointer hidden and frozen over a Try Again it could
+        // not reach -- and the way to get it back is only said the first time.
+        inputCapture?.releasePointer("the stream ended")
         metalView?.setError(title, detail: detail)
     }
 
@@ -1302,6 +1323,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// and is silently clipped to nothing. AppKit sizes and truncates the
     /// subtitle itself, next to the title, and cannot lose it.
     func setOccludedBy(_ name: String?) {
+        // What the poll compares with: told by the host's push alone, a cover
+        // that went away before the next poll -- its "clear" push lost --
+        // left the subtitle up for good, the poll seeing nothing change.
+        wasOccluded = !(name ?? "").isEmpty
         guard let name, !name.isEmpty else {
             window?.subtitle = ""
             return
