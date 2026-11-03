@@ -27,7 +27,11 @@ public:
     /// Ready for `ratio`, with nothing carried from before. A ratio that is
     /// not a positive number gives nothing out, rather than spinning.
     void Reset(double ratio) {
-        ratio_ = ratio;
+        // Outside 8 kHz..768 kHz against 48 kHz is a broken driver's number,
+        // not a device: a table of hundreds of millions of entries, or a
+        // million outputs from one buffer. Nothing out, as for zero.
+        ratio_ = ratio >= 1.0 / 6.0 && ratio <= 16.0 ? ratio : 0.0;
+        ratio = ratio_;
         history_.clear();
         table_.clear();
         if (!(ratio > 0.0) || ratio == 1.0) {
@@ -83,6 +87,19 @@ public:
             history_.erase(history_.begin(), history_.begin() + keepFrom * 2);
             position_ -= (double) keepFrom;
         }
+    }
+
+    /// The end of a sound, before a silence that brings no input: the last
+    /// half a filter's worth was held back for input to come, and held, it
+    /// was joined straight onto the next sound, seconds later -- a tick. Run
+    /// out against zeros, then everything starts afresh.
+    void Finish(std::vector<float>& out) {
+        if (!(ratio_ > 0.0) || ratio_ == 1.0) {
+            return;
+        }
+        const size_t pad = (size_t) std::ceil(halfWidth_) + 2;
+        Run(std::vector<float>(pad * 2, 0.0f), out);
+        Reset(ratio_);
     }
 
 private:

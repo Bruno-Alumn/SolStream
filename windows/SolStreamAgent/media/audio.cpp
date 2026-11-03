@@ -920,6 +920,7 @@ void RunWholePc(Packetizer& packetizer, const std::function<bool()>& running,
                 // after a short silence to end what was playing on (Packetizer::
                 // EndSound), which arrives as this flag here, not as zeros.
                 if (sounding) {
+                    resampler.Finish(pending);
                     packetizer.EndSound(pending);
                     sounding = false;
                 }

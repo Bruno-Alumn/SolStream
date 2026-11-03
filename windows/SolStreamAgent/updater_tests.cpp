@@ -4476,6 +4476,30 @@ void TestResampler() {
     std::vector<float> none;
     broken.Run({0.25f, -0.25f}, none);
     CHECK(none.empty());
+    // Nor a driver's nonsense rate, high or low.
+    for (const double nonsense : {1e-5, 100000.0}) {
+        SincResampler wild;
+        wild.Reset(nonsense);
+        std::vector<float> nothing;
+        wild.Run(std::vector<float>(1920, 0.1f), nothing);
+        CHECK(nothing.empty());
+    }
+
+    // A sound, a silence that brings no input, and the next sound: the first
+    // one's tail comes out before the silence, and nothing of it is joined
+    // to the second.
+    SincResampler ends;
+    ends.Reset(44100.0 / 48000.0);
+    std::vector<float> first;
+    ends.Run(std::vector<float>(441 * 2, 0.8f), first);
+    const size_t before = first.size();
+    ends.Finish(first);
+    CHECK(first.size() > before);
+    std::vector<float> second;
+    ends.Run(std::vector<float>(4410 * 2, -0.8f), second);
+    bool positive = false;
+    for (float v : second) { positive = positive || v > 0.05f; }
+    CHECK(!positive);
 }
 
 void TestFullScreen() {
