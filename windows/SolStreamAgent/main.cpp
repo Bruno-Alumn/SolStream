@@ -2638,7 +2638,8 @@ std::vector<uint64_t> g_offers_pending;
 
 /// From the host window: a file handed over by `--send-to-mac`. 1 when a
 /// signed-in Mac that takes offers will be told of it, 0 when none can, 2
-/// when too many are already on their way. Checked again here: any program
+/// when too many are already on their way, 3 when the file itself was
+/// turned down. Checked again here: any program
 /// on the PC can send this, though all it can do is offer a file that this
 /// account can read to this account's own Mac.
 int QueueFileForMac(const std::wstring& path) {
@@ -2648,10 +2649,11 @@ int QueueFileForMac(const std::wstring& path) {
         return 0;
     }
     std::string error;
-    const uint64_t id = solstream::AddFileOffer(path, error);
+    bool full = false;
+    const uint64_t id = solstream::AddFileOffer(path, error, &full);
     if (id == 0) {
         Log("[files] not offering %s: %s", ToUtf8(path).c_str(), error.c_str());
-        return 2;
+        return full ? 2 : 3;
     }
     {
         std::lock_guard<std::mutex> lock(g_links_cs);
@@ -6761,12 +6763,16 @@ int wmain(int argc, wchar_t** argv) {
                 case 1:
                     return 0;
                 case 2:
-                    // The host says no more than that. Its likely reason is
-                    // the cap; anything about the file itself is asked again.
+                    refusal = "SolStream is already sending 16 files. Wait for them to "
+                              "arrive on the Mac, then send the rest.";
+                    break;
+                case 3:
+                    // The host turned the file down; why is asked again here,
+                    // since the answer carries only a number.
                     refusal = solstream::FileOfferRefusal(path);
                     if (refusal.empty()) {
-                        refusal = "SolStream is already sending 16 files. Wait for them to "
-                                  "arrive on the Mac, then send the rest.";
+                        refusal = "SolStream couldn't read that file on the PC. Try again, "
+                                  "or copy it somewhere else first.";
                     }
                     break;
                 case -1:

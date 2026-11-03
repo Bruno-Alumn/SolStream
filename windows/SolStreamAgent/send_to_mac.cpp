@@ -47,7 +47,7 @@ std::string UnreadableReason(DWORD error) {
             return "SolStream isn't allowed to read that file on the PC.";
         case ERROR_FILE_NOT_FOUND:
         case ERROR_PATH_NOT_FOUND:
-            return "The file was moved or deleted on the PC before it was sent.";
+            return "The file was moved or deleted on the PC while it was being sent.";
         default:
             return "SolStream couldn't read that file on the PC (error " + std::to_string(error)
                  + ").";
@@ -120,7 +120,10 @@ std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size_
     return {};
 }
 
-uint64_t AddFileOffer(const std::wstring& path, std::string& error) {
+uint64_t AddFileOffer(const std::wstring& path, std::string& error, bool* full) {
+    if (full) {
+        *full = false;
+    }
     unsigned long long size = 0;
     error = FileOfferRefusal(path, &size);
     if (!error.empty()) {
@@ -149,6 +152,9 @@ uint64_t AddFileOffer(const std::wstring& path, std::string& error) {
     if (g_offers.size() >= kMaxOffers) {
         error = "SolStream is already sending 16 files. Wait for them to arrive, then "
                 "send the rest.";
+        if (full) {
+            *full = true;
+        }
         return 0;
     }
     const uint64_t id = g_next_offer++;
@@ -179,15 +185,14 @@ std::string DownloadJson(long long id, long long offset) {
         if (found == g_offers.end()) {
             return Fail("The PC no longer has that file on offer. Send it again from the PC.");
         }
-        // Every open offer, not only this one: the Mac fetches one file at a
-        // time, and a small file sent after a large one waits its turn for as
-        // long as the large one takes.
-        const ULONGLONG now = GetTickCount64();
-        for (auto& open : g_offers) {
-            open.second.made = now;
-        }
         offer = found->second;
     }
+    // A file that is gone or not the one offered can never be sent: the offer
+    // goes with the refusal, rather than holding a slot while the Mac retries.
+    auto withdraw = [id](const std::string& reason) {
+        ForgetFileOffer(static_cast<uint64_t>(id));
+        return Fail(reason);
+    };
     if (offset < 0 || static_cast<unsigned long long>(offset) > offer.size
         || (offer.size > 0 && static_cast<unsigned long long>(offset) == offer.size)) {
         return Fail("The Mac asked for a part of the file that isn't there. Send it again "
@@ -197,7 +202,10 @@ std::string DownloadJson(long long id, long long offset) {
     // is still the file that was offered, as it was then.
     HANDLE file = OpenForSending(offer.path);
     if (file == INVALID_HANDLE_VALUE) {
-        return Fail(UnreadableReason(GetLastError()));
+        const DWORD error = GetLastError();
+        // Locked for now is not gone for good.
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+            ? withdraw(UnreadableReason(error)) : Fail(UnreadableReason(error));
     }
     BY_HANDLE_FILE_INFORMATION info{};
     const bool same = GetFileInformationByHandle(file, &info)
@@ -209,7 +217,7 @@ std::string DownloadJson(long long id, long long offset) {
         && CompareFileTime(&info.ftLastWriteTime, &offer.written) == 0;
     if (!same) {
         CloseHandle(file);
-        return Fail(kChanged);
+        return withdraw(kChanged);
     }
     const size_t length = static_cast<size_t>(
         (std::min)(static_cast<unsigned long long>(kTransferChunkBytes),
@@ -225,14 +233,23 @@ std::string DownloadJson(long long id, long long offset) {
     CloseHandle(file);
     if (!read_ok) {
         // A region another app holds locked fails here, not at the open.
-        return Fail(ok ? UnreadableReason(error) : kChanged);
+        return ok ? Fail(UnreadableReason(error)) : withdraw(kChanged);
     }
     if (read != length) {
-        return Fail(kChanged);
+        return withdraw(kChanged);
     }
-    if (static_cast<unsigned long long>(offset) + length == offer.size) {
+    {
         std::lock_guard<std::mutex> lock(g_offers_cs);
-        g_offers.erase(static_cast<uint64_t>(id));
+        if (static_cast<unsigned long long>(offset) + length == offer.size) {
+            g_offers.erase(static_cast<uint64_t>(id));
+        }
+        // Served: every open offer gets another half hour, not only this one.
+        // The Mac fetches one file at a time, and a small file sent after a
+        // large one waits its turn for as long as the large one takes.
+        const ULONGLONG now = GetTickCount64();
+        for (auto& open : g_offers) {
+            open.second.made = now;
+        }
     }
     return "{\"type\":\"download\",\"ok\":true,\"id\":" + std::to_string(id)
          + ",\"total\":" + std::to_string(offer.size) + ",\"offset\":" + std::to_string(offset)

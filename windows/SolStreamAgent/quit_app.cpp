@@ -171,13 +171,13 @@ std::string QuitAppJson(HWND streamed, bool force) {
     // A Store app's frame is ApplicationFrameHost's, which draws every Store
     // app: the process to end is the app inside it. Not found, the frame host
     // stays the one named, and ForceQuitRefusal turns it down.
+    const DWORD window_pid = pid;   // the window's own: the frame host's, for a Store app
     if (IsFrameHost(image)) {
         if (const DWORD app = StoreAppInside(streamed, pid)) {
             pid = app;
             image = ImageName(pid);
         }
     }
-    const DWORD window_pid = pid;
     DWORD session = 0, own_session = 0;
     const bool session_known = ProcessIdToSessionId(pid, &session) != FALSE;
     ProcessIdToSessionId(GetCurrentProcessId(), &own_session);

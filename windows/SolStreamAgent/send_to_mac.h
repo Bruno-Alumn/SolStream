@@ -23,8 +23,9 @@ std::string FileOfferRefusal(const std::wstring& path, unsigned long long* size 
 
 /// Offer `path` (a file, not a folder, at most kMaxUploadBytes) to the Mac.
 /// Its offer number, or 0 with `error` saying why not -- to the person who
-/// asked. Offers expire after half an hour, and at most 16 are open.
-uint64_t AddFileOffer(const std::wstring& path, std::string& error);
+/// asked -- and `full` set when the reason is that 16 are already open.
+/// Offers expire after half an hour.
+uint64_t AddFileOffer(const std::wstring& path, std::string& error, bool* full = nullptr);
 
 /// The push that tells the Mac about offer `id`: its name and size.
 std::string FileOfferJson(uint64_t id);
@@ -32,7 +33,8 @@ std::string FileOfferJson(uint64_t id);
 /// The reply to `{"cmd":"download","id":N,"offset":O}`: up to
 /// kTransferChunkBytes of the offered file from O, or `ok:false` with a
 /// `message` for the person who sent it. Refused once the file is not the one
-/// offered as it was then -- another file, a new size, saved since. The last
+/// offered as it was then -- another file, a new size, saved since -- and the
+/// offer withdrawn with it, as it is when the file is gone. The last
 /// chunk closes the offer, and each one served gives every open offer another
 /// half hour, so neither a slow transfer of a large file nor the files queued
 /// behind it run out of time.

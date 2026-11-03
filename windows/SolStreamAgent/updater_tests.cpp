@@ -1858,6 +1858,40 @@ void TestFileOffers() {
     CHECK(none != 0);
     CHECK(DownloadJson(static_cast<long long>(none), 0).find("\"ok\":true") != std::string::npos);
 
+    // Saved over since it was offered, same size: refused, and the offer
+    // withdrawn. Then swapped for another file: the same.
+    const uint64_t saved = AddFileOffer(file, error);
+    CHECK(saved != 0);
+    {
+        HANDLE handle = CreateFileW(file.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                                    OPEN_EXISTING, 0, nullptr);
+        CHECK(handle != INVALID_HANDLE_VALUE);
+        FILETIME later{};
+        GetFileTime(handle, nullptr, nullptr, &later);
+        later.dwHighDateTime += 1;
+        CHECK(SetFileTime(handle, nullptr, nullptr, &later));
+        CloseHandle(handle);
+    }
+    CHECK(DownloadJson(static_cast<long long>(saved), 0).find("changed") != std::string::npos);
+    CHECK(FileOfferJson(saved).empty());
+    const uint64_t swapped = AddFileOffer(file, error);
+    CHECK(swapped != 0);
+    const std::wstring other = folder + L"\\other.txt";
+    CHECK(WriteWholeFile(other, body));
+    CHECK(MoveFileExW(other.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING));
+    CHECK(DownloadJson(static_cast<long long>(swapped), 0).find("changed") != std::string::npos);
+    CHECK(FileOfferJson(swapped).empty());
+    // Gone: withdrawn too.
+    const std::wstring doomed = folder + L"\\doomed.txt";
+    CHECK(WriteWholeFile(doomed, "x"));
+    const uint64_t gone = AddFileOffer(doomed, error);
+    CHECK(gone != 0 && DeleteFileW(doomed.c_str()));
+    CHECK(DownloadJson(static_cast<long long>(gone), 0).find("\"ok\":false") != std::string::npos);
+    CHECK(FileOfferJson(gone).empty());
+    // The cap says so.
+    bool full = true;
+    CHECK(AddFileOffer(folder, error, &full) == 0 && !full);
+
     // Forgotten -- the Mac gave up -- and gone at once.
     const uint64_t dropped = AddFileOffer(file, error);
     CHECK(dropped != 0);
