@@ -266,6 +266,7 @@ names none of them and receives none. The ones there are:
 | `openURL` | `{"type":"openURL","url":"…"}`: a web or mail link clicked on the PC, with SolStream as its browser there |
 | `fileOffer` | `{"type":"fileOffer","id":N,"name":"…","size":S}`: a file sent with Send to Mac, fetched with `download` |
 | `fullScreen` | `{"type":"fullScreen","id":N,"on":bool}`: the app went full screen on the PC, or came out of it |
+| `inputBlocked` | `{"type":"inputBlocked","reason":"…","app":"…"}`: the Mac's input can't reach the PC. `reason` is `secureDesktop` (a UAC prompt, Ctrl+Alt+Del or the lock screen), `screenSaver`, or `elevated`, with `app` naming the program in front that runs as administrator. An empty `reason` means input works again. Sent on change, checked about twice a second |
 
 `displays[].name` is the `DXGI_OUTPUT_DESC.DeviceName` form (`\\.\DISPLAY1`) —
 the same string the media session names, so the capture display
@@ -459,3 +460,11 @@ names the host, and `virtualDisplay` says whether it has one, so a second Mac (o
 a person diagnosing one) can still tell which PC answered and whether it is set
 up. Only a client that has proved the token counts as streaming; an open socket
 that has not is closed without a word, as above.
+
+When a token is set, a knock from a Mac whose own session may still be held
+(a network change no FIN reported) is offered a takeover on a thread of its
+own, at most four at a time. Lines to such a socket never wait on the lock the
+live session's sends hold, which a send to a Mac whose network had gone can
+keep for up to 30 s. A knock past the four is told the PC is busy answering
+other connections, with no `holder`, so a Mac that is reconnecting tries again
+and one connecting fresh says to go back and connect again.
