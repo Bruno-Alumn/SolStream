@@ -201,8 +201,11 @@ final class HostDropdown: DS.Box {
         return true
     }
 
-    override var acceptsFirstResponder: Bool { true }
-    override var canBecomeKeyView: Bool { true }
+    // In the Tab loop as a pop-up button is: when Full Keyboard Access is on.
+    // Always focusable, it took focus as the connect window opened -- and with
+    // it the Return meant for Connect.
+    override var acceptsFirstResponder: Bool { NSApp.isFullKeyboardAccessEnabled }
+    override var canBecomeKeyView: Bool { acceptsFirstResponder }
     override var focusRingMaskBounds: NSRect { bounds }
     override func drawFocusRingMask() {
         NSBezierPath(roundedRect: bounds, xRadius: DS.Metric.fieldRadius,
@@ -210,9 +213,10 @@ final class HostDropdown: DS.Box {
     }
 
     override func keyDown(with event: NSEvent) {
-        // Space, Return and ↓ open it, as they do a pop-up button.
+        // Space, ↓ and ↑ open it, as they do a pop-up button. Not Return: that
+        // is the default button's, and Connect is what it should press.
         switch event.keyCode {
-        case 49, 36, 76, 125:
+        case 49, 125, 126:
             if !isOpen { openList() }
         default:
             super.keyDown(with: event)
@@ -281,7 +285,9 @@ final class HostDropdown: DS.Box {
         var frame = NSRect(x: screenRect.minX - M.listPad, y: screenRect.origin.y,
                            width: panelWidth, height: height)
         if let visible = window.screen?.visibleFrame {
-            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+            // The bottom kept when it cannot all fit: the address field is the
+            // last row.
+            frame.origin.y = max(min(frame.minY, visible.maxY - frame.height), visible.minY)
             frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
         }
         panel.setFrame(frame, display: false)
