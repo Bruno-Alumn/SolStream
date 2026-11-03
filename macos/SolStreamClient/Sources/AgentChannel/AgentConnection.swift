@@ -2558,7 +2558,11 @@ public final class AgentConnection {
             defer {
                 if tookOver, !authInFlight { releaseHeldRequests() }
             }
-            let host = message["host"] as? String ?? self.host
+            // The name the greeting gives, for messages only: it is cleartext
+            // from whatever answered, so it is cleaned of anything that could
+            // disguise it, and it never decides anything -- the address this
+            // Mac dialled, `self.host`, does.
+            let host = (message["host"] as? String).flatMap(HostBrowser.cleanName) ?? self.host
             let version = message["version"] as? Int ?? 0
             // Before any branch below needs it: a token supplied later by the
             // user authenticates against the challenge from THIS greeting.
@@ -2632,8 +2636,22 @@ public final class AgentConnection {
                 report(.failed("\(host) did not ask for the token this Mac has stored "
                                + "for it. Something may be impersonating your PC."))
                 dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
+            } else if !Self.isThisMachine(self.host) {
+                // A host that wants no token is only ever one listening on its
+                // own loopback: the agent refuses `--no-auth` on any other
+                // address, and an installed one always asks. Anything on the
+                // network that doesn't is not SolStream as installed -- a
+                // machine answering discovery with a PC's name, hoping to be
+                // picked -- and a session with it would run in the clear.
+                Log.error("[agent] \(self.host) asked for no token; refusing a session in the clear")
+                wantsConnection = false
+                report(.failed("\(self.host) didn't ask for a pairing token, which SolStream "
+                               + "always does over the network. Check it's your PC, and "
+                               + "that SolStream on it was installed with its setup."))
+                dropConnection(AgentError.unexpectedDowngrade, reconnect: false)
             } else {
-                // A host that wants no token, and this Mac holds none for it.
+                // A host on this Mac's own loopback -- a development agent, or
+                // one reached through a tunnel -- that wants no token.
                 mayTalk = true
                 releaseHeldRequests()
             }

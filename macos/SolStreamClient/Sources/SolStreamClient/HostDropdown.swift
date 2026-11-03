@@ -440,7 +440,7 @@ final class HostDropdown: DS.Box {
     }
 
     @objc private func manualCommitted() {
-        let typed = manualField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let typed = ConnectWindow.dialable(manualField?.stringValue ?? "")
         guard !typed.isEmpty else { return }
         selectedAddress = typed
         closeList(commit: true)

@@ -29,6 +29,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         /// because nobody is signed in to Windows. Silence instead is a PC
         /// asleep, off, or out of reach.
         var isRefused = false
+        /// The address itself is the trouble: see `Reach`.
+        var addressProblem: Reach?
         var isPaired: Bool
         var latency: TimeInterval?
         /// What this Mac's Tailscale was when the PC was last asked, for the
@@ -91,6 +93,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var stack: NSStackView!
 
     private let browser = HostBrowser()
+    /// Discovery's questions can't go out: see `HostBrowser.onCannotAsk`.
+    private var cannotAskNetwork = false
     private var discovered: [DiscoveredHost] = []
     private var state: HostState
     private var probe: DispatchWorkItem?
@@ -112,7 +116,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// agent's port: the real readings, except in tests.
     private let readTailscale: () -> TailscaleStatus
     /// What opening the agent's port found.
-    enum Reach: Equatable { case open, refused, silent }
+    /// What a probe found. Not answering is told apart from a name that
+    /// leads nowhere -- a typo sent people to check a PC that was fine -- and
+    /// from a name that leads only to IPv6, which the PC doesn't listen on.
+    enum Reach: Equatable { case open, refused, silent, unknownName, ipv6Only }
 
     private let reach: (String) -> Reach
     /// Where the hosts used before are kept: the app's own defaults, except
@@ -424,7 +431,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             }
             dotState = .live
         case .some(false):
-            parts.append(.words(state.isRefused ? "SolStream not running" : "Not answering"))
+            parts.append(.words(state.addressProblem == .unknownName ? "Name not found"
+                : state.addressProblem == .ipv6Only ? "IPv6 only"
+                : state.isRefused ? "SolStream not running" : "Not answering"))
             dotState = .danger
         case nil:
             parts.append(.words(state.address.isEmpty ? "Enter an address" : "Checking…"))
@@ -462,9 +471,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             let names = discovered
                 .map { HostBrowser.baseName(of: $0.name) ?? $0.name }
                 .joined(separator: ", ")
-            hintLabel.stringValue = discovered.isEmpty
-                ? "The first connection asks for the token shown on the PC."
-                : "Found \(names) on this network."
+            hintLabel.stringValue = !discovered.isEmpty
+                ? "Found \(names) on this network."
+                : cannotAskNetwork
+                ? "This Mac can't look for PCs on the network. Check SolStream's Local "
+                    + "Network access in System Settings, or type the PC's address."
+                : "The first connection asks for the token shown on the PC."
             connectButton.title = "Connect"
         }
         // A Tailscale address with Tailscale off cannot answer however long
@@ -607,6 +619,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                       self.state.address == address else { return }
                 self.state.isReachable = reachable
                 self.state.isRefused = answer == .refused
+                self.state.addressProblem =
+                    answer == .unknownName || answer == .ipv6Only ? answer : nil
                 self.state.latency = reachable ? elapsed : nil
                 if !reachable, self.preferDiscoveredHost() { return }
                 if !reachable, self.preferAnotherRoute() { return }
@@ -647,13 +661,13 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                              ai_addr: nil, ai_next: nil)
         var info: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, String(port), &hints, &info) == 0, let head = info else {
-            return .silent
+            return .unknownName
         }
         // The IPv4 address when there is one: the PC listens on IPv4 only, and
         // macOS puts a .local name's link-local IPv6 address first, so a working
         // PC was probed where it is not listening and shown as not answering.
         // One lookup, so a name that does not resolve costs one timeout.
-        var first = head
+        var first: UnsafeMutablePointer<addrinfo>?
         var entry: UnsafeMutablePointer<addrinfo>? = head
         while let candidate = entry {
             if candidate.pointee.ai_family == AF_INET {
@@ -663,6 +677,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             entry = candidate.pointee.ai_next
         }
         defer { freeaddrinfo(info) }
+        // Only IPv6: the PC listens on IPv4 alone, so knocking is no use, and
+        // "not answering" would send someone to check a PC that is fine.
+        guard let first else { return .ipv6Only }
 
         let fd = socket(first.pointee.ai_family, first.pointee.ai_socktype, first.pointee.ai_protocol)
         guard fd >= 0 else { return .silent }
@@ -688,9 +705,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             guard let self, self.browser.isRunning else { return }
             self.discovered = hosts
 
+            self.cannotAskNetwork = false
             // Offer the one obvious choice rather than making them open the list,
-            // but never overwrite a host already chosen.
-            if self.state.address.isEmpty, let first = hosts.first {
+            // but never overwrite a host already chosen. Obvious means one this
+            // Mac is paired with, or the only PC answering: anything on the
+            // network can answer, and the first name alphabetically was picked
+            // for anyone who answered as "AAA-PC".
+            if self.state.address.isEmpty,
+               let first = hosts.first(where: { AgentConnection.hasStoredToken(for: $0.connectTarget) })
+                ?? (hosts.count == 1 ? hosts.first : nil) {
                 self.state.address = first.connectTarget
                 self.state.name = first.name
                 self.scheduleProbe()
@@ -700,6 +723,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 return
             }
             self.refresh()
+        }
+        browser.onCannotAsk = { [weak self] _ in
+            self?.cannotAskNetwork = true
+            self?.refresh()
         }
         browser.start()
     }
@@ -862,6 +889,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.name = discovered.first { $0.connectTarget == typed }?.name
         state.isReachable = nil
         state.isRefused = false
+        state.addressProblem = nil
         wokeAt = nil
         wakeFailed = false
         state.latency = nil
@@ -876,7 +904,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.textColor = DS.danger
             return
         }
-        remember(host: host)
+        // Not a host that has just been found not to answer: a typo would push
+        // a good one out of the five kept. One that answers was remembered by
+        // its probe already.
+        if state.isReachable != false { remember(host: host) }
         close()
         onConnect(host)
     }
@@ -929,6 +960,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // a port nothing listens on more often than it refuses one -- so a
         // PC waiting at the sign-in screen usually looks the same as one
         // asleep.
+        if state.addressProblem == .unknownName {
+            return "Couldn't find a PC called \(state.address). Check the spelling, or use the "
+                + "address shown on SolStream's window on the PC."
+        }
+        if state.addressProblem == .ipv6Only {
+            return "SolStream on the PC listens on IPv4 only. Use its IPv4 address, or its "
+                + "Tailscale address starting 100."
+        }
         if state.isRefused {
             return "Something is on at this address, but SolStream isn't answering. If it's "
                 + "your PC, sign in to Windows or open SolStream."
@@ -1073,6 +1112,30 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     // MARK: - Recents
+
+    /// Forget the hosts used before and the last one, as Forget Paired PCs
+    /// does: kept, a PC just forgotten stayed listed as used before, and the
+    /// window opened on it.
+    static func forgetRecents(in defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: recentHostsKey)
+        defaults.removeObject(forKey: lastHostKey)
+    }
+
+    /// What was typed, as an address to dial: brackets round an IPv6 address
+    /// taken off, and a port taken off another -- the PC's port is fixed, and
+    /// "192.168.1.5:47630" otherwise went to the name lookup whole and failed.
+    static func dialable(_ typed: String) -> String {
+        let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("["), let close = text.firstIndex(of: "]") {
+            return String(text[text.index(after: text.startIndex)..<close])
+        }
+        let colons = text.filter { $0 == ":" }.count
+        if colons == 1, let colon = text.firstIndex(of: ":"),
+           text[text.index(after: colon)...].allSatisfy(\.isNumber) {
+            return String(text[..<colon])
+        }
+        return text
+    }
 
     private static func lastHost(in defaults: UserDefaults) -> String? {
         defaults.string(forKey: lastHostKey)

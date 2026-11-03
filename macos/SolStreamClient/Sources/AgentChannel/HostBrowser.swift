@@ -61,6 +61,12 @@ public final class HostBrowser {
 
     public var onChange: (([DiscoveredHost]) -> Void)?
 
+    /// Every question failed to go out -- macOS keeping SolStream off the
+    /// local network, most often -- with the error. Said once a run, on the
+    /// main queue: without it the list stayed empty and nothing said why.
+    public var onCannotAsk: ((Int32) -> Void)?
+    private var toldCannotAsk = false
+
     public var isRunning: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -72,6 +78,9 @@ public final class HostBrowser {
     deinit { stop() }
 
     public func start() {
+        lock.lock()
+        toldCannotAsk = false
+        lock.unlock()
         guard !isRunning else { return }
         let descriptor = socket(AF_INET, SOCK_DGRAM, 0)
         guard descriptor >= 0 else {
@@ -172,19 +181,60 @@ public final class HostBrowser {
         lock.lock()
         defer { lock.unlock() }
         guard fd >= 0 else { return }
-        var target = sockaddr_in()
-        target.sin_family = sa_family_t(AF_INET)
-        target.sin_port = StreamPorts.discovery.bigEndian
-        target.sin_addr.s_addr = INADDR_BROADCAST
         let payload = Data(Self.question.utf8)
-        _ = payload.withUnsafeBytes { raw in
-            withUnsafePointer(to: &target) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
-                    sendto(fd, raw.baseAddress, raw.count, 0, address,
-                           socklen_t(MemoryLayout<sockaddr_in>.size))
+        // Every network this Mac is on, not only the one 255.255.255.255
+        // leaves by: a Mac on Ethernet and Wi-Fi at once, or with a VPN
+        // holding the default route, otherwise asked one network or none.
+        var sent = false
+        var lastError: Int32 = 0
+        for broadcast in [INADDR_BROADCAST] + Self.interfaceBroadcasts() {
+            var target = sockaddr_in()
+            target.sin_family = sa_family_t(AF_INET)
+            target.sin_port = StreamPorts.discovery.bigEndian
+            target.sin_addr.s_addr = broadcast
+            let result = payload.withUnsafeBytes { raw in
+                withUnsafePointer(to: &target) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+                        sendto(fd, raw.baseAddress, raw.count, 0, address,
+                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
                 }
             }
+            if result >= 0 { sent = true } else { lastError = errno }
         }
+        if sent {
+            toldCannotAsk = false
+        } else if !toldCannotAsk {
+            toldCannotAsk = true
+            Log.error("[browse] could not ask the local network for PCs (errno \(lastError))")
+            let error = lastError
+            DispatchQueue.main.async { [weak self] in self?.onCannotAsk?(error) }
+        }
+    }
+
+    /// The broadcast address of each IPv4 network this Mac is up on, loopback
+    /// and point-to-point links left out. In network byte order, as
+    /// `sin_addr` takes it.
+    static func interfaceBroadcasts() -> [in_addr_t] {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let head = list else { return [] }
+        defer { freeifaddrs(list) }
+        var found: [in_addr_t] = []
+        var entry: UnsafeMutablePointer<ifaddrs>? = head
+        while let current = entry {
+            entry = current.pointee.ifa_next
+            let flags = Int32(current.pointee.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_BROADCAST != 0, flags & IFF_LOOPBACK == 0,
+                  let address = current.pointee.ifa_dstaddr,
+                  address.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            let broadcast = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+                $0.pointee.sin_addr.s_addr
+            }
+            if broadcast != 0, broadcast != INADDR_BROADCAST, !found.contains(broadcast) {
+                found.append(broadcast)
+            }
+        }
+        return found
     }
 
     /// Drop hosts that have stopped answering.
@@ -221,6 +271,8 @@ public final class HostBrowser {
                 }
             }
             guard n > 0 else { continue }
+            // An answer comes from the port the question went to.
+            guard from.sin_port == StreamPorts.discovery.bigEndian else { continue }
             guard let text = String(bytes: buffer[0..<n], encoding: .utf8),
                   text.hasPrefix(Self.answerPrefix) else { continue }
 

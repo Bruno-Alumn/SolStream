@@ -2346,8 +2346,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Forget paired PCs?"
         alert.informativeText = """
-            SolStream will forget the pairing token it holds for each PC. \
-            You will need to enter the token again — it is shown on SolStream's \
+            SolStream will forget the pairing token it holds for each PC, \
+            and the list of PCs used before. You will need to enter the token again — it is shown on SolStream's \
             own window on that PC, under "Pairing token".
             """
         alert.addButton(withTitle: "Forget")
@@ -2360,6 +2360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // forgotten, by itself, and asked for its token at once. A stream
         // open now is not saved at quit either, for the same reason.
         AppLink.setLast(nil)
+        // And the list of PCs used before, which otherwise still offered the
+        // ones just forgotten, the window opening on the last of them.
+        ConnectWindow.forgetRecents()
         forgotPairings = true
         Log.info("[agent] every stored pairing token forgotten")
     }
