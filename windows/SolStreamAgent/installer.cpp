@@ -1273,6 +1273,21 @@ InstallOptions OptionsFromArguments(int argc, wchar_t** argv) {
 /// a character either answer can contain: both are sentences.
 constexpr char kDisplaySeparator[] = "\n--display--\n";
 
+/// The account a result is for: the one that asked, as setup passes it on,
+/// else whoever is signed in to this session, else this process's own. Only
+/// ever a well-formed SID: it goes into the file's permissions.
+std::wstring ResultReaderSid() {
+    for (const std::wstring& candidate :
+         {SwitchValue(kInvokingUserSwitch), SessionUserSid(), CurrentUserSid()}) {
+        PSID sid = nullptr;
+        if (!candidate.empty() && ConvertStringSidToSidW(candidate.c_str(), &sid)) {
+            LocalFree(sid);
+            return candidate;
+        }
+    }
+    return {};
+}
+
 void WriteInstallResult(bool ok, const std::string& error, const std::string& display) {
     const std::wstring path = ResultPath();
     // Delete first, then CREATE_NEW rather than CREATE_ALWAYS: what is written
@@ -1283,8 +1298,27 @@ void WriteInstallResult(bool ok, const std::string& error, const std::string& di
     // there should be nothing there at all; this is what makes that true rather
     // than likely.
     DeleteFileW(path.c_str());
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+    // Its own permissions, not the folder's: every user may write the files in
+    // it, so any account on this PC could have rewritten an answer -- an ERR
+    // into an OK -- or deleted it before the window read it. SYSTEM and
+    // administrators, and the one account waiting for it, which may only read
+    // it and take it away.
+    SECURITY_ATTRIBUTES attributes{};
+    attributes.nLength = sizeof(attributes);
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const std::wstring reader = ResultReaderSid();
+    if (!reader.empty()
+        && ConvertStringSecurityDescriptorToSecurityDescriptorW(
+               (L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRSD;;;" + reader + L")").c_str(),
+               SDDL_REVISION_1, &descriptor, nullptr)) {
+        attributes.lpSecurityDescriptor = descriptor;
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+                              descriptor ? &attributes : nullptr, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (descriptor) {
+        LocalFree(descriptor);
+    }
     if (file == INVALID_HANDLE_VALUE) {
         const DWORD code = GetLastError();
         // The window on the other side of this file is about to say "The install
