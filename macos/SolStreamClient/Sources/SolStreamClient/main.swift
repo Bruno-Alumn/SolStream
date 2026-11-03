@@ -1577,6 +1577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // before, and a fresh session never reports `.live`, so three
                 // recoveries over a long stream used up every retry it had.
                 self.mediaRecoveryAttempts = 0
+                guard !self.connectionLostShown else { return }
                 self.appWindows.forEach { $0.hideStatus() }
             case .failed(let message):
                 let notice = self.notice(for: .failed(message), agent: agent, host: host)
@@ -1595,6 +1596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.show(notice)
                 }
             case .waitingForVideo:
+                guard !self.connectionLostShown else { return }
                 self.appWindows.forEach { $0.setStatus("Waiting for video") }
             default:
                 break
@@ -1699,6 +1701,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.recoveringMedia = false
             // The windows may all have closed during the wait.
             guard !self.appWindows.isEmpty, self.session == nil else { return }
+            // Nor is a stream started under "Lost the connection": its first
+            // frame or "Waiting for video" would replace the card, and when
+            // the PC ends it with the channel the window would be left with
+            // neither a picture nor a Try Again.
+            guard !self.connectionLostShown else { return }
             guard let media, media.streaming else {
                 // The channel dropping under the open is the usual reason it
                 // failed, and then `onReconnected` tries again with a fresh
