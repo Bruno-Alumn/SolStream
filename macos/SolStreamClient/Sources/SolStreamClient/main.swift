@@ -53,8 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// or as the one reopened at launch -- waiting for the picker's lists to
     /// be found in. See `open(link:)`.
     private var pendingOpen: AppLink?
-    /// A pairing-token sheet is up; see `promptForToken`.
+    /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
+    private weak var tokenPromptParent: NSWindow?
     /// The PC being woken for `pendingOpen`; see `LaunchWake`. Kept once it
     /// has given up, so one launcher click wakes the PC once.
     private var launchWake: LaunchWake?
@@ -725,10 +726,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // token after two minutes, and its reconnect asks again: a second sheet
         // queued behind the first, and closing it after the first had paired
         // put "needs its pairing token" over a connection that was working.
-        guard !tokenPromptOpen else { return }
+        // But only while that sheet is still to be seen: its window closed or
+        // hidden under it -- Disconnect, a launcher for another PC, Switch
+        // App -- ends nothing, and a sheet that was never finished would
+        // otherwise stop every later one, for any PC, until a restart.
+        if tokenPromptOpen, let shown = tokenPromptParent, shown.isVisible,
+           shown.attachedSheet != nil {
+            return
+        }
         tokenPromptOpen = true
+        tokenPromptParent = parent
         TokenPrompt.present(host: host, rejected: rejected, over: parent) { [weak self] token in
             self?.tokenPromptOpen = false
+            self?.tokenPromptParent = nil
             guard let token else {
                 onRefused("\(host) needs its pairing token. It's on SolStream's window on "
                           + "the PC, under \"Pairing token\". Connect again to enter it.")

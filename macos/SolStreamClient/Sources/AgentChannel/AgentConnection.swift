@@ -392,6 +392,12 @@ public final class AgentConnection {
                     Log.info("[agent] keeping the token typed for \(self.host) for the "
                              + "next greeting")
                     self.token = trimmed
+                    // And that greeting now, not after a backoff of up to half
+                    // a minute while the person who typed it watches a spinner.
+                    // The reconnect already due finds this socket and stands down.
+                    if self.connection == nil, self.wantsConnection {
+                        self.openConnection()
+                    }
                     return
                 }
                 Log.info("[agent] a token was typed for \(self.host) when none was asked "
@@ -680,6 +686,9 @@ public final class AgentConnection {
             Log.info("[agent] \(host) is still holding a session (\(holder)); "
                      + "trying again in \(String(format: "%.1f", delay))s")
             report(.waiting("Waiting for \(host) to let go of the last connection…"))
+            // A wait of its own, at its own pace: not counted into the backoff a
+            // plain failure after it starts from.
+            reconnectAttempt = 0
             dropConnection(AgentError.hostBusy, after: delay)
         case .giveUp:
             // The host's words for its own session are about a wait in
@@ -1144,6 +1153,7 @@ public final class AgentConnection {
             // run through paths that would otherwise queue a reconnect to a host
             // the user has just left.
             self.wantsConnection = false
+            self.sessionUp = false
             // Left on purpose: nothing it said before is why it ended.
             self.stateLock.lock()
             self.lastFailureText = nil
