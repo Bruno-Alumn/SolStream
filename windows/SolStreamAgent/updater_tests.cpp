@@ -2178,8 +2178,9 @@ void TestClipboardMarkers() {
     // What KeePass puts beside every password it copies.
     CHECK(ClipboardIsPrivate(Markers(true, true, refuse, refuse)));
     // What the host puts beside the pairing token (MarkClipboardPrivate):
-    // all four, Clipboard Viewer Ignore included since 11-03.
-    CHECK(ClipboardIsPrivate(Markers(true, true, refuse, refuse)));
+    // all four since 11-03, as KeePass does above; and what a host before
+    // that put, without Clipboard Viewer Ignore, still private.
+    CHECK(ClipboardIsPrivate(Markers(true, false, refuse, refuse)));
 
     // Reading the DWORD out of a format's data.
     const DWORD zero = 0;

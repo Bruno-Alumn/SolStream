@@ -2153,7 +2153,10 @@ LRESULT CALLBACK TokenEditProc(HWND edit, UINT message, WPARAM wparam, LPARAM lp
                 return 0;
             }
             if (wparam == VK_ESCAPE) {
-                PostMessageW(GetParent(edit), WM_CLOSE, 0, 0);
+                // As the window's own Escape: only when it goes to the tray.
+                if (g_tray_added) {
+                    PostMessageW(GetParent(edit), WM_CLOSE, 0, 0);
+                }
                 return 0;
             }
             break;
@@ -2542,8 +2545,15 @@ ULONGLONG g_banner_changed_at = 0;
 void Activate(HWND window, int id) {
     switch (id) {
         case kIdCopyToken: {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            CopyToClipboard(g_status.pairing_token);
+            // Read under the lock, copied outside it: the copy may wait on a
+            // clipboard another program holds, and the status thread takes
+            // this lock too.
+            std::wstring token;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                token = g_status.pairing_token;
+            }
+            CopyToClipboard(token);
             break;
         }
         case kIdBannerFix: {
@@ -2766,15 +2776,30 @@ void ShowFromTray(HWND window) {
     // Back on a display that is still there. Hidden, a window is not moved
     // when its display goes -- the virtual one it was dragged onto during a
     // stream, removed since -- and it came back nowhere anybody could see.
-    if (!MonitorFromWindow(window, MONITOR_DEFAULTTONULL)) {
+    // By its placement, which is its restored position even while minimized:
+    // the minimized rectangle is a caption at -32000, and moving that left
+    // the restore position on the display that had gone.
+    WINDOWPLACEMENT placement{sizeof(placement)};
+    // rcNormalPosition is in workspace coordinates: offset by the primary
+    // monitor's work area from the screen's. Turned into screen coordinates
+    // to ask which monitor it is on, and back to place it.
+    RECT primary{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &primary, 0);
+    if (GetWindowPlacement(window, &placement)) {
+        RECT on_screen = placement.rcNormalPosition;
+        OffsetRect(&on_screen, primary.left, primary.top);
         MONITORINFO info{sizeof(info)};
-        RECT at{};
-        GetWindowRect(window, &at);
-        if (GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &info)) {
+        if (!MonitorFromRect(&on_screen, MONITOR_DEFAULTTONULL)
+            && GetMonitorInfoW(MonitorFromRect(&on_screen, MONITOR_DEFAULTTONEAREST), &info)) {
+            const LONG width = on_screen.right - on_screen.left;
+            const LONG height = on_screen.bottom - on_screen.top;
             const RECT& work = info.rcWork;
-            SetWindowPos(window, nullptr, work.left + ((work.right - work.left) - (at.right - at.left)) / 2,
-                         work.top + ((work.bottom - work.top) - (at.bottom - at.top)) / 2, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            const LONG left = work.left + (std::max)(0L, (work.right - work.left - width) / 2);
+            const LONG top = work.top + (std::max)(0L, (work.bottom - work.top - height) / 2);
+            placement.rcNormalPosition = {left - primary.left, top - primary.top,
+                                          left - primary.left + width, top - primary.top + height};
+            placement.showCmd = IsIconic(window) ? SW_SHOWMINIMIZED : SW_HIDE;
+            SetWindowPlacement(window, &placement);
         }
     }
     ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
@@ -2848,8 +2873,15 @@ void ShowTrayMenu(HWND window) {
             ShowFromTray(window);
             break;
         case kTrayCopyToken: {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            CopyToClipboard(g_status.pairing_token);
+            // Read under the lock, copied outside it: the copy may wait on a
+            // clipboard another program holds, and the status thread takes
+            // this lock too.
+            std::wstring token;
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                token = g_status.pairing_token;
+            }
+            CopyToClipboard(token);
             break;
         }
         // Both open the window: it is where the progress and the answer are
@@ -3205,9 +3237,15 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
 
         case WM_KEYDOWN: {
-            // Escape puts the host window away, as the close box does.
+            // Escape puts the host window away, as the close box does -- only
+            // when there is a tray icon to put it in. Without one, closing
+            // ends the host and any stream with it, and one stray key -- one
+            // the Mac sent, with this window in front on the streamed desktop
+            // -- must not do that.
             if (wparam == VK_ESCAPE && g_mode == WindowMode::Host) {
-                PostMessageW(window, WM_CLOSE, 0, 0);
+                if (g_tray_added) {
+                    PostMessageW(window, WM_CLOSE, 0, 0);
+                }
                 return 0;
             }
             if (wparam == VK_TAB) {
