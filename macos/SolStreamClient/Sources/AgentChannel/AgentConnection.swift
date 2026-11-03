@@ -2966,18 +2966,38 @@ public final class AgentConnection {
 
     /// Whether a link's host names the machine it is opened on: a PC's
     /// "localhost" is the PC, and opened here it would reach whatever listens
-    /// on this Mac instead -- which a program on the PC could aim at.
+    /// on this Mac instead -- which a program on the PC could aim at. Parsed
+    /// as the system parses an address, not matched as text: a browser takes
+    /// 2130706433, 0x7f000001, 0177.0.0.1, 127.1 and [::ffff:7f00:1] for
+    /// loopback as readily as 127.0.0.1.
     static func isThisMachine(_ host: String) -> Bool {
-        let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
-        if name == "localhost" || name.hasSuffix(".localhost") || name == "0.0.0.0"
-            || name == "::1" || name == "::" || name == "0:0:0:0:0:0:0:1" {
-            return true
+        var name = host.lowercased()
+        if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+        if let zone = name.firstIndex(of: "%") { name = String(name[..<zone]) }
+        while name.hasSuffix(".") { name.removeLast() }
+        if name == "localhost" || name.hasSuffix(".localhost") { return true }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, name, &v6) == 1 {
+            let bytes = withUnsafeBytes(of: v6) { Array($0) }
+            // ::1 and ::, and an IPv4 address carried inside one -- mapped
+            // (::ffff:a.b.c.d) or compatible (::a.b.c.d) -- judged as IPv4.
+            if bytes[0..<15].allSatisfy({ $0 == 0 }) && (bytes[15] == 1 || bytes[15] == 0) {
+                return true
+            }
+            let mapped = bytes[0..<10].allSatisfy { $0 == 0 }
+                && (bytes[10..<12].allSatisfy { $0 == 0xFF } || bytes[10..<12].allSatisfy { $0 == 0 })
+            return mapped && (bytes[12] == 127 || bytes[12...15].allSatisfy { $0 == 0 })
         }
-        let octets = name.split(separator: ".", omittingEmptySubsequences: false)
-        if octets.count == 4, octets.allSatisfy({ UInt8($0) != nil }), octets[0] == "127" {
-            return true
+        // inet_aton reads every form a browser does: dotted, short, decimal,
+        // hex and octal.
+        guard name.unicodeScalars.allSatisfy({ $0.isASCII && ($0.properties.isASCIIHexDigit
+                                                    || $0 == "." || $0 == "x") }) else {
+            return false
         }
-        return name.hasPrefix("::ffff:127.")
+        var v4 = in_addr()
+        guard inet_aton(name, &v4) == 1 else { return false }
+        let address = UInt32(bigEndian: v4.s_addr)
+        return address >> 24 == 127 || address == 0
     }
 
     static func read(line: Data) -> LineReading {

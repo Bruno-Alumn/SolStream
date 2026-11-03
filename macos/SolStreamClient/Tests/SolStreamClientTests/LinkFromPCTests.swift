@@ -26,12 +26,22 @@ final class LinkFromPCTests: XCTestCase {
         for text in ["http://localhost:8080/", "http://LOCALHOST/", "http://127.0.0.1/admin",
                      "http://127.1.2.3/", "http://[::1]:3000/", "http://0.0.0.0/",
                      "http://app.localhost/", "http://[::ffff:127.0.0.1]/",
-                     "https://user:pass@example.com/", "https://user@example.com/"] {
+                     "https://user:pass@example.com/", "https://user@example.com/",
+                     "https://@example.com/", "http://localhost:3000@evil.com/",
+                     // Every spelling a browser reads as loopback.
+                     "http://2130706433/", "http://0x7f000001/", "http://0177.0.0.1/",
+                     "http://127.1/", "http://0x7f.1/", "http://0/", "http://localhost./",
+                     "http://127.0.0.1./", "http://[0:0::1]/",
+                     "http://[0000:0000:0000:0000:0000:0000:0000:0001]/",
+                     "http://[::ffff:7f00:1]/", "http://[::127.0.0.1]/", "http://[::1%25lo0]/",
+                     "http://[::]/"] {
             XCTAssertNil(AgentConnection.linkToOpen(text), text)
         }
         // Other machines on the network, and names merely starting alike, open.
         for text in ["http://192.168.1.1/", "http://nas.local/", "http://127.example.com/",
-                     "https://localhostel.com/", "http://10.0.0.5:8080/"] {
+                     "https://localhostel.com/", "http://10.0.0.5:8080/", "http://cafe/",
+                     "http://deadbeef.de/", "http://[2001:db8::1]/", "http://[::ffff:c0a8:101]/",
+                     "http://3232235777/"] {
             XCTAssertNotNil(AgentConnection.linkToOpen(text), text)
         }
     }

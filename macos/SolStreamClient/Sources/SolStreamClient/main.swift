@@ -1359,7 +1359,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .tell(ClipboardBridge.pictureTooLargeNote)
         }
         bridge.onTextCut = { [weak self] note in
-            self?.appWindows.first { $0.window?.isKeyWindow == true }?.tell(note)
+            guard let self else { return }
+            (self.appWindows.first { $0.window?.isKeyWindow == true } ?? self.appWindows.first)?
+                .tell(note)
         }
         if StreamSettings.shared.syncsClipboard {
             bridge.start(resuming: false)
@@ -2326,13 +2328,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[links] the PC sent a link this Mac won't open; ignored")
             return
         }
-        switch linkLimit.take(at: Date()) {
+        switch linkLimit.take() {
         case .open:
             Log.info("[links] opening a \(url.scheme ?? "") link from the PC")
             NSWorkspace.shared.open(url)
         case .firstHeldBack:
             Log.info("[links] more than ten links from the PC in a minute; holding the rest back")
-            appWindows.first { $0.window?.isKeyWindow == true }?.tell(LinkRateLimit.note)
+            // Not only a key window: the links that did open took the focus.
+            (appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first)?
+                .tell(LinkRateLimit.note)
         case .heldBack:
             Log.info("[links] held back a link from the PC")
         }
