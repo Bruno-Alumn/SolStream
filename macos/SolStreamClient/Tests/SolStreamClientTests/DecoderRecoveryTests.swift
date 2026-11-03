@@ -128,4 +128,19 @@ final class DecoderRecoveryTests: XCTestCase {
         _ = recovery.sessionDropped(beforeIdr: false)
         XCTAssertEqual(recovery.keyframeWait(0.5), 0, "the first real failure is asked about at once")
     }
+
+    /// A frame lost to a failure that keeps the session still costs the
+    /// picture the next frames build on: an IDR is asked for at once, then
+    /// less and less often while it goes on, and a decoded picture resets it.
+    func testALostFrameAsksForAnIdrBackingOff() {
+        var recovery = SessionRecovery()
+        XCTAssertEqual(recovery.frameLost(0.5), 0)
+        XCTAssertEqual(recovery.frameLost(0.5), 0.5)
+        XCTAssertEqual(recovery.frameLost(0.5), 1.0)
+        XCTAssertEqual(recovery.frameLost(0.5), 2.0)
+        for _ in 0..<10 { _ = recovery.frameLost(0.5) }
+        XCTAssertEqual(recovery.frameLost(0.5), 10)
+        recovery.pictureDecoded()
+        XCTAssertEqual(recovery.frameLost(0.5), 0)
+    }
 }

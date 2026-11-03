@@ -170,6 +170,26 @@ public final class AudioRenderer {
         silence.withUnsafeBufferPointer { ringBuffer.write($0) }
     }
 
+    /// When packets started arriving with nothing played, in uptime
+    /// nanoseconds; zero while sound is being played. Receive thread only.
+    private var stallSince: UInt64 = 0
+
+    /// Whether output has stalled: nothing read out for two seconds of
+    /// packets arriving. `since` is the caller's to keep between calls.
+    static func stalled(playedLately: Bool, since: inout UInt64, now: UInt64) -> Bool {
+        if playedLately {
+            since = 0
+            return false
+        }
+        if since == 0 {
+            since = now
+            return false
+        }
+        guard now &- since > 2_000_000_000 else { return false }
+        since = 0
+        return true
+    }
+
     /// Samples in the last packet played, for `fillGap`. Receive thread only.
     private var lastPacketSamples = 0
 
@@ -179,7 +199,21 @@ public final class AudioRenderer {
     /// device yet, another app holding one) usually passes. Receive thread.
     private func isRunningOrRetried() -> Bool {
         let now = state.withLock { $0 }
-        if now.running { return true }
+        if now.running {
+            guard Self.stalled(playedLately: ringBuffer.wasPlayed(within: 1.5),
+                               since: &stallSince,
+                               now: DispatchTime.now().uptimeNanoseconds) else { return true }
+            // Running by its own account, and nothing read out for seconds
+            // while packets arrive: CoreAudio stopped calling -- its server
+            // restarted, or the device went with nothing to fall back on. A
+            // retry only ever ran for a unit that had not started, so the
+            // sound stayed off for the session and the pill blamed the PC.
+            Log.error("[audio] the Mac's sound output stopped taking sound; starting it again")
+            failureLock.withLock { $0 = "the Mac's sound output stopped" }
+            state.withLock { $0.running = false }
+            lastAttempt = 0
+            return isRunningOrRetried()
+        }
         if now.stopped { return false }
         let tick = DispatchTime.now().uptimeNanoseconds
         guard tick - lastAttempt >= 2_000_000_000 else { return false }

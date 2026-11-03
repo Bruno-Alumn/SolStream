@@ -355,7 +355,17 @@ public final class VideoDecoder {
             lastDecodeErrorLog = now
         }
 
-        guard SessionRecovery.dropsSession(status) else { return }
+        guard SessionRecovery.dropsSession(status) else {
+            // Not one that costs the session, but the frame is still lost --
+            // and with it the picture the next ones are built on. Without a
+            // new IDR they decode against something that never existed, and
+            // the picture smears until the host happens to send one. Asked
+            // for, waiting longer each time it goes on failing.
+            if status != noErr {
+                requestKeyframe(after: recovery.frameLost(Self.keyframeRequestInterval))
+            }
+            return
+        }
         invalidateSession()
         // The next IDR rebuilds it; ask for one now rather than waiting for
         // the host's own keyframe interval. Unless that IDR is the frame in
@@ -608,6 +618,21 @@ struct SessionRecovery {
     /// A picture came out: whatever failed before, this stream decodes.
     mutating func pictureDecoded() {
         failedKeyframes = 0
+        framesLost = 0
+    }
+
+    /// Frames lost in a row to failures that keep the session; see
+    /// `frameLost`.
+    private(set) var framesLost = 0
+
+    /// A frame was lost to a failure that keeps the session. How long since
+    /// the last IDR asked for before asking again: at once for the first, then
+    /// twice as long each time, to 10 seconds -- a failure on every frame must
+    /// not ask the host for a keyframe on every frame.
+    mutating func frameLost(_ interval: TimeInterval) -> TimeInterval {
+        framesLost += 1
+        guard framesLost > 1 else { return 0 }
+        return min(interval * pow(2, Double(framesLost - 2)), 10)
     }
 
     /// How long to leave it before asking for another IDR after a failure.
