@@ -98,8 +98,11 @@ enum AppLauncher {
         // the path its launcher hashes, and a second launcher under the new
         // name shared the first one's bundle id -- two in Spotlight, and
         // Launch Services choosing between them.
+        // Not hidden ones: `make` stages a launcher as ".<uuid>.app", and one
+        // a crash left behind -- link written, never swapped in -- would be
+        // found first and the launcher made where nobody can see it.
         let existing = ((try? FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: nil)) ?? [])
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [])
             .filter { $0.pathExtension == "app" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         if let own = existing.first(where: { Self.link(inLauncher: $0)?.sameApp(as: link) == true }) {
@@ -127,7 +130,8 @@ enum AppLauncher {
     /// A name Finder takes: no slash, no colon, nothing hidden, not endless.
     ///
     /// Nothing that disguises a name either -- a right-to-left override would
-    /// make one app's launcher read as another's -- and cut by what the file
+    /// make one app's launcher read as another's; controlCharacters takes
+    /// those too, and the format filter says so -- and cut by what the file
     /// system counts, not by characters: 60 emoji are 240 bytes, past APFS's
     /// 255 once " (PC 20).app" is added.
     static func fileName(_ name: String) -> String {

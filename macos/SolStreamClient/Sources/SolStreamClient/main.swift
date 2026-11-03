@@ -79,6 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// for next time, and what Add to Dock adds.
     private var openingLink: AppLink?
     private var streamLink: AppLink?
+    /// Asking whether to leave one PC's stream for a launcher's (see `open`).
+    private var askingToOpen = false
     /// Started with `--host`: a test, or someone at a terminal. Nothing they
     /// open is kept for next time.
     private var commandLineSession = false
@@ -433,7 +435,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Another PC while one is streaming: said first, not done -- a
         // misclick in Spotlight or a launcher left from another PC ended a
         // game mid-session.
-        if !appWindows.isEmpty, let current = streamHost {
+        // Not over a stream that has already ended: there is nothing to end.
+        if !appWindows.isEmpty, session != nil, !connectionLostShown, let current = streamHost {
+            // One question at a time: a launcher clicked while this is up is
+            // left, not stacked -- answered in the wrong order, the older click
+            // won over the newer.
+            guard !askingToOpen else {
+                Log.info("[app] still asking about the last launcher; \"\(link.name)\" left")
+                return
+            }
+            askingToOpen = true
+            defer { askingToOpen = false }
             let alert = NSAlert()
             alert.messageText = "Open \(link.name) on \(link.host)?"
             alert.informativeText = "This ends the stream from \(current)"
