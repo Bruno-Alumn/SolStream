@@ -1,7 +1,9 @@
 #include "audio.h"
+#include "audio_downmix.h"
 
 #include <mmreg.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
 #include <audioclientactivationparams.h>
@@ -54,13 +56,16 @@ int16_t Clamp16(float value) {
 /// It is also not guaranteed to be 48 kHz stereo. The dev box's endpoint reports
 /// **96 kHz, 8 channels, 32 bits**, and a host that shipped those samples
 /// untouched would have the Mac play them at half speed through the first two
-/// of eight channels. Front left and right are always the first two channels in
-/// a WAVEFORMATEXTENSIBLE layout, so taking them is a correct downmix rather
-/// than an arbitrary one; the rate is dealt with by the resampler below.
+/// of eight channels. The channels are mixed down to two by their layout
+/// (audio_downmix.h) -- taking the first two dropped a film's dialogue, which
+/// is in the centre; the rate is dealt with by the resampler below.
 void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 frames,
              std::vector<float>& out) {
     const int channels = format->nChannels;
     out.resize((size_t) frames * 2);
+    const uint32_t mask = format->wFormatTag == WAVE_FORMAT_EXTENSIBLE
+        ? (uint32_t) ((const WAVEFORMATEXTENSIBLE*) format)->dwChannelMask : 0u;
+    const StereoWeights weights = DownmixWeights(channels, mask);
 
     // The extensible subformat GUID's first word IS the old format tag --
     // {00000003-0000-0010-8000-00aa00389b71} is IEEE float -- so this needs
@@ -87,18 +92,23 @@ void Convert(const WAVEFORMATEX* format, const unsigned char* source, UINT32 fra
 
     for (UINT32 i = 0; i < frames; ++i) {
         float left = 0.0f, right = 0.0f;
-        if (isFloat && format->wBitsPerSample == 32) {
-            const float* samples = (const float*) source + (size_t) i * channels;
-            left = samples[0];
-            right = channels > 1 ? samples[1] : samples[0];
-        } else if (format->wBitsPerSample == 16) {
-            const int16_t* samples = (const int16_t*) source + (size_t) i * channels;
-            left = samples[0] / 32768.0f;
-            right = channels > 1 ? samples[1] / 32768.0f : left;
-        } else if (format->wBitsPerSample == 32) {
-            const int32_t* samples = (const int32_t*) source + (size_t) i * channels;
-            left = (float) samples[0] / 2147483648.0f;
-            right = channels > 1 ? (float) samples[1] / 2147483648.0f : left;
+        for (int c = 0; c < channels; ++c) {
+            const float wl = weights.left[(size_t) c];
+            const float wr = weights.right[(size_t) c];
+            if (wl == 0.0f && wr == 0.0f) {
+                continue;
+            }
+            const size_t at = (size_t) i * channels + (size_t) c;
+            float sample = 0.0f;
+            if (isFloat && format->wBitsPerSample == 32) {
+                sample = ((const float*) source)[at];
+            } else if (format->wBitsPerSample == 16) {
+                sample = ((const int16_t*) source)[at] / 32768.0f;
+            } else if (format->wBitsPerSample == 32) {
+                sample = (float) ((const int32_t*) source)[at] / 2147483648.0f;
+            }
+            left += sample * wl;
+            right += sample * wr;
         }
         out[(size_t) i * 2] = left;
         out[(size_t) i * 2 + 1] = right;
@@ -420,7 +430,7 @@ HRESULT OpenTap(DWORD pid, ProcessTap& tap) {
                                     AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
                                         | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
                                         | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                                    200000, 0, &format, nullptr);
+                                    1000000, 0, &format, nullptr);
     }
     if (SUCCEEDED(hr)) {
         tap.ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -863,6 +873,15 @@ void AudioCapture::Run(const AudioEncoding& encoding, const Processes& processes
     silent_.store(0);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool ownsCom = SUCCEEDED(com);
+    // Scheduled as audio, as Windows' own audio threads are: at normal
+    // priority a game loading every core held this thread off long enough
+    // to lose sound.
+    DWORD mmcssTask = 0;
+    const HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcssTask);
+    if (!mmcss) {
+        Log("[media] the sound thread could not be scheduled as audio (%lu)",
+            (unsigned long) GetLastError());
+    }
     Packetizer packetizer(encoding, sink, packets_, silent_);
     const auto running = [&] { return !stop_.load() && keepGoing(); };
 
@@ -876,6 +895,7 @@ void AudioCapture::Run(const AudioEncoding& encoding, const Processes& processes
         RunWholePc(packetizer, running, silent_);
     }
     appSources_.store(-1);
+    if (mmcss) { AvRevertMmThreadCharacteristics(mmcss); }
     if (ownsCom) { CoUninitialize(); }
 }
 

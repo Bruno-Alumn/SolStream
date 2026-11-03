@@ -51,6 +51,7 @@
 #include "host_theme.h"
 #include "media/audio_reopen.h"
 #include "media/audio_source.h"
+#include "media/audio_downmix.h"
 #include "media/feed_ledger.h"
 #include "media/overflow_gate.h"
 #include "media/receive_errors.h"
@@ -4343,6 +4344,35 @@ void TestContrastPalette() {
     CHECK(light.accent.b > 0.49f && light.accent.b < 0.51f && light.accent.r == 0.0f);
 }
 
+/// The PC's speaker channels mixed down to the Mac's two: the centre, which
+/// carries dialogue, to both; each surround to its own side; nothing lost.
+void TestDownmix() {
+    using solstream::media::DownmixWeights;
+    // Stereo: as it was.
+    auto w = DownmixWeights(2, 0x3);
+    CHECK(w.left[0] == 1.0f && w.right[0] == 0.0f && w.left[1] == 0.0f && w.right[1] == 1.0f);
+    // Mono: to both.
+    w = DownmixWeights(1, 0x4);
+    CHECK(w.left[0] == 1.0f && w.right[0] == 1.0f);
+    // 5.1 (FL FR FC LFE BL BR): the centre to both, the rears to their sides,
+    // the low-frequency channel left out.
+    w = DownmixWeights(6, 0x3F);
+    CHECK(w.left[2] > 0.7f && w.left[2] < 0.71f && w.right[2] == w.left[2]);
+    CHECK(w.left[3] == 0.0f && w.right[3] == 0.0f);
+    CHECK(w.left[4] > 0.7f && w.right[4] == 0.0f);
+    CHECK(w.right[5] > 0.7f && w.left[5] == 0.0f);
+    // 7.1 (FL FR FC LFE BL BR SL SR): the sides to their sides as well.
+    w = DownmixWeights(8, 0x63F);
+    CHECK(w.left[6] > 0.7f && w.right[6] == 0.0f && w.right[7] > 0.7f && w.left[7] == 0.0f);
+    // The dev box's 8 channels with no mask: the first two, nothing guessed.
+    w = DownmixWeights(8, 0);
+    CHECK(w.left[0] == 1.0f && w.right[1] == 1.0f && w.left[2] == 0.0f && w.right[7] == 0.0f);
+    // Fewer channels than the mask names: only as many weights as channels.
+    w = DownmixWeights(2, 0x3F);
+    CHECK(w.left.size() == 2 && w.left[0] == 1.0f && w.right[1] == 1.0f);
+    CHECK(DownmixWeights(0, 0x3).left.empty());
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -4517,6 +4547,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferEncoding();
     TestWake();
     TestFullScreen();
+    TestDownmix();
     TestContrastPalette();
     TestReplayWindow();
 

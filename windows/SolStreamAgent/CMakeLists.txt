@@ -126,6 +126,8 @@ target_link_libraries(SolStreamCore PUBLIC
     # interface ids (uuid) -- mingw's import libraries do not carry those unless
     # the library is named.
     ole32 uuid
+    # AvSetMmThreadCharacteristics: the sound thread scheduled as audio.
+    avrt
     # The logon task is registered through ITaskService, whose strings are BSTRs.
     oleaut32
     # WTSQuerySessionInformationW: who is signed in at this desktop, which the
