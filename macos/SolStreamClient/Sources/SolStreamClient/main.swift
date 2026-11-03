@@ -1618,7 +1618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // With the agent channel down too, `onReconnected` recovers.
                 let notice = self.notice(for: .lost, agent: agent, host: host)
                 if case .restart = notice, let agent {
-                    self.recoverMedia(host: host, agent: agent)
+                    self.recoverMedia(host: host, agent: agent, countsTowardLimit: true)
                 } else {
                     self.show(notice)
                 }
@@ -1644,7 +1644,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // open synchronously, from inside itself, and tearing the
                     // session down from in there would run `stop()` mid-`start()`.
                     DispatchQueue.main.async { [weak self] in
-                        self?.recoverMedia(host: host, agent: agent)
+                        self?.recoverMedia(host: host, agent: agent, countsTowardLimit: true)
                     }
                 } else {
                     // Not "Stream failed" while the channel is coming back by
@@ -1697,11 +1697,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// After the Mac wakes: the stream again, from a fresh media session,
     /// when there is one on screen and the channel is up -- otherwise the
     /// channel's own reconnect brings it back.
+    ///
+    /// Two seconds on, not at once: the network is often not back the moment
+    /// the Mac is, and a restart then looked a name up on the main thread and
+    /// failed for want of a route. And only for the session that was showing
+    /// when the Mac woke, if no picture has come since: a stream already back
+    /// by itself, or one a recovery started meanwhile, is left alone.
     private func restartStreamAfterWake() {
-        guard session != nil, !appWindows.isEmpty, !connectionLostShown,
-              let host = streamHost, let agent, agent.isConnected else { return }
-        Log.info("[app] the Mac woke; restarting the stream from \(host)")
-        recoverMedia(host: host, agent: agent)
+        guard let woken = session else { return }
+        let framesAtWake = woken.mediaCounters.frames
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak woken] in
+            guard let self, let woken, self.session === woken,
+                  woken.mediaCounters.frames == framesAtWake,
+                  !self.appWindows.isEmpty, !self.connectionLostShown,
+                  let host = self.streamHost, let agent = self.agent, agent.isConnected
+            else { return }
+            Log.info("[app] no picture since the Mac woke; restarting the stream from \(host)")
+            self.recoverMedia(host: host, agent: agent)
+        }
     }
 
     /// Whether a recovering restart now would be one too many, given those in
@@ -1724,8 +1737,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// - Parameter status: what the windows say meanwhile, when it is not a
     ///   reconnect -- a restart to apply new settings, which nothing went wrong
     ///   to cause.
+    /// - Parameter countsTowardLimit: a stream that was running and ended --
+    ///   lost, or failed -- rather than a retry, a reconnect or a wake: only
+    ///   those are what `restartLimit` counts, so a few Wi-Fi blips or lid
+    ///   closes never add up to giving up.
     private func recoverMedia(host: String, agent: AgentConnection,
-                              status: (title: String, detail: String)? = nil) {
+                              status: (title: String, detail: String)? = nil,
+                              countsTowardLimit: Bool = false) {
         // Every caller is a handler the session or the agent delivers on main.
         dispatchPrecondition(condition: .onQueue(.main))
         guard !recoveringMedia, !appWindows.isEmpty,
@@ -1754,15 +1772,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A restart to recover, not one to apply settings: counted, and given
         // up on when the PC keeps ending the stream however often it starts.
-        if status == nil {
+        if countsTowardLimit {
             let now = Date()
             if Self.restartsExhausted(&mediaRestarts, now: now) {
                 Log.error("[app] \(Self.restartLimit.count) restarts in "
                           + "\(Int(Self.restartLimit.within)) s; not restarting again")
                 showEnded("The stream keeps stopping",
-                          detail: "\(host) ended the stream \(Self.restartLimit.count) times in two "
-                              + "minutes. Check the PC isn't locked, asleep or short of memory, "
-                              + "then choose Try Again.")
+                          detail: "The stream from \(host) stopped \(Self.restartLimit.count) times in "
+                              + "two minutes. Check the PC isn't locked or short of memory, and "
+                              + "that no other Mac is connecting to it, then choose Try Again.")
                 return
             }
         }
@@ -1911,6 +1929,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `recoverMedia`, which already knows how to swap a session under windows
     /// that stay where they are.
     private func restartMedia(reason: String) {
+        // Settings chosen anew: a stream that had kept stopping starts its
+        // count again.
+        mediaRestarts = []
         guard !appWindows.isEmpty, let host = streamHost, let agent,
               let request = mediaRequest, let config = streamConfig else { return }
         // A recovery in flight is opening a session with the old request, and

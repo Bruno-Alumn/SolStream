@@ -47,7 +47,7 @@ public final class MediaClient {
     /// Why `start()` returned false, for words that say what to do: a name
     /// that does not resolve is not an address with no IPv4, and neither is
     /// "quit and reopen SolStream".
-    public enum StartFailure: Equatable { case unresolved, noIPv4, socket }
+    public enum StartFailure: Equatable { case unresolved, noIPv4, socket, noRoute }
     public private(set) var startFailure: StartFailure?
 
     private let host: String
@@ -269,6 +269,7 @@ public final class MediaClient {
         }
         guard connected == 0 else {
             Log.error("[media] connect failed: \(String(cString: strerror(errno)))")
+            startFailure = .noRoute
             close(fd)
             fd = -1
             return false

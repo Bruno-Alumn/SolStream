@@ -309,6 +309,9 @@ final class StreamSession {
             return "\(host) can only be reached over IPv6 here, and the stream needs IPv4. "
                 + "Connect by the PC's IPv4 address, or its Tailscale address starting "
                 + "100., then Try Again."
+        case .noRoute:
+            return "This Mac has no route to \(host) right now. Check the Mac's Wi-Fi or "
+                + "network, then Try Again."
         case .socket, nil:
             return "This Mac couldn't open the stream. Try Again; if it keeps happening, "
                 + "quit and reopen SolStream."

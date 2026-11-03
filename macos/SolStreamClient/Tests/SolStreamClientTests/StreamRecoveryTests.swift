@@ -29,6 +29,7 @@ final class StreamRecoveryTests: XCTestCase {
         XCTAssertTrue(ipv6.contains("100."))
         XCTAssertFalse(ipv6.contains("quit and reopen"))
         XCTAssertTrue(StreamSession.startFailureText(.socket, host: "x").contains("quit and reopen"))
+        XCTAssertTrue(StreamSession.startFailureText(.noRoute, host: "x").contains("network"))
         XCTAssertTrue(StreamSession.startFailureText(nil, host: "x").contains("Try Again"))
     }
 }
