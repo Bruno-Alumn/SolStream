@@ -34,7 +34,23 @@ enum TokenPrompt {
             completion(nil)
             return
         }
+        // One at a time. The connection asks again each time it reconnects,
+        // and AppKit queues a second sheet on a window behind the first: the
+        // token typed into the first was accepted, and the next copy of the
+        // same question came straight up in its place, looking for all the
+        // world like a sheet that would not go away. The one already up takes
+        // the newer question -- its words, and who gets the answer.
+        if let showing = Sheet.showing(over: parent) {
+            showing.retarget(host: host, rejected: rejected, completion: completion)
+            return
+        }
         Sheet(host: host, rejected: rejected, completion: completion).present(over: parent)
+    }
+
+    /// Whether a token sheet is up over `parent`; for tests.
+    @MainActor
+    static func isShowing(over parent: NSWindow) -> Bool {
+        Sheet.showing(over: parent) != nil
     }
 
     /// The sheet itself. Retained by its own completion handler until dismissed,
@@ -43,12 +59,30 @@ enum TokenPrompt {
     private final class Sheet: NSObject {
         private let window: NSWindow
         private let field = DS.Field(placeholder: "Paste the token", mono: true)
-        private let completion: (String?) -> Void
+        private var completion: (String?) -> Void
         private var done = false
         private var keepAlive: Sheet?
+        private let heading: NSTextField
+        private weak var parent: NSWindow?
+        /// Every sheet up now; see `TokenPrompt.present`.
+        private static var live: [Sheet] = []
+
+        static func showing(over parent: NSWindow) -> Sheet? {
+            live.first { $0.parent === parent && !$0.done }
+        }
+
+        static func headingText(host: String, rejected: Bool) -> String {
+            rejected ? "\(host) didn't accept that token" : "\(host) needs a pairing token"
+        }
+
+        func retarget(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
+            heading.stringValue = Self.headingText(host: host, rejected: rejected)
+            self.completion = completion
+        }
 
         init(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
             self.completion = completion
+            heading = NSTextField(labelWithString: Self.headingText(host: host, rejected: rejected))
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 250),
                               styleMask: [.titled, .fullSizeContentView],
                               backing: .buffered, defer: false)
@@ -59,9 +93,6 @@ enum TokenPrompt {
             window.backgroundColor = DS.ground
             window.isMovableByWindowBackground = false
 
-            let heading = NSTextField(labelWithString:
-                rejected ? "\(host) didn't accept that token"
-                         : "\(host) needs a pairing token")
             heading.font = DS.title
             heading.textColor = DS.text
             heading.lineBreakMode = .byTruncatingTail
@@ -136,6 +167,8 @@ enum TokenPrompt {
 
         func present(over parent: NSWindow) {
             keepAlive = self
+            self.parent = parent
+            Self.live.append(self)
             parent.beginSheet(window) { [weak self] _ in
                 // Covers the sheet being dismissed by any route, including one
                 // that never went through the buttons.
@@ -164,6 +197,7 @@ enum TokenPrompt {
         private func finish(_ token: String?) {
             guard !done else { return }
             done = true
+            Self.live.removeAll { $0 === self }
             if let parent = window.sheetParent {
                 parent.endSheet(window)
             }
