@@ -555,6 +555,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         capture.onPointerCaptureChanged = { [weak self] captured in
             self?.pointerCaptureChanged(captured)
         }
+        capture.isOverOwnUI = { [weak view] point in view?.isOverStatusCard(point) ?? false }
         inputCapture = capture
         // Left clicks in the picture, which AppKit hands the view only when
         // they do not start a resize or a move of the window, and the click
@@ -624,7 +625,23 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // with — see `requestResize`.
         guard !isMatchingHostSize else { return }
         requestResize()
+        // A resize that was not a drag -- tiling, Zoom, Window › Fill -- has no
+        // end of a live resize to settle on, so an app that refused the size
+        // kept its bars until an edge was nudged. Settled a moment after the
+        // last such resize instead.
+        if window?.inLiveResize == false {
+            settleAfterResize?.cancel()
+            let settle = DispatchWorkItem { [weak self] in
+                guard let self, !self.isClosing else { return }
+                self.requestResize(settle: true)
+            }
+            settleAfterResize = settle
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: settle)
+        }
     }
+
+    /// See `windowDidResize`.
+    private var settleAfterResize: DispatchWorkItem?
 
     func windowDidEndLiveResize(_ notification: Notification) {
         // The resize took the release of any button the PC was holding.

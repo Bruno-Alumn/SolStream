@@ -1276,7 +1276,37 @@ public final class InputCapture {
     func handleMonitoredEvent(_ event: NSEvent) {
         if let press = Self.press(event) { lastMonitoredPress = press }
         guard event.type != .leftMouseDown else { return }
+        guard !heldBackByOwnUI(event) else { return }
         handleMouseEvent(event)
+    }
+
+    /// Whether a point in the window is over the Mac's own controls drawn on
+    /// the picture -- the status card -- rather than the PC's. The left button
+    /// reaches the card through AppKit, but this monitor sees every other
+    /// button and the wheel by window, not by view: a right-click or a scroll
+    /// over "Waiting for video" went on to the PC application under it.
+    public var isOverOwnUI: ((NSPoint) -> Bool)?
+
+    /// Buttons whose press was kept from the PC: their drags and release go
+    /// with them. A release alone is not harmless -- Windows opens a context
+    /// menu on the right button's release.
+    private var buttonsHeldBack: Set<Int> = []
+
+    private func heldBackByOwnUI(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .rightMouseDown, .otherMouseDown:
+            guard isOverOwnUI?(event.locationInWindow) == true else { return false }
+            buttonsHeldBack.insert(event.buttonNumber)
+            return true
+        case .rightMouseDragged, .otherMouseDragged:
+            return buttonsHeldBack.contains(event.buttonNumber)
+        case .rightMouseUp, .otherMouseUp:
+            return buttonsHeldBack.remove(event.buttonNumber) != nil
+        case .scrollWheel:
+            return isOverOwnUI?(event.locationInWindow) == true
+        default:
+            return false
+        }
     }
 
     /// A press the stream view was handed: every left press that is a click

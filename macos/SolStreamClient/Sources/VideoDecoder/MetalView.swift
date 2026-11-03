@@ -210,6 +210,12 @@ public final class MetalView: NSView {
 
     // MARK: - Status overlay
 
+    /// Whether `windowPoint` is over the status card, where the Mac's own
+    /// controls are rather than the PC's picture.
+    public func isOverStatusCard(_ windowPoint: NSPoint) -> Bool {
+        overlay.hitTest(overlay.superview?.convert(windowPoint, from: nil) ?? windowPoint) != nil
+    }
+
     /// Update the overlay.
     public func setStatus(_ title: String, detail: String? = nil, busy: Bool = true) {
         bumpStatusEpoch()
