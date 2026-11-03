@@ -137,6 +137,8 @@ struct MediaSession::Impl {
     /// coincide; two threads joining one std::thread is std::terminate. The
     /// second caller now waits, then finds nothing left to stop.
     std::mutex stopLock;
+    /// Stop, with stopLock already held: Start's way in, and Stop's.
+    void StopLocked();
 
     std::mutex queueLock;
     std::condition_variable queueReady;
@@ -1057,7 +1059,13 @@ MediaSession& MediaSession::Instance() {
 bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
                          std::string* error) {
     Impl& s = *impl_;
-    Stop();
+    // The whole of a start under the lock a stop takes: a Stop landing between
+    // the socket opening and the threads starting -- the PC shutting down,
+    // the session ending -- closed the socket and dropped the keys, then this
+    // started four threads on a dead socket, which a later Start assigned
+    // over while they could still be joined: std::terminate.
+    std::unique_lock<std::mutex> serialised(s.stopLock);
+    s.StopLocked();
 
     if (!Capture::Supported()) {
         if (error) { *error = "Windows.Graphics.Capture is not available"; }
@@ -1238,6 +1246,10 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
         });
     }
 
+    // Started: let go before the wait below, which can take eight seconds and
+    // must not hold up a Stop -- the PC shutting down has five.
+    serialised.unlock();
+
     // Wait for the capture thread to say whether the source and the encoder
     // actually opened. Without this the answer on the agent channel was decided
     // before anything had been tried: a window that had just closed, a WGC item
@@ -1294,7 +1306,17 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
 void MediaSession::Stop() {
     Impl& s = *impl_;
     std::lock_guard<std::mutex> serialised(s.stopLock);
-    if (!s.running.exchange(false) && s.socket == INVALID_SOCKET) {
+    s.StopLocked();
+}
+
+void MediaSession::Impl::StopLocked() {
+    Impl& s = *this;
+    // Not only "running": a session whose threads were started and that then
+    // ended on its own -- the silence timeout -- is not running, and its
+    // threads still have to be joined before the next Start assigns new ones.
+    const bool threads = s.captureThread.joinable() || s.senderThread.joinable()
+                      || s.audioThread.joinable() || s.receiveThread.joinable();
+    if (!s.running.exchange(false) && s.socket == INVALID_SOCKET && !threads) {
         return;
     }
     s.queueReady.notify_all();
