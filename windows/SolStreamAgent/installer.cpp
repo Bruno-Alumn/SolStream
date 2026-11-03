@@ -1277,12 +1277,27 @@ constexpr char kDisplaySeparator[] = "\n--display--\n";
 /// else whoever is signed in to this session, else this process's own. Only
 /// ever a well-formed SID: it goes into the file's permissions.
 std::wstring ResultReaderSid() {
-    for (const std::wstring& candidate :
-         {SwitchValue(kInvokingUserSwitch), SessionUserSid(), CurrentUserSid()}) {
+    // One at a time: looking a session's user up when the asker was named
+    // already wrote a failure to the log on every install that had no need of it.
+    for (int which = 0; which < 3; ++which) {
+        const std::wstring candidate = which == 0 ? SwitchValue(kInvokingUserSwitch)
+                                     : which == 1 ? SessionUserSid()
+                                                  : CurrentUserSid();
         PSID sid = nullptr;
-        if (!candidate.empty() && ConvertStringSidToSidW(candidate.c_str(), &sid)) {
-            LocalFree(sid);
-            return candidate;
+        if (candidate.empty() || !ConvertStringSidToSidW(candidate.c_str(), &sid)) {
+            continue;
+        }
+        // Written back out as S-1-..., so a short name such as WD -- which the
+        // conversion also takes -- can never stand in for an account.
+        LPWSTR text = nullptr;
+        std::wstring canonical;
+        if (ConvertSidToStringSidW(sid, &text)) {
+            canonical = text;
+            LocalFree(text);
+        }
+        LocalFree(sid);
+        if (!canonical.empty()) {
+            return canonical;
         }
     }
     return {};
@@ -1312,6 +1327,9 @@ void WriteInstallResult(bool ok, const std::string& error, const std::string& di
                (L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRSD;;;" + reader + L")").c_str(),
                SDDL_REVISION_1, &descriptor, nullptr)) {
         attributes.lpSecurityDescriptor = descriptor;
+    }
+    if (!descriptor) {
+        InstallLog("could not give the result its own permissions; it has the folder's");
     }
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
                               descriptor ? &attributes : nullptr, CREATE_NEW,
@@ -1595,6 +1613,16 @@ bool RelaunchElevated(const std::wstring& arguments, std::string& error, bool ma
     // installs and uninstalls alike, and the callers pass their arguments in as
     // fixed strings that have no room for it.
     std::wstring parameters = arguments;
+    // Who asked, for every elevation and not only setup's: the answer is made
+    // readable by that account alone, and guessed from the session instead it
+    // could be the administrator whose password was typed, leaving the window
+    // that asked unable to read that it had worked.
+    if (parameters.find(kInvokingUserSwitch) == std::wstring::npos) {
+        const std::wstring asker = CurrentUserSid();
+        if (!asker.empty()) {
+            parameters += L" " + std::wstring(kInvokingUserSwitch) + L" " + asker;
+        }
+    }
     g_result_token = NewResultToken();
     if (!g_result_token.empty()) {
         parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + g_result_token;
@@ -1705,6 +1733,11 @@ bool RelaunchFromTemp(const std::wstring& arguments, std::string& error) {
     const std::wstring token = ResultToken();
     if (!token.empty()) {
         parameters += L" " + std::wstring(kResultTokenSwitch) + L" " + token;
+    }
+    // And who asked, carried across as the token is.
+    const std::wstring asker = SwitchValue(kInvokingUserSwitch);
+    if (!asker.empty()) {
+        parameters += L" " + std::wstring(kInvokingUserSwitch) + L" " + asker;
     }
     // Held from here until it has started, sharing read only, checked to be
     // this program, and started by where the held file is. A hold that cannot
