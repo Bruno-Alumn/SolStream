@@ -19,8 +19,9 @@
 // clipboard's privacy markers and line endings, when the sound capture opens
 // its device again, when the encoder spends a frame id, when a Mac may take
 // back the session it left behind, how a key the Mac sends by position is
-// pressed here, which media packets the replay window turns away, and the other decisions of the host's that are kept in small
-// headers of their own so that they can be checked here.
+// pressed here, which media packets the replay window turns away, and the
+// other decisions of the host's that are kept in small headers of their own so
+// that they can be checked here.
 
 #include "updater.cpp"
 
@@ -4136,9 +4137,21 @@ void TestReplayWindow() {
     CHECK(bits[0] == 0 && bits[1] == 0b101);
     SlideWindow(bits, 130);
     CHECK(bits[1] == 0 && bits[3] == 0b10100);
+    bits[3] = 0;
     bits[15] = 1ull << 63;
     SlideWindow(bits, 1);
-    CHECK(bits[15] == 0);   // the oldest slot falls off, it does not wrap
+    CHECK(bits[15] == 0 && bits[0] == 0);   // the oldest slot falls off, it does not wrap
+    // Whole words and a carry at once: the spill comes from the word the
+    // shift reads, not the one beside the word it writes.
+    bits[0] = 0b11ull << 62;   // slots 62 and 63
+    SlideWindow(bits, 65);      // to 127 and 128, either side of a word
+    CHECK(bits[0] == 0 && bits[1] == 1ull << 63 && bits[2] == 1 && bits[3] == 0);
+    bits[1] = bits[2] = 0;
+    bits[0] = 1ull << 63;   // slot 63
+    bits[1] = 1ull << 63;   // slot 127
+    SlideWindow(bits, 65);
+    CHECK(bits[0] == 0 && bits[1] == 0 && bits[2] == 1 && bits[3] == 1);
+    bits[2] = bits[3] = 0;
     SlideWindow(bits, 1024);
     bool empty = true;
     for (uint64_t word : bits) { empty = empty && word == 0; }
@@ -4194,6 +4207,16 @@ void TestReplayWindow() {
     for (uint64_t counter = 3000 - 1024; counter < 3000; ++counter) {
         CHECK(run.SeenOrTooOld(counter));
     }
+    // A late packet at the far edge is recorded; one past it changes nothing
+    // -- in particular it is not written past the end of the bits.
+    ReplayWindow late;
+    late.Record(2000);
+    late.Record(2000 - 1023);
+    CHECK(late.SeenOrTooOld(2000 - 1023));
+    CHECK(!late.SeenOrTooOld(2000 - 1022));
+    late.Record(2000 - 1024);
+    late.Record(2000 - 1500);
+    CHECK(late.highest == 2000 && late.SeenOrTooOld(2000) && !late.SeenOrTooOld(1999));
     // Every other packet, then the gaps filled in late: each gap is new once.
     ReplayWindow gaps;
     for (uint64_t counter = 0; counter < 2000; counter += 2) { gaps.Record(counter); }
