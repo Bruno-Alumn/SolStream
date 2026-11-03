@@ -744,9 +744,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 self.lastPlacement = placement
                 let shown = self.picture(of: visible)
                 self.applySizeLimits(placement, achieved: shown, scale: scale)
-                if placement.resizeBorder > 0 {
-                    self.inputCapture?.edgeGuard = placement.resizeBorder
-                }
+                // Zero too: a window with no sizing border has nothing at its
+                // edges to keep the pointer from, and nor has one in full
+                // screen, which the app reaches edge to edge.
+                self.inputCapture?.edgeGuard = self.fullScreenForHost ? 0 : placement.resizeBorder
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
                 // Never under a hand that took an edge again while the answer

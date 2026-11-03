@@ -1091,6 +1091,20 @@ public final class InputCapture {
     /// held, or without the Shift the letter was typed with, until that key
     /// was pressed again. Every event says what is really held, so the next
     /// one puts it right.
+    /// What a move or a drag can say: that a modifier is no longer held.
+    ///
+    /// Its release can go to another app -- Spotlight or Raycast taking the
+    /// keyboard over ⌘Space, without this window ever resigning key -- and
+    /// with only the mouse moving after, nothing sent it: a captured game
+    /// stayed crouched on Ctrl, and Alt let go at the next click opened the
+    /// menu bar. Releases only: the monitor is app-wide, and a modifier held
+    /// in another SolStream window must not be pressed on the PC by a move.
+    private func releaseModifiersLetGo(_ flags: NSEvent.ModifierFlags) {
+        let held = Self.heldModifierBits(flags.rawValue, last: lastDeviceFlags)
+        guard held != lastDeviceFlags, held & ~lastDeviceFlags == 0 else { return }
+        syncModifiers(to: flags)
+    }
+
     private func syncModifiers(to flags: NSEvent.ModifierFlags) {
         let held = Self.heldModifierBits(flags.rawValue, last: lastDeviceFlags)
         if held != lastDeviceFlags {
@@ -1421,6 +1435,7 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             if event.type == .mouseMoved { mouseMovedSeen += 1 }
+            releaseModifiersLetGo(event.modifierFlags)
             // A drag follows the pointer out of the window; a bare move does not,
             // so letting go of the mouse outside leaves the host cursor exactly
             // where the drag left it.
@@ -1856,6 +1871,7 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             mouseMovedSeen += 1
+            releaseModifiersLetGo(event.modifierFlags)
             let perPoint = view.bounds.width > 0 ? source(for: view).width / view.bounds.width : 1
             let motion = Self.relativeMotion(deltaX: event.deltaX, deltaY: event.deltaY,
                                              pixelsPerPoint: perPoint, sensitivity: sensitivity,

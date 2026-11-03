@@ -5294,7 +5294,12 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                       limits.minimum.x, limits.minimum.y,
                       limits.maximum.x, limits.maximum.y,
                       limits.resizable ? "true" : "false",
-                      ResizeBorderThickness(window), missed);
+                      // A band to keep the pointer out of only where there is
+                      // one: a window that never had a sizing border -- a
+                      // borderless game, a dialog -- has none inside its
+                      // client area, and the guard only cost it its edges:
+                      // an RTS could not pan by touching them.
+                      IsResizable(window) ? ResizeBorderThickness(window) : 0, missed);
         // The title strip the application draws, for the Mac to leave out of
         // the picture when asked, and the program, to remember that by.
         std::string reply(buffer);

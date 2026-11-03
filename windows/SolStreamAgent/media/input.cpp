@@ -511,23 +511,37 @@ void InputInjector::RetryOwedReleases() {
 }
 
 void InputInjector::ReleaseAll() {
+    // A release Windows refuses -- an elevated window, Task Manager say, has
+    // the foreground -- stays held and owed, rather than forgotten: the
+    // injector outlives the session, and the next one's first input retries
+    // it (RetryOwedReleases). Cleared regardless, Ctrl and Shift stayed down
+    // for everyone at the PC's own keyboard until someone pressed them.
+    int held = 0;
+    int owed = 0;
     for (int i = 0; i < keysDownCount_; ++i) {
+        const uint32_t key = keysDown_[i];
         INPUT up{};
-        if (KeyUpInput(keysDown_[i], &up)) {
-            SendInput(1, &up, sizeof(INPUT));
+        if (!KeyUpInput(key, &up) || SendInput(1, &up, sizeof(INPUT)) == 1) {
+            continue;
         }
+        keysDown_[held++] = key;
+        if (owed < 16) { owedKeys_[owed++] = key; }
     }
-    keysDownCount_ = 0;
-    owedKeysCount_ = 0;
+    if (held > 0) {
+        Log("[input] Windows refused %d key release(s); retried with the next input", held);
+    }
+    keysDownCount_ = held;
+    owedKeysCount_ = owed;
 
+    unsigned char buttons = 0;
     for (int i = 0; i < 5; ++i) {
-        if (buttonsDown_ & (1u << i)) {
-            INPUT up = ButtonUpInput(i);
-            SendInput(1, &up, sizeof(INPUT));
-        }
+        const unsigned char bit = (unsigned char) (1u << i);
+        if (!(buttonsDown_ & bit)) { continue; }
+        INPUT up = ButtonUpInput(i);
+        if (SendInput(1, &up, sizeof(INPUT)) != 1) { buttons = (unsigned char) (buttons | bit); }
     }
-    buttonsDown_ = 0;
-    owedButtons_ = 0;
+    buttonsDown_ = buttons;
+    owedButtons_ = buttons;
 }
 
 }  // namespace solstream::media
