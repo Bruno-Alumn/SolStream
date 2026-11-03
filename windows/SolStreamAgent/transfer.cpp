@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cwctype>
 #include <mutex>
+#include <new>
 
 #include "media/log.h"
 #include "util.h"
@@ -224,14 +225,14 @@ bool PngToDib(const std::vector<unsigned char>& png, std::vector<unsigned char>&
     return true;
 }
 
-/// The bytes a clipboard format holds. The caller has the clipboard open.
 /// The most of one clipboard format read: a DIB of the largest picture a Mac
 /// takes (33 megapixels, 4 bytes each) and its header.
 constexpr size_t kMaxClipboardFormatBytes = 160u * 1024 * 1024;
 
-/// A clipboard format's bytes, or none past `kMaxClipboardFormatBytes`: a
-/// picture bigger than any that could be sent is not copied whole to find
-/// that out, and an allocation that size failing would end the host.
+/// A clipboard format's bytes, or none past `kMaxClipboardFormatBytes`. The
+/// caller has the clipboard open. Capped because a picture bigger than any
+/// that could be sent is not copied whole to find that out, and an allocation
+/// that size failing would end the host.
 std::vector<unsigned char> FormatBytes(UINT format) {
     std::vector<unsigned char> bytes;
     HANDLE handle = GetClipboardData(format);
@@ -477,10 +478,23 @@ std::string ClipboardImageGetJson(long long seq, long long offset) {
                 if (dib.empty()) {
                     dib = FormatBytes(CF_DIBV5);
                 }
-                source = DibAsBmp(dib.data(), dib.size());
+                try {
+                    source = DibAsBmp(dib.data(), dib.size());
+                } catch (const std::bad_alloc&) {
+                    source.clear();   // see below
+                }
             }
         }
-        if (source.empty() || !EncodePng(source, g_outgoing.png)) {
+        // Every copy of a picture this size can fail to be made -- the BMP
+        // above, the decode and the PNG below -- and a throw out of here
+        // would end the host. Not made is the same as not readable.
+        bool encoded = false;
+        try {
+            encoded = !source.empty() && EncodePng(source, g_outgoing.png);
+        } catch (const std::bad_alloc&) {
+            encoded = false;
+        }
+        if (!encoded) {
             g_outgoing.png.clear();
             Log("[transfer] the clipboard's picture could not be read");
         } else if (g_outgoing.png.size() > kMaxClipboardImageBytes) {

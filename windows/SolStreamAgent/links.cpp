@@ -65,10 +65,22 @@ bool IsForwardableLink(const std::string& url) {
         && url.compare(colon, 3, "://") == 0 && colon + 3 < url.size();
 }
 
-std::string EncodeSpaces(const std::string& url) {
+std::string CleanLink(const std::string& url) {
+    size_t first = 0;
+    size_t last = url.size();
+    while (first < last && static_cast<unsigned char>(url[first]) <= 0x20) {
+        ++first;
+    }
+    while (last > first && static_cast<unsigned char>(url[last - 1]) <= 0x20) {
+        --last;
+    }
     std::string out;
-    out.reserve(url.size());
-    for (const char c : url) {
+    out.reserve(last - first);
+    for (size_t i = first; i < last; ++i) {
+        const char c = url[i];
+        if (c == '\t' || c == '\r' || c == '\n') {
+            continue;
+        }
         if (c == ' ') {
             out += "%20";
         } else {

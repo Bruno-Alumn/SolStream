@@ -130,13 +130,14 @@ void SetShellFlashHandler(void (*handler)(HWND window));
 /// it stops this host. The window's own status is a copy a second old.
 void SetLiveClientCount(int (*count)());
 
-/// What to run with a link handed over by `--open-url` (links.h): whether it
-/// went on to a Mac. Runs on the window's thread.
-void SetLinkHandler(bool (*handler)(const std::string& url));
+/// What to run with a link handed over by `--open-url` (links.h): 1 when it
+/// went on to a Mac, 0 when no Mac can take it, 2 when one could but too many
+/// links came at once. Runs on the window's thread.
+void SetLinkHandler(int (*handler)(const std::string& url));
 
-/// From `--open-url`: hand the link to the host already running. False when
-/// there is none, or no Mac took it -- then it is the caller's to open here.
-bool SendLinkToRunningHost(const std::string& url);
+/// From `--open-url`: hand the link to the host already running. Its answer
+/// as above, or 0 when there is none -- then it is the caller's to open here.
+int SendLinkToRunningHost(const std::string& url);
 
 /// What to run with a file handed over by `--send-to-mac` (send_to_mac.h):
 /// 1 when it is on its way to a Mac, 0 when no Mac can take it, 2 when too

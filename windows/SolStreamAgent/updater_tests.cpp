@@ -1738,10 +1738,15 @@ void TestForwardableLinks() {
     CHECK(!IsForwardableLink("https://example.com/a b"));
     CHECK(!IsForwardableLink("https://example.com/\nx"));
     CHECK(!IsForwardableLink("https://example.com/" + std::string(8200, 'a')));
-    // A space some app left unencoded is encoded, as a browser would.
-    CHECK(EncodeSpaces("https://example.com/a b c") == "https://example.com/a%20b%20c");
-    CHECK(IsForwardableLink(EncodeSpaces("https://example.com/a b")));
-    CHECK(EncodeSpaces("") .empty());
+    // As an address bar takes it: a space inside encoded, the ends trimmed,
+    // line breaks and tabs dropped.
+    CHECK(CleanLink("https://example.com/a b c") == "https://example.com/a%20b%20c");
+    CHECK(IsForwardableLink(CleanLink("https://example.com/a b")));
+    CHECK(CleanLink("  https://example.com/page \r\n") == "https://example.com/page");
+    CHECK(CleanLink("https://exam\nple.com/\ta") == "https://example.com/a");
+    CHECK(CleanLink("mailto:a@b?subject=a b") == "mailto:a@b?subject=a%20b");
+    CHECK(CleanLink("https://example.com/a%20b") == "https://example.com/a%20b");
+    CHECK(CleanLink("").empty() && CleanLink("   ").empty());
     // The scheme in any case: a "Mailto:" with no Mac must not go to Edge,
     // which hands it straight back.
     CHECK(IsMailLink("mailto:a@b") && IsMailLink("Mailto:a@b") && IsMailLink("MAILTO:a@b"));

@@ -168,7 +168,7 @@ void (*g_shell_flash_handler)(HWND) = nullptr;
 int (*g_live_client_count)() = nullptr;
 UINT g_shell_hook_message = 0;
 /// See SetLinkHandler, and the tag its WM_COPYDATA carries: "SOLL".
-bool (*g_link_handler)(const std::string&) = nullptr;
+int (*g_link_handler)(const std::string&) = nullptr;
 constexpr ULONG_PTR kLinkCopyData = 0x534F4C4C;
 /// See SetFileHandler, and its tag: "SOLF".
 int (*g_file_handler)(const std::wstring&) = nullptr;
@@ -2795,7 +2795,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (data && data->dwData == kLinkCopyData && data->lpData && data->cbData <= 16384
             && g_link_handler) {
             const std::string url(static_cast<const char*>(data->lpData), data->cbData);
-            return g_link_handler(url) ? 1 : 0;
+            return g_link_handler(url);
         }
         if (data && data->dwData == kFileCopyData && data->lpData && data->cbData <= 65536
             && data->cbData % sizeof(wchar_t) == 0 && g_file_handler) {
@@ -3528,14 +3528,14 @@ void SetEndSessionHandler(void (*handler)()) {
     g_end_session_handler = handler;
 }
 
-void SetLinkHandler(bool (*handler)(const std::string& url)) {
+void SetLinkHandler(int (*handler)(const std::string& url)) {
     g_link_handler = handler;
 }
 
-bool SendLinkToRunningHost(const std::string& url) {
+int SendLinkToRunningHost(const std::string& url) {
     HWND host = FindWindowW(kClassName, nullptr);
     if (!host) {
-        return false;
+        return 0;
     }
     COPYDATASTRUCT data{};
     data.dwData = kLinkCopyData;
@@ -3545,9 +3545,9 @@ bool SendLinkToRunningHost(const std::string& url) {
     // Bounded: a host that has stopped answering must not hold the click.
     if (!SendMessageTimeoutW(host, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data),
                              SMTO_ABORTIFHUNG | SMTO_BLOCK, 3000, &answer)) {
-        return false;
+        return 0;
     }
-    return answer == 1;
+    return answer == 1 || answer == 2 ? static_cast<int>(answer) : 0;
 }
 
 void SetFileHandler(int (*handler)(const std::wstring& path)) {

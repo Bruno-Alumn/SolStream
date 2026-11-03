@@ -18,9 +18,11 @@ namespace solstream {
 /// characters, and at most a few kilobytes.
 bool IsForwardableLink(const std::string& url);
 
-/// `url` with each space written %20, as a browser would: some apps hand a
-/// link over unencoded, and the click's one quoted argument keeps it whole.
-std::string EncodeSpaces(const std::string& url);
+/// `url` as a browser's address bar would take it: spaces and control
+/// characters trimmed from both ends, tabs and line breaks dropped, and each
+/// space left inside written %20. Some apps hand a link over unencoded, and
+/// the click's one quoted argument keeps it whole.
+std::string CleanLink(const std::string& url);
 
 /// Whether `url`'s scheme -- in any case -- is mailto, or http or https.
 bool IsMailLink(const std::string& url);

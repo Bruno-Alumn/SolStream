@@ -2665,19 +2665,21 @@ int QueueFileForMac(const std::wstring& path) {
     return 1;
 }
 
-/// From the host window: a link handed over by `--open-url`. True when a
-/// signed-in Mac that understands links will be sent it; false sends the
+/// From the host window: a link handed over by `--open-url`. 1 when a
+/// signed-in Mac that understands links will be sent it, 2 when one could but
+/// too many came at once -- dropped, as a flood should be; 0 sends the
 /// click to Edge. Any program on the PC can send this, so the link is checked
-/// again. The same link twice within a quarter second is one click; past
-/// eight waiting, or eight in a second, the rest open in Edge here rather than
-/// going nowhere. The Mac keeps its own count of how many it opens.
-bool QueueLinkForMac(const std::string& url) {
+/// again. The same link twice within a quarter second is one click, and at
+/// most eight wait, or go in a second: "open all" on a folder of links gets
+/// them all, and a program opening link after link gets no further. A Mac
+/// since 11-03 keeps its own count of how many it opens.
+int QueueLinkForMac(const std::string& url) {
     if (!solstream::IsForwardableLink(url)) {
-        return false;
+        return 0;
     }
     if (InterlockedCompareExchange(&g_push_authorised, 0, 0) == 0
         || (InterlockedCompareExchange(&g_push_features, 0, 0) & solstream::kPushOpenUrl) == 0) {
-        return false;
+        return 0;
     }
     static std::string last_url;
     static ULONGLONG last = 0;
@@ -2687,14 +2689,14 @@ bool QueueLinkForMac(const std::string& url) {
     {
         std::lock_guard<std::mutex> lock(g_links_cs);
         if (last != 0 && now - last < 250 && url == last_url) {
-            return true;  // A double click: one link.
+            return 1;  // A double click: one link.
         }
         if (now - second >= 1000) {
             second = now;
             this_second = 0;
         }
         if (g_links_pending.size() >= 8 || this_second >= 8) {
-            return false;
+            return 2;
         }
         ++this_second;
         last = now;
@@ -2704,7 +2706,7 @@ bool QueueLinkForMac(const std::string& url) {
     if (g_watcher_wake) {
         SetEvent(g_watcher_wake);
     }
-    return true;
+    return 1;
 }
 
 /// Tell the Mac what changed about the windows it streams: a new title, at
@@ -6807,16 +6809,28 @@ int wmain(int argc, wchar_t** argv) {
         // No console for a click. The manifest keeps Windows 11 24H2 and later
         // from making one at all; before that, it is let go at once.
         ReleaseUnwantedConsole();
-        const std::string url = solstream::EncodeSpaces(ToUtf8(argv[2]));
+        const std::string url = solstream::CleanLink(ToUtf8(argv[2]));
         // Not one for the Mac -- too long, or with characters a link can't
-        // hold -- still opens: a web link in Edge, here. Anything else, which
+        // hold -- still opens: a web link in Edge, here. A mail link like that
+        // is said to be one SolStream can't open; anything else, which
         // Windows only sends for the schemes registered, goes nowhere.
         const bool forwardable = solstream::IsForwardableLink(url);
+        if (!forwardable && solstream::IsMailLink(url)) {
+            MessageBoxW(nullptr,
+                        L"SolStream can't open this email link: it is too long, or has "
+                        L"characters an email link can't hold.",
+                        L"SolStream", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            return 0;
+        }
         if (!forwardable && !solstream::IsWebLink(url)) {
             return 0;
         }
-        if (forwardable && solstream::SendLinkToRunningHost(url)) {
-            return 0;
+        if (forwardable) {
+            const int answer = solstream::SendLinkToRunningHost(url);
+            // On its way, or one of a flood and dropped: either way, not Edge.
+            if (answer == 1 || answer == 2) {
+                return 0;
+            }
         }
         // No Mac to take it. A web link opens here, in Edge, so choosing
         // SolStream never leaves a click going nowhere. A mail link can't:
