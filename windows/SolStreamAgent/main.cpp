@@ -85,6 +85,7 @@
 #include "token_store.h"
 #include "stranded.h"
 #include "window_restore.h"
+#include "crash_report.h"
 #include "updater.h"
 #include "util.h"
 
@@ -7006,6 +7007,8 @@ int wmain(int argc, wchar_t** argv) {
     bool install_driver = false;
     bool check_updates = false;
     bool download_update = false;
+    // Set when this copy was started by the last one's crash (crash_report.h).
+    unsigned long after_crash = 0;
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--verify-update-signature") {
@@ -7034,6 +7037,8 @@ int wmain(int argc, wchar_t** argv) {
             bind_address = ToUtf8(argv[i + 1]);
         } else if (arg == L"--listen-all") {
             bind_address = "0.0.0.0";
+        } else if (arg == L"--after-crash" && i + 1 < argc) {
+            after_crash = std::wcstoul(argv[++i], nullptr, 10);
         } else if (arg == L"--background") {
             // Straight to the notification area, no window: how the logon
             // task starts it.
@@ -7350,6 +7355,11 @@ int wmain(int argc, wchar_t** argv) {
     // is what lets go of it.
     {
         constexpr wchar_t kInstanceName[] = L"Local\\SolStreamAgentHost";
+        if (after_crash != 0) {
+            // The copy that crashed still holds the name until it is gone.
+            Log("[agent] starting again after a crash of process %lu", after_crash);
+            solstream::WaitForCrashedCopy(after_crash);
+        }
         HANDLE instance = CreateMutexW(nullptr, FALSE, kInstanceName);
         const DWORD created = GetLastError();
         // Access denied is also "somebody has it": an elevated copy's mutex
@@ -7415,6 +7425,11 @@ int wmain(int argc, wchar_t** argv) {
                 (unsigned long) created);
         }
     }
+
+    // Only the host, once it is the one: a crash says where, and the host
+    // comes back -- except a --headless copy, which somebody started by hand
+    // and is watching.
+    solstream::InstallCrashReport(!headless);
 
     // Normal priority, however this copy was started, and before anything that
     // captures, encodes or starts an application: see RaiseToNormalPriority.

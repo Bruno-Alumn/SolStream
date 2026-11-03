@@ -107,6 +107,8 @@ add_library(SolStreamCore OBJECT
     send_to_mac.cpp
     # Putting a streamed window back as it was, and remembering what is owed.
     window_restore.cpp
+    # What a crash leaves in the log, and starting again after one.
+    crash_report.cpp
     installer.cpp
 )
 
