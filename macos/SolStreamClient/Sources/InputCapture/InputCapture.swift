@@ -515,6 +515,9 @@ public final class InputCapture {
 
     /// Disable capture. Called when the window resigns key.
     public func disableCapture() {
+        // Their releases will not be seen now; kept, one would later swallow
+        // a release the PC needs.
+        buttonsHeldBack.removeAll()
         guard isCapturing else { return }
         isCapturing = false
         // Anything kept back for the PC's focus goes first, so the releases
@@ -1184,6 +1187,7 @@ public final class InputCapture {
     /// Forget every key, button and modifier the host was told is down: it
     /// has just been let go of them, or a new session holds none.
     private func forgetHostState() {
+        buttonsHeldBack.removeAll()
         heldKeys.removeAll()
         heldButtons.removeAll()
         lastDeviceFlags = 0
@@ -1293,9 +1297,20 @@ public final class InputCapture {
     private var buttonsHeldBack: Set<Int> = []
 
     private func heldBackByOwnUI(_ event: NSEvent) -> Bool {
+        // This window's events only -- the monitor is the app's, and another
+        // window's point means nothing against this card -- and not while the
+        // mouse is captured, when the point is where capture froze it, not
+        // where the game's pointer is.
+        guard event.window == nil || event.window === targetView?.window,
+              !isPointerCaptured else { return false }
         switch event.type {
         case .rightMouseDown, .otherMouseDown:
-            guard isOverOwnUI?(event.locationInWindow) == true else { return false }
+            guard isOverOwnUI?(event.locationInWindow) == true else {
+                // A press that goes to the PC: its release must too, whatever
+                // an earlier press of this button left behind.
+                buttonsHeldBack.remove(event.buttonNumber)
+                return false
+            }
             buttonsHeldBack.insert(event.buttonNumber)
             return true
         case .rightMouseDragged, .otherMouseDragged:
