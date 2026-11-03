@@ -341,6 +341,9 @@ public final class AgentConnection {
     private var heardFromHost = false
     /// Heartbeats that found the host still silent; see `startHeartbeat`.
     private var silentBeats = 0
+    /// Whether this socket reached `.ready`: once it has, the host was
+    /// reached, and a failure is a drop rather than a reason it can't be.
+    private var socketWasReady = false
     /// The greeting asked for a token this Mac does not have, and the
     /// question is with the user. A token supplied at any other time --
     /// from a second sheet, after the connection authenticated, before a new
@@ -895,6 +898,7 @@ public final class AgentConnection {
         mayTalk = false
         heardFromHost = false
         silentBeats = 0
+        socketWasReady = false
         awaitingToken = false
         buffer.removeAll()
         authInFlight = false
@@ -943,6 +947,7 @@ public final class AgentConnection {
                 // takes the connection and closes it -- as one does while
                 // another socket holds its slot unauthenticated -- was retried
                 // every two seconds for as long as that lasted.
+                self.socketWasReady = true
                 self.receive()
                 self.startHeartbeat()
                 if reconnected {
@@ -961,7 +966,7 @@ public final class AgentConnection {
                 // coming back by itself, which they did not say. A first
                 // connection that never got going is told what went wrong
                 // instead: there was nothing to reconnect to.
-                if !self.sessionUp && self.reconnectAttempt == 0 {
+                if !self.socketWasReady && self.reconnectAttempt == 0 {
                     self.report(.failed(Self.explain(error, host: self.host, port: self.port)))
                 } else {
                     self.report(.failed("The connection to \(self.host) dropped. "
@@ -1027,6 +1032,8 @@ public final class AgentConnection {
     /// exactly like one whose answer has not arrived yet.
     private func startHeartbeat() {
         heartbeat?.cancel()
+        // Beats a replaced socket's timer counted are not this one's.
+        silentBeats = 0
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.heartbeatInterval,
                        repeating: Self.heartbeatInterval, leeway: .seconds(1))
