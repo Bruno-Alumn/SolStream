@@ -2293,8 +2293,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// stream window in front -- or, with none, by bouncing the Dock icon.
     private func receiveFile(_ offer: FileReceiver.Offer, from agent: AgentConnection) {
         if fileReceiver?.agent !== agent {
-            // The old connection's files won't arrive: said, not dropped.
-            fileReceiver?.abandon()
             let receiver = FileReceiver(agent: agent)
             receiver.onReport = { [weak self] text in
                 Log.info("[files] \(text)")
@@ -2306,6 +2304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSApp.requestUserAttention(.informationalRequest)
                 }
             }
+            // The old connection's queue: taken over, or said to be lost.
+            fileReceiver?.replaced(by: receiver)
             fileReceiver = receiver
         }
         fileReceiver?.receive(offer)

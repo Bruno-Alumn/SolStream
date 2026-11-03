@@ -24,8 +24,17 @@ final class FileReceiver {
     private var queue: [Offer] = []
     /// The file being fetched now, by its saved name.
     private var current: String?
-    /// Replaced by a new connection's receiver: nothing more is fetched or said.
+    /// Waiting for the connection to come back, with the rest still queued.
+    private var paused = false
+    /// Replaced by a new connection's receiver: nothing more is fetched here.
     private var abandoned = false
+    /// The receiver that took this one's queue over, for a file that was
+    /// still being fetched here when it was replaced.
+    private weak var successor: FileReceiver?
+
+    /// How long a dropped connection is waited for before the files queued
+    /// over it are given up on: the host keeps an offer for half an hour.
+    static let reconnectPatience: TimeInterval = 25 * 60
 
     /// Part files are swept once a run, by the first receiver: one left by a
     /// download cut short by a crash or a power cut is hidden and can be 8 GB.
@@ -50,25 +59,34 @@ final class FileReceiver {
         next()
     }
 
-    /// The connection these offers came over is gone. Said once, for every
-    /// queued file that won't now arrive -- they were dropped without a word
-    /// -- and the host is told to let go of them, if it can still hear. The one
-    /// being fetched says how it ended for itself.
-    func abandon() {
+    /// Replaced by `receiver`, a new connection's. To the same PC, the queued
+    /// files go with it: the host keeps an offer by number, not by connection,
+    /// so any connection to it can fetch them. To another PC they can't be,
+    /// so that is said once, and the old host is told to let go if it can
+    /// still hear. The file being fetched here ends on its own, and if its
+    /// connection went it is handed on too.
+    func replaced(by receiver: FileReceiver) {
         guard !abandoned else { return }
         abandoned = true
-        let lost = queue.map { Self.safeName($0.name) }
-        for offer in queue { agent.cancelDownload(id: offer.id) }
+        let waiting = queue
         queue.removeAll()
+        if receiver.agent.hostName == agent.hostName {
+            successor = receiver
+            for offer in waiting { receiver.receive(offer) }
+            return
+        }
+        for offer in waiting { agent.cancelDownload(id: offer.id) }
+        let lost = waiting.map { Self.safeName($0.name) }
         guard !lost.isEmpty else { return }
         onReport?(lost.count == 1
-            ? "\(lost[0]) didn't arrive: the connection to the PC was lost. Send it again."
-            : "\(lost.count) files didn't arrive: the connection to the PC was lost. Send them "
-              + "again.")
+            ? "\(lost[0]) didn't arrive: SolStream connected to another PC. Send it again from "
+              + "the first one."
+            : "\(lost.count) files didn't arrive: SolStream connected to another PC. Send them "
+              + "again from the first one.")
     }
 
     private func next() {
-        guard !abandoned, current == nil, !queue.isEmpty else { return }
+        guard !abandoned, !paused, current == nil, !queue.isEmpty else { return }
         let offer = queue.removeFirst()
         let name = Self.safeName(offer.name)
         current = name
@@ -99,12 +117,35 @@ final class FileReceiver {
         Log.info("[files] receiving \(offer.size) bytes from the PC")
         // Held strongly until the download ends, replaced or not: the part file
         // is this closure's to move or delete either way.
-        agent.download(id: offer.id, size: offer.size, into: handle) { ok, why in
+        agent.download(id: offer.id, size: offer.size, into: handle) { outcome in
             try? handle.close()
-            guard ok else {
+            switch outcome {
+            case .done:
+                break
+            case .lost:
+                // From the start again once there is a connection: the host
+                // still has the offer, and a part file can't be resumed into.
                 try? FileManager.default.removeItem(at: partial)
-                return self.done(why.map { "\(name) didn't arrive: \($0)" }
+                self.current = nil
+                if self.abandoned {
+                    if let successor = self.successor {
+                        successor.receive(offer)
+                    } else {
+                        self.onReport?("\(name) didn't arrive: the connection to the PC was "
+                                       + "lost. Send it again.")
+                    }
+                    return
+                }
+                self.queue.insert(offer, at: 0)
+                return self.waitForConnection(since: Date())
+            case .refused(let why):
+                try? FileManager.default.removeItem(at: partial)
+                return self.done(why.map { "\(name) didn't arrive. \($0)" }
                     ?? "\(name) didn't arrive from the PC. Send it again.")
+            case .unwritable:
+                try? FileManager.default.removeItem(at: partial)
+                return self.done("Couldn't save \(name) in Downloads › SolStream. Check there's "
+                                 + "room on this Mac, then send it again.")
             }
             guard let destination = Self.move(partial, toName: name, in: folder) else {
                 try? FileManager.default.removeItem(at: partial)
@@ -121,6 +162,33 @@ final class FileReceiver {
         }
     }
 
+    /// The connection dropped: nothing is fetched until it is back, rather
+    /// than every queued file failing at once over a connection that isn't
+    /// there, each with a message of its own. Given up on together, in one
+    /// message, if it doesn't come back while the host still has them.
+    private func waitForConnection(since: Date) {
+        paused = true
+        guard !abandoned else { return }
+        if agent.isSessionUp {
+            paused = false
+            return next()
+        }
+        if Date().timeIntervalSince(since) > Self.reconnectPatience {
+            paused = false
+            let lost = queue.map { Self.safeName($0.name) }
+            queue.removeAll()
+            guard !lost.isEmpty else { return }
+            onReport?(lost.count == 1
+                ? "\(lost[0]) didn't arrive: the connection to the PC was lost. Send it again."
+                : "\(lost.count) files didn't arrive: the connection to the PC was lost. Send "
+                  + "them again.")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.waitForConnection(since: since)
+        }
+    }
+
     private func done(_ report: String) {
         current = nil
         onReport?(report)
@@ -129,14 +197,20 @@ final class FileReceiver {
 
     static let partSuffix = ".solstream-part"
 
-    /// Delete the hidden part files in `folder`: a download that had one open
-    /// is never in progress when a run begins.
-    static func removeLeftoverParts(in folder: URL) {
+    /// Delete the hidden part files in `folder` that nothing is writing: one
+    /// written to in the last ten minutes may be another copy of SolStream's
+    /// download in progress -- one is written to at least once a minute.
+    static func removeLeftoverParts(in folder: URL, now: Date = Date()) {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else {
             return
         }
         for name in names where name.hasPrefix(".") && name.hasSuffix(partSuffix) {
-            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+            let url = folder.appendingPathComponent(name)
+            if let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate, now.timeIntervalSince(modified) < 10 * 60 {
+                continue
+            }
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -158,6 +232,7 @@ final class FileReceiver {
                 return nil
             }
         }
+        Log.error("[files] could not move a file from the PC into place: every name was taken")
         return nil
     }
 
@@ -198,24 +273,36 @@ final class FileReceiver {
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
         cleaned = cleaned.trimmingCharacters(in: .whitespaces)
         if cleaned.isEmpty { cleaned = "File from PC" }
-        if cleaned.utf8.count > 200 {
-            // Cut by bytes, which is what the file system counts: 150
-            // characters of Japanese are 450 bytes, past its 255.
+        if units(cleaned) > maxNameUnits {
+            // APFS counts a name in UTF-16 units of its decomposed form, at
+            // most 255: 251 kanji fit, 128 emoji don't, and 100 Ǖ -- 200
+            // bytes -- don't either. Cut to leave room for " 9999".
             let ext = String((cleaned as NSString).pathExtension.prefix(20))
-            let stem = prefix((cleaned as NSString).deletingPathExtension, bytes: 150)
-            cleaned = ext.isEmpty ? stem : "\(stem).\(prefix(ext, bytes: 40))"
+            let room = ext.isEmpty ? maxNameUnits : maxNameUnits - units(ext) - 1
+            var stem = prefix((cleaned as NSString).deletingPathExtension, units: room)
+            while stem.hasPrefix(".") { stem.removeFirst() }
+            if stem.isEmpty { stem = "File from PC" }
+            cleaned = ext.isEmpty ? stem : "\(stem).\(ext)"
         }
         return cleaned
     }
 
-    /// The longest start of `text` that is at most `bytes` in UTF-8, cut
-    /// between characters.
-    static func prefix(_ text: String, bytes: Int) -> String {
+    /// Room in a name for what `uniqueURL` may add, " 9999", under 255.
+    static let maxNameUnits = 240
+
+    /// The length APFS holds a name to: UTF-16 units, decomposed.
+    static func units(_ text: String) -> Int {
+        text.decomposedStringWithCanonicalMapping.utf16.count
+    }
+
+    /// The longest start of `text` that is at most `units` long as APFS
+    /// counts, cut between characters.
+    static func prefix(_ text: String, units limit: Int) -> String {
         var result = ""
         var used = 0
         for character in text {
-            let size = character.utf8.count
-            if used + size > bytes { break }
+            let size = units(String(character))
+            if used + size > limit { break }
             result.append(character)
             used += size
         }

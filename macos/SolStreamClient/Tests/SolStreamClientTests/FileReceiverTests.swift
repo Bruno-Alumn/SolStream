@@ -15,7 +15,7 @@ final class FileReceiverTests: XCTestCase {
         XCTAssertEqual(FileReceiver.safeName("evil\u{202E}gpj.exe"), "evil_gpj.exe")
         XCTAssertEqual(FileReceiver.safeName(""), "File from PC")
         XCTAssertEqual(FileReceiver.safeName("..."), "File from PC")
-        XCTAssertLessThanOrEqual(FileReceiver.safeName(String(repeating: "x", count: 400) + ".txt").utf8.count, 200)
+        XCTAssertLessThanOrEqual(FileReceiver.units(FileReceiver.safeName(String(repeating: "x", count: 400) + ".txt")), FileReceiver.maxNameUnits)
     }
 
     /// A name already taken gets a number; nothing is overwritten.
@@ -49,19 +49,29 @@ final class FileReceiverTests: XCTestCase {
         XCTAssertEqual(properties[kLSQuarantineAgentNameKey as String] as? String, "SolStream")
     }
 
-    /// A long name is cut by bytes, which the file system counts, between
-    /// characters: 150 characters of Japanese would be 450 bytes, past 255.
-    func testALongNameIsCutByBytes() {
-        let japanese = String(repeating: "資料", count: 60) + ".pdf"   // 360 bytes before .pdf
-        let cut = FileReceiver.safeName(japanese)
-        XCTAssertLessThanOrEqual(cut.utf8.count, 255)
-        XCTAssertTrue(cut.hasSuffix(".pdf"))
-        XCTAssertTrue(cut.hasPrefix("資料"))
-        XCTAssertEqual(FileReceiver.prefix("aé資", bytes: 3), "aé")
-        XCTAssertEqual(FileReceiver.prefix("aé資", bytes: 5), "aé")
-        XCTAssertEqual(FileReceiver.prefix("aé資", bytes: 6), "aé資")
-        // A character made of several scalars is kept whole or not at all.
-        XCTAssertEqual(FileReceiver.prefix("e\u{301}x", bytes: 2), "")
+    /// A long name is cut to what APFS holds -- UTF-16 units of the
+    /// decomposed form -- between characters, with room for " 9999".
+    func testALongNameIsCutToWhatAPFSHolds() {
+        // 250 kanji fit whole in 255 units, though they are 750 bytes.
+        let kanji = String(repeating: "資", count: 230) + ".pdf"
+        XCTAssertEqual(FileReceiver.safeName(kanji), kanji)
+        // 128 emoji are 256 units: cut.
+        let emoji = FileReceiver.safeName(String(repeating: "😀", count: 128) + ".txt")
+        XCTAssertLessThanOrEqual(FileReceiver.units(emoji), FileReceiver.maxNameUnits)
+        XCTAssertTrue(emoji.hasSuffix(".txt") && emoji.hasPrefix("😀"))
+        // 100 Ǖ are 200 bytes but 300 units decomposed: cut too.
+        let accented = FileReceiver.safeName(String(repeating: "\u{01D5}", count: 100) + ".txt")
+        XCTAssertLessThanOrEqual(FileReceiver.units(accented), FileReceiver.maxNameUnits)
+        XCTAssertLessThanOrEqual(FileReceiver.units(accented + " 9999"), 255)
+        // A first character too long to keep leaves no hidden or empty name.
+        let monster = "e" + String(repeating: "\u{301}", count: 300) + "x.txt"
+        XCTAssertEqual(FileReceiver.safeName(monster), "File from PC.txt")
+        XCTAssertEqual(FileReceiver.safeName("e" + String(repeating: "\u{301}", count: 300)),
+                       "File from PC")
+        // Characters are kept whole.
+        XCTAssertEqual(FileReceiver.prefix("aé資", units: 2), "a")
+        XCTAssertEqual(FileReceiver.prefix("aé資", units: 3), "aé")
+        XCTAssertEqual(FileReceiver.prefix("aé資", units: 4), "aé資")
         // Short names are left as they are.
         XCTAssertEqual(FileReceiver.safeName("資料.pdf"), "資料.pdf")
     }
@@ -77,7 +87,11 @@ final class FileReceiverTests: XCTestCase {
         for name in names {
             try Data("x".utf8).write(to: folder.appendingPathComponent(name))
         }
+        // Written to just now: maybe another copy's download in progress.
         FileReceiver.removeLeftoverParts(in: folder)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path).count, 4)
+        // Untouched for longer than any download goes quiet: swept.
+        FileReceiver.removeLeftoverParts(in: folder, now: Date().addingTimeInterval(11 * 60))
         let left = Set(try FileManager.default.contentsOfDirectory(atPath: folder.path))
         XCTAssertEqual(left, ["keep.solstream-part", "report.pdf", ".DS_Store"])
     }
@@ -107,6 +121,12 @@ final class FileReceiverTests: XCTestCase {
             "The file changed on the PC while it was being sent. Send it again once it's saved.")
         XCTAssertNil(AgentConnection.downloadReason("no such file on offer"))
         XCTAssertNil(AgentConnection.downloadReason("offset out of range"))
+        XCTAssertNil(AgentConnection.downloadReason("the file can no longer be read"))
         XCTAssertNil(AgentConnection.downloadReason(""))
+        XCTAssertNil(AgentConnection.downloadReason(String(repeating: "A", count: 301)))
+        // A script without case, or a sentence that ends otherwise, is shown.
+        XCTAssertEqual(AgentConnection.downloadReason("ファイルが変更されました。"),
+                       "ファイルが変更されました。")
+        XCTAssertEqual(AgentConnection.downloadReason("Error 5!"), "Error 5!")
     }
 }

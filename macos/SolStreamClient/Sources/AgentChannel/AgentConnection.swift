@@ -1781,19 +1781,22 @@ public final class AgentConnection {
     /// so a large file is never in memory whole. Answers on the main queue
     /// with whether every byte came, in order.
     ///
-    /// `completion` gets true, or false with the host's own words for why when
-    /// it gave some a person can read (see `downloadReason`).
+    /// `completion` says how it ended: see `DownloadOutcome`.
     public func download(id: UInt64, size: Int64, into handle: FileHandle,
                          progress: ((Int64) -> Void)? = nil,
-                         completion: @escaping (Bool, String?) -> Void) {
+                         completion: @escaping (DownloadOutcome) -> Void) {
         var received: Int64 = 0
-        func finish(_ ok: Bool, _ why: String? = nil) {
-            DispatchQueue.main.async { completion(ok, why) }
+        func finish(_ outcome: DownloadOutcome) {
+            DispatchQueue.main.async { completion(outcome) }
         }
         func next() {
             send(["cmd": "download", "id": id, "offset": received]) { result in
-                guard case .success(let message) = result,
-                      message["ok"] as? Bool == true,
+                guard case .success(let message) = result else {
+                    // No answer: the connection went. The offer is still the
+                    // host's, by number, so it is not let go of here.
+                    return finish(.lost)
+                }
+                guard message["ok"] as? Bool == true,
                       (message["total"] as? NSNumber)?.int64Value == size,
                       (message["offset"] as? NSNumber)?.int64Value == received,
                       let base64 = message["data"] as? String,
@@ -1801,26 +1804,40 @@ public final class AgentConnection {
                       received + Int64(chunk.count) <= size,
                       !chunk.isEmpty || size == 0 else {
                     var why: String?
-                    if case .success(let message) = result, let text = message["message"] as? String {
+                    if let text = message["message"] as? String {
                         Log.error("[files] the host stopped sending file \(id): \(text)")
                         why = Self.downloadReason(text)
                     }
                     self.cancelDownload(id: id)
-                    return finish(false, why)
+                    return finish(.refused(why))
                 }
                 do {
                     try handle.write(contentsOf: chunk)
                 } catch {
                     Log.error("[files] could not write file \(id): \(error)")
                     self.cancelDownload(id: id)
-                    return finish(false)
+                    return finish(.unwritable)
                 }
                 received += Int64(chunk.count)
                 progress?(received)
-                if received < size { next() } else { finish(true) }
+                if received < size { next() } else { finish(.done) }
             }
         }
         next()
+    }
+
+    /// How a `download` ended.
+    public enum DownloadOutcome: Equatable {
+        /// Every byte written.
+        case done
+        /// The host turned it down, with its words for why when it gave some a
+        /// person can read (see `downloadReason`). The offer is let go of.
+        case refused(String?)
+        /// It couldn't be written on this Mac. The offer is let go of.
+        case unwritable
+        /// The connection went before it finished. The offer is kept: the
+        /// host still has it, and a later connection can fetch it again.
+        case lost
     }
 
     /// Let go of offer `id` without fetching (more of) it: the host frees its
@@ -1830,14 +1847,17 @@ public final class AgentConnection {
         send(["cmd": "download", "id": id, "offset": 0, "cancel": 1]) { _ in }
     }
 
-    /// A download failure's `message`, when it is one to show: hosts since
+    /// A download failure's `message`, when it is one to show. Hosts since
     /// 11-03 write a sentence for the person who sent the file; older ones a
-    /// lowercase note for the log, which is left there.
+    /// note for the log, every one starting with a lowercase ASCII letter,
+    /// which is left in the log. Any script that has no case is a sentence.
     public static func downloadReason(_ message: String) -> String? {
-        guard let first = message.unicodeScalars.first,
-              CharacterSet.uppercaseLetters.contains(first),
-              message.hasSuffix(".") else { return nil }
-        return message
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.unicodeScalars.first, trimmed.count <= 300,
+              !(first.isASCII && CharacterSet.lowercaseLetters.contains(first)) else {
+            return nil
+        }
+        return trimmed
     }
 
     /// Put a PNG on the host's clipboard. The new clipboard sequence, or nil
