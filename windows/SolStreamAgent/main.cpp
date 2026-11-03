@@ -1948,6 +1948,9 @@ constexpr LONG_PTR kLockedStyleBits = WS_THICKFRAME | WS_MAXIMIZEBOX;
 struct WindowLock {
     HWND window = nullptr;
     RECT desired{};           // client area, in virtual-desktop coordinates
+    /// A `place` is moving the window: the watcher leaves it alone until it
+    /// is done, rather than moving it from a second thread at the same time.
+    bool placing = false;
     /// Which of kLockedStyleBits the lock removed, and so owes back.
     LONG_PTR removed_style = 0;
     /// Who owned this window when the agent first touched it.
@@ -3433,6 +3436,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             bool still_ours = false;
             EnterCriticalSection(&g_lock_cs);
             still_ours = g_locks[i].active && g_locks[i].geometry_locked
+                      && !g_locks[i].placing
                       && g_locks[i].window == window
                       && g_locks[i].generation == generation;
             if (still_ours) {
@@ -3454,12 +3458,19 @@ DWORD WINAPI WatcherProc(LPVOID) {
                     ShowWindow(window, SW_RESTORE);
                 }
             } else {
-                // Said, at most every five seconds: a window pulled back over
-                // and over is a fight with something -- the application, or a
-                // `place` -- and the log was silent about it.
+                // Said when it is news -- another window, or another place to
+                // put it back to -- and otherwise once a minute: a window
+                // pulled back over and over is a fight with the application,
+                // and the log was silent about it, but a fight that lasts the
+                // whole session must not fill the log either.
+                static HWND said_window = nullptr;
+                static RECT said_rect{};
                 static ULONGLONG said_at = 0;
                 const ULONGLONG tick = GetTickCount64();
-                if (tick - said_at >= 5000) {
+                const bool news = window != said_window || !EqualRect(&desired, &said_rect);
+                if (news || tick - said_at >= 60000) {
+                    said_window = window;
+                    said_rect = desired;
                     said_at = tick;
                     const std::string title = WindowTitleForLog(window);
                     Log("[watcher] \"%s\" was %ldx%ld at %ld,%ld; putting it back at "
@@ -5323,8 +5334,24 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!fixed_size) {
             SetLockedGeometry(window, RECT{(LONG) x, (LONG) y, (LONG) (x + w), (LONG) (y + h)});
         }
+        // And kept off it until the move is done: two threads moving one window
+        // each measure its border from where the other left it.
+        EnterCriticalSection(&g_lock_cs);
+        g_locks[slot].placing = true;
+        LeaveCriticalSection(&g_lock_cs);
+        struct DonePlacing {
+            int slot;
+            HWND window;
+            ~DonePlacing() {
+                EnterCriticalSection(&g_lock_cs);
+                if (g_locks[slot].window == window) {
+                    g_locks[slot].placing = false;
+                }
+                LeaveCriticalSection(&g_lock_cs);
+            }
+        } done_placing{slot, window};
         const UINT dpi_before = GetDpiForWindow(window);
-        const bool ok = fixed_size
+        bool ok = fixed_size
             ? MoveClientArea(window, (int) x, (int) y, &client)
             : PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
         // Carried onto a display at another scaling, the application is still
@@ -5342,6 +5369,15 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 missed = PlacementError(client, (int) x, (int) y, (int) w, (int) h);
             }
         }
+        // Maximised again by the time the move was done -- a restore from the
+        // minimised state that a `focus` started, finishing late, brings back
+        // the maximised one -- it fills the display, not the rectangle asked
+        // for. Un-maximised and placed once more; a maximised rectangle is
+        // never what is held.
+        if (ok && !fixed_size && IsZoomed(window)) {
+            Log("[place] the window was maximised again; restoring it and placing it once more");
+            ok = PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
+        }
         // A miss that survived every correction is the application refusing the
         // size, and it is worth a line: it is the difference between "SolStream
         // sized this wrongly" and "this window will not be that shape", and until
@@ -5354,16 +5390,6 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
                 title.empty() ? "(untitled)" : title.c_str(), w, h, x, y,
                 client.right - client.left, client.bottom - client.top,
                 client.left, client.top, missed);
-        }
-        // Maximised again by the time the move was done -- a restore from the
-        // minimised state that a `focus` started, finishing late, brings back
-        // the maximised one -- it fills the display, not the rectangle asked
-        // for. Un-maximised and placed once more; a maximised rectangle is
-        // never what is held.
-        if (ok && !fixed_size && IsZoomed(window)) {
-            Log("[place] the window was maximised again; restoring it and placing it once more");
-            ShowWindow(window, SW_RESTORE);
-            PlaceClientArea(window, (int) x, (int) y, (int) w, (int) h, &client, &missed);
         }
         // The Mac asked for this, so it is the new truth — otherwise the watcher
         // would immediately drag the window back to the previous size.
