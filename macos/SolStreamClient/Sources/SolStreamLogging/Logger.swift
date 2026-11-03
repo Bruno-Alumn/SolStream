@@ -95,8 +95,11 @@ final class LogFile {
     private let echoToTerminal = isatty(STDOUT_FILENO) != 0
     private let formatter: DateFormatter
 
-    /// XCTest is loaded into the test runner and never into the app.
+    /// XCTest is loaded into the test runner and never into the app -- so the
+    /// app the UI tests launch says so with `SOLSTREAM_TOKEN_DIR`, which keeps
+    /// its pairing tokens apart too (see TokenStore).
     static let isTestRun = NSClassFromString("XCTestCase") != nil
+        || ProcessInfo.processInfo.environment["SOLSTREAM_TOKEN_DIR"].map { !$0.isEmpty } == true
 
     private init() {
         formatter = DateFormatter()

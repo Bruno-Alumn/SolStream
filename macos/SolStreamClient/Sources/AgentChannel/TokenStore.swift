@@ -234,7 +234,7 @@ public enum TokenStore {
     /// give the app they launch: that app is the real binary, without XCTest
     /// loaded, and otherwise read the person's tokens and moved -- deleting --
     /// the old keychain items. Set, the keychain is left alone too.
-    static let environmentDirectory: URL? = ProcessInfo.processInfo
+    public static let environmentDirectory: URL? = ProcessInfo.processInfo
         .environment["SOLSTREAM_TOKEN_DIR"].flatMap { $0.isEmpty ? nil : $0 }
         .map { URL(fileURLWithPath: $0, isDirectory: true) }
 

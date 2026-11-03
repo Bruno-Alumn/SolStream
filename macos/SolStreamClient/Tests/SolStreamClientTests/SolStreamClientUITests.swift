@@ -89,6 +89,9 @@ final class SolStreamClientUITests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// The launched app's own token folder, removed with it.
+    private var tokenFolder: URL?
+
     private func launchApp(args: [String] = []) throws {
         let workDir = FileManager.default.currentDirectoryPath
         let app = appURL
@@ -111,7 +114,9 @@ final class SolStreamClientUITests: XCTestCase {
         var environment = ProcessInfo.processInfo.environment
         environment["SOLSTREAM_TOKEN_DIR"] = tokens.path
         process.environment = environment
-        process.arguments = args + ["-SolStream.lastHost", "", "-SolStream.recentHosts", "()"]
+        process.arguments = args + ["-SolStream.lastHost", "", "-SolStream.recentHosts", "()",
+                                    "-SolStream.lastApp", ""]
+        tokenFolder = tokens
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -123,6 +128,8 @@ final class SolStreamClientUITests: XCTestCase {
     }
 
     private func killApp() {
+        if let tokenFolder { try? FileManager.default.removeItem(at: tokenFolder) }
+        tokenFolder = nil
         guard let process = appProcess, process.isRunning else {
             appProcess = nil
             return

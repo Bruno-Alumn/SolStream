@@ -116,7 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // --test-dropdown too, here rather than where it is acted on below:
         // the launch path, which reopens the last app outside a test, runs
         // before that.
+        // And the app a UI test launches: it reopens no last app, saves none
+        // at quit, and checks for no update -- the person's PC and settings
+        // are not the test's to touch.
         testMode = arguments.contains("--test-screenshot") || arguments.contains("--test-dropdown")
+            || TokenStore.environmentDirectory != nil
         if let path = value(after: "--screenshot-path") { screenshotPath = path }
 
         // --screenshot-after <seconds> waits long enough for real frames to
