@@ -461,9 +461,9 @@ a person diagnosing one) can still tell which PC answered and whether it is set
 up. Only a client that has proved the token counts as streaming; an open socket
 that has not is closed without a word, as above.
 
-When a token is set, a knock from a Mac whose own session may still be held
-(a network change no FIN reported) is offered a takeover on a thread of its
-own, at most four at a time. Lines to such a socket never wait on the lock the
+When a token is set, any knock while a session is held is offered a takeover
+-- it may be that Mac's own session, left by a network change no FIN reported,
+and only its proof can say -- on a thread of its own, at most four at a time. Lines to such a socket never wait on the lock the
 live session's sends hold, which a send to a Mac whose network had gone can
 keep for up to 30 s. A knock past the four is told the PC is busy answering
 other connections, with no `holder`, so a Mac that is reconnecting tries again
