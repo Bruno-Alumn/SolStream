@@ -75,3 +75,17 @@ final class OpeningSizeTests: XCTestCase {
         XCTAssertEqual(twoPoint.width * 2, onePoint.width, accuracy: 1)
     }
 }
+
+/// A display bigger than the encoder takes is scaled into the canvas, and
+/// the crop follows it there; at the usual size nothing changes.
+final class CanvasCropTests: XCTestCase {
+    func testTheCropIsTakenInTheCanvasPixels() {
+        let tile = CGRect(x: 2560, y: 0, width: 2560, height: 1440)
+        let scaled = AppWindow.canvasRect(tile, display: CGSize(width: 5120, height: 1440),
+                                          canvas: CGSize(width: 4096, height: 1440))
+        XCTAssertEqual(scaled, CGRect(x: 2048, y: 0, width: 2048, height: 1440))
+        let same = AppWindow.canvasRect(tile, display: CGSize(width: 5120, height: 2880),
+                                        canvas: CGSize(width: 5120, height: 2880))
+        XCTAssertEqual(same, tile)
+    }
+}

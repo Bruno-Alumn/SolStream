@@ -371,15 +371,45 @@ final class AppWindow: NSObject, NSWindowDelegate {
         captureHint.flash()
     }
 
+    /// The capture display's size, in its own pixels.
+    private var displaySize: CGSize { CGSize(width: display.width, height: display.height) }
+
+    /// `rect`, in the capture display's pixels, in the encoded picture's.
+    ///
+    /// The same almost always: the canvas is asked for at the display's size.
+    /// But a canvas is held to what the encoder takes -- 4096 a side -- and a
+    /// display past that, an ultrawide at 5120 or a virtual display set
+    /// larger, is scaled into it. The crop was taken in display pixels from
+    /// a picture in canvas pixels, and the pointer divided by the canvas: the
+    /// picture showed the wrong part, squeezed, and a click on the right of
+    /// the window landed on the display's last column.
+    static func canvasRect(_ rect: CGRect, display: CGSize, canvas: CGSize) -> CGRect {
+        guard display.width > 0, display.height > 0, canvas.width > 0, canvas.height > 0,
+              display != canvas else { return rect }
+        let sx = canvas.width / display.width
+        let sy = canvas.height / display.height
+        return CGRect(x: rect.minX * sx, y: rect.minY * sy,
+                      width: rect.width * sx, height: rect.height * sy)
+    }
+
+    /// A length in display pixels, in the canvas's; see `canvasRect`.
+    private func canvasPixels(_ length: CGFloat) -> CGFloat {
+        Self.canvasRect(CGRect(x: 0, y: 0, width: length, height: 0), display: displaySize,
+                        canvas: session.canvasSize).width
+    }
+
     /// Point this window at a different region of the canvas: the host
     /// window's client area, of which the picture shows `picture(of:)`.
     func setTile(_ rect: CGRect) {
         tile = rect
         let shown = picture(of: rect)
-        let crop = CGRect(x: shown.minX - CGFloat(display.x),
-                          y: shown.minY - CGFloat(display.y),
-                          width: shown.width, height: shown.height)
+        let crop = Self.canvasRect(CGRect(x: shown.minX - CGFloat(display.x),
+                                          y: shown.minY - CGFloat(display.y),
+                                          width: shown.width, height: shown.height),
+                                   display: displaySize, canvas: session.canvasSize)
         metalView?.sourceRect = crop
+        inputCapture?.displayPixelsPerCanvasPixel = displaySize.width > 0 && session.canvasSize.width > 0
+            ? displaySize.width / session.canvasSize.width : 1
         inputCapture?.sourceRect = crop
         inputCapture?.guardsTopEdge = picture(of: rect).minY == rect.minY
         inputCapture?.canvasSize = session.canvasSize
@@ -747,7 +777,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // Zero too: a window with no sizing border has nothing at its
                 // edges to keep the pointer from, and nor has one in full
                 // screen, which the app reaches edge to edge.
-                self.inputCapture?.edgeGuard = self.fullScreenForHost ? 0 : placement.resizeBorder
+                self.inputCapture?.edgeGuard = self.fullScreenForHost ? 0
+                    : self.canvasPixels(placement.resizeBorder)
                 guard visible.width >= 1, visible.height >= 1 else { return }
                 self.setTile(visible)
                 // Never under a hand that took an edge again while the answer
@@ -1228,7 +1259,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     func windowDidExitFullScreen(_ notification: Notification) {
         fullScreenForHost = false
         // A placement answered during the animation left no guard.
-        inputCapture?.edgeGuard = lastPlacement?.resizeBorder ?? 0
+        inputCapture?.edgeGuard = canvasPixels(lastPlacement?.resizeBorder ?? 0)
         fullScreenTransitionEnded()
     }
 

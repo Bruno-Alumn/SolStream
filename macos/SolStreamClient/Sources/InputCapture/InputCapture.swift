@@ -28,6 +28,11 @@ public final class InputCapture {
     /// this side's business alone.
     public var sourceRect: CGRect?
     public var canvasSize: CGSize?
+    /// Display pixels to a canvas pixel: 1 unless the display is bigger than
+    /// the encoder takes and was scaled into the canvas. Relative motion is
+    /// in display pixels -- Windows moves its pointer by those -- while the
+    /// crop it is measured against is in the canvas's.
+    public var displayPixelsPerCanvasPixel: CGFloat = 1
 
     /// How far inside the crop to keep the host pointer, in canvas pixels.
     ///
@@ -1875,7 +1880,8 @@ public final class InputCapture {
         switch event.type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             mouseMovedSeen += 1
-            let perPoint = view.bounds.width > 0 ? source(for: view).width / view.bounds.width : 1
+            let perPoint = view.bounds.width > 0
+                ? source(for: view).width * displayPixelsPerCanvasPixel / view.bounds.width : 1
             let motion = Self.relativeMotion(deltaX: event.deltaX, deltaY: event.deltaY,
                                              pixelsPerPoint: perPoint, sensitivity: sensitivity,
                                              residual: relativeResidual)
