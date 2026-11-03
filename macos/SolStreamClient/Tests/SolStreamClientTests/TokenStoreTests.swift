@@ -13,11 +13,16 @@ final class TokenStoreTests: XCTestCase {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("solstream-tokens-\(UUID().uuidString)", isDirectory: true)
         TokenStore.directoryOverride = directory
+        TokenStore.namesDefaults = UserDefaults(
+            suiteName: directory.appendingPathComponent("names").path)!
     }
 
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "SolStream.agentToken.\(host)")
         TokenStore.directoryOverride = nil
+        TokenStore.namesDefaults.removePersistentDomain(
+            forName: directory.appendingPathComponent("names").path)
+        TokenStore.namesDefaults = .standard
         try? FileManager.default.removeItem(at: directory)
         super.tearDown()
     }
@@ -127,10 +132,45 @@ final class TokenStoreTests: XCTestCase {
         XCTAssertFalse(TokenStore.hasToken(for: host))
         XCTAssertNil(TokenStore.token(for: host))
     }
+
+    /// A token is found by the PC's name at any of its addresses -- in any
+    /// case -- but never when two PCs by that name hold different ones.
+    func testATokenIsFoundByThePCsName() {
+        TokenStore.set("00112233445566778899aabbccddee01", for: "192.168.1.21")
+        TokenStore.setName("DESKTOP-PC", for: "192.168.1.21")
+        XCTAssertEqual(TokenStore.token(forPCNamed: "desktop-pc"), "00112233445566778899aabbccddee01")
+        XCTAssertTrue(TokenStore.hasToken(forPCNamed: "DESKTOP-PC"))
+        XCTAssertNil(TokenStore.token(forPCNamed: "LAPTOP"))
+        // The same PC on Wi-Fi too, same token: still one answer.
+        TokenStore.set("00112233445566778899aabbccddee01", for: "192.168.1.40")
+        TokenStore.setName("DESKTOP-PC", for: "192.168.1.40")
+        XCTAssertEqual(TokenStore.token(forPCNamed: "DESKTOP-PC"), "00112233445566778899aabbccddee01")
+        // A second PC by that name with its own token: no guess.
+        TokenStore.set("00112233445566778899aabbccddee02", for: "10.0.0.9")
+        TokenStore.setName("DESKTOP-PC", for: "10.0.0.9")
+        XCTAssertNil(TokenStore.token(forPCNamed: "DESKTOP-PC"))
+        XCTAssertFalse(TokenStore.hasToken(forPCNamed: "DESKTOP-PC"))
+        // Forgotten with its address, and with everything.
+        TokenStore.remove(for: "10.0.0.9")
+        XCTAssertEqual(TokenStore.token(forPCNamed: "DESKTOP-PC"), "00112233445566778899aabbccddee01")
+        TokenStore.removeAll()
+        XCTAssertNil(TokenStore.token(forPCNamed: "DESKTOP-PC"))
+    }
 }
 
 /// Names written two ways are one PC to the store and to the recent list.
 final class HostVariantTests: XCTestCase {
+    /// A test that sets no override never reaches the person's real store:
+    /// one once ran `removeAll()` against it.
+    func testATestWithoutAnOverrideHasAStoreOfItsOwn() {
+        XCTAssertNil(TokenStore.directoryOverride)
+        XCTAssertTrue(TokenStore.unguardedTest)
+        XCTAssertFalse(TokenStore.fileURL.path.contains("Application Support"),
+                       TokenStore.fileURL.path)
+        XCTAssertTrue(TokenStore.fileURL.path.hasPrefix(
+            FileManager.default.temporaryDirectory.path))
+    }
+
     func testCaseAndATrailingDotAreTheSameHost() {
         XCTAssertTrue(TokenStore.sameHost("PC.local", "pc.local."))
         XCTAssertTrue(TokenStore.sameHost("Gaming-PC", "gaming-pc"))

@@ -121,21 +121,69 @@ public enum TokenStore {
         store(token, for: host)
     }
 
+    // MARK: Which PC each token is for
+
+    /// address -> the PC's name, as its greeting gave it when the token was
+    /// proved there. Not secret -- the name is in every discovery answer --
+    /// so kept in preferences, beside the token store rather than in it,
+    /// where an older build reading the token file would trip over it.
+    private static let namesKey = "SolStream.pairedPCNames"
+    /// Where they are kept: tests give their own, as they do the token file.
+    static var namesDefaults: UserDefaults = .standard
+    private static var defaults: UserDefaults { namesDefaults }
+
+    /// Record that `host` is the PC called `name`.
+    public static func setName(_ name: String, for host: String) {
+        var names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        guard names[host] != name else { return }
+        names[host] = name
+        defaults.set(names, forKey: namesKey)
+    }
+
+    /// The token proved at a PC called `name` -- any of its addresses -- when
+    /// every address with that name holds the same one. Nil when none does,
+    /// or when two PCs share the name and their tokens differ: a guess
+    /// between them would be proving one PC's token to the other.
+    public static func token(forPCNamed name: String) -> String? {
+        let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        let hosts = names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
+        let tokens = Set(hosts.compactMap { token(for: $0) })
+        return tokens.count == 1 ? tokens.first : nil
+    }
+
+    /// Whether `token(forPCNamed:)` would find one.
+    public static func hasToken(forPCNamed name: String) -> Bool {
+        let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        let hosts = names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
+        return !hosts.isEmpty && hosts.allSatisfy { hasToken(for: $0) }
+            && token(forPCNamed: name) != nil
+    }
+
+    private static func forgetName(for host: String) {
+        var names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        guard names.keys.contains(where: { sameHost($0, host) }) else { return }
+        for key in names.keys where sameHost(key, host) { names[key] = nil }
+        defaults.set(names, forKey: namesKey)
+    }
+
     public static func remove(for host: String) {
+        forgetName(for: host)
         lock.lock()
         defer { lock.unlock() }
         var current = loaded()
         for key in current.keys where sameHost(key, host) { current[key] = nil }
         save(current)
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
-        SecItemDelete(keychainQuery(host) as CFDictionary)
+        if !unguardedTest { SecItemDelete(keychainQuery(host) as CFDictionary) }
     }
 
     /// Forget every host.
     public static func removeAll() {
+        namesDefaults.removeObject(forKey: namesKey)
         lock.lock()
         defer { lock.unlock() }
         save([:])
+        guard !unguardedTest else { return }
         for key in UserDefaults.standard.dictionaryRepresentation().keys
         where key.hasPrefix(legacyPrefix) {
             UserDefaults.standard.removeObject(forKey: key)
@@ -158,9 +206,25 @@ public enum TokenStore {
         }
     }
 
+    /// Running inside a test that set no `directoryOverride`. Then nothing
+    /// here may reach the person's real tokens: a test class that forgot the
+    /// override once ran `removeAll()` against them, and the PC had to be
+    /// paired again. Such a test gets a store of its own, in a folder of this
+    /// process's, and the old keychain items are left alone.
+    static var unguardedTest: Bool {
+        directoryOverride == nil && NSClassFromString("XCTestCase") != nil
+    }
+
+    private static let unguardedTestDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("solstream-unguarded-test-\(ProcessInfo.processInfo.processIdentifier)",
+                                isDirectory: true)
+
     static var fileURL: URL {
         if let directoryOverride {
             return directoryOverride.appendingPathComponent("pairing-tokens.json")
+        }
+        if unguardedTest {
+            return unguardedTestDirectory.appendingPathComponent("pairing-tokens.json")
         }
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask).first
@@ -195,7 +259,7 @@ public enum TokenStore {
         // failed leaves the old copy the only one that outlives this run.
         guard save(current) else { return false }
         UserDefaults.standard.removeObject(forKey: legacyPrefix + host)
-        SecItemDelete(keychainQuery(host) as CFDictionary)
+        if !unguardedTest { SecItemDelete(keychainQuery(host) as CFDictionary) }
         return true
     }
 
@@ -259,6 +323,8 @@ public enum TokenStore {
     /// fails here, and the person types the token once more instead of meeting
     /// a password dialog at launch.
     private static func legacyKeychain(_ host: String) -> String? {
+        // Not read into a test's own store either.
+        guard !unguardedTest else { return nil }
         var query = keychainQuery(host)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne

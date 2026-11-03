@@ -413,7 +413,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         readTailscaleIfDue()
         let askedUnderAnotherTailscale = forgetAnswerFromAnotherTailscale()
         // "Paired" means one thing: this Mac holds the host's agent token.
-        state.isPaired = AgentConnection.hasStoredToken(for: state.address)
+        state.isPaired = AgentConnection.hasStoredToken(
+            for: state.address, named: state.name)
 
         var dotState: DS.Dot.State = .idle
         var parts: [HostDropdown.Detail] = []
@@ -719,7 +720,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             // network can answer, and the first name alphabetically was picked
             // for anyone who answered as "AAA-PC".
             if self.state.address.isEmpty,
-               let first = hosts.first(where: { AgentConnection.hasStoredToken(for: $0.connectTarget) })
+               let first = hosts.first(where: Self.isPaired)
                 ?? (hosts.count == 1 ? hosts.first : nil) {
                 self.state.address = first.connectTarget
                 self.state.name = first.name
@@ -760,9 +761,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private func preferDiscoveredHost() -> Bool {
         guard !hostChosenHere, state.isReachable == false,
               !discovered.contains(where: { $0.connectTarget == state.address }),
-              let paired = discovered.first(where: {
-                  AgentConnection.hasStoredToken(for: $0.connectTarget)
-              }) else { return false }
+              let paired = discovered.first(where: Self.isPaired) else { return false }
         Log.info("[connect] \(state.address) has not answered; preferring \(paired.connectTarget), "
                  + "found on the network and already paired")
         state.address = paired.connectTarget
@@ -1098,14 +1097,22 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Whether this Mac is paired with a PC found on the network: a token for
+    /// its address, or for the PC by that name at another -- its router gave
+    /// it a new address, or it answers on Ethernet and Wi-Fi both. Proved
+    /// when connecting, never taken on the name's word.
+    static func isPaired(_ host: DiscoveredHost) -> Bool {
+        AgentConnection.hasStoredToken(for: host.connectTarget,
+                                       named: HostBrowser.baseName(of: host.name) ?? host.name)
+    }
+
     /// Rows for the list: what is on the network now, then what was used before.
     /// Two kinds, so exactly one divider falls between them.
     private func hostItems() -> [HostDropdown.Item] {
         var items = discovered.map { host in
             HostDropdown.Item(address: host.connectTarget, name: host.name,
                               detail: [.data(host.connectTarget),
-                                       .words(AgentConnection.hasStoredToken(for: host.connectTarget)
-                                              ? "Paired" : "Not paired")],
+                                       .words(Self.isPaired(host) ? "Paired" : "Not paired")],
                               dotState: .live, kind: .discovered)
         }
         items += HostBrowser.recentsWorthShowing(recentHosts,

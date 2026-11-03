@@ -29,6 +29,8 @@ final class AgentReconnectLoopbackTests: XCTestCase {
             .appendingPathComponent("solstream-reconnect-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         TokenStore.directoryOverride = folder
+        TokenStore.namesDefaults = try XCTUnwrap(
+            UserDefaults(suiteName: folder.appendingPathComponent("names").path))
         // A path, not a name: a named suite leaves its plist behind in
         // ~/Library/Preferences after every run, even once emptied.
         suite = folder.appendingPathComponent("defaults").path
@@ -41,6 +43,7 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         AgentConnection.busyTimingOverride = nil
         AgentConnection.clientIDDefaultsOverride = nil
         TokenStore.directoryOverride = nil
+        TokenStore.namesDefaults = .standard
         UserDefaults().removePersistentDomain(forName: suite)
         try? FileManager.default.removeItem(at: folder)
         super.tearDown()
@@ -239,6 +242,65 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         let after = try XCTUnwrap(seen.get("afterGreeting") as? [String: Any])
         XCTAssertEqual(after["cmd"] as? String, "windows")
         XCTAssertEqual(titles, ["Notepad"])
+    }
+
+    /// A PC paired at one address, greeting from another under the same name
+    /// -- its router gave it a new one -- is proved the same token without
+    /// asking, and the token is kept for the new address once the PC has
+    /// proved it too.
+    func testAPairedPCAtANewAddressIsKnownByName() throws {
+        TokenStore.set(Self.token, for: "old-address.invalid")
+        TokenStore.setName("TEST-PC", for: "old-address.invalid")
+        let host = ScriptedHost { _, connection in
+            guard connection.greetAndAuthenticate(token: Self.token) != nil else { return }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        let record = StateRecord(agent)
+        let shown = expectation(description: "displays")
+        agent.onDisplays = { _ in shown.fulfill() }
+        agent.connect()
+        wait(for: [shown], timeout: 8)
+        agent.onDisplays = nil
+        XCTAssertFalse(record.states.contains { if case .needsToken = $0 { return true }; return false },
+                       "asked for a token it holds for this PC: \(record.states)")
+        XCTAssertEqual(TokenStore.token(for: "::1"), Self.token)
+        XCTAssertEqual(TokenStore.token(forPCNamed: "test-pc"), Self.token)
+    }
+
+    /// Another PC by the same name, holding another token: it is asked for,
+    /// as an unpaired PC is -- not "the token was wrong" -- and the stored
+    /// one is left where it is.
+    func testATokenFoundByNameThatIsRefusedAsksWithoutBlame() throws {
+        TokenStore.set(Self.token, for: "old-address.invalid")
+        TokenStore.setName("TEST-PC", for: "old-address.invalid")
+        let host = ScriptedHost { _, connection in
+            connection.send(#"{"type":"hello","version":2,"host":"TEST-PC","needsAuth":true,"#
+                            + #""challenge":"\#(ScriptedHost.randomHex(32))","channelCrypto":2}"#)
+            _ = connection.readLine(timeout: 5)
+            connection.send(#"{"type":"auth","ok":false}"#)
+            Thread.sleep(forTimeInterval: 1)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        var asked: Bool?
+        let askedForToken = expectation(description: "asked for a token")
+        agent.onState = { state in
+            if case .needsToken(_, let rejected) = state, asked == nil {
+                asked = rejected
+                askedForToken.fulfill()
+            }
+        }
+        agent.connect()
+        wait(for: [askedForToken], timeout: 8)
+        XCTAssertEqual(asked, false)
+        XCTAssertEqual(TokenStore.token(for: "old-address.invalid"), Self.token)
+        XCTAssertNil(TokenStore.token(for: "::1"))
     }
 
     /// Something on the network that asks for no token -- and calls itself
