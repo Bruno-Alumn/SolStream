@@ -1780,15 +1780,15 @@ public final class AgentConnection {
     /// Fetch offered file `id`, `size` bytes, into `handle`, a chunk at a time,
     /// so a large file is never in memory whole. Answers on the main queue
     /// with whether every byte came, in order.
+    ///
+    /// `completion` gets true, or false with the host's own words for why when
+    /// it gave some a person can read (see `downloadReason`).
     public func download(id: UInt64, size: Int64, into handle: FileHandle,
                          progress: ((Int64) -> Void)? = nil,
-                         completion: @escaping (Bool) -> Void) {
+                         completion: @escaping (Bool, String?) -> Void) {
         var received: Int64 = 0
-        func finish(_ ok: Bool) { DispatchQueue.main.async { completion(ok) } }
-        // Given up on: the host frees its slot now rather than in half an hour.
-        // Over a connection that has gone, it fails quietly, as it should.
-        func cancelDownload(_ id: UInt64) {
-            send(["cmd": "download", "id": id, "offset": 0, "cancel": 1]) { _ in }
+        func finish(_ ok: Bool, _ why: String? = nil) {
+            DispatchQueue.main.async { completion(ok, why) }
         }
         func next() {
             send(["cmd": "download", "id": id, "offset": received]) { result in
@@ -1800,17 +1800,19 @@ public final class AgentConnection {
                       let chunk = Data(base64Encoded: base64),
                       received + Int64(chunk.count) <= size,
                       !chunk.isEmpty || size == 0 else {
-                    if case .success(let message) = result, let why = message["message"] as? String {
-                        Log.error("[files] the host stopped sending file \(id): \(why)")
+                    var why: String?
+                    if case .success(let message) = result, let text = message["message"] as? String {
+                        Log.error("[files] the host stopped sending file \(id): \(text)")
+                        why = Self.downloadReason(text)
                     }
-                    cancelDownload(id)
-                    return finish(false)
+                    self.cancelDownload(id: id)
+                    return finish(false, why)
                 }
                 do {
                     try handle.write(contentsOf: chunk)
                 } catch {
                     Log.error("[files] could not write file \(id): \(error)")
-                    cancelDownload(id)
+                    self.cancelDownload(id: id)
                     return finish(false)
                 }
                 received += Int64(chunk.count)
@@ -1819,6 +1821,23 @@ public final class AgentConnection {
             }
         }
         next()
+    }
+
+    /// Let go of offer `id` without fetching (more of) it: the host frees its
+    /// slot now rather than in half an hour. Over a connection that has gone,
+    /// it fails quietly, as it should.
+    public func cancelDownload(id: UInt64) {
+        send(["cmd": "download", "id": id, "offset": 0, "cancel": 1]) { _ in }
+    }
+
+    /// A download failure's `message`, when it is one to show: hosts since
+    /// 11-03 write a sentence for the person who sent the file; older ones a
+    /// lowercase note for the log, which is left there.
+    public static func downloadReason(_ message: String) -> String? {
+        guard let first = message.unicodeScalars.first,
+              CharacterSet.uppercaseLetters.contains(first),
+              message.hasSuffix(".") else { return nil }
+        return message
     }
 
     /// Put a PNG on the host's clipboard. The new clipboard sequence, or nil
