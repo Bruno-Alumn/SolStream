@@ -139,6 +139,16 @@ final class QualityPill: DS.Box {
     // MARK: - The popover
 
     static let detailWidth: CGFloat = 320
+    /// Behind the popover's contents: the dark theme's surface, nearly opaque.
+    /// Resolved for the dark appearance the popover always has, since a
+    /// layer's colour does not follow the appearance by itself.
+    static let detailBacking: NSColor = {
+        var colour = DS.surface
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            colour = DS.surface.usingColorSpace(.sRGB) ?? DS.surface
+        }
+        return colour.withAlphaComponent(0.86)
+    }()
     private static let contentWidth = detailWidth - DS.Space.x5 * 2
     /// Every control in the settings rows is this wide, so their left edges
     /// make one column whatever each holds: a toggle, a slider, a menu.
@@ -349,6 +359,12 @@ final class QualityPill: DS.Box {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: Self.detailWidth, height: 400))
+        // The popover is glass, and the stream behind it can be anything: over
+        // a bright pink sky the muted labels faded into it. A backing of the
+        // dark surface keeps every label at its contrast whatever is under it,
+        // and lets a little of the glass through at the edges.
+        container.wantsLayer = true
+        container.layer?.backgroundColor = Self.detailBacking.cgColor
         container.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),

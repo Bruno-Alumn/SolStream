@@ -89,6 +89,17 @@ final class QualityPillTests: XCTestCase {
         try Self.writePicture(of: detail, named: "solstream-quality-popover.png")
     }
 
+    /// Readable over any stream: the popover's contents sit on a dark,
+    /// nearly opaque backing rather than on bare glass.
+    func testThePopoverHasABackingThatKeepsItsTextReadable() throws {
+        let pill = QualityPill()
+        let detail = pill.buildDetail()
+        let colour = try XCTUnwrap(detail.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) })
+        let rgb = try XCTUnwrap(colour.usingColorSpace(.sRGB))
+        XCTAssertGreaterThanOrEqual(rgb.alphaComponent, 0.8)
+        XCTAssertLessThan(rgb.redComponent + rgb.greenComponent + rgb.blueComponent, 0.5)
+    }
+
     func testMovingTheVolumeSetsItAndUnmutes() throws {
         StreamSettings.shared.isMuted = true
         let detail = detail()
