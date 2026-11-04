@@ -3292,18 +3292,36 @@ void TestMouseFence() {
     CHECK(to.x == 3500 && to.y == 33);
 
     // The Mac's input is never touched, nor anything off the fence.
-    FenceAction action = DecideFence(true, WM_LBUTTONDOWN, true);
+    FenceState state;
+    FenceAction action = DecideFence(true, WM_LBUTTONDOWN, 0, true, false, state);
     CHECK(!action.clamp && !action.swallow);
-    action = DecideFence(false, WM_LBUTTONDOWN, false);
+    action = DecideFence(false, WM_LBUTTONDOWN, 0, false, false, state);
     CHECK(!action.clamp && !action.swallow);
     // The hand's movement goes through, for a game's raw input, and is put back.
-    action = DecideFence(false, WM_MOUSEMOVE, true);
+    action = DecideFence(false, WM_MOUSEMOVE, 0, true, false, state);
     CHECK(action.clamp && !action.swallow);
-    // Its click on the fence is held back, to be sent again from the wall.
-    action = DecideFence(false, WM_LBUTTONDOWN, true);
-    CHECK(action.clamp && action.swallow);
-    action = DecideFence(false, WM_MOUSEWHEEL, true);
-    CHECK(action.clamp && action.swallow);
+    // Not while the Mac is driving: the pointer is on the fence because the
+    // Mac put it there.
+    action = DecideFence(false, WM_MOUSEMOVE, 0, true, true, state);
+    CHECK(!action.clamp && !action.swallow);
+    action = DecideFence(false, WM_LBUTTONDOWN, 0, true, true, state);
+    CHECK(!action.clamp && !action.swallow && state.held == 0);
+    // A click on the fence is held back, to be sent again from the wall...
+    action = DecideFence(false, WM_LBUTTONDOWN, 0, true, false, state);
+    CHECK(action.clamp && action.swallow && state.held == 1);
+    // ...and so is its release, even once the pointer is off the fence, or
+    // it would arrive before the press.
+    action = DecideFence(false, WM_LBUTTONUP, 0, false, false, state);
+    CHECK(!action.clamp && action.swallow && state.held == 0);
+    // A release whose press went through is left alone.
+    action = DecideFence(false, WM_LBUTTONUP, 0, false, false, state);
+    CHECK(!action.swallow);
+    action = DecideFence(false, WM_XBUTTONDOWN, MAKELONG(0, XBUTTON2), true, false, state);
+    CHECK(action.swallow && state.held == 16);
+    action = DecideFence(false, WM_XBUTTONUP, MAKELONG(0, XBUTTON2), false, false, state);
+    CHECK(action.swallow && state.held == 0);
+    action = DecideFence(false, WM_MOUSEWHEEL, 0, true, false, state);
+    CHECK(action.clamp && action.swallow && state.held == 0);
 
     DWORD data = 1;
     CHECK(ResendFlags(WM_LBUTTONDOWN, 0, data) == MOUSEEVENTF_LEFTDOWN && data == 0);

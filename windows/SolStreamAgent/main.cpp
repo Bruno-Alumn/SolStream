@@ -2905,28 +2905,47 @@ RECT FenceNow(RECT* fallback) {
     return fence;
 }
 
-/// Where the hand on the PC last had the pointer off the fence. Hook thread only.
+/// Hook thread only: where the hand on the PC last had the pointer off the
+/// fence, and where its latest event put it -- what the cursor is about to
+/// be, which GetCursorPos may not say yet when the clamp runs.
 POINT g_fence_last_outside{};
 bool g_fence_have_outside = false;
-/// Said once while fenced: the first time is news, the hundredth is not.
-bool g_fence_said = false;
+POINT g_fence_latest{};
+ULONGLONG g_fence_injected_at = 0;
+solstream::FenceState g_fence_state;
+/// How long after the Mac's last input the PC's own mouse is left alone.
+constexpr ULONGLONG kFenceMacDrivingMs = 1000;
+
+/// For the watcher to say, once per stream: the hook thread does no file I/O,
+/// since every mouse event on the PC waits for it.
+std::atomic<bool> g_fence_clamped{false};
 
 LRESULT CALLBACK FenceHookProc(int code, WPARAM wparam, LPARAM lparam) {
     if (code == HC_ACTION) {
         const auto* info = reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam);
         const bool injected = (info->flags & LLMHF_INJECTED) != 0;
+        const ULONGLONG now = GetTickCount64();
+        if (injected) {
+            g_fence_injected_at = now;
+            return CallNextHookEx(nullptr, code, wparam, lparam);
+        }
         const bool inside = solstream::InFence(FenceNow(nullptr), info->pt);
-        if (!injected && !inside) {
+        g_fence_latest = info->pt;
+        if (!inside) {
             g_fence_last_outside = info->pt;
             g_fence_have_outside = true;
         }
-        const solstream::FenceAction action =
-            solstream::DecideFence(injected, static_cast<UINT>(wparam), inside);
-        if (action.clamp) {
+        const bool mac_driving =
+            g_fence_injected_at != 0 && now - g_fence_injected_at < kFenceMacDrivingMs;
+        const solstream::FenceAction action = solstream::DecideFence(
+            false, static_cast<UINT>(wparam), info->mouseData, inside, mac_driving,
+            g_fence_state);
+        if (action.clamp || action.swallow) {
             // After this returns, when the movement has landed; a held-back
             // event is sent again from there, in the order it came.
             PostThreadMessageW(GetCurrentThreadId(), kFenceClamp,
-                               action.swallow ? wparam : 0, info->mouseData);
+                               action.swallow ? wparam : 0,
+                               (action.clamp ? 0x80000000u : 0) | (info->mouseData >> 16));
         }
         if (action.swallow) {
             return 1;
@@ -2937,11 +2956,10 @@ LRESULT CALLBACK FenceHookProc(int code, WPARAM wparam, LPARAM lparam) {
 
 /// Put the pointer back on the real screen it came from, and send again what
 /// was held back while it was off it.
-void FenceClamp(UINT held, DWORD mouse_data) {
+void FenceClamp(UINT held, bool clamp, DWORD mouse_data) {
     RECT fallback{};
     const RECT fence = FenceNow(&fallback);
-    POINT now{};
-    if (GetCursorPos(&now) && solstream::InFence(fence, now)) {
+    if (clamp && solstream::InFence(fence, g_fence_latest)) {
         RECT area = fallback;
         if (g_fence_have_outside) {
             MONITORINFO info{};
@@ -2953,18 +2971,19 @@ void FenceClamp(UINT held, DWORD mouse_data) {
                 area = info.rcMonitor;
             }
         }
-        const POINT to = solstream::ClampInto(area, now);
+        const POINT to = solstream::ClampInto(area, g_fence_latest);
         SetCursorPos(to.x, to.y);
-        if (!g_fence_said) {
-            g_fence_said = true;
-            Log("[fence] the PC's own mouse went onto the capture display at %ld,%ld; "
-                "kept it on the real screen at %ld,%ld", now.x, now.y, to.x, to.y);
-        }
+        g_fence_latest = to;
+        g_fence_clamped = true;
     }
     if (held) {
         DWORD data = 0;
-        const DWORD flags = solstream::ResendFlags(held, mouse_data, data);
+        // Only the high word travels in the message; ResendFlags reads it there.
+        const DWORD flags = solstream::ResendFlags(held, mouse_data << 16, data);
         if (flags) {
+            // Injected, so a window run as administrator does not get it while
+            // this host is not, and a game that ignores injected input ignores
+            // it -- a click it would have had only by landing on the fence.
             INPUT input{};
             input.type = INPUT_MOUSE;
             input.mi.dwFlags = flags;
@@ -2980,6 +2999,9 @@ DWORD WINAPI FenceThreadProc(void*) {
     // state as it is, for one posted before.
     PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
     PostThreadMessageW(GetCurrentThreadId(), kFenceUpdate, 0, 0);
+    // Every mouse event on the PC waits for this thread while hooked; a game
+    // holding every core must not make it wait longer.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     HHOOK hook = nullptr;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (msg.message == kFenceUpdate) {
@@ -2997,10 +3019,12 @@ DWORD WINAPI FenceThreadProc(void*) {
                 UnhookWindowsHookEx(hook);
                 hook = nullptr;
                 g_fence_have_outside = false;
-                g_fence_said = false;
+                g_fence_state = solstream::FenceState{};
             }
         } else if (msg.message == kFenceClamp) {
-            FenceClamp(static_cast<UINT>(msg.wParam), static_cast<DWORD>(msg.lParam));
+            const DWORD packed = static_cast<DWORD>(msg.lParam);
+            FenceClamp(static_cast<UINT>(msg.wParam), (packed & 0x80000000u) != 0,
+                       packed & 0xFFFFu);
         }
     }
     return 0;
@@ -3021,6 +3045,17 @@ void UpdateMouseFence(bool holding) {
     g_fence = fence;
     g_fence_fallback = fallback;
     ReleaseSRWLockExclusive(&g_fence_lock);
+    // Once per stream, from here: the hook thread does no file I/O.
+    static bool said = false;
+    const bool fenced = fence.right > fence.left;
+    if (!fenced) {
+        said = false;
+        g_fence_clamped = false;
+    } else if (!said && g_fence_clamped.exchange(false)) {
+        said = true;
+        Log("[fence] the PC's own mouse went onto the capture display; kept it on the "
+            "real screen");
+    }
     if (!changed) {
         return;
     }

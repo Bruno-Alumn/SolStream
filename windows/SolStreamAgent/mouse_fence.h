@@ -60,17 +60,60 @@ struct FenceAction {
     bool clamp = false;    ///< put the pointer back on the real screen
 };
 
+/// A bit per button, for FenceState::held.
+inline unsigned FenceButton(UINT message, DWORD hook_mouse_data) {
+    switch (message) {
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: return 1;
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: return 2;
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: return 4;
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+        return HIWORD(hook_mouse_data) == XBUTTON2 ? 16 : 8;
+    default: return 0;
+    }
+}
+
+inline bool IsButtonUp(UINT message) {
+    return message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP
+        || message == WM_XBUTTONUP;
+}
+
+/// What the hook remembers between events.
+struct FenceState {
+    /// Buttons whose press was held back: their release is held back too,
+    /// wherever it lands, or it would reach the window before the press does
+    /// and leave the button down.
+    unsigned held = 0;
+};
+
 /// `injected`: LLMHF_INJECTED -- the Mac's input, or any other program's.
 /// `message`: the hook's wParam. `inside`: the event's point is on the fence.
-inline FenceAction DecideFence(bool injected, UINT message, bool inside) {
+/// `mac_driving`: injected input came moments ago. The pointer is then on the
+/// fence because the Mac put it there, and a twitch of the PC's mouse must not
+/// carry it off to the real screen, where the Mac's next click -- sent with no
+/// position of its own -- would land.
+inline FenceAction DecideFence(bool injected, UINT message, DWORD hook_mouse_data,
+                               bool inside, bool mac_driving, FenceState& state) {
     FenceAction action;
-    if (injected || !inside) {
+    if (injected) {
+        return action;
+    }
+    const unsigned button = FenceButton(message, hook_mouse_data);
+    if (button && IsButtonUp(message) && (state.held & button)) {
+        state.held &= ~button;
+        action.swallow = true;
+        action.clamp = inside && !mac_driving;
+        return action;
+    }
+    if (!inside || mac_driving) {
         return action;
     }
     action.clamp = true;
     // A movement goes through: a game turning its camera reads it as raw
     // input, and swallowing it would stop the turn at the edge.
     action.swallow = message != WM_MOUSEMOVE;
+    if (action.swallow && button && !IsButtonUp(message)) {
+        state.held |= button;
+    }
     return action;
 }
 
