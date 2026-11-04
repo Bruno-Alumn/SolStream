@@ -28,7 +28,8 @@ PC. Not a remote desktop or a second screen to squint at: only the app, right
 where you’re working.
 
 <div align="center">
-  <img src="docs/media/demo.gif" width="860" alt="Apps from a Windows PC in their own windows on a Mac: Calculator works out 12 × 3, and a command prompt prints a line typed on the Mac.">
+  <img src="docs/media/open-app.gif" width="560" alt="SolStream's app picker on a Mac: typing “fire” finds Firefox on the PC, Launch starts it there, and a few seconds later Firefox opens in its own Mac window.">
+  <br><sub>Pick an app on the PC and it opens in a window of its own on the Mac.</sub>
 </div>
 
 ## Features
@@ -98,7 +99,7 @@ brew install --cask bruno-alumn/solstream/solstream
 3. **Choose an app.** Pick an open window or anything from the Start menu,
    Store apps and Steam and Epic games included.
 
-<img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, and video quality.">
+<img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, the title bar, and video quality.">
 
 | Action | What it does |
 |:--|:--|
@@ -116,6 +117,11 @@ Mac’s display awake during a stream. Everything else is in
 **SolStream › Settings**.
 
 <br clear="right">
+
+<div align="center">
+  <img src="docs/media/settings.png" width="560" alt="SolStream's Settings window: video quality, frame rate and codec; the PC's sound, from the streamed apps or the whole PC; Desktop or Gaming mouse; clipboard sync and reopening the last app; and updates.">
+  <br><sub>Settings are kept on the Mac and apply to every PC you stream from.</sub>
+</div>
 
 ## Troubleshooting
 
