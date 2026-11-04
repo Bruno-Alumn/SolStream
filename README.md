@@ -58,11 +58,6 @@ where you’re working.
 - Pairing-token authentication and AES-256-GCM on every packet.
 - Signed updates that ask before installing.
 
-<div align="center">
-  <img src="docs/media/resize.gif" width="640" alt="PhotoCraft, an image editor running on the PC, in a Mac window. Dragging the window's corner resizes it, and the editor re-lays itself out at each size.">
-  <br><sub>Resize the window and the app adapts its layout on the PC.</sub>
-</div>
-
 ## Install
 
 You need a Mac with macOS 14 or later and a PC with Windows 10 (version 1903 or
