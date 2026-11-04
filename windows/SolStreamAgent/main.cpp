@@ -72,6 +72,7 @@
 #include "driver_install.h"
 #include "foreground.h"
 #include "full_screen.h"
+#include "mouse_fence.h"
 #include "tailscale.h"
 #include "transfer.h"
 #include "wake.h"
@@ -2881,6 +2882,158 @@ void LookAtDisplays() {
         displays, g_capture_visibility.capture, g_capture_visibility.rescue_to);
 }
 
+// ── Keeping the PC's own mouse off the capture display ───────────────────────
+// See mouse_fence.h. The watcher says what to fence; a thread of its own holds
+// the hook, which Windows calls on that thread for every mouse event on the PC,
+// so it does nothing else and answers at once.
+
+constexpr UINT kFenceUpdate = WM_APP + 1;  ///< the fence changed; hook or unhook
+constexpr UINT kFenceClamp = WM_APP + 2;   ///< wParam: the held-back message, or 0
+
+SRWLOCK g_fence_lock = SRWLOCK_INIT;
+RECT g_fence{};           ///< the capture display; empty when nothing is fenced
+RECT g_fence_fallback{};  ///< where the pointer goes when its own screen is unknown
+DWORD g_fence_thread = 0;
+
+RECT FenceNow(RECT* fallback) {
+    AcquireSRWLockShared(&g_fence_lock);
+    const RECT fence = g_fence;
+    if (fallback) {
+        *fallback = g_fence_fallback;
+    }
+    ReleaseSRWLockShared(&g_fence_lock);
+    return fence;
+}
+
+/// Where the hand on the PC last had the pointer off the fence. Hook thread only.
+POINT g_fence_last_outside{};
+bool g_fence_have_outside = false;
+/// Said once while fenced: the first time is news, the hundredth is not.
+bool g_fence_said = false;
+
+LRESULT CALLBACK FenceHookProc(int code, WPARAM wparam, LPARAM lparam) {
+    if (code == HC_ACTION) {
+        const auto* info = reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam);
+        const bool injected = (info->flags & LLMHF_INJECTED) != 0;
+        const bool inside = solstream::InFence(FenceNow(nullptr), info->pt);
+        if (!injected && !inside) {
+            g_fence_last_outside = info->pt;
+            g_fence_have_outside = true;
+        }
+        const solstream::FenceAction action =
+            solstream::DecideFence(injected, static_cast<UINT>(wparam), inside);
+        if (action.clamp) {
+            // After this returns, when the movement has landed; a held-back
+            // event is sent again from there, in the order it came.
+            PostThreadMessageW(GetCurrentThreadId(), kFenceClamp,
+                               action.swallow ? wparam : 0, info->mouseData);
+        }
+        if (action.swallow) {
+            return 1;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+/// Put the pointer back on the real screen it came from, and send again what
+/// was held back while it was off it.
+void FenceClamp(UINT held, DWORD mouse_data) {
+    RECT fallback{};
+    const RECT fence = FenceNow(&fallback);
+    POINT now{};
+    if (GetCursorPos(&now) && solstream::InFence(fence, now)) {
+        RECT area = fallback;
+        if (g_fence_have_outside) {
+            MONITORINFO info{};
+            info.cbSize = sizeof(info);
+            const HMONITOR monitor =
+                MonitorFromPoint(g_fence_last_outside, MONITOR_DEFAULTTONEAREST);
+            if (monitor && GetMonitorInfoW(monitor, &info)
+                && !EqualRect(&info.rcMonitor, &fence)) {
+                area = info.rcMonitor;
+            }
+        }
+        const POINT to = solstream::ClampInto(area, now);
+        SetCursorPos(to.x, to.y);
+        if (!g_fence_said) {
+            g_fence_said = true;
+            Log("[fence] the PC's own mouse went onto the capture display at %ld,%ld; "
+                "kept it on the real screen at %ld,%ld", now.x, now.y, to.x, to.y);
+        }
+    }
+    if (held) {
+        DWORD data = 0;
+        const DWORD flags = solstream::ResendFlags(held, mouse_data, data);
+        if (flags) {
+            INPUT input{};
+            input.type = INPUT_MOUSE;
+            input.mi.dwFlags = flags;
+            input.mi.mouseData = data;
+            SendInput(1, &input, sizeof(input));
+        }
+    }
+}
+
+DWORD WINAPI FenceThreadProc(void*) {
+    MSG msg;
+    // The queue first, so an update posted from here on is not lost; then the
+    // state as it is, for one posted before.
+    PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+    PostThreadMessageW(GetCurrentThreadId(), kFenceUpdate, 0, 0);
+    HHOOK hook = nullptr;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (msg.message == kFenceUpdate) {
+            RECT none{};
+            const RECT fence = FenceNow(nullptr);
+            const bool want = !EqualRect(&fence, &none);
+            if (want && !hook) {
+                hook = SetWindowsHookExW(WH_MOUSE_LL, FenceHookProc,
+                                         GetModuleHandleW(nullptr), 0);
+                if (!hook) {
+                    Log("[fence] could not watch the PC's own mouse (error %lu); it can "
+                        "still wander onto the capture display", GetLastError());
+                }
+            } else if (!want && hook) {
+                UnhookWindowsHookEx(hook);
+                hook = nullptr;
+                g_fence_have_outside = false;
+                g_fence_said = false;
+            }
+        } else if (msg.message == kFenceClamp) {
+            FenceClamp(static_cast<UINT>(msg.wParam), static_cast<DWORD>(msg.lParam));
+        }
+    }
+    return 0;
+}
+
+/// Fence the capture display while a window is streamed from it and nobody
+/// can see it; otherwise nothing. Watcher thread, every tick: cheap when
+/// nothing changed. Never a real monitor -- what is on one is in plain sight.
+void UpdateMouseFence(bool holding) {
+    RECT fence{};
+    RECT fallback{};
+    if (holding && g_capture_visibility.invisible) {
+        fence = g_capture_visibility.capture;
+        fallback = g_capture_visibility.rescue_to;
+    }
+    AcquireSRWLockExclusive(&g_fence_lock);
+    const bool changed = !EqualRect(&fence, &g_fence) || !EqualRect(&fallback, &g_fence_fallback);
+    g_fence = fence;
+    g_fence_fallback = fallback;
+    ReleaseSRWLockExclusive(&g_fence_lock);
+    if (!changed) {
+        return;
+    }
+    if (!g_fence_thread) {
+        HANDLE thread = CreateThread(nullptr, 0, FenceThreadProc, nullptr, 0, &g_fence_thread);
+        if (thread) {
+            CloseHandle(thread);
+        }
+        return;  // it reads the fence as it starts
+    }
+    PostThreadMessageW(g_fence_thread, kFenceUpdate, 0, 0);
+}
+
 struct StrandedSearch {
     std::vector<HWND> found;
     RECT capture{};
@@ -3492,6 +3645,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         ReportForegroundThief();
         ReportPointerTarget();
         ReportOcclusion();
+        UpdateMouseFence(holding);
         const ULONGLONG now = GetTickCount64();
         if (now - rescued_at >= kRescueIntervalMs) {
             rescued_at = now;

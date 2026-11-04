@@ -67,6 +67,7 @@
 #include "stranded.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
+#include "mouse_fence.h"
 #include "tailscale.h"
 #include "vdd.h"
 #include "window_restore.h"
@@ -3269,6 +3270,52 @@ void TestVideoCodecs() {
     CHECK(!StartsWithParameterSets(VideoCodec::Hevc, h264Idr, sizeof(h264Idr)));
 }
 
+void TestMouseFence() {
+    using namespace solstream;
+    // The capture display parked right of a 3440-wide primary.
+    const RECT fence{3440, 0, 3440 + 2560, 1440};
+    const RECT primary{0, 0, 3440, 1440};
+    CHECK(InFence(fence, POINT{3440, 0}));
+    CHECK(InFence(fence, POINT{3440 + 2559, 1439}));
+    CHECK(!InFence(fence, POINT{3439, 10}));
+    CHECK(!InFence(fence, POINT{3440 + 2560, 10}));
+    CHECK(!InFence(RECT{}, POINT{0, 0}));
+
+    // Stopped at the wall, on the last column of the real screen.
+    POINT to = ClampInto(primary, POINT{3500, 33});
+    CHECK(to.x == 3439 && to.y == 33);
+    to = ClampInto(primary, POINT{4000, 2000});
+    CHECK(to.x == 3439 && to.y == 1439);
+    to = ClampInto(primary, POINT{-5, -5});
+    CHECK(to.x == 0 && to.y == 0);
+    to = ClampInto(RECT{}, POINT{3500, 33});
+    CHECK(to.x == 3500 && to.y == 33);
+
+    // The Mac's input is never touched, nor anything off the fence.
+    FenceAction action = DecideFence(true, WM_LBUTTONDOWN, true);
+    CHECK(!action.clamp && !action.swallow);
+    action = DecideFence(false, WM_LBUTTONDOWN, false);
+    CHECK(!action.clamp && !action.swallow);
+    // The hand's movement goes through, for a game's raw input, and is put back.
+    action = DecideFence(false, WM_MOUSEMOVE, true);
+    CHECK(action.clamp && !action.swallow);
+    // Its click on the fence is held back, to be sent again from the wall.
+    action = DecideFence(false, WM_LBUTTONDOWN, true);
+    CHECK(action.clamp && action.swallow);
+    action = DecideFence(false, WM_MOUSEWHEEL, true);
+    CHECK(action.clamp && action.swallow);
+
+    DWORD data = 1;
+    CHECK(ResendFlags(WM_LBUTTONDOWN, 0, data) == MOUSEEVENTF_LEFTDOWN && data == 0);
+    CHECK(ResendFlags(WM_RBUTTONUP, 0, data) == MOUSEEVENTF_RIGHTUP);
+    CHECK(ResendFlags(WM_XBUTTONDOWN, MAKELONG(0, XBUTTON2), data) == MOUSEEVENTF_XDOWN
+          && data == XBUTTON2);
+    CHECK(ResendFlags(WM_MOUSEWHEEL, MAKELONG(0, static_cast<WORD>(-WHEEL_DELTA)), data)
+              == MOUSEEVENTF_WHEEL
+          && static_cast<LONG>(data) == -WHEEL_DELTA);
+    CHECK(ResendFlags(WM_MOUSEMOVE, 0, data) == 0);
+}
+
 void TestPointerMath() {
     using namespace media;
     // Every pixel the Mac aims at (pixel * 65535 / extent, rounded down) comes
@@ -4598,6 +4645,7 @@ int wmain(int argc, wchar_t** argv) {
     TestVersions();
     TestAppIds();
     TestPointerMath();
+    TestMouseFence();
     TestDibAsBmp();
     TestBase64();
     TestSignature(vector);
