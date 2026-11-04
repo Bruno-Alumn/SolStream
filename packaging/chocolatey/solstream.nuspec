@@ -5,7 +5,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>solstream</id>
-    <version>1.0.6</version>
+    <version>1.0.7</version>
     <title>SolStream</title>
     <authors>Bruno-Alumn</authors>
     <owners>Bruno-Alumn</owners>
