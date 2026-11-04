@@ -27,36 +27,54 @@ switch to with <kbd>⌘</kbd><kbd>Tab</kbd>, while the app keeps running on the
 PC. Not a remote desktop or a second screen to squint at: only the app, right
 where you’re working.
 
-<div align="center">
-  <img src="docs/media/open-app.gif" width="560" alt="SolStream's app picker on a Mac: typing “fire” finds Firefox on the PC, Launch starts it there, and a few seconds later Firefox opens in its own Mac window.">
-  <br><sub>Pick an app on the PC and it opens in a window of its own on the Mac.</sub>
-</div>
+<p align="center">
+  <img src="docs/media/open-app.gif" width="520" alt="SolStream's app picker on a Mac: typing “fire” finds Firefox on the PC, Launch starts it there, and a few seconds later Firefox opens in its own Mac window.">
+</p>
 
 ## Features
 
-**Feels like a Mac app**
-
-- Stream any Windows app in its own window; switch to another with
-  **Host › Switch App…** (<kbd>⌘</kbd><kbd>O</kbd>).
-- Resize a window and the app re-lays itself out on the PC instead of being
-  scaled.
-- Add a Windows app to the Dock and Spotlight.
-- Copy and paste text and pictures both ways; drop files on a window to save
-  them on the PC and paste them there.
-- Your keyboard layout, Caps Lock and input methods work as usual.
-- Apps run on a virtual display, leaving the PC’s own monitor untouched.
-
-**Fast and dependable**
-
-- Hardware H.264 or HEVC encoding; 49 fps at 3600×2338 in testing.
-- Sound from only the streamed apps on Windows 11, in Opus or lossless.
-- A gaming mode with raw mouse input.
-- Reconnects by itself after Wi-Fi drops, network changes and restarts.
-
-**Private by design**
-
-- Pairing-token authentication and AES-256-GCM on every packet.
-- Signed updates that ask before installing.
+<table>
+  <tr>
+    <td width="55%"><img src="docs/media/resize.gif" width="100%" alt="Firefox from the PC in a Mac window. Dragging the window's corner makes it larger, and the page re-lays itself out to fill it."></td>
+    <td>
+      <h3>Feels like a Mac app</h3>
+      <ul>
+        <li>Stream any Windows app in its own window; switch to another with <b>Host › Switch App…</b> (<kbd>⌘</kbd><kbd>O</kbd>).</li>
+        <li>Resize a window and the app re-lays itself out on the PC instead of being scaled.</li>
+        <li>Add a Windows app to the Dock and Spotlight.</li>
+        <li>Apps run on a virtual display, leaving the PC’s own monitor untouched.</li>
+      </ul>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h3>Works with your Mac</h3>
+      <ul>
+        <li>Copy and paste text and pictures both ways.</li>
+        <li>Drop files on a window to save them on the PC and paste them there.</li>
+        <li>Your keyboard layout, Caps Lock and input methods work as usual.</li>
+      </ul>
+    </td>
+    <td width="55%"><img src="docs/media/clipboard.gif" width="100%" alt="A heading is selected and copied in Firefox on the PC, then pasted into TextEdit on the Mac."></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/controls.gif" width="300" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, the title bar, and video quality. Title bar is switched to Hide and back to Show."></td>
+    <td>
+      <h3>Fast and dependable</h3>
+      <ul>
+        <li>Hardware H.264 or HEVC encoding; 49 fps at 3600×2338 in testing.</li>
+        <li>Sound from only the streamed apps on Windows 11, in Opus or lossless.</li>
+        <li>A gaming mode with raw mouse input.</li>
+        <li>Reconnects by itself after Wi-Fi drops, network changes and restarts.</li>
+      </ul>
+      <h3>Private by design</h3>
+      <ul>
+        <li>Pairing-token authentication and AES-256-GCM on every packet.</li>
+        <li>Signed updates that ask before installing.</li>
+      </ul>
+    </td>
+  </tr>
+</table>
 
 ## Install
 
@@ -94,8 +112,6 @@ brew install --cask bruno-alumn/solstream/solstream
 3. **Choose an app.** Pick an open window or anything from the Start menu,
    Store apps and Steam and Epic games included.
 
-<img src="docs/media/stream-controls.png" width="260" align="right" alt="The stream's controls: frame rate, latency and bandwidth, the host display, volume, sound quality, Desktop or Gaming mouse, the title bar, and video quality.">
-
 | Action | What it does |
 |:--|:--|
 | Click the frame rate in the title bar | Open the stream controls: volume, quality, mouse mode |
@@ -111,12 +127,10 @@ SolStream reopens the app you were streaming when you quit, and keeps the
 Mac’s display awake during a stream. Everything else is in
 **SolStream › Settings**.
 
-<br clear="right">
-
-<div align="center">
-  <img src="docs/media/settings.png" width="560" alt="SolStream's Settings window: video quality, frame rate and codec; the PC's sound, from the streamed apps or the whole PC; Desktop or Gaming mouse; clipboard sync and reopening the last app; and updates.">
+<p align="center">
+  <img src="docs/media/settings.png" width="520" alt="SolStream's Settings window: video quality, frame rate and codec; the PC's sound, from the streamed apps or the whole PC; Desktop or Gaming mouse; clipboard sync and reopening the last app; and updates.">
   <br><sub>Settings are kept on the Mac and apply to every PC you stream from.</sub>
-</div>
+</p>
 
 ## Troubleshooting
 
