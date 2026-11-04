@@ -39,9 +39,14 @@ where you’re working.
   **Host › Switch App…** (<kbd>⌘</kbd><kbd>O</kbd>).
 - Resize a window and the app re-lays itself out on the PC instead of being
   scaled.
-- Add a Windows app to the Dock and Spotlight.
-- Copy and paste text and pictures both ways; drop files on a window to save
-  them on the PC and paste them there.
+- Add a Windows app to the Dock and Spotlight. Clicking it wakes a sleeping
+  PC.
+- Window titles, Dock bounces, full screen and Quit follow the app.
+- Copy and paste text, formatted text and pictures both ways; drop files on a
+  window to save them on the PC and paste them there.
+- Links clicked on the PC open in your Mac's browser once SolStream is the
+  PC's default browser, and **Send to Mac** in Explorer sends a file to your
+  Downloads.
 - Your keyboard layout, Caps Lock and input methods work as usual.
 - Apps run on a virtual display, leaving the PC’s own monitor untouched.
 
@@ -108,6 +113,8 @@ brew install --cask bruno-alumn/solstream/solstream
 | Pinch on the trackpad | Zoom in the app |
 | Drop files on a window | Save them in `Downloads\SolStream` on the PC and put them on its clipboard; paste with <kbd>⌘</kbd><kbd>V</kbd> |
 | Right-click an app › **Add to Dock** | Open it from the Dock or Spotlight |
+| **Host › Quit App on PC**, or the Dock menu; hold <kbd>⌥</kbd> for **Force Quit** | Close the app on the PC, not just its Mac window |
+| Right-click a file in Explorer › **Send to Mac** | Save it in `Downloads/SolStream` on the Mac |
 | **Title bar › Hide** | Remove the title bar an app draws itself |
 | **Host › Switch App…** (<kbd>⌘</kbd><kbd>O</kbd>) | Stream a different app; **Host › Disconnect** (<kbd>⌘</kbd><kbd>D</kbd>) leaves the PC |
 
@@ -155,9 +162,10 @@ PC's audio. On Windows 11, check **Settings › Sound › From** is set to
 <summary><strong>The PC is asleep</strong></summary>
 
 Once SolStream has connected to a PC, it remembers how to wake it. When that
-PC doesn't answer, the connect window offers **Wake PC**. This needs
-Wake-on-LAN turned on for the PC's network adapter (in Device Manager, and on
-some PCs in the BIOS), and the Mac on the same network: the wake signal
+PC doesn't answer, the connect window offers **Wake PC**, and a Dock launcher
+wakes it by itself. This needs Wake-on-LAN turned on for the PC's network
+adapter (in Device Manager, and on some PCs in the BIOS), and the Mac on the
+same network: the wake signal
 doesn't cross routers or Tailscale. A PC waiting at the Windows sign-in
 screen looks the same as one asleep: SolStream runs once you sign in.
 </details>
