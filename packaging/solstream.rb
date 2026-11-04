@@ -2,8 +2,8 @@
 # Bruno-Alumn/homebrew-solstream (Casks/solstream.rb); this copy is the source.
 # scripts/update-packages.sh sets the version and sha256 from the latest release.
 cask "solstream" do
-  version "1.0.5"
-  sha256 "c308ad3e13068294e86676ad9d95dd0b93f840c51f8d26311ecce07310d72ecf"
+  version "1.0.6"
+  sha256 "1ce2f5184fbbb9fed1c4f49e23f672650e057a34c743019cd4cffc09bc000930"
 
   url "https://github.com/Bruno-Alumn/SolStream/releases/download/v#{version}/SolStream-#{version}-macOS.zip"
   name "SolStream"
