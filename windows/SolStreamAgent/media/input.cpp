@@ -521,9 +521,38 @@ bool InputInjector::PressCharKey(int slot, const unsigned char* chars, size_t le
     // would type in it.
     const HWND front = GetForegroundWindow();
     const HKL layout = GetKeyboardLayout(front ? GetWindowThreadProcessId(front, nullptr) : 0);
-    const SHORT vkScan = unitCount == 1 ? VkKeyScanExW(units[0], layout) : (SHORT) -1;
-    const WORD vkScanCode = vkScan == -1
-        ? 0 : (WORD) MapVirtualKeyExW((UINT) (vkScan & 0xFF), MAPVK_VK_TO_VSC, layout);
+    SHORT vkScan = unitCount == 1 ? VkKeyScanExW(units[0], layout) : (SHORT) -1;
+    const UINT vk = vkScan == -1 ? 0 : (UINT) (vkScan & 0xFF);
+    const WORD vkScanCode = vk == 0 ? 0 : (WORD) MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, layout);
+    // A dead key here -- ´ on a Spanish PC, ' on US-International -- would
+    // wait for the next key instead of typing: the character goes whole.
+    if (vk != 0 && (MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, layout) & 0x80000000u) != 0) {
+        vkScan = -1;
+    }
+    // Which Shift types it with Caps Lock as it is: Caps Lock turns some keys'
+    // Shift around -- letters, a French PC's number row -- and not others,
+    // like a German PC's ß. Asked of the layout itself, both ways; neither
+    // giving the character, it goes whole.
+    if (vkScan != -1) {
+        const unsigned states = ((unsigned) vkScan >> 8) & 0xFF;
+        bool found = false;
+        for (int flip = 0; flip < 2 && !found; ++flip) {
+            const bool shift = ((states & 1) != 0) != (flip == 1);
+            BYTE keys[256] = {};
+            if (shift) { keys[VK_SHIFT] = keys[VK_LSHIFT] = 0x80; }
+            if (states & 2) { keys[VK_CONTROL] = keys[VK_LCONTROL] = 0x80; }
+            if (states & 4) { keys[VK_MENU] = keys[VK_LMENU] = 0x80; }
+            if (capsOn) { keys[VK_CAPITAL] = 0x01; }
+            WCHAR typed[4] = {};
+            // 0x4: leave the keyboard's own state, dead keys included, alone.
+            const int got = ToUnicodeEx(vk, vkScanCode, keys, typed, 4, 0x4, layout);
+            if (got == 1 && typed[0] == units[0]) {
+                vkScan = (SHORT) ((vkScan & 0xFF) | ((states & ~1u) | (shift ? 1u : 0u)) << 8);
+                found = true;
+            }
+        }
+        if (!found) { vkScan = -1; }
+    }
     unsigned held = 0;
     const struct { int vk; unsigned bit; } sides[] = {
         {VK_LSHIFT, kHeldLShift}, {VK_RSHIFT, kHeldRShift},
@@ -533,18 +562,34 @@ bool InputInjector::PressCharKey(int slot, const unsigned char* chars, size_t le
     for (const auto& side : sides) {
         if (GetAsyncKeyState(side.vk) & 0x8000) { held |= side.bit; }
     }
-    const bool isAlpha = unitCount == 1 && IsCharAlphaW(units[0]);
+    // A repeat that now means another key -- focus went to a window with a
+    // layout of its own -- lets go of the first before pressing the second.
+    const WORD before = charKeys_[slot];
+    if (before != 0 && before != kCharTyped
+        && (vkScan == -1 || (WORD) (vkScan & 0xFF) != before)) {
+        INPUT up = VirtualKeyInput(before, false);
+        if (SendInput(1, &up, sizeof(INPUT)) == 1) { TrackKey(before, false); }
+        charKeys_[slot] = 0;
+    }
 
     INPUT keys[32];
     WORD pressed = 0;
-    const int count = BuildCharKeyPress(units, unitCount, vkScan, vkScanCode, held, capsOn,
-                                        isAlpha, keys, &pressed);
+    // Caps Lock is already in the Shift chosen above.
+    const int count = BuildCharKeyPress(units, unitCount, vkScan, vkScanCode, held, false,
+                                        false, keys, &pressed);
     if (count == 0 || SendInput((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
         return false;
     }
     if (pressed != 0) {
-        // Held like a key sent by virtual key, so ReleaseAll lets go of it.
+        // Held like a key sent by virtual key, so ReleaseAll lets go of it,
+        // and no longer owed a release refused before it went down again.
         TrackKey(pressed, true);
+        for (int i = 0; i < owedKeysCount_; ++i) {
+            if (owedKeys_[i] == pressed) {
+                owedKeys_[i] = owedKeys_[--owedKeysCount_];
+                break;
+            }
+        }
         charKeys_[slot] = pressed;
     } else {
         charKeys_[slot] = kCharTyped;

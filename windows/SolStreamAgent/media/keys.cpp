@@ -250,23 +250,28 @@ int BuildCharKeyPress(const WCHAR* units, int unitCount, SHORT vkScan, WORD vkSc
 
     bool lifted[3][2] = {};
     bool added[3] = {};
-    // Alt is let go of last of all on the way down, and with the mask key
+    // Every lift before every add, and the adds gone before the lifts come
+    // back: Alt held while Shift goes down or up is Windows' Alt+Shift, which
+    // switches the input language. Alt is lifted first, with the mask key
     // pressed while it is still held, so Windows does not open a menu for it.
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 2; i >= 0; --i) {
         const ModifierSides& m = kModifierSides[i];
         const bool have = (held & (m.leftBit | m.rightBit)) != 0;
-        if (have && !need[i]) {
-            if (i == 2) {
-                out[n++] = KeyboardInput(kVkMaskKey, 0, 0);
-                out[n++] = KeyboardInput(kVkMaskKey, 0, KEYEVENTF_KEYUP);
+        if (!have || need[i]) { continue; }
+        if (i == 2) {
+            out[n++] = KeyboardInput(kVkMaskKey, 0, 0);
+            out[n++] = KeyboardInput(kVkMaskKey, 0, KEYEVENTF_KEYUP);
+        }
+        for (int side = 0; side < 2; ++side) {
+            if (held & (side ? m.rightBit : m.leftBit)) {
+                out[n++] = ModifierInput(m, side == 1, false);
+                lifted[i][side] = true;
             }
-            for (int side = 0; side < 2; ++side) {
-                if (held & (side ? m.rightBit : m.leftBit)) {
-                    out[n++] = ModifierInput(m, side == 1, false);
-                    lifted[i][side] = true;
-                }
-            }
-        } else if (!have && need[i]) {
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        const ModifierSides& m = kModifierSides[i];
+        if (need[i] && (held & (m.leftBit | m.rightBit)) == 0) {
             out[n++] = ModifierInput(m, false, true);
             added[i] = true;
         }
@@ -284,16 +289,18 @@ int BuildCharKeyPress(const WCHAR* units, int unitCount, SHORT vkScan, WORD vkSc
         }
     }
 
-    // Everything back as the Mac has it, in the reverse order.
-    bool altBack = false;
+    // Everything back as the Mac has it: what was added goes first, then
+    // what was lifted comes back, Alt last.
     for (int i = 2; i >= 0; --i) {
-        const ModifierSides& m = kModifierSides[i];
         if (added[i]) {
-            out[n++] = ModifierInput(m, false, false);
+            out[n++] = ModifierInput(kModifierSides[i], false, false);
         }
+    }
+    bool altBack = false;
+    for (int i = 0; i < 3; ++i) {
         for (int side = 0; side < 2; ++side) {
             if (lifted[i][side]) {
-                out[n++] = ModifierInput(m, side == 1, true);
+                out[n++] = ModifierInput(kModifierSides[i], side == 1, true);
                 altBack = altBack || i == 2;
             }
         }

@@ -251,15 +251,18 @@ public final class InputCapture {
     /// anything else that is a key rather than a character -- though Space
     /// after a dead key types the accent itself, and that goes; not the
     /// keypad, whose keys
-    /// the host presses as keypad keys. With ⌥, only what is not a letter or a
-    /// digit: ⌥2 is the Spanish Mac's '@', which is wanted, but ⌥F is Alt+F
-    /// on the PC, a menu, and the 'ƒ' it makes here is not.
+    /// the host presses as keypad keys. With ⌥, only ASCII punctuation: ⌥2 is
+    /// the Spanish Mac's '@' and ⌥ç its '}', which are wanted, and '€'; but on a US Mac
+    /// ⌥D is '∂' and ⌥Space a no-break space, where the PC wants Alt+D and
+    /// Alt+Space.
     static func characterToSend(characters: String?, flags: NSEvent.ModifierFlags) -> String? {
         guard flags.isDisjoint(with: [.command, .control, .numericPad]),
               let characters, characters != " ", characters.count == 1, characters.utf16.count <= 2,
               let scalar = characters.unicodeScalars.first,
               !isControl(scalar), !(0xF700...0xF8FF).contains(scalar.value) else { return nil }
-        if flags.contains(.option), CharacterSet.alphanumerics.contains(scalar) { return nil }
+        if flags.contains(.option), scalar != "€",
+           !(scalar.isASCII && CharacterSet.punctuationCharacters
+                .union(.symbols).contains(scalar)) { return nil }
         return characters
     }
 
@@ -726,8 +729,9 @@ public final class InputCapture {
                 if event.type == .keyUp { swallowedDeadKeys.remove(event.keyCode) }
                 return true
             }
+            // Not with ⌥: on a US Mac ⌥E is a dead key, and the PC's Alt+E.
             if held == nil, event.type == .keyDown, typesMacCharacters,
-               event.modifierFlags.isDisjoint(with: [.command, .control]),
+               event.modifierFlags.isDisjoint(with: [.command, .control, .option]),
                Self.isDeadKeyPress(characters: event.characters,
                                    ignoringModifiers: event.charactersIgnoringModifiers) {
                 swallowedDeadKeys.insert(event.keyCode)
@@ -743,6 +747,16 @@ public final class InputCapture {
                                                      ignoringModifiers: event.charactersIgnoringModifiers)
             }
             var keyCode = event.keyCode
+            // An accent that did not combine with the key after it -- ´ then k
+            // -- is two characters, which no one key types: they go as text.
+            if held == nil, event.type == .keyDown, typesMacCharacters,
+               event.modifierFlags.isDisjoint(with: [.command, .control]),
+               let typed = event.characters, typed.count > 1,
+               typed.unicodeScalars.allSatisfy({ !Self.isControl($0)
+                                                 && !(0xF700...0xF8FF).contains($0.value) }) {
+                sendText(typed)
+                return true
+            }
             // The character this Mac's layout typed, for the host to type: on
             // a press, or a repeat of a key that went down with one.
             var character: String?

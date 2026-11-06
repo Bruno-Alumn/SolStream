@@ -33,6 +33,13 @@ final class KeyCharacterTests: XCTestCase {
         // ⌥2 is the Spanish Mac's @; ⌥F is the PC's Alt+F.
         XCTAssertEqual(InputCapture.characterToSend(characters: "@", flags: [.option]), "@")
         XCTAssertNil(InputCapture.characterToSend(characters: "ƒ", flags: [.option]))
+        XCTAssertEqual(InputCapture.characterToSend(characters: "}", flags: [.option]), "}")
+        XCTAssertEqual(InputCapture.characterToSend(characters: "#", flags: [.option]), "#")
+        XCTAssertEqual(InputCapture.characterToSend(characters: "€", flags: [.option]), "€")
+        // A US Mac's ⌥ symbols and ⌥Space are the PC's Alt.
+        XCTAssertNil(InputCapture.characterToSend(characters: "∂", flags: [.option]))
+        XCTAssertNil(InputCapture.characterToSend(characters: "\u{A0}", flags: [.option]))
+        XCTAssertNil(InputCapture.characterToSend(characters: "™", flags: [.option]))
         // Shortcuts, keys that are keys, the keypad and a plain space go by
         // position.
         XCTAssertNil(InputCapture.characterToSend(characters: "c", flags: [.command]))
@@ -135,6 +142,34 @@ final class KeyCharacterTests: XCTestCase {
         XCTAssertTrue(packets().isEmpty, "the dead key went to the host")
         capture.handleKeyEvent(key(.keyDown, 0x0E, "é", ignoring: "e"))
         XCTAssertEqual(Array(packets().last![2...]), [0x00, 0x12, 1, 0, 0x00, 0xE9])
+    }
+
+    /// ⌥E, a dead key on a US Mac, is the PC's Alt+E: by position.
+    func testAnOptionDeadKeyIsAlt() {
+        let (capture, packets) = capture(characters: true)
+        defer { capture.disableCapture() }
+        capture.keyTypes = { _, _ in ["e", "E", "´"] }
+        capture.handleKeyEvent(key(.keyDown, 0x0E, "", ignoring: "´", flags: [.option]))
+        XCTAssertEqual(packets().last.map { Array($0[2...5]) }, [0x00, 0x12, 1, 0x04])
+    }
+
+    /// ´ then k: the two characters go as text.
+    func testAnUncombinedAccentGoesAsText() {
+        let capture = InputCapture()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let view = NSView(frame: window.contentLayoutRect)
+        window.contentView = view
+        capture.attach(to: view)
+        capture.sendsScanCodes = true
+        capture.sendsKeyCharacters = true
+        capture.enableCapture()
+        defer { capture.disableCapture() }
+        var kinds: [UInt8] = []
+        capture.onInput = { kinds.append([UInt8]($0)[0]) }
+        capture.handleKeyEvent(key(.keyDown, 0x21, "", ignoring: "´"))
+        capture.handleKeyEvent(key(.keyDown, 0x28, "´k", ignoring: "k"))
+        XCTAssertEqual(kinds, [SMTInput.Kind.text.rawValue])
     }
 
     /// ⌘C stays a shortcut by position, with no character.

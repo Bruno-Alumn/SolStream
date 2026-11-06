@@ -2687,9 +2687,6 @@ void TestHolderHearing() {
     }
 }
 
-/// A key the Mac sends by position goes in as that scan code, so this PC's own
-/// layout decides what it types -- except the few where the Mac's meaning has
-/// no PC key to carry it.
 void TestCharKeys() {
     using namespace media;
     INPUT out[32];
@@ -2740,8 +2737,15 @@ void TestCharKeys() {
           && (out[1].ki.dwFlags & KEYEVENTF_KEYUP));
     // A right Alt held under one is lifted by its own side and put back.
     n = BuildCharKeyPress(enye, 1, (SHORT) -1, 0, kHeldRAlt, false, true, out, &pressed);
-    CHECK(n == 9 && isKey(out[2], VK_RMENU, true)
-          && (out[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) && isKey(out[6], VK_RMENU, false));
+    CHECK(n == 8 && isKey(out[0], kVkMaskKey, false) && isKey(out[2], VK_RMENU, true)
+          && (out[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) && isKey(out[5], VK_RMENU, false)
+          && isKey(out[6], kVkMaskKey, false));
+    // Shift held and Alt held, for a character that needs Shift alone: Alt
+    // never moves while Shift is the other way from the Mac's.
+    n = BuildCharKeyPress(at, 1, (SHORT) (0x100 | '2'), 0x03, kHeldLAlt | kHeldLShift, false,
+                          false, out, &pressed);
+    CHECK(n == 7 && isKey(out[2], VK_LMENU, true) && isKey(out[3], '2', false)
+          && isKey(out[4], VK_LMENU, false));
     // A pair is typed whole, both halves.
     const WCHAR smile[2] = {0xD83D, 0xDE00};
     n = BuildCharKeyPress(smile, 2, (SHORT) -1, 0, 0, false, false, out, &pressed);
@@ -2751,6 +2755,9 @@ void TestCharKeys() {
     CHECK(n == 2 && pressed == 0);
 }
 
+/// A key the Mac sends by position goes in as that scan code, so this PC's own
+/// layout decides what it types -- except the few where the Mac's meaning has
+/// no PC key to carry it.
 void TestScanKeys() {
     using media::BuildScanKeyInput;
     INPUT in{};
