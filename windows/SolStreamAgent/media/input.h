@@ -53,6 +53,11 @@ enum : unsigned char {
     /// Sent only by a Mac that read "scancodes" in this host's `media open`
     /// reply; anything older sends `kInputKey`, which is still taken exactly
     /// as it always was.
+    ///
+    /// From a Mac that read "scancodes" 2, a press may go on with the
+    /// character its keyboard layout typed, UTF-16 big-endian, which is then
+    /// typed instead of whatever this PC's layout makes of the position. See
+    /// keys.h. A host before it reads the first four bytes only.
     kInputKeyScan = 8,
 };
 
@@ -165,6 +170,19 @@ private:
     static bool KeyUpInput(uint32_t key, INPUT* up);
     /// The input that lets go of mouse button `index` (0 = left).
     static INPUT ButtonUpInput(int index);
+
+    /// A `kInputKeyScan` press that came with the character the Mac's layout
+    /// typed: see keys.h. `chars` is that character's UTF-16 units; `capsOn`
+    /// the Mac's Caps Lock, which MatchCapsLock has just made this PC's too --
+    /// GetKeyState would not say so yet on a thread that reads no messages.
+    bool PressCharKey(int slot, const unsigned char* chars, size_t length, bool capsOn);
+    /// Where a scan code's entry in `charKeys_` is, or -1 for none.
+    static int CharSlot(uint16_t code);
+    /// For each key pressed with its character, what its release lets go of:
+    /// the virtual key it went down as, kCharTyped for a character typed
+    /// whole, 0 for a key that went by position. Receive thread; Reset clears.
+    static constexpr WORD kCharTyped = 0xFFFF;
+    WORD charKeys_[256] = {};
 
     /// Press Caps Lock if the PC's is not what the Mac says its own is. See
     /// keys.h. Only the receive thread touches the belief; Reset clears it.

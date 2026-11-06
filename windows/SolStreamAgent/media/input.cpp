@@ -292,6 +292,22 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
             }
             // Caps Lock's own event has done all it came to do above.
             if (code == kScanCapsLock) { return true; }
+            // With the character the Mac's layout typed: see keys.h. Its
+            // release lets go of whatever its press put down.
+            const int slot = CharSlot(code);
+            if (!down && slot >= 0 && charKeys_[slot] != 0) {
+                const WORD vk = charKeys_[slot];
+                charKeys_[slot] = 0;
+                if (vk == kCharTyped) { return true; }
+                input = VirtualKeyInput(vk, false);
+                trackedKey = vk;
+                trackedDown = false;
+                break;
+            }
+            if (down && length >= 6 && slot >= 0) {
+                return PressCharKey(slot, body + 4, length - 4,
+                                    (body[3] & kModifierCapsLock) != 0);
+            }
             if (!BuildScanKeyInput(code, down, &input)) { return false; }
             trackedKey = kHeldByScan | code;
             trackedDown = down;
@@ -475,6 +491,65 @@ void InputInjector::Reset() {
     // Asked afresh each session: the PC's Caps Lock may have been changed at
     // the PC since the last one.
     capsLock_ = CapsLockBelief{};
+    for (WORD& key : charKeys_) { key = 0; }
+}
+
+int InputInjector::CharSlot(uint16_t code) {
+    const unsigned prefix = code >> 8;
+    const unsigned scan = code & 0xFF;
+    if ((prefix != 0 && prefix != 0xE0) || scan == 0 || scan >= 0x80) { return -1; }
+    return (int) ((prefix ? 0x80 : 0) | scan);
+}
+
+bool InputInjector::PressCharKey(int slot, const unsigned char* chars, size_t length,
+                                 bool capsOn) {
+    WCHAR units[2] = {};
+    int unitCount = 0;
+    for (size_t at = 0; at + 1 < length && unitCount < 2; at += 2) {
+        units[unitCount++] = (WCHAR) smt::ReadBE(chars + at, 2);
+    }
+    // One character only: a lone half of a pair, or two that are not one,
+    // say nothing that could be typed.
+    const bool pair = unitCount == 2 && units[0] >= 0xD800 && units[0] <= 0xDBFF
+                   && units[1] >= 0xDC00 && units[1] <= 0xDFFF;
+    if (unitCount == 2 && !pair) { unitCount = 1; }
+    if (unitCount == 0 || (unitCount == 1 && units[0] >= 0xD800 && units[0] <= 0xDFFF)) {
+        return false;
+    }
+
+    // The layout of the window the keys go to, as the PC's own keyboard
+    // would type in it.
+    const HWND front = GetForegroundWindow();
+    const HKL layout = GetKeyboardLayout(front ? GetWindowThreadProcessId(front, nullptr) : 0);
+    const SHORT vkScan = unitCount == 1 ? VkKeyScanExW(units[0], layout) : (SHORT) -1;
+    const WORD vkScanCode = vkScan == -1
+        ? 0 : (WORD) MapVirtualKeyExW((UINT) (vkScan & 0xFF), MAPVK_VK_TO_VSC, layout);
+    unsigned held = 0;
+    const struct { int vk; unsigned bit; } sides[] = {
+        {VK_LSHIFT, kHeldLShift}, {VK_RSHIFT, kHeldRShift},
+        {VK_LCONTROL, kHeldLControl}, {VK_RCONTROL, kHeldRControl},
+        {VK_LMENU, kHeldLAlt}, {VK_RMENU, kHeldRAlt},
+    };
+    for (const auto& side : sides) {
+        if (GetAsyncKeyState(side.vk) & 0x8000) { held |= side.bit; }
+    }
+    const bool isAlpha = unitCount == 1 && IsCharAlphaW(units[0]);
+
+    INPUT keys[32];
+    WORD pressed = 0;
+    const int count = BuildCharKeyPress(units, unitCount, vkScan, vkScanCode, held, capsOn,
+                                        isAlpha, keys, &pressed);
+    if (count == 0 || SendInput((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
+        return false;
+    }
+    if (pressed != 0) {
+        // Held like a key sent by virtual key, so ReleaseAll lets go of it.
+        TrackKey(pressed, true);
+        charKeys_[slot] = pressed;
+    } else {
+        charKeys_[slot] = kCharTyped;
+    }
+    return true;
 }
 
 void InputInjector::MatchCapsLock(bool wanted) {

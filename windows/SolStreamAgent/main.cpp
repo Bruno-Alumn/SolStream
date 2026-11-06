@@ -5001,7 +5001,8 @@ std::string HandleMedia(const std::string& line) {
     // takes -- so either end can be the older one.
     std::string inputReply;
 #ifdef SOLSTREAM_MEDIA
-    inputReply = ",\"scancodes\":1";
+    // 2: a key may come with the character the Mac typed; see keys.h.
+    inputReply = ",\"scancodes\":2";
     long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
     // Zero means "host decides", which is what an absent field leaves behind.
     long long width = 0, height = 0;

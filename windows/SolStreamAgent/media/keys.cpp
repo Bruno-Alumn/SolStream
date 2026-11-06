@@ -177,6 +177,136 @@ size_t BuildTextCharInput(const unsigned char* body, size_t length, size_t at,
     return used;
 }
 
+namespace {
+
+INPUT KeyboardInput(WORD vk, WORD scan, DWORD flags) {
+    INPUT input{};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = scan;
+    input.ki.dwFlags = flags;
+    return input;
+}
+
+/// The modifier keys, each with its two sides' bits, virtual keys and scan
+/// codes, in the order they are put down: Shift, Control, Alt.
+struct ModifierSides {
+    unsigned leftBit, rightBit;
+    WORD leftVk, rightVk;
+    WORD scan;
+};
+constexpr ModifierSides kModifierSides[3] = {
+    {kHeldLShift, kHeldRShift, VK_LSHIFT, VK_RSHIFT, 0x2A},
+    {kHeldLControl, kHeldRControl, VK_LCONTROL, VK_RCONTROL, 0x1D},
+    {kHeldLAlt, kHeldRAlt, VK_LMENU, VK_RMENU, 0x38},
+};
+
+/// One side of a modifier going down or up. The right Shift has a scan code
+/// of its own; the right Control and Alt are the left ones' behind 0xE0.
+INPUT ModifierInput(const ModifierSides& m, bool right, bool down) {
+    WORD scan = m.scan;
+    DWORD flags = down ? 0 : KEYEVENTF_KEYUP;
+    if (right) {
+        if (m.leftVk == VK_LSHIFT) {
+            scan = 0x36;
+        } else {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+    }
+    return KeyboardInput(right ? m.rightVk : m.leftVk, scan, flags);
+}
+
+}  // namespace
+
+int BuildCharKeyPress(const WCHAR* units, int unitCount, SHORT vkScan, WORD vkScanCode,
+                      unsigned held, bool capsOn, bool isAlpha, INPUT out[32],
+                      WORD* pressedVk) {
+    int n = 0;
+    *pressedVk = 0;
+    if (unitCount < 1 || unitCount > 2) {
+        return 0;
+    }
+    // A key on this layout types it when VkKeyScan found one that needs no
+    // more than Shift, Control and Alt -- not the Hankaku or the layout's own
+    // extra shift states, which nothing here can hold.
+    const unsigned states = vkScan == -1 ? 0xFF : ((unsigned) vkScan >> 8) & 0xFF;
+    const bool byKey = unitCount == 1 && vkScan != -1 && (states & ~7u) == 0
+                    && (vkScan & 0xFF) != 0;
+    bool need[3] = {false, false, false};
+    if (byKey) {
+        need[0] = (states & 1) != 0;
+        need[1] = (states & 2) != 0;
+        need[2] = (states & 4) != 0;
+        // Caps Lock on, a letter's case comes from it with Shift turned around:
+        // 'A' is the A key alone, 'a' is it with Shift.
+        if (capsOn && isAlpha) {
+            need[0] = !need[0];
+        }
+    } else {
+        // Typed whole: Shift changes nothing about a unicode character, so it
+        // stays as it is; Control or Alt under one would make it a shortcut.
+        need[0] = (held & (kHeldLShift | kHeldRShift)) != 0;
+    }
+
+    bool lifted[3][2] = {};
+    bool added[3] = {};
+    // Alt is let go of last of all on the way down, and with the mask key
+    // pressed while it is still held, so Windows does not open a menu for it.
+    for (int i = 0; i < 3; ++i) {
+        const ModifierSides& m = kModifierSides[i];
+        const bool have = (held & (m.leftBit | m.rightBit)) != 0;
+        if (have && !need[i]) {
+            if (i == 2) {
+                out[n++] = KeyboardInput(kVkMaskKey, 0, 0);
+                out[n++] = KeyboardInput(kVkMaskKey, 0, KEYEVENTF_KEYUP);
+            }
+            for (int side = 0; side < 2; ++side) {
+                if (held & (side ? m.rightBit : m.leftBit)) {
+                    out[n++] = ModifierInput(m, side == 1, false);
+                    lifted[i][side] = true;
+                }
+            }
+        } else if (!have && need[i]) {
+            out[n++] = ModifierInput(m, false, true);
+            added[i] = true;
+        }
+    }
+
+    if (byKey) {
+        const WORD vk = (WORD) (vkScan & 0xFF);
+        out[n++] = KeyboardInput(vk, vkScanCode, 0);
+        *pressedVk = vk;
+    } else {
+        // Both halves of a pair in the one run, as BuildTextCharInput does.
+        for (int i = 0; i < unitCount; ++i) {
+            out[n++] = KeyboardInput(0, units[i], KEYEVENTF_UNICODE);
+            out[n++] = KeyboardInput(0, units[i], KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
+        }
+    }
+
+    // Everything back as the Mac has it, in the reverse order.
+    bool altBack = false;
+    for (int i = 2; i >= 0; --i) {
+        const ModifierSides& m = kModifierSides[i];
+        if (added[i]) {
+            out[n++] = ModifierInput(m, false, false);
+        }
+        for (int side = 0; side < 2; ++side) {
+            if (lifted[i][side]) {
+                out[n++] = ModifierInput(m, side == 1, true);
+                altBack = altBack || i == 2;
+            }
+        }
+    }
+    // Alt down again, and the Mac's ⌥ will come up next with nothing between:
+    // a tap, to Windows, which opens the menu. The mask key is that something.
+    if (altBack) {
+        out[n++] = KeyboardInput(kVkMaskKey, 0, 0);
+        out[n++] = KeyboardInput(kVkMaskKey, 0, KEYEVENTF_KEYUP);
+    }
+    return n;
+}
+
 bool CapsLockNeedsReading(const CapsLockBelief& belief, uint64_t nowMs) {
     // A clock that has gone backwards says nothing about how old the belief
     // is, so it is asked again rather than trusted for ever.

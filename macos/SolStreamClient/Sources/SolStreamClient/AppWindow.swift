@@ -545,6 +545,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let capture = InputCapture()
         capture.attach(to: view)
         capture.sendsScanCodes = session.hostTakesScanCodes
+        capture.sendsKeyCharacters = session.hostTakesKeyCharacters
         capture.hostName = session.host
         capture.onInput = { [weak self] packet in
             self?.session.sendInput(packet)
@@ -1045,6 +1046,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // The host may have been updated in between, and the new session's
         // answer is the one that holds.
         inputCapture?.sendsScanCodes = fresh.hostTakesScanCodes
+        inputCapture?.sendsKeyCharacters = fresh.hostTakesKeyCharacters
         setTile(tile)
         lastFrameCount = 0
         lastByteCount = 0

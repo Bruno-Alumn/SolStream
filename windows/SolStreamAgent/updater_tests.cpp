@@ -2690,6 +2690,67 @@ void TestHolderHearing() {
 /// A key the Mac sends by position goes in as that scan code, so this PC's own
 /// layout decides what it types -- except the few where the Mac's meaning has
 /// no PC key to carry it.
+void TestCharKeys() {
+    using namespace media;
+    INPUT out[32];
+    WORD pressed = 0;
+    auto isKey = [](const INPUT& in, WORD vk, bool up) {
+        return in.type == INPUT_KEYBOARD && in.ki.wVk == vk
+            && ((in.ki.dwFlags & KEYEVENTF_KEYUP) != 0) == up
+            && (in.ki.dwFlags & KEYEVENTF_UNICODE) == 0;
+    };
+    // '=' on a US PC is VK_OEM_PLUS alone; the Spanish Mac typed it with
+    // Shift, which is lifted for it and put back.
+    const WCHAR eq[1] = {L'='};
+    int n = BuildCharKeyPress(eq, 1, (SHORT) VK_OEM_PLUS, 0x0D, kHeldLShift, false, false,
+                              out, &pressed);
+    CHECK(n == 3 && pressed == VK_OEM_PLUS);
+    CHECK(isKey(out[0], VK_LSHIFT, true) && isKey(out[1], VK_OEM_PLUS, false)
+          && out[1].ki.wScan == 0x0D && isKey(out[2], VK_LSHIFT, false));
+    // '@' from ⌥2: Alt is lifted behind the mask key, Shift added for the US
+    // PC's Shift+2, then everything put back and Alt masked again.
+    const WCHAR at[1] = {L'@'};
+    n = BuildCharKeyPress(at, 1, (SHORT) (0x100 | '2'), 0x03, kHeldLAlt, false, false,
+                          out, &pressed);
+    CHECK(pressed == '2' && n == 9);
+    CHECK(isKey(out[0], kVkMaskKey, false) && isKey(out[1], kVkMaskKey, true)
+          && isKey(out[2], VK_LMENU, true) && isKey(out[3], VK_LSHIFT, false)
+          && isKey(out[4], '2', false) && isKey(out[5], VK_LSHIFT, true)
+          && isKey(out[6], VK_LMENU, false) && isKey(out[7], kVkMaskKey, false)
+          && isKey(out[8], kVkMaskKey, true));
+    // Nothing held and nothing needed: just the key.
+    const WCHAR a[1] = {L'a'};
+    n = BuildCharKeyPress(a, 1, (SHORT) 'A', 0x1E, 0, false, true, out, &pressed);
+    CHECK(n == 1 && isKey(out[0], 'A', false) && pressed == 'A');
+    // Caps Lock on: 'a' is the A key with Shift, 'A' without.
+    n = BuildCharKeyPress(a, 1, (SHORT) 'A', 0x1E, 0, true, true, out, &pressed);
+    CHECK(n == 3 && isKey(out[0], VK_LSHIFT, false) && isKey(out[1], 'A', false));
+    // An AltGr character: Control and Alt added for it.
+    const WCHAR euro[1] = {0x20AC};
+    n = BuildCharKeyPress(euro, 1, (SHORT) (0x600 | 'E'), 0x12, 0, false, false, out, &pressed);
+    CHECK(n == 5 && isKey(out[0], VK_LCONTROL, false) && isKey(out[1], VK_LMENU, false)
+          && isKey(out[2], 'E', false) && isKey(out[3], VK_LMENU, true)
+          && isKey(out[4], VK_LCONTROL, true));
+    // No key for it here -- Ñ on a US PC: typed whole, Shift left as it is,
+    // and nothing left down.
+    const WCHAR enye[1] = {0x00D1};
+    n = BuildCharKeyPress(enye, 1, (SHORT) -1, 0, kHeldRShift, false, true, out, &pressed);
+    CHECK(n == 2 && pressed == 0);
+    CHECK((out[0].ki.dwFlags & KEYEVENTF_UNICODE) && out[0].ki.wScan == 0x00D1
+          && (out[1].ki.dwFlags & KEYEVENTF_KEYUP));
+    // A right Alt held under one is lifted by its own side and put back.
+    n = BuildCharKeyPress(enye, 1, (SHORT) -1, 0, kHeldRAlt, false, true, out, &pressed);
+    CHECK(n == 9 && isKey(out[2], VK_RMENU, true)
+          && (out[2].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) && isKey(out[6], VK_RMENU, false));
+    // A pair is typed whole, both halves.
+    const WCHAR smile[2] = {0xD83D, 0xDE00};
+    n = BuildCharKeyPress(smile, 2, (SHORT) -1, 0, 0, false, false, out, &pressed);
+    CHECK(n == 4 && pressed == 0 && out[0].ki.wScan == 0xD83D && out[2].ki.wScan == 0xDE00);
+    // A key that needs a shift state beyond these is typed whole.
+    n = BuildCharKeyPress(a, 1, (SHORT) (0x800 | 'A'), 0x1E, 0, false, true, out, &pressed);
+    CHECK(n == 2 && pressed == 0);
+}
+
 void TestScanKeys() {
     using media::BuildScanKeyInput;
     INPUT in{};
@@ -4724,6 +4785,7 @@ int wmain(int argc, wchar_t** argv) {
     TestDecideTakeover();
     TestHolderHearing();
     TestScanKeys();
+    TestCharKeys();
     TestTextInput();
     TestCapsLock();
     TestHoldOrder();

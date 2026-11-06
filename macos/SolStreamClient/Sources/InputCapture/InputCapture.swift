@@ -178,6 +178,21 @@ public final class InputCapture {
     /// takes. See `KeyboardMap`.
     public var sendsScanCodes = false
 
+    /// The host types, for a key sent by position, the character this Mac's
+    /// layout made, sent along with it: a Spanish Mac's Ñ is Ñ on a US PC, not
+    /// the ';' at that place there. Set by the owner from the session's answer
+    /// ("scancodes" 2); see `characterToSend`.
+    public var sendsKeyCharacters = false
+
+    /// Keys down on the host with the character they type, so a repeat types
+    /// that character again rather than the key's position.
+    private var keyCharacters: [UInt16: String] = [:]
+
+    /// Dead keys pressed while characters go with keys: this Mac composes the
+    /// accent with the next key itself, so neither half of one goes to the
+    /// host.
+    private var swallowedDeadKeys: Set<UInt16> = []
+
     /// Whether a key event came from an ISO keyboard, which decides two keys'
     /// places. Replaceable so the tests do not depend on the keyboard of the
     /// Mac that runs them.
@@ -213,10 +228,39 @@ public final class InputCapture {
     }
 
     /// The packet for one key, in whichever form the host takes.
-    func keyPacket(_ key: HostKey, pressed: Bool, modifiers: SMTInput.Modifiers) -> Data {
+    func keyPacket(_ key: HostKey, pressed: Bool, modifiers: SMTInput.Modifiers,
+                   character: String? = nil) -> Data {
         sendsScanCodes
-            ? SMTInput.scanKey(code: key.scanCode, pressed: pressed, modifiers: modifiers)
+            ? SMTInput.scanKey(code: key.scanCode, pressed: pressed, modifiers: modifiers,
+                               character: character)
             : SMTInput.key(code: key.windowsKey, pressed: pressed, modifiers: modifiers)
+    }
+
+    /// Whether keys go with this Mac's characters now: the host takes them,
+    /// and the keys are being typed rather than played -- in Gaming mode, or
+    /// with the mouse captured, a key is a control and goes by position.
+    private var typesMacCharacters: Bool {
+        sendsScanCodes && sendsKeyCharacters && Self.pointerMode != .gaming && !isPointerCaptured
+    }
+
+    /// The character to send with a key press, or nil to send the key by
+    /// position alone.
+    ///
+    /// One character a key typed: not with ⌘ or ⌃, which are shortcuts and go
+    /// by position as always; not a plain space, Return, Tab, the arrows or
+    /// anything else that is a key rather than a character -- though Space
+    /// after a dead key types the accent itself, and that goes; not the
+    /// keypad, whose keys
+    /// the host presses as keypad keys. With ⌥, only what is not a letter or a
+    /// digit: ⌥2 is the Spanish Mac's '@', which is wanted, but ⌥F is Alt+F
+    /// on the PC, a menu, and the 'ƒ' it makes here is not.
+    static func characterToSend(characters: String?, flags: NSEvent.ModifierFlags) -> String? {
+        guard flags.isDisjoint(with: [.command, .control, .numericPad]),
+              let characters, characters != " ", characters.count == 1, characters.utf16.count <= 2,
+              let scalar = characters.unicodeScalars.first,
+              !isControl(scalar), !(0xF700...0xF8FF).contains(scalar.value) else { return nil }
+        if flags.contains(.option), CharacterSet.alphanumerics.contains(scalar) { return nil }
+        return characters
     }
 
     /// Key codes already reported by `noteUnmapped`, so a held key says it once.
@@ -674,6 +718,22 @@ public final class InputCapture {
                 shortcutKeys.remove(event.keyCode)
             }
             if held == nil, routeToInputMethod(event) { return true }
+            // A dead key, while this Mac's characters go with keys: AppKit
+            // composes it with the next key, whose characters are then the é
+            // itself. Sent by position, the PC would have composed with the
+            // accent at that place on its own layout -- or typed a quote.
+            if swallowedDeadKeys.contains(event.keyCode) {
+                if event.type == .keyUp { swallowedDeadKeys.remove(event.keyCode) }
+                return true
+            }
+            if held == nil, event.type == .keyDown, typesMacCharacters,
+               event.modifierFlags.isDisjoint(with: [.command, .control]),
+               Self.isDeadKeyPress(characters: event.characters,
+                                   ignoringModifiers: event.charactersIgnoringModifiers) {
+                swallowedDeadKeys.insert(event.keyCode)
+                followsDeadKey = false
+                return true
+            }
             // A key already down on the host is let go of as it was pressed.
             // Anything else is first asked whether a key typed it at all --
             // except the key after a dead key, see `followsDeadKey`.
@@ -683,7 +743,18 @@ public final class InputCapture {
                                                      ignoringModifiers: event.charactersIgnoringModifiers)
             }
             var keyCode = event.keyCode
-            if held == nil, !(afterDeadKey && event.type == .keyDown) {
+            // The character this Mac's layout typed, for the host to type: on
+            // a press, or a repeat of a key that went down with one.
+            var character: String?
+            if event.type == .keyDown {
+                if held != nil {
+                    character = keyCharacters[event.keyCode]
+                } else if typesMacCharacters {
+                    character = Self.characterToSend(characters: event.characters,
+                                                     flags: event.modifierFlags)
+                }
+            }
+            if character == nil, held == nil, !(afterDeadKey && event.type == .keyDown) {
                 switch keyOrigin(of: event) {
                 case .key:
                     break
@@ -715,11 +786,14 @@ public final class InputCapture {
                 // chord is recorded here so they can be let go when ⌘ is.
                 heldKeys[event.keyCode] = (key, held?.chord
                                                 ?? event.modifierFlags.contains(.command))
+                keyCharacters[event.keyCode] = character
             } else {
                 heldKeys[event.keyCode] = nil
+                keyCharacters[event.keyCode] = nil
             }
             emit(keyPacket(key, pressed: pressed,
-                               modifiers: Self.modifiers(from: event.modifierFlags)))
+                           modifiers: Self.modifiers(from: event.modifierFlags),
+                           character: character))
             // Everything that reached the host is consumed. The window is a
             // Windows application as far as the keyboard is concerned, so ⇥ must
             // not move focus around our own view tree and Space must not press
@@ -1191,6 +1265,8 @@ public final class InputCapture {
     private func forgetHostState() {
         buttonsHeldBack.removeAll()
         heldKeys.removeAll()
+        keyCharacters.removeAll()
+        swallowedDeadKeys.removeAll()
         heldButtons.removeAll()
         lastDeviceFlags = 0
         followsDeadKey = false

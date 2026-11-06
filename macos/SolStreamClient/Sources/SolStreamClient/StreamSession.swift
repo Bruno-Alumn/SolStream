@@ -146,6 +146,9 @@ final class StreamSession {
     /// layout decides what they type. Fixed for the session, as the host's
     /// answer is; a host that predates it is sent keys by virtual key.
     let hostTakesScanCodes: Bool
+    /// The host types the character this Mac's layout made for a key, sent
+    /// with it, so a Spanish Mac types Spanish on a US PC. See InputCapture.
+    let hostTakesKeyCharacters: Bool
 
     var onPhase: ((StreamPhase) -> Void)?
 
@@ -198,11 +201,14 @@ final class StreamSession {
         self.hostSendsWholePC = Self.hostSendsWholePC(asked: config, answered: session.audioSource,
                                                       stated: session.audioSourceStated)
         self.hostTakesScanCodes = session.takesScanCodes
+        self.hostTakesKeyCharacters = session.takesScanCodes && session.takesKeyCharacters
         // Said once a session, because it decides what every key types and
         // nothing on screen shows which way they are going.
         Log.info("[input] keys go to \(host) "
-                 + (session.takesScanCodes ? "by position, so the PC's layout decides what they type"
-                                           : "by US-layout name; it predates sending them by position"))
+                 + (session.takesScanCodes && session.takesKeyCharacters
+                    ? "by position with this Mac's character, so this Mac's layout decides what they type"
+                    : session.takesScanCodes ? "by position, so the PC's layout decides what they type"
+                                             : "by US-layout name; it predates sending them by position"))
         // The address the agent's connection reached, when there is one: see
         // `MediaSession.address`.
         self.reachedAddress = session.address

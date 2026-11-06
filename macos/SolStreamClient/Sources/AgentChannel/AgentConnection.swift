@@ -1474,6 +1474,9 @@ public final class AgentConnection {
         /// The host takes keys by position, as scan codes. False for a host
         /// that said nothing, which takes them only by virtual key.
         public var takesScanCodes = false
+        /// The host takes, with a key by position, the character this Mac's
+        /// layout typed, and types that instead: "scancodes" 2 or more.
+        public var takesKeyCharacters = false
         /// What the host said its picture is coded in. H.264 from a host that
         /// said nothing, because that is all one that predates the choice
         /// sends.
@@ -1588,6 +1591,12 @@ public final class AgentConnection {
     /// host that predates scan codes says nothing, and is sent virtual keys.
     static func takesScanCodes(inReply reply: [String: Any]) -> Bool {
         (reply["scancodes"] as? Int ?? 0) >= 1
+    }
+
+    /// Whether a `media open` reply says the host types a key's character as
+    /// this Mac's layout made it, sent along with the key: "scancodes" 2.
+    static func takesKeyCharacters(inReply reply: [String: Any]) -> Bool {
+        (reply["scancodes"] as? Int ?? 0) >= 2
     }
 
     /// Stop the host's media session, leaving the agent channel up.
@@ -1708,6 +1717,7 @@ public final class AgentConnection {
                             audioCodec: audioCodec, audioSource: audioSource,
                             audioSourceStated: reply["audioSource"] != nil,
                             takesScanCodes: Self.takesScanCodes(inReply: reply),
+                            takesKeyCharacters: Self.takesKeyCharacters(inReply: reply),
                             videoCodec: videoCodec, address: currentIPv4())
     }
 

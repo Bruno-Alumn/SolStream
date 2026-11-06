@@ -84,6 +84,47 @@ bool BuildScanKeyInput(uint16_t code, bool down, INPUT* out);
 size_t BuildTextCharInput(const unsigned char* body, size_t length, size_t at,
                           INPUT out[4], int* count);
 
+// ── A key the Mac sent with its character ───────────────────────────────────
+//
+// By position alone, a Mac set to one layout and a PC set to another disagree
+// about what a key types: the Spanish Mac's Ñ key is where a US PC has ';', and
+// it typed ';'. So a Mac whose host says "scancodes" 2 or more sends, with a
+// key that types a character in Desktop mode, the character its own layout
+// made. Here that character is typed by the key that makes it on THIS PC's
+// layout -- VK_OEM_PLUS for '=', Shift and 2 for '@' on a US PC -- with Shift,
+// Control and Alt set as that key needs them for the moment it goes down and
+// put back after, so the key is still a key: an application's shortcut on it
+// works, and it is held for as long as the Mac's key is. A character no key
+// on this layout types -- the Ñ on a US PC, an é the Mac composed from a dead
+// key -- goes in as KEYEVENTF_UNICODE instead, with Control and Alt lifted
+// around it so it is a character, not a shortcut.
+
+/// The modifier keys held here, one bit per side, as `BuildCharKeyPress` takes
+/// them.
+enum : unsigned {
+    kHeldLShift = 0x01, kHeldRShift = 0x02,
+    kHeldLControl = 0x04, kHeldRControl = 0x08,
+    kHeldLAlt = 0x10, kHeldRAlt = 0x20,
+};
+
+/// A key nothing on a keyboard sends, pressed and released between Alt going
+/// down and coming up, so that Windows does not take the pair for a tap of Alt
+/// and open the window's menu.
+constexpr WORD kVkMaskKey = 0xE8;
+
+/// The keystrokes that type `units` (one character: one code unit, or a
+/// surrogate pair as two) for a key going down, into `out`; returns how many.
+///
+/// `vkScan` is what VkKeyScanExW said for the character on this PC's layout,
+/// -1 for none; `vkScanCode` the scan code of its virtual key there. `held` is
+/// the kHeld* bits down now, `capsOn` whether Caps Lock is, and `isAlpha`
+/// whether the character is a letter, which Caps Lock turns Shift around for.
+/// In `pressedVk` comes the virtual key left down, to be let go of with the
+/// Mac's key, or 0 when the character was typed whole as unicode.
+int BuildCharKeyPress(const WCHAR* units, int unitCount, SHORT vkScan, WORD vkScanCode,
+                      unsigned held, bool capsOn, bool isAlpha, INPUT out[32],
+                      WORD* pressedVk);
+
 // ── Caps Lock ────────────────────────────────────────────────────────────────
 //
 // Caps Lock is a toggle, and the Mac used to keep it in step by sending a

@@ -132,8 +132,16 @@ public enum SMTInput {
     /// predates it counts it as one it does not know rather than pressing the
     /// wrong key -- although it is only ever sent to a host that said it takes
     /// it, and every host still takes `key`.
-    public static func scanKey(code: UInt16, pressed: Bool, modifiers: Modifiers) -> Data {
-        event(.keyScan, be16(code) + Data([pressed ? 1 : 0, modifiers.rawValue]))
+    ///
+    /// `character`, for a host that said "scancodes" 2, is what this Mac's
+    /// keyboard layout typed with the key, which the host then types instead
+    /// of what its own layout makes of the position: UTF-16 big-endian after
+    /// the four bytes, which an older host never reads.
+    public static func scanKey(code: UInt16, pressed: Bool, modifiers: Modifiers,
+                               character: String? = nil) -> Data {
+        var body = be16(code) + Data([pressed ? 1 : 0, modifiers.rawValue])
+        for unit in (character ?? "").utf16 { body += be16(unit) }
+        return event(.keyScan, body)
     }
 
     /// The key or button an event presses or lets go of, and whether it lets
