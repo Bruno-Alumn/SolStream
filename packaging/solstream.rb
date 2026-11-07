@@ -3,7 +3,7 @@
 # scripts/update-packages.sh sets the version and sha256 from the latest release.
 cask "solstream" do
   version "1.0.8"
-  sha256 "d3e2b37eb347b457b4974fc3f080024c31fa028e9fde6954fa9042c2cd6d261b"
+  sha256 "63da45998f5f66848f93eb60aabd8de845c179d041ae025901680cbe86690eca"
 
   url "https://github.com/Bruno-Alumn/SolStream/releases/download/v#{version}/SolStream-#{version}-macOS.zip"
   name "SolStream"
