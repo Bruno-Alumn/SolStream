@@ -112,9 +112,14 @@ if [ "$UNIVERSAL" = true ]; then
     done
     SLICES+=("$NATIVE_ARCH")
     SLICE_BINARIES=()
+    # And each in a build folder of its own: since Swift 6.4 SwiftPM puts
+    # every architecture's products in the same .build/out/Products/Release,
+    # so the second build overwrote the first and lipo was handed two arm64
+    # slices.
     for arch in "${SLICES[@]}"; do
-        swift build --configuration release --arch "$arch"
-        SLICE_BINARIES+=("$(swift build --configuration release --arch "$arch" --show-bin-path)/$EXECUTABLE_NAME")
+        swift build --configuration release --arch "$arch" --scratch-path ".build/arch-$arch"
+        SLICE_BINARIES+=("$(swift build --configuration release --arch "$arch" \
+            --scratch-path ".build/arch-$arch" --show-bin-path)/$EXECUTABLE_NAME")
     done
 else
     swift build --configuration release
