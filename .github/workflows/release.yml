@@ -133,9 +133,11 @@ jobs:
       - name: Toolchain
         run: swift --version
       - name: Package
-        # --dev is ad hoc signing. There is no Developer ID certificate, so
-        # that is the only identity a release can carry; README.md says what
-        # Gatekeeper makes of it. --universal so it runs on Intel Macs too.
+        # --dev is ad hoc signing. The Developer ID certificate and the
+        # notarization profile are on the owner's Mac, not on the runners, so
+        # a release built here carries an ad hoc identity; README.md says what
+        # Gatekeeper makes of it, and scripts/package-macos.sh --notarize is
+        # the signed and notarized build. --universal so it runs on Intel Macs.
         run: bash scripts/package-macos.sh --dev --universal
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

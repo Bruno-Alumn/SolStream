@@ -4,17 +4,28 @@
 # Prerequisites:
 #   - Xcode 15+ installed
 #   - Developer ID Application certificate in keychain (not for --dev)
-#   - App Store Connect API key (for notarytool)
+#   - For --notarize, notarytool credentials: a keychain profile made with
+#     `xcrun notarytool store-credentials`, or an App Store Connect API key
 #
 # Usage:
 #   ./package-macos.sh [--dev] [--universal] [--notarize]
 #
 #   --dev        Ad-hoc signing, no notarization. The release workflow packages
-#                with it too: until there is a Developer ID certificate, ad hoc
-#                is the only identity a release can carry.
+#                with it: the Developer ID certificate is on the owner's Mac,
+#                not on the runners, so a CI release carries an ad hoc identity.
 #   --universal  Apple silicon and Intel in one executable, as a release ships.
 #                Without it, only this Mac's own architecture is built.
-#   --notarize   Production build with full notarization
+#   --notarize   Developer ID signing, then notarization of the application and
+#                of the DMG, each stapled
+#
+# Environment:
+#   SIGN_IDENTITY    the codesign identity; the first "Developer ID Application"
+#                    in the keychain when unset
+#   NOTARY_PROFILE   the notarytool keychain profile. When it is unset and an
+#                    App Store Connect API key is in ~/.appstoreconnect
+#                    (private_key.p8, key-id.txt, issuer-id.txt), the key is
+#                    used; otherwise the profile "tuckaway-notary", which this
+#                    Mac keeps for the owner's team
 #
 # Produces:
 #   macos/SolStreamClient/.build/release/SolStream.app
@@ -73,6 +84,11 @@ for arg in "$@"; do
         --universal) UNIVERSAL=true ;;
     esac
 done
+
+if [ "$DEV_BUILD" = true ] && [ "$DO_NOTARIZE" = true ]; then
+    echo "ERROR: --dev is ad hoc, and Apple notarizes only a Developer ID signature."
+    exit 1
+fi
 
 echo "=== SolStream macOS Package ==="
 echo "Version: $VERSION (build $BUILD_NUMBER)"
@@ -225,28 +241,96 @@ fi
 # Step 3: Sign
 echo ""
 echo "--- Step 3: Signing ---"
+# How notarytool is told who is asking, as arguments, when notarizing.
+notary_auth() {
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        NOTARY_ARGS=(--keychain-profile "$NOTARY_PROFILE")
+    elif [ -f "$HOME/.appstoreconnect/private_key.p8" ]; then
+        NOTARY_ARGS=(--key "$HOME/.appstoreconnect/private_key.p8"
+                     --key-id "$(cat "$HOME/.appstoreconnect/key-id.txt")"
+                     --issuer "$(cat "$HOME/.appstoreconnect/issuer-id.txt")")
+    else
+        NOTARY_ARGS=(--keychain-profile "tuckaway-notary")
+    fi
+}
+
+# Submit one file and wait for Apple's answer. A rejection prints Apple's own
+# log of why, which is the only place the reason is written down.
+notarize() {
+    local file="$1" out id
+    out=$(xcrun notarytool submit "$file" "${NOTARY_ARGS[@]}" --wait 2>&1) || true
+    echo "$out"
+    if ! grep -q "status: Accepted" <<<"$out"; then
+        id=$(sed -n 's/^ *id: \([0-9a-f-]\{36\}\).*/\1/p' <<<"$out" | head -1)
+        if [ -n "$id" ]; then
+            xcrun notarytool log "$id" "${NOTARY_ARGS[@]}" || true
+        fi
+        echo "ERROR: Apple did not accept $file."
+        exit 1
+    fi
+}
+
 if [ "$DEV_BUILD" = true ]; then
     codesign --deep --force --verify --verbose \
         --sign "-" "$APP_PATH"
 else
-    IDENTITY=$(security find-identity -v -p codesigning \
+    IDENTITY="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning \
         | grep "Developer ID Application" | head -1 \
-        | awk '{print $2}')
+        | sed -n 's/.*"\(Developer ID Application: .*\)".*/\1/p')}"
     if [ -z "$IDENTITY" ]; then
         echo "ERROR: No Developer ID Application certificate found."
         echo "Run: security find-identity -v -p codesigning"
         exit 1
     fi
     echo "Signing with identity: $IDENTITY"
-    codesign --deep --force --verify --verbose \
-        --options runtime \
-        --sign "$IDENTITY" "$APP_PATH"
+    # From the inside out, never --deep: every nested piece of code -- a
+    # framework, a dylib, a helper -- is signed on its own first, deepest
+    # first, and the bundle last, so each seal covers signatures that are
+    # already final. --deep signs them all with the outer bundle's options and
+    # is what Apple says not to ship with. Today the bundle holds one
+    # executable and nothing nested; this is here for when it does not.
+    while IFS= read -r nested; do
+        [ -n "$nested" ] || continue
+        codesign --force --options runtime --timestamp --sign "$IDENTITY" "$nested"
+    done < <(find "$APP_PATH/Contents" -mindepth 2 \
+                 \( -name "*.framework" -o -name "*.dylib" -o -name "*.app" \
+                    -o -name "*.xpc" -o -name "*.appex" -o -name "*.bundle" \
+                    -o \( -type f -perm -u+x ! -path "$APP_PATH/Contents/MacOS/$PRODUCT_NAME" \) \) \
+                 -print | awk '{ print gsub("/", "/"), $0 }' | sort -rn | cut -d' ' -f2-)
+    # The hardened runtime and a secure timestamp, both of which notarization
+    # requires, and no entitlements at all: SolStream asks for nothing the
+    # runtime withholds -- no JIT, no unsigned libraries, no debugger -- so
+    # there is no get-task-allow to leave in by mistake.
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP_PATH"
+    if codesign -d --entitlements - "$APP_PATH" 2>/dev/null | grep -q "get-task-allow"; then
+        echo "ERROR: $APP_PATH carries get-task-allow, which notarization refuses."
+        exit 1
+    fi
+    codesign -d --verbose=2 "$APP_PATH" 2>&1 | grep -E "^(Authority|TeamIdentifier|Timestamp|flags)" || true
 fi
 
 # Verify signing, as strictly as the updater will before it installs this
 # bundle (docs/updates.md): failing here costs a rebuild, failing there costs
 # every installed copy its update.
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+# Step 3b: Notarize the application itself, so its ticket can be stapled into
+# the bundle before the zip and the DMG are made of it. The updater installs
+# from the zip, which nothing else could staple: an application stapled here
+# opens without asking Apple, on a Mac that is offline or behind a proxy.
+if [ "$DO_NOTARIZE" = true ]; then
+    echo ""
+    echo "--- Step 3b: Notarizing the application ---"
+    notary_auth
+    APP_SUBMIT_DIR=$(mktemp -d)
+    ditto -c -k --norsrc --noextattr --noacl --keepParent "$APP_PATH" \
+        "$APP_SUBMIT_DIR/$PRODUCT_NAME.zip"
+    notarize "$APP_SUBMIT_DIR/$PRODUCT_NAME.zip"
+    rm -rf "$APP_SUBMIT_DIR"
+    xcrun stapler staple "$APP_PATH"
+    xcrun stapler validate "$APP_PATH"
+    spctl --assess --type execute --verbose=2 "$APP_PATH"
+fi
 
 # Step 4: Zip, for the updater
 echo ""
@@ -319,57 +403,26 @@ done
 
 rm -rf "$DMG_DIR"
 
+# The image signed too, with the same identity: notarization and Gatekeeper's
+# check of a downloaded DMG both want a signed one.
+if [ "$DEV_BUILD" != true ]; then
+    codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
+fi
+
 echo ""
 echo "DMG created: $DMG_PATH"
 
-# Step 6: Notarize (optional)
-# The DMG is what is submitted. Notarizing it also records the bundle inside,
-# which is byte for byte the one in the zip, so the updater's copy passes
-# Gatekeeper's online check too; only the DMG gets a stapled ticket.
+# Step 6: Notarize the DMG (optional)
+# The application inside is the one notarized and stapled above; the image is
+# submitted on its own so that it can carry a ticket of its own, which is what
+# Gatekeeper looks for when somebody opens it from Downloads.
 if [ "$DO_NOTARIZE" = true ]; then
     echo ""
-    echo "--- Step 6: Notarizing ---"
-
-    # Requires App Store Connect API key or Apple ID
-    # Option A: API key
-    if [ -f "$HOME/.appstoreconnect/private_key.p8" ]; then
-        xcrun notarytool submit "$DMG_PATH" \
-            --key "$HOME/.appstoreconnect/private_key.p8" \
-            --key-id "$(cat "$HOME/.appstoreconnect/key-id.txt")" \
-            --issuer "$(cat "$HOME/.appstoreconnect/issuer-id.txt")" \
-            --wait
-    else
-        # Option B: Apple ID (interactive)
-        echo "No API key found. Using Apple ID..."
-
-        # The Team ID is the 10 characters in brackets at the end of the
-        # certificate's common name -- "Developer ID Application: Name (AB12CD34EF)".
-        # This used to reuse the awk '{print $2}' pipeline from the signing step,
-        # which yields the certificate's SHA-1 fingerprint instead: notarytool
-        # would reject it, after asking for a password.
-        TEAM_ID=$(security find-identity -v -p codesigning \
-            | grep "Developer ID Application" | head -1 \
-            | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')
-        if [ -z "$TEAM_ID" ]; then
-            echo "ERROR: Could not read a Team ID from the Developer ID certificate."
-            echo "Run: security find-identity -v -p codesigning"
-            exit 1
-        fi
-        echo "Team ID: $TEAM_ID"
-
-        read -rp "Apple ID: " APPLE_ID
-        read -rsp "App-specific password: " APP_PASSWORD
-        echo ""
-        xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APP_PASSWORD" \
-            --team-id "$TEAM_ID" \
-            --wait
-    fi
-
-    # Staple the ticket
+    echo "--- Step 6: Notarizing the DMG ---"
+    notarize "$DMG_PATH"
     xcrun stapler staple "$DMG_PATH"
-
+    xcrun stapler validate "$DMG_PATH"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_PATH"
     echo ""
     echo "Notarization complete."
 fi
