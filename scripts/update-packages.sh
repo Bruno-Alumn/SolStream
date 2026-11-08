@@ -48,16 +48,20 @@ grep -q "^  version \"$version\"\$" "$cask" && grep -q "^  sha256 \"$sha\"\$" "$
     { echo "packaging/solstream.rb has no version or sha256 line to set" >&2; exit 1; }
 echo "packaging/solstream.rb: $version $sha"
 
-sed -i.bak -E "s|<version>[^<]*</version>|<version>$version</version>|" "$nuspec"
+sed -i.bak -E \
+    -e "s|<version>[^<]*</version>|<version>$version</version>|" \
+    -e "s|<projectSourceUrl>[^<]*</projectSourceUrl>|<projectSourceUrl>https://github.com/$repo/tree/$tag</projectSourceUrl>|" \
+    "$nuspec"
 sed -i.bak -E \
     -e "s|^( *url64bit *= *)'[^']*'|\\1'https://github.com/$repo/releases/download/$tag/SolStreamSetup-$version.exe'|" \
     -e "s|^( *checksum64 *= *)'[^']*'|\\1'$setup_sha'|" \
     "$choco_install"
 rm -f "$nuspec.bak" "$choco_install.bak"
 grep -q "<version>$version</version>" "$nuspec" &&
+    grep -q "<projectSourceUrl>https://github.com/$repo/tree/$tag</projectSourceUrl>" "$nuspec" &&
     grep -q "/$tag/SolStreamSetup-$version.exe'\$" "$choco_install" &&
     grep -q "^ *checksum64 *= *'$setup_sha'\$" "$choco_install" ||
-    { echo "packaging/chocolatey has no version, url64bit or checksum64 to set" >&2; exit 1; }
+    { echo "packaging/chocolatey has no version, projectSourceUrl, url64bit or checksum64 to set" >&2; exit 1; }
 echo "packaging/chocolatey: $version $setup_sha"
 
 if $push; then

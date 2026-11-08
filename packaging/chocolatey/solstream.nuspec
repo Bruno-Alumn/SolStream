@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The Chocolatey package for SolStream's Windows host. scripts/update-packages.sh
-     sets the version here and the download in tools/chocolateyinstall.ps1 from a
-     release; .github/workflows/chocolatey.yml packs, tests and publishes it. -->
+     sets the version and projectSourceUrl here and the download in
+     tools/chocolateyinstall.ps1 from a release; .github/workflows/chocolatey.yml
+     packs, tests and publishes it. projectSourceUrl is the release's source, so
+     it differs from projectUrl as Chocolatey's moderation asks (CPMR0041). -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>solstream</id>
@@ -11,7 +13,8 @@
     <owners>Bruno-Alumn</owners>
     <projectUrl>https://github.com/Bruno-Alumn/SolStream</projectUrl>
     <packageSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/main/packaging/chocolatey</packageSourceUrl>
-    <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream</projectSourceUrl>
+    <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/v1.0.8</projectSourceUrl>
+    <licenseUrl>https://github.com/Bruno-Alumn/SolStream/blob/main/LICENSE</licenseUrl>
     <docsUrl>https://github.com/Bruno-Alumn/SolStream#readme</docsUrl>
     <bugTrackerUrl>https://github.com/Bruno-Alumn/SolStream/issues</bugTrackerUrl>
     <releaseNotes>https://github.com/Bruno-Alumn/SolStream/releases</releaseNotes>
