@@ -160,6 +160,15 @@ public enum TokenStore {
         return tokens.count == 1 ? tokens.first : nil
     }
 
+    /// Every address a PC called `name` has been paired at, as recorded when
+    /// its greeting named it.
+    public static func hosts(forPCNamed name: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        return names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
+    }
+
     /// Whether `token(forPCNamed:)` would find one.
     public static func hasToken(forPCNamed name: String) -> Bool {
         token(forPCNamed: name) != nil

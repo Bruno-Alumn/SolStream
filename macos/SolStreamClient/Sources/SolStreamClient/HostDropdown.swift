@@ -42,6 +42,8 @@ final class HostDropdown: DS.Box {
         var detail: [Detail]
         var dotState: DS.Dot.State
         var kind: Kind
+        /// This Mac holds a pairing token for it: Forget Pairing is offered.
+        var paired = false
     }
 
     /// The open list is rebuilt when these change, and only then: the
@@ -59,6 +61,8 @@ final class HostDropdown: DS.Box {
     /// Take a "Used before" address off the list: right-click, or ⌘⌫ on its
     /// highlighted row. Nil leaves recent rows as they are.
     var onForget: ((String) -> Void)?
+    /// Forget a paired PC's token: right-click on its row. Nil offers nothing.
+    var onForgetPairing: ((Item) -> Void)?
 
     private(set) var selectedAddress: String = ""
 
@@ -457,6 +461,14 @@ final class HostDropdown: DS.Box {
                 self?.selectedAddress = item.address
                 self?.closeList(commit: true)
             }
+            if item.paired, onForgetPairing != nil {
+                row.onForgetPairing = { [weak self] in
+                    // The list closes first: the question is asked over the
+                    // window, and a list left open would sit over it.
+                    self?.closeList(commit: false)
+                    self?.onForgetPairing?(item)
+                }
+            }
             if item.kind == .recent, onForget != nil {
                 row.onForget = { [weak self] in self?.onForget?(item.address) }
             }
@@ -655,16 +667,30 @@ final class HostDropdown: DS.Box {
         var onClick: (() -> Void)?
         var onHover: ((Bool) -> Void)?
         /// Set for a used-before row: what takes it off the list.
-        var onForget: (() -> Void)? {
-            didSet {
-                setAccessibilityCustomActions(onForget == nil ? nil : [
-                    NSAccessibilityCustomAction(name: "Remove from List") { [weak self] in
-                        self?.onForget?()
-                        return true
-                    },
-                ])
+        var onForget: (() -> Void)? { didSet { offerActions() } }
+        /// Set for a paired PC's row: what forgets its token.
+        var onForgetPairing: (() -> Void)? { didSet { offerActions() } }
+
+        /// The row's menu, to VoiceOver as well.
+        private func offerActions() {
+            var actions: [NSAccessibilityCustomAction] = []
+            if onForgetPairing != nil {
+                actions.append(NSAccessibilityCustomAction(name: "Forget Pairing") { [weak self] in
+                    self?.onForgetPairing?()
+                    return true
+                })
             }
+            if onForget != nil {
+                actions.append(NSAccessibilityCustomAction(name: "Remove from List") { [weak self] in
+                    self?.onForget?()
+                    return true
+                })
+            }
+            setAccessibilityCustomActions(actions.isEmpty ? nil : actions)
         }
+
+        /// The titles of the row's menu, for tests.
+        var menuTitles: [String] { rowMenu()?.items.map(\.title) ?? [] }
 
         private let detail: [Detail]
         private let dot = DS.Dot()
@@ -756,15 +782,24 @@ final class HostDropdown: DS.Box {
         override func mouseExited(with event: NSEvent) { onHover?(false) }
         override func mouseDown(with event: NSEvent) { onClick?() }
 
-        override func menu(for event: NSEvent) -> NSMenu? {
-            guard onForget != nil else { return nil }
+        override func menu(for event: NSEvent) -> NSMenu? { rowMenu() }
+
+        private func rowMenu() -> NSMenu? {
+            guard onForget != nil || onForgetPairing != nil else { return nil }
             let menu = NSMenu()
-            menu.addItem(withTitle: "Remove from List", action: #selector(forgetChosen),
-                         keyEquivalent: "").target = self
+            if onForgetPairing != nil {
+                menu.addItem(withTitle: "Forget Pairing…", action: #selector(forgetPairingChosen),
+                             keyEquivalent: "").target = self
+            }
+            if onForget != nil {
+                menu.addItem(withTitle: "Remove from List", action: #selector(forgetChosen),
+                             keyEquivalent: "").target = self
+            }
             return menu
         }
 
         @objc private func forgetChosen() { onForget?() }
+        @objc private func forgetPairingChosen() { onForgetPairing?() }
 
         override func isAccessibilityElement() -> Bool { true }
         override func accessibilityRole() -> NSAccessibility.Role? { .button }

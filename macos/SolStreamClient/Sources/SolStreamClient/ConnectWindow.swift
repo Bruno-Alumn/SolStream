@@ -220,6 +220,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             }
         }
 
+        hostDropdown.onForgetPairing = { [weak self] item in self?.askToForgetPairing(item) }
+
         // Supporting text, so `textMuted` rather than secondary: the subheading
         // above is the sentence to read, this is the footnote to the row.
         hintLabel.font = DS.body
@@ -1117,6 +1119,40 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                                        named: HostBrowser.baseName(of: host.name) ?? host.name)
     }
 
+    /// Forget Pairing on a row: asked over this window, then done for that PC
+    /// alone -- every address it was paired at under its name -- and its
+    /// Dock launchers too when ticked, as Forget Paired PCs offers.
+    private func askToForgetPairing(_ item: HostDropdown.Item) {
+        let name = item.name.map { HostBrowser.baseName(of: $0) ?? $0 }
+        let hosts = PairingForget.hosts(address: item.address, name: name)
+        let alert = NSAlert()
+        alert.messageText = Self.forgetPairingQuestion(name ?? item.address)
+        alert.informativeText = Self.forgetPairingDetail
+        alert.addButton(withTitle: "Forget")
+        alert.addButton(withTitle: "Cancel")
+        let launchers = PairingForget.launcherCount(for: hosts)
+        let removeLaunchers = NSButton(
+            checkboxWithTitle: launchers == 1 ? "Also remove its Dock launcher"
+                                              : "Also remove its \(launchers) Dock launchers",
+            target: nil, action: nil)
+        if launchers > 0 { alert.accessoryView = removeLaunchers }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            PairingForget.forget(hosts: hosts, removingLaunchers: removeLaunchers.state == .on)
+            self?.refresh()
+        }
+    }
+
+    static func forgetPairingQuestion(_ pc: String) -> String {
+        "Forget the pairing with \(pc)?"
+    }
+
+    static let forgetPairingDetail = """
+        SolStream will forget this PC's pairing token. To connect again, enter \
+        the token shown on SolStream's own window on that PC, under "Pairing \
+        token". Other PCs stay paired.
+        """
+
     /// Rows for the list: what is on the network now, then what was used before.
     /// Two kinds, so exactly one divider falls between them.
     private func hostItems() -> [HostDropdown.Item] {
@@ -1124,15 +1160,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             HostDropdown.Item(address: host.connectTarget, name: host.name,
                               detail: [.data(host.connectTarget),
                                        .words(Self.isPaired(host) ? "Paired" : "Not paired")],
-                              dotState: .live, kind: .discovered)
+                              dotState: .live, kind: .discovered, paired: Self.isPaired(host))
         }
         items += HostBrowser.recentsWorthShowing(recentHosts,
                                                  discovered: discovered).map { address in
-            HostDropdown.Item(address: address, name: nil,
-                              detail: [.words("Used before"),
-                                       .words(AgentConnection.hasStoredToken(for: address)
-                                              ? "Paired" : "Not paired")],
-                              dotState: .idle, kind: .recent)
+            let paired = AgentConnection.hasStoredToken(for: address)
+            return HostDropdown.Item(address: address, name: nil,
+                                     detail: [.words("Used before"),
+                                              .words(paired ? "Paired" : "Not paired")],
+                                     dotState: .idle, kind: .recent, paired: paired)
         }
         return items
     }

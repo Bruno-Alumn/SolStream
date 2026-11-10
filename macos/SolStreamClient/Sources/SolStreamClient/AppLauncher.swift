@@ -165,6 +165,21 @@ enum AppLauncher {
         return items.filter { $0.pathExtension == "app" }.compactMap(Self.link(inLauncher:))
     }
 
+    /// Remove the launchers for apps on any of `hosts`, for Forget Pairing on
+    /// one PC: each would only ask for a token now.
+    static func remove(forHosts hosts: [String], in folder: URL = AppLauncher.folder) -> [URL] {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil)) ?? []
+        var removed: [URL] = []
+        for item in items where item.pathExtension == "app" {
+            guard let link = link(inLauncher: item),
+                  hosts.contains(where: { AppLink.sameHost($0, link.host) }) else { continue }
+            if (try? FileManager.default.removeItem(at: item)) != nil { removed.append(item) }
+        }
+        if !removed.isEmpty { NotificationCenter.default.post(name: didChange, object: nil) }
+        return removed
+    }
+
     /// Remove every launcher this app made, for Forget Paired PCs: each
     /// would only ask for a token now. Returns the ones removed, whose Dock
     /// tiles `removeFromDock` then takes off.
