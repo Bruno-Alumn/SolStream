@@ -41,4 +41,13 @@ final class AppPickerSearchTests: XCTestCase {
         let apart = try XCTUnwrap(score("Code Studio Helper", "studio code"))
         XCTAssertGreaterThan(together, apart)
     }
+
+    /// However the space between them was typed, or a title spells it.
+    func testAnySpaceBetweenTheWords() {
+        let single = score("Visual Studio Code", "visual studio")
+        XCTAssertEqual(score("Visual Studio Code", "visual  studio"), single)
+        XCTAssertEqual(score("Visual Studio Code", "visual\tstudio"), single)
+        XCTAssertEqual(score("Visual\u{00A0}Studio Code", "visual studio"), single)
+        XCTAssertEqual(AppPicker.fold("  Café\u{3000}Bar \n"), "cafe bar")
+    }
 }

@@ -520,8 +520,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     /// words apart; one word scores as `match` does.
     static func score(title: String, query: String) -> Int? {
         let haystack = fold(title)
-        let needle = fold(query).trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = needle.split(whereSeparator: \.isWhitespace).map(String.init)
+        let needle = fold(query)
+        let words = needle.split(separator: " ").map(String.init)
         guard words.count > 1 else { return match(haystack, needle) }
         var total = 0
         for word in words {
@@ -531,10 +531,15 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         return total + (haystack.contains(needle) ? 50 : 0)
     }
 
-    /// Lower case, without accents, and narrow, as a search should compare.
+    /// Lower case, without accents, and narrow, as a search should compare;
+    /// every run of white space -- two spaces typed, a tab, a title's
+    /// no-break space -- one space, and none at the ends, so the words typed
+    /// together are found together in the title.
     static func fold(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
                      locale: nil)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     /// Prefix beats word-start beats substring; nil means no match at all.
