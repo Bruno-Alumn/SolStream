@@ -2799,12 +2799,13 @@ void TestWindowKeys() {
     CHECK(KeyTarget(M::Setup, P::Done, Key::Escape) == KeyPress::Close);
     CHECK(KeyTarget(M::Setup, P::Failed, Key::Enter) == KeyPress::Retry);
     CHECK(KeyTarget(M::Setup, P::Failed, Key::Escape) == KeyPress::Close);
-    // Uninstall: Remove is never a key's, but Escape cancels and Enter closes
-    // once it has finished.
+    // Uninstall: Remove, and trying it again, are never a key's; Escape
+    // cancels, and Enter closes once it has finished.
     CHECK(KeyTarget(M::Uninstall, P::Choosing, Key::Enter) == KeyPress::None);
     CHECK(KeyTarget(M::Uninstall, P::Choosing, Key::Escape) == KeyPress::Cancel);
     CHECK(KeyTarget(M::Uninstall, P::Done, Key::Enter) == KeyPress::Close);
-    CHECK(KeyTarget(M::Uninstall, P::Failed, Key::Enter) == KeyPress::Retry);
+    CHECK(KeyTarget(M::Uninstall, P::Failed, Key::Enter) == KeyPress::None);
+    CHECK(KeyTarget(M::Uninstall, P::Failed, Key::Escape) == KeyPress::Close);
     // The host: Ctrl+C copies the token; its Escape is its own.
     CHECK(KeyTarget(M::Host, P::Choosing, Key::CtrlC) == KeyPress::CopyToken);
     CHECK(KeyTarget(M::Host, P::Choosing, Key::Escape) == KeyPress::None);

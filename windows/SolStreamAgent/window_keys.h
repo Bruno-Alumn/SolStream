@@ -26,9 +26,9 @@ enum class Key { Enter, Escape, CtrlC };
 
 /// The button `key` presses in `mode` at `phase`, with nothing focused.
 ///
-/// Enter presses the screen's primary button, except Remove: taking SolStream
-/// off a PC is asked for by pressing it, not by a key that may have been meant
-/// for another window. Escape is Cancel while choosing and Close once it has
+/// Enter presses the screen's primary button, except Remove and trying a
+/// removal again: taking SolStream off a PC is asked for by pressing it, not
+/// by a key that may have been meant for another window. Escape is Cancel while choosing and Close once it has
 /// finished, and nothing while working, when closing is refused anyway. The
 /// host window keeps its own Escape (put away to the tray), and Ctrl+C copies
 /// the token there.
@@ -54,7 +54,9 @@ inline KeyPress KeyTarget(WindowMode mode, Phase phase, Key key) {
                 case Phase::Working: return KeyPress::None;
                 case Phase::Done:
                     return mode == WindowMode::Setup ? KeyPress::OpenApp : KeyPress::Close;
-                case Phase::Failed: return KeyPress::Retry;
+                // Trying a removal again is asked for on purpose, as Remove is.
+                case Phase::Failed:
+                    return mode == WindowMode::Setup ? KeyPress::Retry : KeyPress::None;
             }
             return KeyPress::None;
     }

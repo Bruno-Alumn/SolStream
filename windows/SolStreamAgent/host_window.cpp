@@ -2892,8 +2892,17 @@ void Activate(HWND window, int id) {
         }
 
         case kIdInstall:
-        case kIdRetry:
             StartInstallJob(window);
+            break;
+
+        // Again what failed: a removal's Try again removes. It ran the
+        // install, on a PC somebody was taking SolStream off.
+        case kIdRetry:
+            if (g_mode == WindowMode::Uninstall) {
+                StartUninstallJob(window);
+            } else {
+                StartInstallJob(window);
+            }
             break;
 
         case kIdRemove:
@@ -3636,22 +3645,31 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             // outlives a control the next screen hid -- Enter on Done ran the
             // install again -- and a held key's repeats would go on to press
             // whatever took its place.
-            if ((wparam == VK_SPACE || wparam == VK_RETURN) && g_focus != 0
-                && (lparam & (1 << 30)) == 0 && IsShownControl(g_focus)) {
+            //
+            // Enter presses the focused control only when the keyboard put the
+            // focus there, where its ring shows it: a click leaves the focus on
+            // what was clicked, unmarked, and Enter after it pressed that rather
+            // than the button drawn as the screen's own.
+            const bool focused = g_focus != 0 && IsShownControl(g_focus);
+            if ((wparam == VK_SPACE || (wparam == VK_RETURN && g_keyboard_nav)) && focused
+                && (lparam & (1 << 30)) == 0) {
                 Activate(window, g_focus);
                 return 0;
             }
-            // With nothing focused, Enter, Escape and Ctrl+C press the button
-            // window_keys.h names -- one on show, and on a fresh press only.
+            // Otherwise Enter, Escape and Ctrl+C press the button window_keys.h
+            // names -- one on show, and on a fresh press only. Ctrl+C without
+            // Alt: AltGr is Ctrl+Alt, and AltGr+C types a letter on some
+            // layouts, which must not put the token on the clipboard.
             {
                 const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
                 Key key;
                 bool known = true;
-                if (wparam == VK_RETURN && g_focus == 0 && !ctrl) {
+                if (wparam == VK_RETURN && !ctrl && !alt) {
                     key = Key::Enter;
                 } else if (wparam == VK_ESCAPE) {
                     key = Key::Escape;
-                } else if (wparam == 'C' && ctrl) {
+                } else if (wparam == 'C' && ctrl && !alt) {
                     key = Key::CtrlC;
                 } else {
                     known = false;
