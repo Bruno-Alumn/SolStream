@@ -2492,16 +2492,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// One Quit, with Force Quit on ⌥, per streamed app.
+    /// SolStream's own Dock menu. With nothing streaming it used to offer
+    /// nothing at all: the apps added to the Dock, and the last one opened,
+    /// could not be reached from SolStream's icon. Now it lists them to open,
+    /// and while streaming also Switch App and Disconnect, above each app's
+    /// Quit and Force Quit.
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        guard !appWindows.isEmpty else { return nil }
         let menu = NSMenu()
-        for appWindow in appWindows {
-            for item in Self.quitItems(for: appWindow) {
+        let entries = Self.dockOpenEntries(launchers: Self.dockLaunchers(),
+                                           last: AppLink.last(),
+                                           streaming: appWindows.isEmpty ? nil : streamLink)
+        for entry in entries {
+            let item = NSMenuItem(title: entry.title, action: #selector(dockOpen(_:)),
+                                  keyEquivalent: "")
+            item.representedObject = entry.link
+            item.target = self
+            menu.addItem(item)
+        }
+        if !appWindows.isEmpty {
+            if !entries.isEmpty { menu.addItem(.separator()) }
+            for (title, action) in [("Switch App…", #selector(switchApp)),
+                                    ("Disconnect", #selector(disconnectHost))] {
+                let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
                 item.target = self
                 menu.addItem(item)
             }
+            menu.addItem(.separator())
+            for appWindow in appWindows {
+                for item in Self.quitItems(for: appWindow) {
+                    item.target = self
+                    menu.addItem(item)
+                }
+            }
         }
-        return menu
+        return menu.items.isEmpty ? nil : menu
+    }
+
+    /// The apps the Dock menu offers to open: the last one opened first, as
+    /// Reopen, unless it is among the launchers; then every launcher by name.
+    /// Not the app on screen now, which is there already. Named with its PC
+    /// where two PCs have an app of the same name.
+    static func dockOpenEntries(launchers: [AppLink], last: AppLink?,
+                                streaming: AppLink?) -> [(title: String, link: AppLink)] {
+        let onScreen = { (link: AppLink) in streaming.map { $0.sameApp(as: link) } ?? false }
+        let sorted = launchers.filter { !onScreen($0) }.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        func title(_ link: AppLink, _ verb: String) -> String {
+            let twins = launchers.filter {
+                $0.name.caseInsensitiveCompare(link.name) == .orderedSame
+                    && !AppLink.sameHost($0.host, link.host)
+            }
+            return twins.isEmpty ? "\(verb) \(link.name)" : "\(verb) \(link.name) on \(link.host)"
+        }
+        var entries = sorted.map { (title: title($0, "Open"), link: $0) }
+        if let last, !onScreen(last), !launchers.contains(where: { $0.sameApp(as: last) }) {
+            entries.insert((title: title(last, "Reopen"), link: last), at: 0)
+        }
+        return entries
+    }
+
+    /// The apps added to the Dock: every launcher in their folder that reads.
+    private static func dockLaunchers() -> [AppLink] {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: AppLauncher.folder, includingPropertiesForKeys: nil)) ?? []
+        return items.filter { $0.pathExtension == "app" }.compactMap(AppLauncher.link(inLauncher:))
+    }
+
+    @objc private func dockOpen(_ sender: NSMenuItem) {
+        guard let link = sender.representedObject as? AppLink else { return }
+        open(link: link)
     }
 
     /// A file sent from the PC: saved in Downloads › SolStream, and said in the
