@@ -1173,7 +1173,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
                  + "\(total) bytes, to the host")
 
         func send(_ index: Int) {
-            guard index < files.count else { return finish() }
+            // Stopped once the last file was across: still a stop, and the
+            // PC's clipboard is left as it was.
+            guard index < files.count else {
+                return cancellation.isCancelled ? stopped() : finish()
+            }
             let file = files[index]
             let name = names[index]
             say(Self.sendingText(files.count, name: name, percent: 0))
@@ -1203,12 +1207,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                         self.sendingFiles = nil
                         // Stopped from the menu: said as that, not as a
                         // failure to look into on the PC.
-                        if cancellation.isCancelled {
-                            Log.info("[transfer] stopped by the person after "
-                                     + "\(received.count) of \(files.count)")
-                            self.say(Self.stoppedText(received: received.count), for: 6)
-                            return
-                        }
+                        if cancellation.isCancelled { return stopped() }
                         // Not only an old host: a full disk or a timeout end
                         // here too. The files already across are on the PC, and
                         // the note says so rather than leaving them forgotten.
@@ -1231,7 +1230,16 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 }
             }
         }
+        func stopped() {
+            Self.isSendingFiles = false
+            sendingFiles = nil
+            Log.info("[transfer] stopped by the person after \(received.count) of \(files.count)")
+            say(Self.stoppedText(received: received.count, leftOut: leftOut), for: 6)
+        }
         func finish() {
+            // Nothing left to stop: the files are across, and this only puts
+            // them on the PC's clipboard.
+            sendingFiles = nil
             agent.setClipboardFiles(received) { [weak self] sequence in
                 DispatchQueue.main.async {
                     AppWindow.isSendingFiles = false
@@ -1261,7 +1269,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     static func sendingText(_ count: Int, name: String, percent: Int) -> String {
-        let what = count == 1 ? name : "\(count) files"
+        let what = count == 1 ? shortName(name) : "\(count) files"
         return "Sending \(what) to the PC… \(min(max(percent, 0), 100))% · ⌃⌘. stops"
     }
 
@@ -1269,12 +1277,24 @@ final class AppWindow: NSObject, NSWindowDelegate {
     static let busySendingText =
         "Wait for the files already on their way to the PC, or press ⌃⌘. to stop them."
 
-    /// A send stopped from the menu, and where what had crossed is.
-    static func stoppedText(received: Int) -> String {
-        guard received > 0 else { return "Stopped sending. Nothing was left on the PC." }
-        let what = received == 1 ? "The file" : "The \(received) files"
-        return "Stopped sending. \(what) sent before \(received == 1 ? "is" : "are") in "
-            + "Downloads\\SolStream on the PC."
+    /// A file's name short enough that the percent and the way to stop
+    /// after it are not the part cut off: its middle goes, its start and its
+    /// extension stay.
+    static func shortName(_ name: String, limit: Int = 28) -> String {
+        guard name.count > limit else { return name }
+        return String(name.prefix(limit - 10)) + "…" + String(name.suffix(9))
+    }
+
+    /// A send stopped from the menu, where what had crossed is, and what was
+    /// left out of the drop, as the other endings say.
+    static func stoppedText(received: Int, leftOut: Int = 0) -> String {
+        let kept = received == 0 ? " Nothing was left on the PC."
+            : " \(received == 1 ? "The file" : "The \(received) files") already across "
+              + "\(received == 1 ? "is" : "are") in Downloads\\SolStream on the PC."
+        let skipped = leftOut == 0 ? ""
+            : " \(leftOut == 1 ? "One item was" : "\(leftOut) items were") left out too: "
+              + "only files can be sent, not folders."
+        return "Stopped sending." + kept + skipped
     }
 
     /// Whether this window's files are on their way, and can be stopped.
