@@ -734,6 +734,24 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(pane.versionLabel.accessibilityLabel(), "SolStream version 1.0.0")
     }
 
+    /// What's new is there for an update there, names it, and goes once none is.
+    @MainActor
+    func testWhatsNewFollowsTheUpdate() {
+        let updater = makeUpdater()
+        let pane = SettingsPane(updater: updater)
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
+        XCTAssertTrue(pane.whatsNewLink.isHidden)
+        updater.state = .available("1.1.0")
+        pane.refreshUpdates()
+        XCTAssertFalse(pane.whatsNewLink.isHidden)
+        XCTAssertEqual(pane.whatsNewLink.words, "What's new in 1.1.0")
+        updater.state = .upToDate
+        pane.refreshUpdates()
+        XCTAssertTrue(pane.whatsNewLink.isHidden)
+    }
+
     /// The card with an update ready, in both themes, for whoever changes it
     /// next; and a failure, whose words are the longest it shows.
     @MainActor
@@ -786,7 +804,7 @@ final class SettingsWindowTests: XCTestCase {
             pane.footnote,
             pane.versionLabel, pane.updateStatus, pane.automaticUpdatesSwitch,
             pane.installButton.isHidden ? pane.checkButton : pane.installButton,
-        ]
+        ] + (pane.whatsNewLink.isHidden ? [] : [pane.whatsNewLink])
         let frames = controls.map { $0.convert($0.bounds, to: pane) }
         for (control, frame) in zip(controls, frames) {
             XCTAssertFalse(frame.isEmpty, "\(type(of: control)) has no size", file: file, line: line)

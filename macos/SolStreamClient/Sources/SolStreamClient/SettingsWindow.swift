@@ -197,7 +197,7 @@ final class SettingsPane: NSView {
     /// What is in the update on offer: its release page. Beside the version,
     /// while there is one -- the card said an update was there and asked for
     /// a download and a relaunch without a word about what it brings.
-    private lazy var whatsNewLink = LinkButton(title: "What's new", font: DS.caption,
+    lazy var whatsNewLink = LinkButton(title: "What's new", font: DS.caption,
                                                target: self, action: #selector(showWhatsNew))
     let updater: Updater
     let versionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
