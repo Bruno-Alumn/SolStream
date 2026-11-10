@@ -2355,6 +2355,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(windowMenuItem)
         NSApp.windowsMenu = windowMenu
 
+        let helpMenuItem = NSMenuItem()
+        let helpMenu = HelpMenu.make(target: self, action: #selector(openHelpLink(_:)))
+        helpMenuItem.submenu = helpMenu
+        mainMenu.addItem(helpMenuItem)
+        // Named to AppKit, which puts the menu bar's search field at its head.
+        NSApp.helpMenu = helpMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -2441,6 +2448,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+
+    @objc func openHelpLink(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
+    }
 
     /// Flush before revealing: the point of the menu item is that someone is
     /// about to open the file, and the last few lines are usually the ones that
