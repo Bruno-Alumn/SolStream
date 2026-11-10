@@ -16,6 +16,7 @@
 // hand-rolling text selection to get them back would be absurd.
 
 #include "host_window.h"
+#include "tray_tip.h"
 #include "crash_report.h"
 
 #include "media/log.h"
@@ -2479,7 +2480,6 @@ void StartDisplayJob(HWND window) {
 }
 
 // The notification area's, below.
-std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version);
 NOTIFYICONDATAW TrayData(HWND window);
 
 // ── Updates ──────────────────────────────────────────────────────────────────
@@ -2893,19 +2893,6 @@ float ToDip(int pixels) { return pixels * 96.0f / g_dpi; }
 /// here as well -- quietly, where somebody pointing at the icon will see it,
 /// rather than with a balloon. Not while streaming: then the stream is what the
 /// icon is about, and Install has to wait for the Mac anyway.
-std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version) {
-    if (!status.agent_listening) {
-        return L"SolStream \u2014 not reachable yet";
-    }
-    if (status.connected_clients > 0) {
-        return L"SolStream \u2014 streaming to your Mac";
-    }
-    if (!update_version.empty()) {
-        return L"SolStream \u2014 update " + update_version + L" available";
-    }
-    return L"SolStream \u2014 ready for your Mac";
-}
-
 NOTIFYICONDATAW TrayData(HWND window) {
     NOTIFYICONDATAW data{};
     data.cbSize = sizeof(data);

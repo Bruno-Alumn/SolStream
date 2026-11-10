@@ -64,6 +64,7 @@
 #include "send_to_mac.h"
 #include "session_takeover.h"
 #include "token_store.h"
+#include "tray_tip.h"
 #include "stranded.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
@@ -2687,6 +2688,31 @@ void TestHolderHearing() {
     }
 }
 
+void TestTrayTip() {
+    HostStatus status;
+    status.agent_listening = true;
+    status.address = L"192.168.1.5";
+    status.streaming_ready = true;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 ready for your Mac");
+    CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 update 1.0.9 available");
+    status.connected_clients = 1;
+    CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 streaming to your Mac");
+    // The window's hard failures, not "ready" over them.
+    status.connected_clients = 0;
+    status.streaming_ready = false;
+    CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 streaming didn't start");
+    status.address.clear();
+    CHECK(TrayTip(status, L"") ==
+          L"SolStream \u2014 not reachable: this PC has no network address");
+    status.agent_listening = false;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 not reachable yet");
+    // Every one fits the notification area's 128-character tip.
+    status.agent_listening = true;
+    status.address = L"x";
+    status.streaming_ready = true;
+    CHECK(TrayTip(status, L"999999999.999999999.999999999").size() < 128);
+}
+
 void TestCharKeys() {
     using namespace media;
     INPUT out[32];
@@ -4793,6 +4819,7 @@ int wmain(int argc, wchar_t** argv) {
     TestHolderHearing();
     TestScanKeys();
     TestCharKeys();
+    TestTrayTip();
     TestTextInput();
     TestCapsLock();
     TestHoldOrder();
