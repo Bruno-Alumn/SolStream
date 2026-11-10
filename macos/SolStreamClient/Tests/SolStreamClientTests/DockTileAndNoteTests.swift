@@ -26,11 +26,35 @@ final class DockTileAndNoteTests: XCTestCase {
         XCTAssertEqual(AppLauncher.tiles([safari], without: []).count, 1)
     }
 
+    /// The Dock's own spelling of a name with ";" -- CFURL encodes it, Swift
+    /// does not -- and a folder reached through a link still match.
+    func testSpellingsOfOnePathMatch() throws {
+        let semicolon: [String: Any] = ["tile-data": ["file-data": [
+            "_CFURLString": "file:///Users/me/Applications/SolStream%20Apps/Foo%3B%20Bar%20(PC).app/"]]]
+        XCTAssertTrue(AppLauncher.tiles([semicolon], without: [
+            URL(fileURLWithPath: "/Users/me/Applications/SolStream Apps/Foo; Bar (PC).app")]).isEmpty)
+
+        let real = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DockTile-\(UUID().uuidString)", isDirectory: true)
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DockTileLink-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        defer {
+            try? FileManager.default.removeItem(at: link)
+            try? FileManager.default.removeItem(at: real)
+        }
+        let throughLink = tile(link.appendingPathComponent("Notepad (PC).app").path)
+        XCTAssertTrue(AppLauncher.tiles([throughLink], without: [
+            real.resolvingSymlinksInPath().appendingPathComponent("Notepad (PC).app")]).isEmpty)
+    }
+
     /// Held during the fade-out of an earlier dismissal: still shown when the
     /// fade has finished.
     @MainActor
     func testANoteHeldDuringItsFadeStaysShown() {
         let note = CaptureHint(text: "first")
+        note.reducesMotion = { false }
         note.hold()
         note.dismiss()
         note.text = "second"

@@ -1535,8 +1535,12 @@ final class CaptureHint: DS.Box {
     /// it is still the one it was hiding.
     private(set) var shownGeneration = 0
 
+    /// Whether to skip the fade. Replaceable so a test can see the fade run
+    /// whatever the Mac running it is set to.
+    var reducesMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
     private func fade(to alpha: CGFloat, then completion: (() -> Void)? = nil) {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+        guard !reducesMotion() else {
             alphaValue = alpha
             completion?()
             return

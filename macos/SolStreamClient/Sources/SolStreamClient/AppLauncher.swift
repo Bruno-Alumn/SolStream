@@ -263,6 +263,9 @@ enum AppLauncher {
         guard !launchers.isEmpty else { return true }
         let domain = "com.apple.dock" as CFString
         let key = "persistent-apps" as CFString
+        // Read fresh: a cached copy written back would undo whatever the
+        // Dock saved since.
+        CFPreferencesAppSynchronize(domain)
         guard let tiles = CFPreferencesCopyAppValue(key, domain) as? [[String: Any]] else {
             Log.error("[launcher] could not read the Dock's applications")
             return false
@@ -287,13 +290,25 @@ enum AppLauncher {
         return true
     }
 
-    /// `tiles` without those of `launchers`, matched by the URL the Dock
-    /// keeps, as `addToDock` writes it.
+    /// `tiles` without those of `launchers`, matched by path rather than by
+    /// the URL's spelling: the Dock rewrites its tiles through CFURL, which
+    /// encodes a ";" that Swift leaves alone, and a folder reached through a
+    /// symbolic link is listed under the link's target. Both sides are
+    /// decoded, and their folders resolved, before they are compared.
     static func tiles(_ tiles: [[String: Any]], without launchers: [URL]) -> [[String: Any]] {
-        let gone = Set(launchers.map {
-            URL(fileURLWithPath: $0.path, isDirectory: true).absoluteString
-        })
-        return tiles.filter { Self.url(ofTile: $0).map { !gone.contains($0) } ?? true }
+        let gone = Set(launchers.map { Self.comparablePath($0) })
+        return tiles.filter { tile in
+            guard let text = Self.url(ofTile: tile), let url = URL(string: text),
+                  url.isFileURL else { return true }
+            return !gone.contains(Self.comparablePath(url))
+        }
+    }
+
+    /// A bundle's path with its folder's symbolic links resolved -- the
+    /// bundle itself may be gone by then -- and no trailing slash.
+    static func comparablePath(_ url: URL) -> String {
+        let folder = url.deletingLastPathComponent().resolvingSymlinksInPath()
+        return folder.appendingPathComponent(url.lastPathComponent).standardizedFileURL.path
     }
 
     static func url(ofTile tile: [String: Any]) -> String? {
