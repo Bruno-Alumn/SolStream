@@ -260,6 +260,8 @@ public final class MetalView: NSView {
 
     /// Whether a status or error card is up.
     public var isShowingStatus: Bool { !overlay.isHidden }
+    /// A card is up and it is a busy one, not an error.
+    public var isShowingBusyStatus: Bool { !overlay.isHidden && !showingError }
 
     // MARK: - Presentation
 

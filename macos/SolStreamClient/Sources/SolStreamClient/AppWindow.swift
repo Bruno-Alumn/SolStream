@@ -1078,6 +1078,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         isClosing = true
+        endWayOut()
         sendingFiles?.cancel()
         lifeTimer?.invalidate()
         lifeTimer = nil
@@ -1382,11 +1383,20 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // short stall never gets that far. Counted from the first busy card,
         // not the latest: a card whose words move on while it waits would
         // otherwise put the offer off for ever.
+        // Not on the way to the first picture: a cold start takes longer than
+        // the wait, and is not stuck.
         if wayOutOffered {
             metalView?.offerWayOut()
-        } else if wayOut == nil {
+        } else if wayOut == nil, pictureWasLive {
             let offer = DispatchWorkItem { [weak self] in
                 guard let self, !self.isClosing else { return }
+                // A frame can take the card down without going through
+                // `hideStatus`: then there is nothing to offer, and letting go
+                // of the mouse would be in the middle of a game.
+                guard self.metalView?.isShowingBusyStatus == true else {
+                    self.endWayOut()
+                    return
+                }
                 self.wayOutOffered = true
                 self.metalView?.offerWayOut()
                 self.inputCapture?.releasePointer("still waiting")
@@ -1399,6 +1409,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// How long a busy card stays before it offers a way out.
     static let wayOutAfter: TimeInterval = 10
     private var wayOutOffered = false
+    /// The picture has been up since the window opened: a busy card after
+    /// it is a stall, not the first connection.
+    private var pictureWasLive = false
 
     /// The busy card is gone, or has become an error with its own button.
     private func endWayOut() {
@@ -1424,6 +1437,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// card stays over them for the fraction of a second that takes.
     func hideStatus() {
         endWayOut()
+        pictureWasLive = true
         guard firstPlacementDone else {
             hideStatusWhenPlaced = true
             return

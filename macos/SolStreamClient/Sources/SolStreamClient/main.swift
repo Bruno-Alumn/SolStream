@@ -1927,8 +1927,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, let agent else { return }
             let media = agent.isConnected ? await agent.openMediaSession(request) : nil
             self.recoveringMedia = false
-            // The windows may all have closed during the wait.
-            guard !self.appWindows.isEmpty, self.session == nil else { return }
+            // The windows may all have closed during the wait -- Back to Apps
+            // on a card that stayed -- and then the stream the PC has just
+            // started is nobody's: closed, not left encoding for no one.
+            guard !self.appWindows.isEmpty, self.session == nil else {
+                if media?.streaming == true, self.appWindows.isEmpty {
+                    agent.closeMediaSession()
+                }
+                return
+            }
             // Nor is a stream started under "Lost the connection": its first
             // frame or "Waiting for video" would replace the card, and when
             // the PC ends it with the channel the window would be left with

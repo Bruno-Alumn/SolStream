@@ -1914,7 +1914,11 @@ public final class InputCapture {
         // In the picture itself, a click or a move alike: a drag that has
         // carried a held button out of it is taken when it comes back, not
         // where the frozen cursor would send every later click elsewhere.
+        // Not over SolStream's own card, though it sits in the picture: a
+        // card with a button -- Back to Apps -- had the mouse taken back the
+        // moment it moved towards it.
         let inside = pictureUnitPoint(for: event, in: view) != nil
+            && isOverOwnUI?(event.locationInWindow) != true
         guard policy.wantsCapture(after: isClick ? .click : .pointerMoved,
                                   moment(pointerInside: inside)) else { return false }
         // The key window hears every move, wherever the pointer is -- over
