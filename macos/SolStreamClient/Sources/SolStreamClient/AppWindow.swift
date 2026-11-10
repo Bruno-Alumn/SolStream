@@ -1139,7 +1139,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// They are kept in Downloads\SolStream on the PC either way.
     func filesDropped(_ urls: [URL]) -> Bool {
         guard !Self.isSendingFiles else {
-            say("Wait for the files already on their way to the PC.", for: 3)
+            say(Self.busySendingText, for: 4)
             return false
         }
         // Through aliases and links, to what they point at, but under the
@@ -1200,6 +1200,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     }
                     guard let path else {
                         Self.isSendingFiles = false
+                        self.sendingFiles = nil
+                        // Stopped from the menu: said as that, not as a
+                        // failure to look into on the PC.
+                        if cancellation.isCancelled {
+                            Log.info("[transfer] stopped by the person after "
+                                     + "\(received.count) of \(files.count)")
+                            self.say(Self.stoppedText(received: received.count), for: 6)
+                            return
+                        }
                         // Not only an old host: a full disk or a timeout end
                         // here too. The files already across are on the PC, and
                         // the note says so rather than leaving them forgotten.
@@ -1227,6 +1236,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 DispatchQueue.main.async {
                     AppWindow.isSendingFiles = false
                     guard let self else { return }
+                    self.sendingFiles = nil
                     if let sequence { self.onHostClipboardSet?(sequence) }
                     let what = received.count == 1 ? "1 file" : "\(received.count) files"
                     let skipped = leftOut == 0 ? ""
@@ -1252,7 +1262,28 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     static func sendingText(_ count: Int, name: String, percent: Int) -> String {
         let what = count == 1 ? name : "\(count) files"
-        return "Sending \(what) to the PC… \(min(max(percent, 0), 100))%"
+        return "Sending \(what) to the PC… \(min(max(percent, 0), 100))% · ⌃⌘. stops"
+    }
+
+    /// A second drop while files are on their way: what to do about it.
+    static let busySendingText =
+        "Wait for the files already on their way to the PC, or press ⌃⌘. to stop them."
+
+    /// A send stopped from the menu, and where what had crossed is.
+    static func stoppedText(received: Int) -> String {
+        guard received > 0 else { return "Stopped sending. Nothing was left on the PC." }
+        let what = received == 1 ? "The file" : "The \(received) files"
+        return "Stopped sending. \(what) sent before \(received == 1 ? "is" : "are") in "
+            + "Downloads\\SolStream on the PC."
+    }
+
+    /// Whether this window's files are on their way, and can be stopped.
+    var isSendingHere: Bool { sendingFiles.map { !$0.isCancelled } ?? false }
+
+    /// Stop this window's files on their way to the PC: the one crossing is
+    /// taken off the PC, those across stay, the rest stay on the Mac.
+    func stopSendingFiles() {
+        sendingFiles?.cancel()
     }
 
     private func showComposition(_ text: String?) {

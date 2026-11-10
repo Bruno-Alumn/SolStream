@@ -2361,6 +2361,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                       action: #selector(disconnectHost), keyEquivalent: "d"))
         hostMenu.addItem(withTitle: "Add App to Dock", action: #selector(addStreamToDock),
                          keyEquivalent: "")
+        // A large send could be stopped only by closing its window: ⌃⌘.,
+        // the Mac's own "stop" with SolStream's ⌃.
+        Self.reserve(hostMenu.addItem(withTitle: "Stop Sending Files",
+                                      action: #selector(stopSendingFiles), keyEquivalent: "."))
         hostMenu.addItem(.separator())
         // The stream's two quick switches, also in the quality pill's popover.
         // Here as well, on ⌃⌘ keys a stream never takes: the pill hides with
@@ -2523,6 +2527,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     static func streamSwitchAnnouncement(mode: InputCapture.PointerMode) -> String {
         mode == .gaming ? "Gaming mouse" : "Desktop mouse"
+    }
+
+    @objc func stopSendingFiles() {
+        appWindows.first { $0.isSendingHere }?.stopSendingFiles()
     }
 
     @objc func toggleMuteFromMenu() {
@@ -2953,6 +2961,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(stopSendingFiles) {
+            return appWindows.contains { $0.isSendingHere }
+        }
         if menuItem.action == #selector(cycleWindows(_:)) {
             let windows = cyclableWindows
             return Self.nextWindowIndex(current: currentCycleIndex(in: windows),
