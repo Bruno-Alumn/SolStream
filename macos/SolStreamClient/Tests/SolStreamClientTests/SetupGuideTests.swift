@@ -54,4 +54,19 @@ final class SetupGuideBlockedSearchTests: XCTestCase {
         XCTAssertTrue(ConnectHint.localNetworkSettings.absoluteString.hasSuffix("Privacy_LocalNetwork"))
         XCTAssertEqual(ConnectHint.localNetworkAction, "Open Local Network Settings")
     }
+
+    /// Offered only for a denied search, steady while a PC is checked, and
+    /// not for a PC reached another way.
+    func testTheLinkIsForADenialAlone() {
+        let offers = ConnectWindow.offersLocalNetworkSettings
+        XCTAssertTrue(offers(true, 0, "", nil))
+        XCTAssertTrue(offers(true, 0, "192.168.1.5", nil), "while checking")
+        XCTAssertTrue(offers(true, 0, "192.168.1.5", false), "not answering: the denial still")
+        XCTAssertFalse(offers(false, 0, "", nil), "offline: no setting fixes that")
+        XCTAssertFalse(offers(true, 1, "", nil), "something was found")
+        XCTAssertFalse(offers(true, 0, "192.168.1.5", true), "the PC answered")
+        XCTAssertFalse(offers(true, 0, "100.101.7.42", nil), "Tailscale needs no local network")
+        XCTAssertFalse(offers(true, 0, "desk.tail1a2b3c.ts.net", nil))
+    }
+
 }

@@ -66,6 +66,10 @@ public final class HostBrowser {
     /// local network, or no network up yet -- and true again once one goes.
     /// Without it the list stayed empty and nothing said why.
     public var onCanAsk: ((Bool) -> Void)?
+    /// Beside `onCanAsk(false)`, set before it is called: whether this Mac is
+    /// on a network and was kept from asking it -- Local Network access off
+    /// -- rather than on none. On the main queue.
+    public private(set) var askingDenied = false
     private var toldCannotAsk = false
 
     public var isRunning: Bool {
@@ -188,7 +192,8 @@ public final class HostBrowser {
         // holding the default route, otherwise asked one network or none.
         var sent = false
         var lastError: Int32 = 0
-        for broadcast in [INADDR_BROADCAST] + Self.interfaceBroadcasts() {
+        let networks = Self.interfaceBroadcasts()
+        for broadcast in [INADDR_BROADCAST] + networks {
             var target = sockaddr_in()
             target.sin_family = sa_family_t(AF_INET)
             target.sin_port = StreamPorts.discovery.bigEndian
@@ -209,6 +214,10 @@ public final class HostBrowser {
             DispatchQueue.main.async { [weak self] in self?.onCanAsk?(true) }
         } else if !sent, !toldCannotAsk {
             toldCannotAsk = true
+            // On a network and still unable to send: macOS keeping SolStream
+            // off it. On none: simply offline, which no setting fixes.
+            let denied = !networks.isEmpty
+            DispatchQueue.main.async { [weak self] in self?.askingDenied = denied }
             Log.error("[browse] could not ask the local network for PCs (errno \(lastError))")
             DispatchQueue.main.async { [weak self] in self?.onCanAsk?(false) }
         }

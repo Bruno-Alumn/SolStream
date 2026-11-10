@@ -91,6 +91,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// the Local Network settings, in Tailscale's place -- nothing on the
     /// network can be found, Tailscale's PCs or any other, until it is allowed.
     private var showsLocalNetworkLink = false
+    /// The search failed on a network this Mac is on: Local Network access is
+    /// off, not merely no network.
+    private var localNetworkDenied = false
     /// What the window was last sized for: which of the two optional parts
     /// had room, and what the Tailscale line says, since its two wordings
     /// can wrap differently. The window is re-fitted when this changes and at
@@ -512,7 +515,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = certain ? ConnectHint.tailscaleOff : ConnectHint.maybeTailscale
         }
         hintLabel.textColor = DS.textMuted
-        showsLocalNetworkLink = hintLabel.stringValue == ConnectHint.cannotSearch
+        showsLocalNetworkLink = Self.offersLocalNetworkSettings(
+            denied: localNetworkDenied, discovered: discovered.count,
+            address: state.address, reachable: state.isReachable)
         // The whole of it on hover, should a long PC name still push a hint
         // past its two lines.
         hintLabel.toolTip = hintLabel.stringValue
@@ -775,6 +780,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         browser.onCanAsk = { [weak self] canAsk in
             guard let self, self.browser.isRunning else { return }
             self.cannotAskNetwork = !canAsk
+            self.localNetworkDenied = !canAsk && self.browser.askingDenied
             self.refresh()
         }
         browser.start()
@@ -959,6 +965,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         if state.addressProblem == nil { remember(host: host) }
         close()
         onConnect(host)
+    }
+
+    /// Whether to offer the Local Network settings: the search is denied,
+    /// nothing has been found, and the PC on show is not one reached another
+    /// way -- answering, or by Tailscale, which needs no local network. From
+    /// the state, not from the hint, which changes with each probe while the
+    /// denial does not.
+    static func offersLocalNetworkSettings(denied: Bool, discovered: Int, address: String,
+                                           reachable: Bool?) -> Bool {
+        denied && discovered == 0 && reachable != true
+            && (address.isEmpty || !StreamSettings.isRemote(host: address))
     }
 
     @objc private func tailscaleTapped() {
