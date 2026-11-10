@@ -17,6 +17,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private static let lastHostKey = "SolStream.lastHost"
     private static let recentHostsKey = "SolStream.recentHosts"
     private static let width: CGFloat = 440
+    static var contentWidth: CGFloat { width }
 
     /// What we know about a host before connecting to it.
     private struct HostState {
@@ -455,10 +456,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         case (.some(true), true):
             // What the person will actually be asked for: the token on
             // SolStream's own window on the PC.
-            hintLabel.stringValue = "Pairing needed — SolStream on the PC shows a token to type in."
+            hintLabel.stringValue = ConnectHint.pairingNeeded
             connectButton.title = "Pair & Connect"
         case (.some(true), false):
-            hintLabel.stringValue = "Reachable and paired. Connecting is one step."
+            hintLabel.stringValue = ConnectHint.paired
             connectButton.title = "Connect"
         case (.some(false), _):
             hintLabel.stringValue = offlineHint()
@@ -473,12 +474,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
                 .map { HostBrowser.baseName(of: $0.name) ?? $0.name }
                 .joined(separator: ", ")
             hintLabel.stringValue = !discovered.isEmpty
-                ? "Found \(names) on this network."
-                : cannotAskNetwork
-                ? "This Mac can't look for PCs on the network. Check it's on Wi-Fi and "
-                    + "SolStream's Local Network access in System Settings, or type the PC's "
-                    + "address."
-                : "The first connection asks for the token shown on the PC."
+                ? ConnectHint.found(names)
+                : cannotAskNetwork ? ConnectHint.cannotSearch : ConnectHint.firstConnection
             connectButton.title = "Connect"
         }
         // A Tailscale address with Tailscale off cannot answer however long
@@ -493,11 +490,12 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             // hand out the same range, so it is said as an if.
             let certain = state.address.lowercased()
                 .trimmingCharacters(in: CharacterSet(charactersIn: ".")).hasSuffix(".ts.net")
-            hintLabel.stringValue = certain
-                ? "That's a Tailscale address, and Tailscale is off on this Mac."
-                : "If that's a Tailscale address, turn Tailscale on on this Mac."
+            hintLabel.stringValue = certain ? ConnectHint.tailscaleOff : ConnectHint.maybeTailscale
         }
         hintLabel.textColor = DS.textMuted
+        // The whole of it on hover, should a long PC name still push a hint
+        // past its two lines.
+        hintLabel.toolTip = hintLabel.stringValue
         connectButton.isEnabled = !state.address.isEmpty
 
         // "Paired" for the guide is about this Mac, not the host on show: a
@@ -907,7 +905,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     @objc private func connectTapped() {
         let host = state.address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
-            hintLabel.stringValue = "Enter a hostname or IP address."
+            hintLabel.stringValue = ConnectHint.enterAddress
             hintLabel.textColor = DS.danger
             return
         }
@@ -968,30 +966,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // PC waiting at the sign-in screen usually looks the same as one
         // asleep.
         if state.addressProblem == .unknownName {
-            return "Couldn't find a PC called \(state.address). Check the spelling and that "
-                + "this Mac is online, or use the address shown on SolStream's window on the PC."
+            return ConnectHint.unknownName(state.address)
         }
-        if state.addressProblem == .ipv6Only {
-            return "SolStream on the PC listens on IPv4 only. Use its IPv4 address, or its "
-                + "Tailscale address starting 100."
-        }
-        if state.isRefused {
-            return "Something is on at this address, but SolStream isn't answering. If it's "
-                + "your PC, sign in to Windows or open SolStream."
-        }
-        if wakeFailed {
-            return "Couldn't send the wake signal from this Mac. Check it's on a network."
-        }
+        if state.addressProblem == .ipv6Only { return ConnectHint.ipv6Only }
+        if state.isRefused { return ConnectHint.refused }
+        if wakeFailed { return ConnectHint.wakeFailed }
         if let wokeAt {
             return Date().timeIntervalSince(wokeAt) < Self.wakeWait
-                ? "Waking the PC… This can take up to a minute."
-                : "Still not answering. If the PC is awake, sign in to Windows. If not, "
-                    + "Wake-on-LAN may be off on it, or it's on another network."
+                ? ConnectHint.waking : ConnectHint.stillNotAnswering
         }
-        return canWake
-            ? "Not answering. The PC may be asleep, or nobody is signed in to Windows."
-            : "Not answering. Check the PC is awake, someone is signed in to Windows, "
-                + "and SolStream is running there."
+        return canWake ? ConnectHint.asleep : ConnectHint.notAnswering
     }
 
     /// How long a PC is given to wake before the hint says it has not.
@@ -1186,4 +1170,44 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         }
         return kept
     }
+}
+
+/// What the connect window's hint says. Each has two lines of the window's
+/// width at most -- the label is held at two lines so the window does not jump
+/// as a probe comes back -- and the ones that said how to get past a problem
+/// were the ones cut off in the middle: ConnectHintTests measures them all.
+enum ConnectHint {
+    static let pairingNeeded = "Pairing needed — SolStream on the PC shows a token to type in."
+    static let paired = "Reachable and paired. Connecting is one step."
+    static func found(_ names: String) -> String { "Found \(names) on this network." }
+    static let cannotSearch = "Can't search this network. Allow Local Network for SolStream "
+        + "in System Settings, or type the PC's address."
+    static let firstConnection = "The first connection asks for the token shown on the PC."
+    static let tailscaleOff = "That's a Tailscale address, and Tailscale is off on this Mac."
+    static let maybeTailscale = "If that's a Tailscale address, turn Tailscale on on this Mac."
+    static func unknownName(_ address: String) -> String {
+        "No PC called \(address). Check the spelling, or use the address SolStream shows on the PC."
+    }
+    static let ipv6Only = "SolStream on the PC listens on IPv4 only. Use its IPv4 address, "
+        + "or its Tailscale one starting 100."
+    static let refused = "Something answers here, but not SolStream. If it's your PC, "
+        + "sign in to Windows or open SolStream."
+    static let wakeFailed = "Couldn't send the wake signal from this Mac. Check it's on a network."
+    static let waking = "Waking the PC… This can take up to a minute."
+    static let stillNotAnswering = "Still not answering. If the PC is awake, sign in to Windows; "
+        + "if not, Wake-on-LAN may be off."
+    static let asleep = "Not answering. The PC may be asleep, or nobody is signed in to Windows."
+    static let notAnswering = "Not answering. Check the PC is awake and signed in, "
+        + "and SolStream is running there."
+    static let enterAddress = "Enter a hostname or IP address."
+
+    /// Every hint, with `address` and `names` where they go in.
+    static func all(address: String, names: String) -> [String] {
+        [pairingNeeded, paired, found(names), cannotSearch, firstConnection, tailscaleOff,
+         maybeTailscale, unknownName(address), ipv6Only, refused, wakeFailed, waking,
+         stillNotAnswering, asleep, notAnswering, enterAddress]
+    }
+
+    /// How wide the hint is: the window less its margins.
+    static var width: CGFloat { ConnectWindow.contentWidth - DS.Metric.inset * 2 }
 }

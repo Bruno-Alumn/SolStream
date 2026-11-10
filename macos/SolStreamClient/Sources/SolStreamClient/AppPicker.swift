@@ -40,6 +40,10 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private let searchField = DS.Field(placeholder: "")
     private let tableView = PickerTableView()
     private let scrollView = NSScrollView()
+    /// Said over the list when it has nothing in it: see `emptyText`.
+    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+    /// The PC's list has arrived at least once.
+    private var hasPresented = false
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private var hasBeenShown = false
     private let spinner = NSProgressIndicator()
@@ -175,6 +179,18 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             scrollView.topAnchor.constraint(equalTo: listCard.topAnchor, constant: pad),
             scrollView.bottomAnchor.constraint(equalTo: listCard.bottomAnchor, constant: -pad),
         ])
+        emptyLabel.font = DS.body
+        emptyLabel.textColor = DS.textMuted
+        emptyLabel.alignment = .center
+        emptyLabel.isHidden = true
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        listCard.addSubview(emptyLabel)
+        NSLayoutConstraint.activate([
+            emptyLabel.centerXAnchor.constraint(equalTo: listCard.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: listCard.centerYAnchor),
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: listCard.widthAnchor,
+                                              constant: -DS.Space.x6 * 2),
+        ])
 
         statusLabel.font = DS.body
         statusLabel.textColor = DS.textMuted
@@ -293,6 +309,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         }
 
         allRows = built
+        hasPresented = true
         setSpinning(false)
         // A failure stays said until somebody does something: a refresh of
         // the lists -- which follows a failed open -- would otherwise put the
@@ -449,7 +466,22 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
         openButton.isEnabled = !rows.isEmpty && !isBusy
+        // An empty card with the footer still counting the PC's apps read as
+        // broken. Nothing before the list first arrives: the footer is
+        // already saying it is being asked for.
+        let empty = Self.emptyText(query: needle, hasPresented: hasPresented)
+        emptyLabel.stringValue = empty ?? ""
+        emptyLabel.isHidden = !rows.isEmpty || empty == nil
         refreshHover()
+    }
+
+    /// What the list says when it shows nothing: why, and the way out.
+    static func emptyText(query: String, hasPresented: Bool) -> String? {
+        guard hasPresented else { return nil }
+        if !query.isEmpty {
+            return "Nothing on the PC matches \u{201C}\(query)\u{201D}. Esc clears the search."
+        }
+        return "The PC has no open windows or apps to show."
     }
 
     /// Put the hover on whichever row is under the pointer now, and on no

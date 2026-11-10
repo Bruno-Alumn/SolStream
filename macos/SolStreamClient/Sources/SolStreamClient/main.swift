@@ -2195,6 +2195,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "Reveal Log in Finder",
                         action: #selector(revealLog), keyEquivalent: "")
         appMenu.addItem(.separator())
+        // Every Mac application's three, with their usual keys. ⌘H is not
+        // reserved: from a streamed window it reaches the PC as Ctrl+H, as
+        // every other ⌘ letter does, and from the picker or Settings it hides.
+        appMenu.addItem(withTitle: "Hide SolStream",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide Others",
+                        action: #selector(NSApplication.hideOtherApplications(_:)),
+                        keyEquivalent: "h").keyEquivalentModifierMask = [.option, .command]
+        appMenu.addItem(withTitle: "Show All",
+                        action: #selector(NSApplication.unhideAllApplications(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit SolStream",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
@@ -2261,6 +2273,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.reserve(windowMenu.addItem(withTitle: "Close",
                                         action: #selector(NSWindow.performClose(_:)),
                                         keyEquivalent: "w"))
+        // Minimize on ⌃⌘M, as Close is on ⌃⌘W: ⌘M alone is the PC's Ctrl+M.
+        Self.reserve(windowMenu.addItem(withTitle: "Minimize",
+                                        action: #selector(NSWindow.performMiniaturize(_:)),
+                                        keyEquivalent: "m"))
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)),
+                           keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front",
+                           action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
         NSApp.windowsMenu = windowMenu

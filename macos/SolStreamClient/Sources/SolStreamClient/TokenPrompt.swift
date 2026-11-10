@@ -62,8 +62,8 @@ enum TokenPrompt {
     /// The sheet itself. Retained by its own completion handler until dismissed,
     /// because nothing else holds a reference to it once `present` returns.
     @MainActor
-    private final class Sheet: NSObject {
-        private let window: NSWindow
+    final class Sheet: NSObject {
+        let window: NSWindow
         private let field = DS.Field(placeholder: "Paste the token", mono: true)
         private var completion: (String?) -> Void
         private var done = false
@@ -86,6 +86,12 @@ enum TokenPrompt {
             heading.stringValue = Self.headingText(host: host, rejected: rejected)
             body.stringValue = Self.bodyText(rejected: rejected)
             self.completion = completion
+            // A heading that went from one line to two, or back, resizes the
+            // sheet with it.
+            if let content = window.contentView {
+                content.layoutSubtreeIfNeeded()
+                window.setContentSize(content.fittingSize)
+            }
         }
 
         func withdraw() {
@@ -130,7 +136,14 @@ enum TokenPrompt {
 
             heading.font = DS.title
             heading.textColor = DS.text
-            heading.lineBreakMode = .byTruncatingTail
+            // Two lines rather than one cut short: with a MagicDNS name the
+            // words cut were the ones saying whether the token was missing or
+            // refused.
+            heading.usesSingleLineMode = false
+            heading.cell?.wraps = true
+            heading.lineBreakMode = .byWordWrapping
+            heading.maximumNumberOfLines = 2
+            heading.preferredMaxLayoutWidth = 440 - DS.Metric.inset * 2
 
             body.font = DS.body
             body.textColor = DS.textSecondary
@@ -174,6 +187,7 @@ enum TokenPrompt {
                 stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -inset),
                 stack.topAnchor.constraint(equalTo: content.topAnchor, constant: inset),
                 stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -inset),
+                heading.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 body.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 fieldBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
