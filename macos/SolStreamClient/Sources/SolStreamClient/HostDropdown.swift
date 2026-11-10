@@ -276,6 +276,7 @@ final class HostDropdown: DS.Box {
             return self.rows[self.highlighted]
         }
         content.accessibleField = { [weak self] in self?.manualField }
+        content.accessibleFooter = { [weak self] in self?.discoveryLabel }
         listView = content
 
         let stack = NSStackView(views: listChildren())
@@ -401,6 +402,9 @@ final class HostDropdown: DS.Box {
         // discovery is doing.
         let pulse = DS.Dot(state: .working)
         let label = DS.label("Looking for more PCs…", font: DS.body, colour: DS.textMuted)
+        // One of the list's children to VoiceOver, so stepping through it
+        // reaches it as it did before the list was one.
+        discoveryLabel = label
         for child in [pulse, label] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(child)
@@ -430,7 +434,10 @@ final class HostDropdown: DS.Box {
         field.action = #selector(manualCommitted)
         manualField = field
 
-        let box = DS.FieldBox(field: field, trailing: DS.Chip("⌘K"))
+        let chip = DS.Chip("⌘K")
+        // The shortcut is the menu's to say; read out, it is an orphan "⌘K".
+        chip.setAccessibilityElement(false)
+        let box = DS.FieldBox(field: field, trailing: chip)
         row.addSubview(box)
         NSLayoutConstraint.activate([
             row.heightAnchor.constraint(equalToConstant: DS.Metric.fieldHeight + M.listPad),
@@ -488,13 +495,20 @@ final class HostDropdown: DS.Box {
         // The highlight is the list's selection to VoiceOver, which otherwise
         // heard nothing as ↓ and ↑ moved it: the list has keyboard focus, and
         // says which of its rows is current when that changes.
-        if let listView {
+        // Only when it moved: hover over the row already highlighted, or a
+        // refresh that lands on it again, would say the same row over.
+        let current = rows.indices.contains(highlighted) ? rows[highlighted] : nil
+        if let listView, current !== announcedRow {
+            announcedRow = current
             NSAccessibility.post(element: listView, notification: .selectedChildrenChanged)
         }
     }
 
-    /// The open list's content, for VoiceOver: the rows and the field.
+    /// The open list's content, for VoiceOver: the rows, the discovery line
+    /// and the field.
     private weak var listView: ListView?
+    private weak var announcedRow: NSView?
+    private weak var discoveryLabel: NSView?
 
     @objc private func manualCommitted() {
         let typed = ConnectWindow.dialable(manualField?.stringValue ?? "")
@@ -512,6 +526,9 @@ final class HostDropdown: DS.Box {
         panel = nil
         rows = []
         manualField = nil
+        listView = nil
+        announcedRow = nil
+        discoveryLabel = nil
         if commit { onPick?(selectedAddress) }
     }
 
@@ -789,11 +806,12 @@ final class HostDropdown: DS.Box {
         var accessibleRows: (() -> [NSView])?
         var accessibleCurrent: (() -> NSView?)?
         var accessibleField: (() -> NSView?)?
+        var accessibleFooter: (() -> NSView?)?
         override func isAccessibilityElement() -> Bool { true }
         override func accessibilityRole() -> NSAccessibility.Role? { .list }
         override func accessibilityLabel() -> String? { "PCs" }
         override func accessibilityChildren() -> [Any]? {
-            (accessibleRows?() ?? []) + [accessibleField?()].compactMap { $0 }
+            (accessibleRows?() ?? []) + [accessibleFooter?(), accessibleField?()].compactMap { $0 }
         }
         override func accessibilitySelectedChildren() -> [Any]? {
             accessibleCurrent?().map { [$0] } ?? []

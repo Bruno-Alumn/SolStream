@@ -41,7 +41,8 @@ final class HostDropdownTests: XCTestCase {
     private func checkedRows(in panel: NSWindow) -> [String] {
         var found: [String] = []
         func walk(_ view: NSView) {
-            if view.isAccessibilitySelected(),
+            // "chosen", the row's value: selected is where the arrows are.
+            if view.accessibilityValue() as? String == "chosen",
                let title = view.subviews.lazy.compactMap({ $0 as? NSTextField }).first {
                 found.append(title.stringValue)
             }
