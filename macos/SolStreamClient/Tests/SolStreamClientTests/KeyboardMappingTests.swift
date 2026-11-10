@@ -243,6 +243,22 @@ final class KeyboardMappingTests: XCTestCase {
         XCTAssertFalse(wire.send(.keyDown, keyCode: 0x03, deviceFlags: leftCommandAndControl))
     }
 
+    /// ⌃⌘` moves the keyboard to another stream window with ` still down;
+    /// that window's capture lets go of the key without sending it to the PC.
+    func testAShortcutKeyHeldIntoAnotherWindowStaysOffThePC() {
+        let first = Wire(), second = Wire()
+        let backtick: UInt16 = 0x32
+        XCTAssertFalse(first.send(.keyDown, keyCode: backtick, deviceFlags: leftCommandAndControl),
+                       "⌃⌘` is SolStream's")
+        XCTAssertTrue(second.send(.keyUp, keyCode: backtick, deviceFlags: 0),
+                      "the release reached the PC from the next window")
+        XCTAssertTrue(second.packets.isEmpty)
+        // Pressed again in that window, it is the PC's once more.
+        second.send(.keyDown, keyCode: backtick, deviceFlags: 0)
+        XCTAssertEqual(second.packets.map(\.pressed), [true])
+        second.send(.keyUp, keyCode: backtick, deviceFlags: 0)
+    }
+
     /// A key pressed before ⌘ whose release macOS never delivered is let go of
     /// when ⌘ comes up, if this Mac's keyboard says it is up -- and kept if
     /// the hand is still on it.

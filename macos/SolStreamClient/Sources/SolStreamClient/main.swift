@@ -2569,9 +2569,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sorted { $0.windowNumber < $1.windowNumber }
     }
 
+    /// The cyclable window in front: the key window, or the one a key sheet,
+    /// popover or dropdown list hangs from.
+    private func currentCycleIndex(in windows: [NSWindow]) -> Int? {
+        var key = NSApp.keyWindow
+        while let owner = key?.sheetParent ?? key?.parent { key = owner }
+        guard let key else { return nil }
+        return windows.firstIndex { $0 === key }
+    }
+
     @objc func cycleWindows(_ sender: NSMenuItem) {
         let windows = cyclableWindows
-        let current = windows.firstIndex { $0.isKeyWindow }
+        let current = currentCycleIndex(in: windows)
         guard let next = Self.nextWindowIndex(current: current, count: windows.count,
                                               backwards: sender.tag == 1) else { return }
         windows[next].makeKeyAndOrderFront(nil)
@@ -2940,7 +2949,7 @@ extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(cycleWindows(_:)) {
             let windows = cyclableWindows
-            return Self.nextWindowIndex(current: windows.firstIndex { $0.isKeyWindow },
+            return Self.nextWindowIndex(current: currentCycleIndex(in: windows),
                                         count: windows.count, backwards: false) != nil
         }
         if menuItem.action == #selector(disconnectHost), menuItem.representedObject == nil {

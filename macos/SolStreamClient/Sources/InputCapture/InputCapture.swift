@@ -457,8 +457,16 @@ public final class InputCapture {
     /// other than in the tests, which cannot select one.
     var inputMethodIsSelected: () -> Bool = InputCapture.inputMethodSelected
     /// Keys whose press went to AppKit as a SolStream shortcut, until they
-    /// come up; see `handleKeyEvent`.
-    private var shortcutKeys: Set<UInt16> = []
+    /// come up; see `handleKeyEvent`. One set for every stream window: ⌃⌘`
+    /// moves the keyboard to another window with ` still held, and that
+    /// window's capture would otherwise send its repeats and its release to
+    /// the PC. A fresh press of the key takes it off, so nothing is held back
+    /// for longer than the key is.
+    private static var shortcutKeys: Set<UInt16> = []
+    private var shortcutKeys: Set<UInt16> {
+        get { Self.shortcutKeys }
+        set { Self.shortcutKeys = newValue }
+    }
     /// Keys whose press went to the input method: their release does too,
     /// not to the PC, which never saw them go down.
     private var keysAtInputMethod: Set<UInt16> = []
