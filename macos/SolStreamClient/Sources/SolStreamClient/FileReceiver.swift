@@ -127,7 +127,8 @@ final class FileReceiver {
         agent.download(id: offer.id, size: offer.size, into: handle, progress: { received in
             // Told on the connection's queue; said on the main one, once a percent.
             DispatchQueue.main.async {
-                guard !self.abandoned, self.current == name else { return }
+                // Still this receiver's, replaced or not, until it ends.
+                guard self.current == name else { return }
                 let percent = Self.percent(received: received, of: offer.size)
                 guard percent != self.lastPercent else { return }
                 self.lastPercent = percent

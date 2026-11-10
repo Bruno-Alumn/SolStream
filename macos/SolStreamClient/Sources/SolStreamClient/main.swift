@@ -34,6 +34,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var agent: AgentConnection?
     /// Files sent from the PC with Send to Mac; one per connection.
     private var fileReceiver: FileReceiver?
+    /// The stream window showing files from the PC coming in, until the last
+    /// report.
+    private weak var receivingWindow: AppWindow?
     private var session: StreamSession?
     private var appWindows: [AppWindow] = []
     private var picker: AppPicker?
@@ -2781,18 +2784,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let receiver = FileReceiver(agent: agent)
             receiver.onReport = { [weak self] text in
                 Log.info("[files] \(text)")
-                if let window = self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
+                // In the window the progress was in, which takes it away.
+                if let window = self?.receivingWindow
+                    ?? self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
                     ?? self?.appWindows.first {
+                    window.holdNote(nil, as: .receiving)
                     window.tell(text)
                 }
+                self?.receivingWindow = nil
                 if !NSApp.isActive {
                     NSApp.requestUserAttention(.informationalRequest)
                 }
             }
             // Held in the window in front, until the report replaces it.
             receiver.onProgress = { [weak self] text in
-                (self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
-                    ?? self?.appWindows.first)?.tell(text, for: nil)
+                guard let self else { return }
+                // One window for a download's progress, so none is left
+                // holding a percent when the keyboard moves to another.
+                let window = self.receivingWindow
+                    ?? self.appWindows.first(where: { $0.window?.isKeyWindow == true })
+                    ?? self.appWindows.first
+                self.receivingWindow = window
+                window?.holdNote(text, as: .receiving)
             }
             // The old connection's queue: taken over, or said to be lost.
             fileReceiver?.replaced(by: receiver)

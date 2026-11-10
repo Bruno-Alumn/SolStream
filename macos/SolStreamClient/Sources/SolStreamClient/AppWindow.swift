@@ -1218,6 +1218,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                         let skipped = leftOut == 0 ? ""
                             : " \(leftOut == 1 ? "One item was" : "\(leftOut) items were") "
                               + "left out too: only files can be sent, not folders."
+                        self.holdNote(nil, as: .sending)
                         self.say("Couldn't send \(name) to the PC. "
                                  + (reason ?? "Check that the PC has room and SolStream there "
                                     + "is up to date.") + kept + skipped,
@@ -1234,6 +1235,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             Self.isSendingFiles = false
             sendingFiles = nil
             Log.info("[transfer] stopped by the person after \(received.count) of \(files.count)")
+            holdNote(nil, as: .sending)
             say(Self.stoppedText(received: received.count, leftOut: leftOut), for: 6)
         }
         func finish() {
@@ -1250,6 +1252,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                     let skipped = leftOut == 0 ? ""
                         : " \(leftOut == 1 ? "One item was" : "\(leftOut) items were") left "
                           + "out: only files can be sent, not folders."
+                    self.holdNote(nil, as: .sending)
                     self.say((sequence != nil
                               ? "\(what) copied to the PC. Press ⌘V to paste."
                               : "\(what) saved in Downloads\\SolStream on the PC.") + skipped,
@@ -1318,17 +1321,57 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// The note at the foot of the window: held while `seconds` is nil.
     /// Something for the person, shown where transfers are, for a few seconds,
     /// or held until replaced when `seconds` is nil.
+    ///
+    /// A note held this way stands for the caller's own news -- the input
+    /// blocked -- and the next one told replaces it, as before. A transfer's
+    /// progress is held apart (`holdNote`), so a note told over it shows for
+    /// its full time and the progress comes back after.
     func tell(_ text: String, for seconds: TimeInterval? = 8) {
-        say(text, for: seconds)
+        if let seconds {
+            noteState.hold(nil, as: .told)
+            flashNote(text, for: seconds)
+        } else {
+            noteState.hold(text, as: .told)
+            showNote()
+        }
     }
 
+    /// A transfer's progress line, held under any note flashed over it; nil
+    /// takes it away.
+    func holdNote(_ text: String?, as source: TransferNoteState.Source) {
+        noteState.hold(text, as: source)
+        showNote()
+    }
+
+    /// A note shown for `seconds` (flashed), or held for this window's sending
+    /// when `seconds` is nil -- its progress.
     private func say(_ text: String, for seconds: TimeInterval? = nil) {
-        transferNote.text = text
         if let seconds {
-            transferNote.flash(for: seconds)
+            flashNote(text, for: seconds)
         } else {
-            transferNote.hold()
+            holdNote(text, as: .sending)
         }
+    }
+
+    private var noteState = TransferNoteState()
+    private var noteExpiry: DispatchWorkItem?
+
+    private func flashNote(_ text: String, for seconds: TimeInterval) {
+        noteState.flash(text)
+        noteExpiry?.cancel()
+        let expiry = DispatchWorkItem { [weak self] in
+            self?.noteState.expireFlash()
+            self?.showNote()
+        }
+        noteExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: expiry)
+        showNote()
+    }
+
+    private func showNote() {
+        guard let text = noteState.shown else { return transferNote.dismiss() }
+        transferNote.text = text
+        transferNote.hold()
     }
 
     /// The app was renamed on the PC: the document it has open, an unread
@@ -1648,4 +1691,32 @@ final class CaptureHint: DS.Box {
             animator().alphaValue = alpha
         }, completionHandler: completion)
     }
+}
+
+/// What the note at the foot of a stream window shows: a flashed note for its
+/// time, over the progress lines held beneath it -- sending, receiving, or
+/// news held until replaced -- the earliest begun shown while several are.
+/// One note for all of them, each kept apart, so a file's report is not
+/// wiped by the next file's 0% and a send's result by a receive's percent.
+struct TransferNoteState: Equatable {
+    enum Source: Equatable { case sending, receiving, told }
+
+    private(set) var held: [Source] = []
+    private var heldText: [Source: String] = [:]
+    private(set) var flashed: String?
+
+    mutating func hold(_ text: String?, as source: Source) {
+        guard let text else {
+            held.removeAll { $0 == source }
+            heldText[source] = nil
+            return
+        }
+        if !held.contains(source) { held.append(source) }
+        heldText[source] = text
+    }
+
+    mutating func flash(_ text: String) { flashed = text }
+    mutating func expireFlash() { flashed = nil }
+
+    var shown: String? { flashed ?? held.first.flatMap { heldText[$0] } }
 }
