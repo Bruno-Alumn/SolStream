@@ -131,6 +131,10 @@ constexpr UINT WM_SOLSTREAM_UPDATE_EXITED = WM_APP + 5;
 /// The virtual display's answer from a job, ahead of its WM_SOLSTREAM_JOB_DONE;
 /// lParam is a std::string* the UI thread takes ownership of.
 constexpr UINT WM_SOLSTREAM_JOB_DISPLAY = WM_APP + 6;
+/// The status changed: the UI thread rebuilds the title and the tooltip from
+/// it, so they are written on one thread only and an older status can never
+/// land after a newer update's.
+constexpr UINT WM_SOLSTREAM_STATUS = WM_APP + 7;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kTrayOpen = 1;
 constexpr UINT kTrayCopyToken = 2;
@@ -2627,8 +2631,14 @@ void RefreshTrayTip(HWND window) {
         tip = TrayTip(g_status, g_update_tip_version);
         title = HostWindowTitle(g_status, g_update_tip_version);
     }
+    // The host window only; Setup and Uninstall keep their own names. Only
+    // when it changed: Narrator says a window's new name.
     if (g_mode == WindowMode::Host) {
-        SetWindowTextW(window, title.c_str());
+        wchar_t current[128] = {0};
+        GetWindowTextW(window, current, 128);
+        if (title != current) {
+            SetWindowTextW(window, title.c_str());
+        }
     }
     if (!g_tray_added) {
         return;
@@ -3464,6 +3474,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
         }
 
+        case WM_SOLSTREAM_STATUS:
+            RefreshTrayTip(window);
+            return 0;
+
         case WM_SOLSTREAM_UPDATE:
             ApplyUpdateCheck(window,
                              std::unique_ptr<update::CheckResult>(
@@ -3936,8 +3950,6 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
 }
 
 void UpdateHostStatus(const HostStatus& status) {
-    std::wstring tip;
-    std::wstring title;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The agent reports once a second and almost nothing changes between
@@ -3949,18 +3961,10 @@ void UpdateHostStatus(const HostStatus& status) {
         }
         first = false;
         g_status = status;
-        tip = TrayTip(status, g_update_tip_version);
-        title = HostWindowTitle(status, g_update_tip_version);
     }
     if (g_window) {
-        // The host window only; Setup and Uninstall keep their own names.
-        if (g_mode == WindowMode::Host) {
-            wchar_t current[128] = {0};
-            GetWindowTextW(g_window, current, 128);
-            if (title != current) {
-                SetWindowTextW(g_window, title.c_str());
-            }
-        }
+        // The title and the tooltip, on the UI thread: see WM_SOLSTREAM_STATUS.
+        PostMessageW(g_window, WM_SOLSTREAM_STATUS, 0, 0);
         // Only when it has actually changed, which is almost never. SetWindowText
         // on an EDIT clears the selection and puts the caret back at nought, so
         // writing the same token over the top of itself on every status update
@@ -3973,12 +3977,6 @@ void UpdateHostStatus(const HostStatus& status) {
             if (status.pairing_token != current) {
                 SetWindowTextW(g_token_edit, status.pairing_token.c_str());
             }
-        }
-        if (g_tray_added) {
-            NOTIFYICONDATAW data = TrayData(g_window);
-            data.uFlags = NIF_TIP | NIF_SHOWTIP;
-            wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
-            Shell_NotifyIconW(NIM_MODIFY, &data);
         }
         InvalidateRect(g_window, nullptr, FALSE);
     }

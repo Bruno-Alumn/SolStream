@@ -2715,6 +2715,19 @@ void TestTrayTip() {
     status.virtual_display = false;
     status.connected_clients = 1;
     CHECK(TrayTip(status, L"") == L"SolStream \u2014 streaming to your Mac");
+    // The hard failures outrank it, as in the window.
+    status.connected_clients = 0;
+    status.streaming_ready = false;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 streaming didn't start");
+    status.streaming_ready = true;
+    status.address.clear();
+    CHECK(TrayTip(status, L"") ==
+          L"SolStream \u2014 not reachable: this PC has no network address");
+    status.address = L"192.168.1.5";
+    status.agent_listening = false;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 not reachable yet");
+    status.agent_listening = true;
+    status.connected_clients = 1;
     status.driver_restart_pending = false;
     // The window's title says the same as the tooltip.
     CHECK(HostWindowTitle(status, L"") == TrayTip(status, L""));
