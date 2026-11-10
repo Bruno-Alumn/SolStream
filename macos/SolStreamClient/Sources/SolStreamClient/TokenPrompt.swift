@@ -59,6 +59,61 @@ enum TokenPrompt {
         return true
     }
 
+    /// What is wrong with a pasted token that cannot be one, said in the sheet
+    /// before it goes anywhere. Without it, a token missing its last digits,
+    /// or with an O for a zero, was refused by the connection and came back
+    /// as "didn't accept that token" -- blaming a PC that never saw it.
+    enum Problem: Error, Equatable {
+        case empty
+        /// A character no token has: they are hexadecimal.
+        case notHex(Character)
+        /// Fewer characters than the shortest token a PC has made, or an odd
+        /// number, which no hex string of whole bytes is: part was missed.
+        case incomplete(Int)
+    }
+
+    /// The token in `raw`, or what is wrong with it. White space anywhere is
+    /// dropped -- a paste can carry a line break -- and so is a label copied
+    /// along with it ("Pairing token: ..."). The PC makes 32 hex digits;
+    /// anything from 16 is let through, as the PC itself accepts, so an older
+    /// token that still works is never turned away here.
+    static func check(_ raw: String) -> Result<String, Problem> {
+        var token = raw
+        if let colon = token.lastIndex(of: ":"),
+           token[..<colon].lowercased().contains("token") {
+            token = String(token[token.index(after: colon)...])
+        }
+        token.removeAll { $0.isWhitespace }
+        guard !token.isEmpty else { return .failure(.empty) }
+        // ASCII only: a full-width digit is a hex digit to Swift, not to the PC.
+        if let bad = token.first(where: { !($0.isASCII && $0.isHexDigit) }) {
+            return .failure(.notHex(bad))
+        }
+        guard token.count >= 16, token.count % 2 == 0 else {
+            return .failure(.incomplete(token.count))
+        }
+        return .success(token)
+    }
+
+    /// The line under the field for `problem`: what is wrong, and what to do.
+    static func problemText(_ problem: Problem) -> String {
+        switch problem {
+        case .empty:
+            return "Paste the pairing token first."
+        case .notHex(let character):
+            let lookalike: String
+            switch character {
+            case "O", "o": lookalike = " An O may be a zero."
+            case "l", "I", "i": lookalike = " An \(character) may be a one."
+            default: lookalike = ""
+            }
+            return "A token has only 0–9 and a–f, not “\(character)”.\(lookalike)"
+        case .incomplete(let count):
+            return "That's \(count) characters, so part of the token was missed. "
+                + "Press Copy on the PC and paste again."
+        }
+    }
+
     /// The sheet itself. Retained by its own completion handler until dismissed,
     /// because nothing else holds a reference to it once `present` returns.
     @MainActor
@@ -70,6 +125,9 @@ enum TokenPrompt {
         private var keepAlive: Sheet?
         private let heading: NSTextField
         private let body: NSTextField
+        /// What is wrong with what was pasted, while something is.
+        private let problem = NSTextField(wrappingLabelWithString: "")
+        private var editObserver: NSObjectProtocol?
         private weak var parent: NSWindow?
         /// Every sheet up now; see `TokenPrompt.present`.
         private static var live: [Sheet] = []
@@ -91,10 +149,16 @@ enum TokenPrompt {
             window.title = heading
             body.stringValue = Self.bodyText(rejected: rejected)
             self.completion = completion
+            problem.isHidden = true
             // A heading that went from one line to two, or back, resizes the
             // sheet with it.
-            // Grown or shrunk from the bottom, so the top stays against the
-            // parent's title bar as a sheet's does.
+            fit()
+        }
+
+        /// The sheet's size for what it shows now. Grown or shrunk from the
+        /// bottom, so the top stays against the parent's title bar as a
+        /// sheet's does.
+        private func fit() {
             if let content = window.contentView {
                 content.layoutSubtreeIfNeeded()
                 let size = content.fittingSize
@@ -105,6 +169,18 @@ enum TokenPrompt {
                     && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
             }
         }
+
+        /// For the tests: the line under the field, nil while hidden.
+        var problemShown: String? { problem.isHidden ? nil : problem.stringValue }
+
+        /// For the tests: the field's text, set as a paste would.
+        var typed: String {
+            get { field.stringValue }
+            set { field.stringValue = newValue }
+        }
+
+        /// For the tests: Connect.
+        func connect() { accept() }
 
         /// For the tests: what VoiceOver calls the token field.
         var fieldAccessibilityLabel: String? { field.accessibilityLabel() }
@@ -187,7 +263,11 @@ enum TokenPrompt {
             // the hairline and, while it has focus, the accent ring.
             let fieldBox = DS.FieldBox(field: field)
 
-            let stack = NSStackView(views: [heading, body, fieldBox, buttons])
+            problem.font = DS.caption
+            problem.textColor = DS.danger
+            problem.isHidden = true
+
+            let stack = NSStackView(views: [heading, body, fieldBox, problem, buttons])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = DS.Space.x2
@@ -213,7 +293,18 @@ enum TokenPrompt {
                 body.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 fieldBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                problem.widthAnchor.constraint(equalTo: stack.widthAnchor),
             ])
+            // Wrong no longer once it is being fixed.
+            editObserver = NotificationCenter.default.addObserver(
+                forName: NSControl.textDidChangeNotification, object: field, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.problem.isHidden else { return }
+                    self.problem.isHidden = true
+                    self.fit()
+                }
+            }
             window.contentView = content
             window.setContentSize(content.fittingSize)
         }
@@ -233,19 +324,23 @@ enum TokenPrompt {
         }
 
         @objc private func accept() {
-            let token = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             // Return with nothing pasted -- or a paste that missed -- is not a
-            // choice to stop pairing: the sheet stays for the token. Cancel is
-            // how to stop.
-            guard !token.isEmpty else {
+            // choice to stop pairing: the sheet stays for the token, and says
+            // what is wrong with it. Cancel is how to stop.
+            switch TokenPrompt.check(field.stringValue) {
+            case .success(let token):
+                finish(token)
+            case .failure(let reason):
+                let text = TokenPrompt.problemText(reason)
+                problem.stringValue = text
+                problem.isHidden = false
+                fit()
                 NSSound.beep()
                 // Focus first: moving it makes VoiceOver say the field, which
                 // would cut the announcement off.
                 if field.currentEditor() == nil { window.makeFirstResponder(field) }
-                DS.announce("Paste the pairing token first.")
-                return
+                DS.announce(text)
             }
-            finish(token)
         }
 
         @objc private func dismiss() { finish(nil) }
@@ -253,6 +348,7 @@ enum TokenPrompt {
         private func finish(_ token: String?) {
             guard !done else { return }
             done = true
+            if let editObserver { NotificationCenter.default.removeObserver(editObserver) }
             Self.live.removeAll { $0 === self }
             if let parent = window.sheetParent {
                 parent.endSheet(window)
