@@ -56,6 +56,9 @@ final class HostDropdown: DS.Box {
     /// Fired when a row is committed, or when an address is typed into the last
     /// row and entered.
     var onPick: ((String) -> Void)?
+    /// Take a "Used before" address off the list: right-click, or ⌫ on its
+    /// highlighted row. Nil leaves recent rows as they are.
+    var onForget: ((String) -> Void)?
 
     private(set) var selectedAddress: String = ""
 
@@ -405,6 +408,9 @@ final class HostDropdown: DS.Box {
                 self?.selectedAddress = item.address
                 self?.closeList(commit: true)
             }
+            if item.kind == .recent, onForget != nil {
+                row.onForget = { [weak self] in self?.onForget?(item.address) }
+            }
             row.onHover = { [weak self] hovering in
                 guard hovering, let self, let index = self.rows.firstIndex(of: row) else { return }
                 self.highlighted = index
@@ -497,6 +503,11 @@ final class HostDropdown: DS.Box {
             return true
         case 53:   // ⎋ closes and restores
             closeList(commit: false); return true
+        case 51, 117:  // ⌫ and ⌦ take a used-before address off the list
+            if rows.indices.contains(highlighted), let forget = rows[highlighted].onForget {
+                forget()
+            }
+            return true
         default:
             return jumpByPrefix(event)
         }
@@ -511,17 +522,34 @@ final class HostDropdown: DS.Box {
     /// Typing jumps to the first row starting with what has been typed. The
     /// buffer clears after a pause, so "of" finds OFFICE-TOWER but a later "o"
     /// starts again rather than searching for "ofo".
+    ///
+    /// What no row starts with is an address being typed: it goes to the
+    /// last row's field, everything typed so far with it, and on from there.
+    /// The keys were swallowed before, and somebody typing 192.168.1.40 into
+    /// the open list saw nothing happen at all.
     private func jumpByPrefix(_ event: NSEvent) -> Bool {
-        guard let characters = event.charactersIgnoringModifiers?.lowercased(),
-              let first = characters.first, first.isLetter || first.isNumber else { return false }
+        guard event.modifierFlags.isDisjoint(with: [.command, .control, .option]),
+              let characters = event.charactersIgnoringModifiers?.lowercased(),
+              let first = characters.first, Self.typesAddress(first) else { return false }
         if Date().timeIntervalSince(typeAheadCleared) > 1.0 { typeAhead = "" }
         typeAhead += characters
         typeAheadCleared = Date()
         if let index = rows.firstIndex(where: { $0.searchKey.hasPrefix(typeAhead) }) {
             highlighted = index
             applyHighlight()
+        } else if let field = manualField {
+            field.stringValue = typeAhead
+            typeAhead = ""
+            panel?.makeFirstResponder(field)
+            let end = (field.stringValue as NSString).length
+            field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)
         }
         return true
+    }
+
+    /// A character an address or a PC's name can hold.
+    static func typesAddress(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || ".-:_[]".contains(character)
     }
 
     // MARK: - Row
@@ -532,6 +560,17 @@ final class HostDropdown: DS.Box {
         let searchKey: String
         var onClick: (() -> Void)?
         var onHover: ((Bool) -> Void)?
+        /// Set for a used-before row: what takes it off the list.
+        var onForget: (() -> Void)? {
+            didSet {
+                setAccessibilityCustomActions(onForget == nil ? nil : [
+                    NSAccessibilityCustomAction(name: "Remove from List") { [weak self] in
+                        self?.onForget?()
+                        return true
+                    },
+                ])
+            }
+        }
 
         private let detail: [Detail]
         private let dot = DS.Dot()
@@ -620,6 +659,16 @@ final class HostDropdown: DS.Box {
         override func mouseEntered(with event: NSEvent) { onHover?(true) }
         override func mouseExited(with event: NSEvent) { onHover?(false) }
         override func mouseDown(with event: NSEvent) { onClick?() }
+
+        override func menu(for event: NSEvent) -> NSMenu? {
+            guard onForget != nil else { return nil }
+            let menu = NSMenu()
+            menu.addItem(withTitle: "Remove from List", action: #selector(forgetChosen),
+                         keyEquivalent: "").target = self
+            return menu
+        }
+
+        @objc private func forgetChosen() { onForget?() }
 
         override func isAccessibilityElement() -> Bool { true }
         override func accessibilityRole() -> NSAccessibility.Role? { .button }

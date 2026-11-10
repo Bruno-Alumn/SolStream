@@ -206,6 +206,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // discovery did not find.
         hostDropdown.translatesAutoresizingMaskIntoConstraints = false
         hostDropdown.onPick = { [weak self] address in self?.hostPicked(address) }
+        hostDropdown.onForget = { [weak self] address in
+            guard let self else { return }
+            Self.forget(host: address, in: self.defaults)
+            self.refresh()
+        }
 
         // Supporting text, so `textMuted` rather than secondary: the subheading
         // above is the sentence to read, this is the footnote to the row.
@@ -1119,6 +1124,17 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     static func forgetRecents(in defaults: UserDefaults = .standard) {
         defaults.removeObject(forKey: recentHostsKey)
         defaults.removeObject(forKey: lastHostKey)
+    }
+
+    /// Take one address off the hosts used before -- a mistyped one, or a
+    /// PC's old address -- and off "last used" if it is that. Its pairing
+    /// token stays: Forget Paired PCs is for that.
+    static func forget(host: String, in defaults: UserDefaults = .standard) {
+        let kept = recentHosts(in: defaults).filter { !TokenStore.sameHost($0, host) }
+        defaults.set(kept, forKey: recentHostsKey)
+        if let last = lastHost(in: defaults), TokenStore.sameHost(last, host) {
+            defaults.removeObject(forKey: lastHostKey)
+        }
     }
 
     /// What was typed, as an address to dial: brackets round an IPv6 address
