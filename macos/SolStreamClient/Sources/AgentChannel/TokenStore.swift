@@ -160,13 +160,32 @@ public enum TokenStore {
         return tokens.count == 1 ? tokens.first : nil
     }
 
-    /// Every address a PC called `name` has been paired at, as recorded when
-    /// its greeting named it.
-    public static func hosts(forPCNamed name: String) -> [String] {
+    /// Every address the PC at `address` is paired at: that one, and the
+    /// others recorded under its name -- `name`, or the one its greeting gave
+    /// at `address` -- that hold the same token. Two PCs can share a name; a
+    /// different token is a different PC, and is left out.
+    public static func addresses(pairedLike address: String, named name: String?) -> [String] {
         lock.lock()
         defer { lock.unlock() }
         let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
-        return names.filter { $0.value.caseInsensitiveCompare(name) == .orderedSame }.map(\.key)
+        guard let pc = name ?? names.first(where: { sameHost($0.key, address) })?.value else {
+            return [address]
+        }
+        let namedHosts = names
+            .filter { $0.value.caseInsensitiveCompare(pc) == .orderedSame }
+            .map(\.key)
+        // The pairing to match: the address's own, or the one token every
+        // address by that name holds -- as `token(forPCNamed:)` finds it.
+        let shared = Set(namedHosts.compactMap { stored($0) })
+        guard let reference = stored(address) ?? (shared.count == 1 ? shared.first : nil) else {
+            return [address]
+        }
+        var hosts = [address]
+        for host in namedHosts where stored(host) == reference
+            && !hosts.contains(where: { sameHost($0, host) }) {
+            hosts.append(host)
+        }
+        return hosts
     }
 
     /// Whether `token(forPCNamed:)` would find one.

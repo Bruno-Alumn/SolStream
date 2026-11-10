@@ -7,15 +7,12 @@ import SolStreamLogging
 /// when one was reinstalled or given away.
 enum PairingForget {
     /// The addresses the PC at `address`, called `name`, is paired at: that
-    /// one, and every other it was paired at under its name -- the router's
-    /// next address for it, or its Wi-Fi and Ethernet both.
+    /// one, and every other it was paired at under its name with the same
+    /// token -- the router's next address for it, or its Wi-Fi and Ethernet
+    /// both -- but not another PC that happens to share the name. With no
+    /// name, as for a used-before row, the one its greeting gave is used.
     static func hosts(address: String, name: String?) -> [String] {
-        var hosts = [address]
-        for host in name.map(TokenStore.hosts(forPCNamed:)) ?? []
-        where !hosts.contains(where: { TokenStore.sameHost($0, host) }) {
-            hosts.append(host)
-        }
-        return hosts
+        TokenStore.addresses(pairedLike: address, named: name)
     }
 
     /// The Dock launchers made for apps on those addresses.

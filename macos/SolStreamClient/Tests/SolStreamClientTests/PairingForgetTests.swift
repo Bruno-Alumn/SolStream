@@ -48,6 +48,29 @@ final class PairingForgetTests: XCTestCase {
         XCTAssertTrue(TokenStore.hasToken(for: "laptop.invalid"), "another PC stays paired")
     }
 
+    /// Two PCs by one name, each with its own token, are two PCs.
+    func testAnotherPCByTheSameNameStaysPaired() {
+        TokenStore.set(token, for: "gaming-desk.invalid")
+        TokenStore.setName("GAMING", for: "gaming-desk.invalid")
+        TokenStore.set("00112233445566778899aabbccddeef0", for: "gaming-laptop.invalid")
+        TokenStore.setName("GAMING", for: "gaming-laptop.invalid")
+        let hosts = PairingForget.hosts(address: "gaming-desk.invalid", name: "GAMING")
+        XCTAssertEqual(hosts, ["gaming-desk.invalid"])
+        PairingForget.forget(hosts: hosts, removingLaunchers: false, defaults: defaults)
+        XCTAssertTrue(TokenStore.hasToken(for: "gaming-laptop.invalid"))
+    }
+
+    /// A used-before row has no name of its own; the one its greeting gave
+    /// finds the PC's other addresses.
+    func testAUsedBeforeRowFindsThePCsOtherAddresses() {
+        TokenStore.set(token, for: "desk-wifi.invalid")
+        TokenStore.setName("DESK", for: "desk-wifi.invalid")
+        TokenStore.set(token, for: "desk-wired.invalid")
+        TokenStore.setName("DESK", for: "desk-wired.invalid")
+        XCTAssertEqual(Set(PairingForget.hosts(address: "desk-wifi.invalid", name: nil)),
+                       ["desk-wifi.invalid", "desk-wired.invalid"])
+    }
+
     func testAnAddressAloneIsItsOwnPC() {
         XCTAssertEqual(PairingForget.hosts(address: "192.0.2.4", name: nil), ["192.0.2.4"])
     }
