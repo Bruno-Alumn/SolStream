@@ -153,6 +153,14 @@ enum AppLauncher {
         return cleaned.isEmpty ? "App" : cleaned
     }
 
+    /// Every launcher in `folder` that reads -- not a staging bundle a crash
+    /// left behind, ".<uuid>.app", which `make` skips too.
+    static func all(in folder: URL = AppLauncher.folder) -> [AppLink] {
+        let items = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        return items.filter { $0.pathExtension == "app" }.compactMap(Self.link(inLauncher:))
+    }
+
     /// Remove every launcher this app made, for Forget Paired PCs: each
     /// would only ask for a token now. Returns the ones removed, whose Dock
     /// tiles `removeFromDock` then takes off.

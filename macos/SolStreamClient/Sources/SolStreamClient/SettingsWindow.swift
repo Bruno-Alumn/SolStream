@@ -191,6 +191,8 @@ final class SettingsPane: NSView {
     // General
     let clipboardSwitch = SolarSwitch(label: "Sync the clipboard")
     let reopenSwitch = SolarSwitch(label: "Reopen the last app")
+    private lazy var showDockAppsButton = LinkButton(title: "Dock apps", font: DS.caption,
+                                                     target: self, action: #selector(showDockApps))
     // Updates
     let updater: Updater
     let versionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
@@ -250,6 +252,12 @@ final class SettingsPane: NSView {
 
     /// Every control from the settings as they are now.
     func refresh() {
+        applyReopenHelp(on: settings.reopensLastApp)
+        let dockApps = AppLauncher.all().count
+        showDockAppsButton.words = dockApps == 0 ? "Dock apps" : "Dock apps (\(dockApps))"
+        showDockAppsButton.toolTip = Self.dockAppsCaption(dockApps)
+        showDockAppsButton.setAccessibilityHelp(Self.dockAppsCaption(dockApps))
+        showDockAppsButton.isEnabled = dockApps > 0
         let quality = settings.videoQuality
         qualityPopUp.select(quality)
         qualityDetail.stringValue = quality.detail
@@ -552,6 +560,7 @@ final class SettingsPane: NSView {
         guard sender.isOn != settings.reopensLastApp else { return }
         Log.info("[settings] reopen the last app: \(sender.isOn ? "on" : "off")")
         write { settings.reopensLastApp = sender.isOn }
+        applyReopenHelp(on: sender.isOn)
     }
 
     @objc private func checkForUpdatesPressed(_ sender: Any?) {
@@ -728,13 +737,19 @@ final class SettingsPane: NSView {
         clipboardSwitch.action = #selector(clipboardToggled(_:))
         reopenSwitch.target = self
         reopenSwitch.action = #selector(reopenToggled(_:))
-        let general = section("General", rows: [
+        // The launchers had no place in the app at all: only a checkbox in
+        // Forget Paired PCs said they existed, in a folder nobody was told.
+        // Beside the heading, where Updates says its version: a row of their
+        // own took the window past a 13-inch screen.
+        let general = section("General", accessory: showDockAppsButton, rows: [
             row("Sync the clipboard", trailing: clipboardSwitch, below: [
                 Self.caption("Copy on one, paste on the other while streaming. "
                              + "Password manager copies stay on the Mac."),
             ]),
-            // No caption: the name says it, and this is the taller column.
+            // No caption: this is the taller column, and the window has to fit
+            // a 13-inch screen. What it will reopen is said on hover instead.
             row("Reopen the last app", trailing: reopenSwitch),
+
         ])
 
         // ── Updates ──────────────────────────────────────────────────────────
@@ -934,7 +949,33 @@ final class SettingsPane: NSView {
     }
 
     /// Supporting text under a row: `caption` in `textMuted`, wrapping.
-    private static func caption(_ text: String) -> NSTextField {
+    /// Under Reopen the last app: which app the next launch opens.
+    static func reopenCaption(_ last: AppLink?, on: Bool) -> String {
+        guard on else { return "SolStream opens on the list of PCs." }
+        guard let last else { return "Nothing was open at the last quit." }
+        return "Next launch: \(last.name) on \(last.host)."
+    }
+
+    /// Under Dock apps: how many there are, or how to make one.
+    static func dockAppsCaption(_ count: Int) -> String {
+        switch count {
+        case 0: return "None yet. Right-click an app in the list and choose Add to Dock."
+        case 1: return "1 app, in Applications › SolStream Apps."
+        default: return "\(count) apps, in Applications › SolStream Apps."
+        }
+    }
+
+    private func applyReopenHelp(on: Bool) {
+        let help = Self.reopenCaption(AppLink.last(), on: on)
+        reopenSwitch.toolTip = help
+        reopenSwitch.setAccessibilityHelp(help)
+    }
+
+    @objc private func showDockApps() {
+        NSWorkspace.shared.activateFileViewerSelecting([AppLauncher.folder])
+    }
+
+    static func caption(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = DS.caption
         label.textColor = DS.textMuted

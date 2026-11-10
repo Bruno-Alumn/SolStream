@@ -2592,12 +2592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The apps added to the Dock: every launcher in their folder that reads.
     private static func dockLaunchers() -> [AppLink] {
-        // Not a staging bundle a crash left behind, ".<uuid>.app", which has
-        // its link file already: `make` skips them too.
-        let items = (try? FileManager.default.contentsOfDirectory(
-            at: AppLauncher.folder, includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles])) ?? []
-        return items.filter { $0.pathExtension == "app" }.compactMap(AppLauncher.link(inLauncher:))
+        AppLauncher.all()
     }
 
     @objc private func dockOpen(_ sender: NSMenuItem) {
