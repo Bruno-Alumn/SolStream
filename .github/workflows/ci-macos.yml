@@ -9,12 +9,16 @@ on:
       - 'macos/**'
       - 'scripts/package-macos.sh'
       - 'VERSION'
+      # The Help menu links to its headings; HelpMenuTests holds them.
+      - 'README.md'
       - '.github/workflows/ci-macos.yml'
   pull_request:
     paths:
       - 'macos/**'
       - 'scripts/package-macos.sh'
       - 'VERSION'
+      # The Help menu links to its headings; HelpMenuTests holds them.
+      - 'README.md'
       - '.github/workflows/ci-macos.yml'
   workflow_dispatch:
 
