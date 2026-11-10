@@ -1950,7 +1950,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// rid of and could not show a download's progress.
     @objc private func checkForUpdates() {
         showSettings()
-        MainActor.assumeIsolated { Updater.shared.checkNow() }
+        // An update already found is what Settings now shows; asking again
+        // would only put "Checking…" in front of it for a moment.
+        MainActor.assumeIsolated {
+            if Updater.shared.announcedVersion == nil { Updater.shared.checkNow() }
+        }
+    }
+
+    /// The app menu's update item, named for what choosing it will show. A
+    /// launcher or "Reopen the last app" goes straight to the stream, past the
+    /// connect window that says an update is waiting, so the menu says it too.
+    static func updateMenuTitle(for state: Updater.State) -> String {
+        switch state {
+        case .ready(let version): return "Install Update \(version)…"
+        case .available(let version), .downloading(let version, _),
+             .waitingForStream(let version), .manualInstall(let version, _):
+            return "Update \(version) Available…"
+        default: return "Check for Updates…"
+        }
     }
 
     /// Volume, buffering and the mouse are applied by whoever owns them as they
@@ -2625,6 +2642,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates) {
+            menuItem.title = Self.updateMenuTitle(for: MainActor.assumeIsolated { Updater.shared.state })
+            return true
+        }
         if menuItem.action == #selector(addStreamToDock) {
             // Named, so it says what it will add.
             menuItem.title = streamLink.map { "Add \($0.name) to Dock" } ?? "Add App to Dock"
