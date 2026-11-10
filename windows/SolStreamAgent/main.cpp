@@ -8185,9 +8185,13 @@ int wmain(int argc, wchar_t** argv) {
             // Its size rather than its device name: "\\.\DISPLAY9" says
             // nothing to the person reading the window, and the name stays in
             // the log.
-            status.display_detail = status.virtual_display
+            // Its size only when what is captured is the virtual display:
+            // falling back to the main one for a moment, it would have shown
+            // the main monitor's size under the virtual display's name.
+            status.display_detail = !status.virtual_display ? L"not installed"
+                : CaptureDisplay() == solstream::VirtualDisplayDevice()
                 ? VirtualDisplaySummary(CaptureDisplay())
-                : L"not installed";
+                : L"ready";
 
             solstream::UpdateHostStatus(status);
             Sleep(1000);
