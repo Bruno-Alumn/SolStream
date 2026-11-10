@@ -685,9 +685,16 @@ final class LinkButton: NSButton {
         func styled(_ colour: NSColor) -> NSAttributedString {
             NSAttributedString(string: words, attributes: [.font: wordsFont, .foregroundColor: colour])
         }
-        attributedTitle = styled(hovering ? DS.text : DS.textSecondary)
+        // Off, it says so: its own colours left a disabled link looking and
+        // hovering exactly like one that would do something.
+        let lit = hovering && isEnabled
+        attributedTitle = styled(!isEnabled ? DS.textFaint : lit ? DS.text : DS.textSecondary)
         attributedAlternateTitle = styled(DS.textMuted)
-        contentTintColor = hovering ? DS.text : DS.textMuted
+        contentTintColor = !isEnabled ? DS.textFaint : lit ? DS.text : DS.textMuted
+    }
+
+    override var isEnabled: Bool {
+        didSet { paint(); window?.invalidateCursorRects(for: self) }
     }
 
     override func updateTrackingAreas() {
@@ -704,7 +711,7 @@ final class LinkButton: NSButton {
     override func mouseExited(with event: NSEvent) { hovering = false }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
     }
 
     // A borderless button draws its title 2pt in from its edge; a label draws

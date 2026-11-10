@@ -218,6 +218,11 @@ final class SettingsPane: NSView {
 
     /// - Parameter updater: whose state the Updates card shows; the tests pass
     ///   one of their own, so photographing the card checks nothing for real.
+    /// The Dock apps and the app reopened, asked for as they are shown;
+    /// replaceable so the tests photograph the same pane on every Mac.
+    var launchers: () -> [AppLink] = { AppLauncher.all() }
+    var lastApp: () -> AppLink? = { AppLink.last() }
+
     init(updater: Updater = .shared) {
         self.updater = updater
         super.init(frame: .zero)
@@ -235,6 +240,12 @@ final class SettingsPane: NSView {
             })
         }
         // A check moves on by itself, so the card follows it while open.
+        // Dock apps made or removed -- Add to Dock, Forget Paired PCs -- while
+        // the pane is open: its count and the app reopened follow.
+        observers.append(center.addObserver(forName: AppLauncher.didChange, object: nil,
+                                            queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        })
         observers.append(center.addObserver(forName: Updater.didChange, object: updater,
                                             queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshUpdates(announcing: true) }
@@ -253,7 +264,7 @@ final class SettingsPane: NSView {
     /// Every control from the settings as they are now.
     func refresh() {
         applyReopenHelp(on: settings.reopensLastApp)
-        let dockApps = AppLauncher.all().count
+        let dockApps = launchers().count
         showDockAppsButton.words = dockApps == 0 ? "Dock apps" : "Dock apps (\(dockApps))"
         showDockAppsButton.toolTip = Self.dockAppsCaption(dockApps)
         showDockAppsButton.setAccessibilityHelp(Self.dockAppsCaption(dockApps))
@@ -749,7 +760,6 @@ final class SettingsPane: NSView {
             // No caption: this is the taller column, and the window has to fit
             // a 13-inch screen. What it will reopen is said on hover instead.
             row("Reopen the last app", trailing: reopenSwitch),
-
         ])
 
         // ── Updates ──────────────────────────────────────────────────────────
@@ -948,34 +958,37 @@ final class SettingsPane: NSView {
         return stack
     }
 
-    /// Supporting text under a row: `caption` in `textMuted`, wrapping.
-    /// Under Reopen the last app: which app the next launch opens.
+    /// Reopen the last app's help: what it opened last time. Said as the
+    /// last time, not the next launch, since quitting now keeps whatever is
+    /// open then instead.
     static func reopenCaption(_ last: AppLink?, on: Bool) -> String {
         guard on else { return "SolStream opens on the list of PCs." }
-        guard let last else { return "Nothing was open at the last quit." }
-        return "Next launch: \(last.name) on \(last.host)."
+        guard let last else { return "Nothing to reopen yet." }
+        return "Last time: \(last.name) on \(last.host)."
     }
 
-    /// Under Dock apps: how many there are, or how to make one.
+    /// The Dock apps link's help: how many there are, or how to make one.
     static func dockAppsCaption(_ count: Int) -> String {
         switch count {
         case 0: return "None yet. Right-click an app in the list and choose Add to Dock."
-        case 1: return "1 app, in Applications › SolStream Apps."
-        default: return "\(count) apps, in Applications › SolStream Apps."
+        case 1: return "1 app, in your Applications › SolStream Apps folder."
+        default: return "\(count) apps, in your Applications › SolStream Apps folder."
         }
     }
 
     private func applyReopenHelp(on: Bool) {
-        let help = Self.reopenCaption(AppLink.last(), on: on)
+        let help = Self.reopenCaption(lastApp(), on: on)
         reopenSwitch.toolTip = help
         reopenSwitch.setAccessibilityHelp(help)
     }
 
+    /// The folder itself, open: selecting it showed its parent instead.
     @objc private func showDockApps() {
-        NSWorkspace.shared.activateFileViewerSelecting([AppLauncher.folder])
+        NSWorkspace.shared.open(AppLauncher.folder)
     }
 
-    static func caption(_ text: String) -> NSTextField {
+    /// Supporting text under a row: `caption` in `textMuted`, wrapping.
+    private static func caption(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = DS.caption
         label.textColor = DS.textMuted

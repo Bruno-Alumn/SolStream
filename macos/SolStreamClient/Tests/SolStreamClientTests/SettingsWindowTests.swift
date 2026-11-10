@@ -93,6 +93,9 @@ final class SettingsWindowTests: XCTestCase {
         settings.reopensLastApp = false
 
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         XCTAssertEqual(pane.qualityPopUp.titleOfSelectedItem, "High")
         XCTAssertEqual(pane.qualityDetail.stringValue, StreamSettings.VideoQuality.high.detail)
         XCTAssertEqual(pane.frameRateControl.segmentCount, 2)
@@ -141,6 +144,9 @@ final class SettingsWindowTests: XCTestCase {
         settings.syncsClipboard = true
 
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         XCTAssertFalse(pane.soundSwitch.isOn)
         XCTAssertFalse(pane.soundSourceControl.isEnabled)
         XCTAssertFalse(pane.soundQualityPopUp.isEnabled)
@@ -164,6 +170,9 @@ final class SettingsWindowTests: XCTestCase {
         settings.isMuted = false
         settings.pointerMode = .desktop
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
 
         settings.volume = 0.2
         XCTAssertEqual(pane.volumeSlider.doubleValue, 20, accuracy: 0.01)
@@ -199,6 +208,9 @@ final class SettingsWindowTests: XCTestCase {
         settings.syncsClipboard = true
         settings.reopensLastApp = true
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
 
         var restarts: [Bool] = []
         let observer = NotificationCenter.default.addObserver(
@@ -351,6 +363,9 @@ final class SettingsWindowTests: XCTestCase {
         settings.volume = 0.8
         settings.isMuted = false
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         XCTAssertEqual(pane.sensitivitySlider.accessibilityValueDescription(), "0.50×")
         XCTAssertEqual(pane.volumeSlider.accessibilityValueDescription(), "80%")
         settings.isMuted = true
@@ -630,6 +645,9 @@ final class SettingsWindowTests: XCTestCase {
     func testTheUpdatesCardFollowsTheUpdater() throws {
         let updater = makeUpdater()
         let pane = SettingsPane(updater: updater)
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         pane.layoutSubtreeIfNeeded()
         let height = pane.fittingSize.height
         XCTAssertEqual(pane.versionLabel.stringValue, "Version 1.0.0")
@@ -737,6 +755,9 @@ final class SettingsWindowTests: XCTestCase {
                             file: StaticString = #filePath, line: UInt = #line) throws {
         let appearance = try XCTUnwrap(NSAppearance(named: theme))
         let pane = SettingsPane(updater: updater)
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         pane.appearance = appearance
         let size = pane.fittingSize
         // 1440x900, the smallest 13-inch MacBook, leaves about 800 points
@@ -838,6 +859,9 @@ final class SettingsWindowTests: XCTestCase {
     @MainActor
     func testAFlagsSettingIsShownAsTheFlags() {
         let pane = SettingsPane(updater: makeUpdater())
+        pane.launchers = { [] }
+        pane.lastApp = { nil }
+        pane.refresh()
         pane.showOverrides([.frameRate, .audio])
         XCTAssertFalse(pane.frameRateControl.isEnabled)
         XCTAssertEqual(pane.frameRateControl.toolTip?.contains("--fps"), true)

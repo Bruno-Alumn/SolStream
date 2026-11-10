@@ -6,15 +6,15 @@ import XCTest
 final class SettingsDockAppsTests: XCTestCase {
     func testTheReopenCaption() {
         let notepad = AppLink(host: "gaming-pc", name: "Notepad", path: #"C:\Notepad.lnk"#)
-        XCTAssertEqual(SettingsPane.reopenCaption(notepad, on: true), "Next launch: Notepad on gaming-pc.")
-        XCTAssertEqual(SettingsPane.reopenCaption(nil, on: true), "Nothing was open at the last quit.")
+        XCTAssertEqual(SettingsPane.reopenCaption(notepad, on: true), "Last time: Notepad on gaming-pc.")
+        XCTAssertEqual(SettingsPane.reopenCaption(nil, on: true), "Nothing to reopen yet.")
         XCTAssertEqual(SettingsPane.reopenCaption(notepad, on: false), "SolStream opens on the list of PCs.")
     }
 
     func testTheDockAppsCaption() {
         XCTAssertTrue(SettingsPane.dockAppsCaption(0).contains("Add to Dock"))
-        XCTAssertEqual(SettingsPane.dockAppsCaption(1), "1 app, in Applications › SolStream Apps.")
-        XCTAssertEqual(SettingsPane.dockAppsCaption(3), "3 apps, in Applications › SolStream Apps.")
+        XCTAssertEqual(SettingsPane.dockAppsCaption(1), "1 app, in your Applications › SolStream Apps folder.")
+        XCTAssertEqual(SettingsPane.dockAppsCaption(3), "3 apps, in your Applications › SolStream Apps folder.")
     }
 
     /// Only launchers that read, and not a crash's staging bundle.

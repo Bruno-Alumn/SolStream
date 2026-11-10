@@ -2744,6 +2744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // forgotten, by itself, and asked for its token at once. A stream
         // open now is not saved at quit either, for the same reason.
         AppLink.setLast(nil)
+        NotificationCenter.default.post(name: AppLauncher.didChange, object: nil)
         // And the list of PCs used before, which otherwise still offered the
         // ones just forgotten, the window opening on the last of them.
         ConnectWindow.forgetRecents()

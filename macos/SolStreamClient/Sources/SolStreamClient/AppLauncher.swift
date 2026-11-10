@@ -27,6 +27,9 @@ import SolStreamLogging
 /// them. Removing one from the Dock leaves it there; deleting the folder
 /// removes them all.
 enum AppLauncher {
+    /// Posted when launchers are made or removed, for anything showing them.
+    static let didChange = Notification.Name("SolStream.launchersChanged")
+
     static var folder: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/SolStream Apps", isDirectory: true)
@@ -85,6 +88,7 @@ enum AppLauncher {
         // than whenever Launch Services next looks.
         LSRegisterURL(bundle as CFURL, true)
         Log.info("[launcher] wrote \(bundle.lastPathComponent) for \"\(link.name)\"")
+        NotificationCenter.default.post(name: didChange, object: nil)
         return bundle
     }
 
@@ -172,6 +176,7 @@ enum AppLauncher {
         for item in items where item.pathExtension == "app" && link(inLauncher: item) != nil {
             if (try? FileManager.default.removeItem(at: item)) != nil { removed.append(item) }
         }
+        if !removed.isEmpty { NotificationCenter.default.post(name: didChange, object: nil) }
         return removed
     }
 
