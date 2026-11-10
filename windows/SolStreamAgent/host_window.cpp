@@ -2852,13 +2852,39 @@ ULONGLONG g_banner_changed_at = 0;
 /// file is not there. Through the shell's own call, which opens in the
 /// signed-in user's Explorer whatever this window runs as; the folder itself
 /// rather than whatever Explorer falls back to for a path it cannot find.
-void ShowFileInExplorer(HWND window, const std::wstring& path) {
+///
+/// With `also`, every one of those that is there is selected beside it, in
+/// the same folder: a log that rotated has its older half next to it.
+void ShowFileInExplorer(HWND window, const std::wstring& path,
+                        const std::vector<std::wstring>& also = {}) {
     HRESULT hr = E_FAIL;
     if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::vector<PIDLIST_ABSOLUTE> items;
+        for (const std::wstring& file : also) {
+            if (GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+            if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(file.c_str())) items.push_back(item);
+        }
         if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(path.c_str())) {
-            hr = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+            if (items.empty()) {
+                hr = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+            } else {
+                // The folder's, and each file's own last part within it.
+                items.insert(items.begin(), item);
+                const size_t slash = path.find_last_of(L"\\/");
+                PIDLIST_ABSOLUTE folder = slash == std::wstring::npos
+                    ? nullptr : ILCreateFromPathW(path.substr(0, slash).c_str());
+                if (folder) {
+                    std::vector<PCUITEMID_CHILD> children;
+                    for (PIDLIST_ABSOLUTE each : items) children.push_back(ILFindLastID(each));
+                    hr = SHOpenFolderAndSelectItems(folder, (UINT) children.size(),
+                                                    children.data(), 0);
+                    ILFree(folder);
+                }
+                items.erase(items.begin());
+            }
             ILFree(item);
         }
+        for (PIDLIST_ABSOLUTE each : items) ILFree(each);
     }
     if (FAILED(hr)) {
         const size_t slash = path.find_last_of(L"\\/");
@@ -3278,7 +3304,10 @@ void ShowTrayMenu(HWND window) {
         case kTrayShowLog:
             // SolStream's own log, the file to send with a question; the
             // window had a way to setup's log only, and this one none.
-            ShowFileInExplorer(window, LocalDataPath(L"solstream.log"));
+            // With the older half beside it once it has rotated (main.cpp's
+            // Log() moves it aside at 1 MB): what went wrong may be in that.
+            ShowFileInExplorer(window, LocalDataPath(L"solstream.log"),
+                               {LocalDataPath(L"solstream.log.1")});
             break;
         case kTraySetUpDisplay:
             ShowFromTray(window);
