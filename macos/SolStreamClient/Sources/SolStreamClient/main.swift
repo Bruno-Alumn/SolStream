@@ -550,8 +550,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 do {
                     let launcher = try AppLauncher.make(link, icon: image, opener: opener)
-                    if !AppLauncher.addToDock(launcher) {
+                    // Said, either way it does not simply appear: a second
+                    // Add to Dock did nothing visible at all, and a Dock that
+                    // could not be changed opened Finder with no word why.
+                    switch AppLauncher.addToDock(launcher) {
+                    case .added:
+                        break
+                    case .alreadyThere:
+                        Self.inform("\(link.name) is already in the Dock",
+                                    "Its launcher has been refreshed from the PC.", over: parent)
+                    case .failed:
                         NSWorkspace.shared.activateFileViewerSelecting([launcher])
+                        Self.inform("Drag \(launcher.deletingPathExtension().lastPathComponent) "
+                                        + "to the Dock",
+                                    "SolStream couldn't change the Dock on this Mac, so it's "
+                                        + "shown in Finder for you to drag there.", over: parent)
                     }
                 } catch {
                     Log.error("[launcher] could not make one for \"\(link.name)\": \(error)")

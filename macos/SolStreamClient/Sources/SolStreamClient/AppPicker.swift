@@ -643,6 +643,18 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             as? PickerCell ?? PickerCell()
         let monogram = cell.tile
         monogram.configure(name: entry.title, key: entry.key)
+        // VoiceOver's Actions rotor: the context menu's one item, by name.
+        if onAddToDock != nil {
+            let choice = entry.choice
+            cell.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Add to Dock") { [weak self] in
+                    self?.onAddToDock?(choice)
+                    return true
+                },
+            ])
+        } else {
+            cell.setAccessibilityCustomActions(nil)
+        }
         // Cached across reloads: the list redraws on every keystroke, and asking
         // the host again each time would make typing hit the network.
         if let cached = iconCache[entry.key] {
@@ -856,7 +868,9 @@ private final class PickerCell: NSTableCellView {
 extension AppPicker: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let row = tableView.clickedRow
+        // The row right-clicked, or -- from the keyboard, ⌃Return or VoiceOver's
+        // menu -- the one selected: right-click alone left it out of reach.
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
         guard onAddToDock != nil, row >= 0, row < rows.count else { return }
         let item = NSMenuItem(title: "Add to Dock", action: #selector(addToDockChosen(_:)),
                               keyEquivalent: "")

@@ -217,17 +217,25 @@ enum AppLauncher {
     /// There is no API for this. The Dock keeps its tiles in its preferences
     /// and reads them when it starts, so the tile is added there and the Dock
     /// restarted: it disappears for a moment and comes back with the tile.
-    static func addToDock(_ launcher: URL) -> Bool {
+    enum DockResult: Equatable { case added, alreadyThere, failed }
+
+    /// Whether `tiles` hold `launcher`'s, by path as `tiles(_:without:)`
+    /// compares them.
+    static func dockHolds(_ tiles: [[String: Any]], _ launcher: URL) -> Bool {
+        Self.tiles(tiles, without: [launcher]).count != tiles.count
+    }
+
+    static func addToDock(_ launcher: URL) -> DockResult {
         let domain = "com.apple.dock" as CFString
         let key = "persistent-apps" as CFString
         guard let tiles = CFPreferencesCopyAppValue(key, domain) as? [[String: Any]] else {
             Log.error("[launcher] could not read the Dock's applications")
-            return false
+            return .failed
         }
         let url = URL(fileURLWithPath: launcher.path, isDirectory: true).absoluteString
-        if tiles.contains(where: { Self.url(ofTile: $0) == url }) {
+        if Self.dockHolds(tiles, launcher) {
             Log.info("[launcher] \(launcher.lastPathComponent) is in the Dock already")
-            return true
+            return .alreadyThere
         }
         let tile: [String: Any] = [
             "tile-type": "file-tile",
@@ -239,7 +247,7 @@ enum AppLauncher {
         CFPreferencesSetAppValue(key, (tiles + [tile]) as CFArray, domain)
         guard CFPreferencesAppSynchronize(domain) else {
             Log.error("[launcher] could not save the Dock's applications")
-            return false
+            return .failed
         }
         let restart = Process()
         restart.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
@@ -248,10 +256,10 @@ enum AppLauncher {
             try restart.run()
         } catch {
             Log.error("[launcher] could not restart the Dock: \(error)")
-            return false
+            return .failed
         }
         Log.info("[launcher] added \(launcher.lastPathComponent) to the Dock")
-        return true
+        return .added
     }
 
     /// Take the tiles of launchers just removed off the Dock. Left there,
