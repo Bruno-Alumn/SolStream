@@ -65,6 +65,7 @@
 #include "session_takeover.h"
 #include "token_store.h"
 #include "tray_tip.h"
+#include "startup_trouble.h"
 #include "banner_advice.h"
 #include "window_keys.h"
 #include "stranded.h"
@@ -2690,6 +2691,25 @@ void TestHolderHearing() {
     }
 }
 
+void TestPortTaken() {
+    const std::wstring self = L"C:\\Program Files\\SolStream\\SolStream.exe";
+    CHECK(ClassifyHolder(self, self) == PortHolder::SolStream);
+    CHECK(ClassifyHolder(L"C:\\Users\\b\\SOLSTREAM.EXE", self) == PortHolder::SolStream);
+    CHECK(ClassifyHolder(L"C:\\Tools\\other.exe", self) == PortHolder::Other);
+    CHECK(ClassifyHolder(L"", self) == PortHolder::Unknown);
+    const std::wstring log = L"C:\\Users\\b\\AppData\\Local\\SolStream\\solstream.log";
+    StartupTrouble mine = PortTakenMessage(47630, PortHolder::SolStream, self, log);
+    CHECK(mine.detail.find(L"already running") != std::wstring::npos);
+    CHECK(mine.detail.find(L"47630") != std::wstring::npos);
+    CHECK(mine.detail.find(log) != std::wstring::npos);
+    StartupTrouble other = PortTakenMessage(47630, PortHolder::Other, L"C:\\Tools\\other.exe", log);
+    CHECK(other.detail.rfind(L"other.exe is using port 47630", 0) == 0);
+    StartupTrouble unknown = PortTakenMessage(47630, PortHolder::Unknown, L"", L"");
+    CHECK(unknown.detail.find(L"port 47630") != std::wstring::npos);
+    CHECK(unknown.detail.find(L"log") == std::wstring::npos);
+    CHECK(unknown.detail.rfind(L" is using", 0) != 0);
+}
+
 void TestTrayMenu() {
     auto find = [](const std::vector<TrayItem>& items, unsigned id) -> const TrayItem* {
         for (const TrayItem& item : items) {
@@ -4982,6 +5002,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTrayTip();
     TestStaysDownloaded();
     TestTrayMenu();
+    TestPortTaken();
     TestAdvicePlace();
     TestWindowKeys();
     TestTextInput();

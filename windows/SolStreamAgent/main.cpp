@@ -33,6 +33,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <windows.h>
 #include <tlhelp32.h>
 #include <dwmapi.h>
@@ -66,6 +67,7 @@
 #include <vector>
 
 #include "agent_crypto.h"
+#include "startup_trouble.h"
 #include "capture_display.h"
 #include "clipboard.h"
 #include "display_setup.h"
@@ -7193,6 +7195,49 @@ void RaiseToNormalPriority() {
     }
 }
 
+/// The full path of the program listening on TCP `port`, or empty when it
+/// can't be told -- the table, or the process, out of this user's reach.
+std::wstring PortHolderImage(unsigned port) {
+    ULONG size = 0;
+    if (GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        != ERROR_INSUFFICIENT_BUFFER) {
+        return {};
+    }
+    std::vector<unsigned char> buffer(size);
+    auto* table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buffer.data());
+    if (GetExtendedTcpTable(table, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0)
+        != NO_ERROR) {
+        return {};
+    }
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const MIB_TCPROW_OWNER_PID& row = table->table[i];
+        if (ntohs((u_short) row.dwLocalPort) != port) continue;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.dwOwningPid);
+        if (!process) return {};
+        wchar_t path[MAX_PATH * 2] = {};
+        DWORD length = (DWORD) (sizeof(path) / sizeof(path[0]));
+        const BOOL known = QueryFullProcessImageNameW(process, 0, path, &length);
+        CloseHandle(process);
+        return known ? std::wstring(path, length) : std::wstring();
+    }
+    return {};
+}
+
+/// Say, in a message box, that the port is taken and by whom.
+void SayPortTaken(unsigned port) {
+    const std::wstring image = PortHolderImage(port);
+    wchar_t self[MAX_PATH * 2] = {};
+    GetModuleFileNameW(nullptr, self, (DWORD) (sizeof(self) / sizeof(self[0])));
+    const solstream::PortHolder holder = solstream::ClassifyHolder(image, self);
+    Log("[agent] port %u is held by %s", port,
+        holder == solstream::PortHolder::SolStream ? "another SolStream"
+        : holder == solstream::PortHolder::Other ? "another program" : "a program not known");
+    const solstream::StartupTrouble trouble = solstream::PortTakenMessage(
+        port, holder, image, LocalDataPath(L"solstream.log"));
+    MessageBoxW(nullptr, (trouble.headline + L"\n\n" + trouble.detail).c_str(), L"SolStream",
+                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+}
+
 int wmain(int argc, wchar_t** argv) {
     // Before anything can ask for administrator rights by this file's path.
     solstream::PinOwnExecutable();
@@ -7845,6 +7890,11 @@ int wmain(int argc, wchar_t** argv) {
                 Log("[agent] another program holds port %u -- probably another "
                     "SolStream, perhaps in another user's session. Stop it and "
                     "start this one again.", port);
+                // Said, unless started at logon with nobody to see it: a
+                // click on the shortcut otherwise did nothing visible.
+                if (!start_hidden) {
+                    SayPortTaken(port);
+                }
             }
             return 1;
         }
