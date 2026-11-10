@@ -1066,13 +1066,9 @@ void DrawLockup(float left, float top, float right) {
          g_palette.text);
     // Which SolStream this is, quietly, at the line's end: asked "which
     // version are you on?", the answer was only in an update's notice.
-    const std::wstring version = std::wstring(L"Version ") + kVersion;
-    const float version_w = MeasureWidth(version, g_fmt_caption);
-    const float caption_h = MeasureHeight(version, g_fmt_caption, version_w + 1.0f);
-    const float caption_top = top + (kLockupH - caption_h) / 2.0f;
-    Text(version, g_fmt_caption,
-         D2D1::RectF(right - version_w - 1.0f, caption_top, right, caption_top + caption_h),
-         g_palette.textMuted);
+    Text(std::wstring(L"Version ") + kVersion, g_fmt_caption,
+         D2D1::RectF(left, top, right, top + kLockupH), g_palette.textMuted,
+         DWRITE_TEXT_ALIGNMENT_TRAILING);
 }
 
 /// Make the window exactly as tall as what was just laid out.
@@ -2828,9 +2824,27 @@ void Activate(HWND window, int id) {
         case kIdShowLog: {
             // Selected in its folder rather than opened: it is the file to
             // send along with a question, and Explorer shows where it is.
-            const std::wstring select = L"/select,\"" + InstallLogPath() + L"\"";
-            ShellExecuteW(window, L"open", L"explorer.exe", select.c_str(), nullptr,
-                          SW_SHOWNORMAL);
+            // Through the shell's own call, which opens in the signed-in
+            // user's Explorer whatever this window runs as; and the folder
+            // itself when there is no log in it, rather than whatever folder
+            // Explorer falls back to for a path it cannot find.
+            const std::wstring log = InstallLogPath();
+            HRESULT hr = E_FAIL;
+            if (GetFileAttributesW(log.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(log.c_str())) {
+                    hr = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+                    ILFree(item);
+                }
+            }
+            if (FAILED(hr)) {
+                const size_t slash = log.find_last_of(L"\\/");
+                const std::wstring folder =
+                    slash == std::wstring::npos ? log : log.substr(0, slash);
+                if ((INT_PTR) ShellExecuteW(window, L"open", folder.c_str(), nullptr, nullptr,
+                                            SW_SHOWNORMAL) <= 32) {
+                    media::Log("[window] couldn't show the setup log (0x%08lX)", hr);
+                }
+            }
             break;
         }
 
