@@ -22,4 +22,17 @@ final class TokenSheetHeadingTests: XCTestCase {
         let fresh = TokenPrompt.Sheet(host: host, rejected: true) { _ in }
         XCTAssertEqual(sheet.window.frame.height, fresh.window.frame.height)
     }
+
+    /// VoiceOver names the sheet by its heading, hidden title and all, and the
+    /// field by what it takes; a retarget renames the sheet with it.
+    func testTheSheetAndItsFieldHaveNames() {
+        let sheet = TokenPrompt.Sheet(host: "PC", rejected: false) { _ in }
+        XCTAssertEqual(sheet.window.title,
+                       TokenPrompt.Sheet.headingText(host: "PC", rejected: false))
+        sheet.retarget(host: "PC", rejected: true) { _ in }
+        XCTAssertEqual(sheet.window.title,
+                       TokenPrompt.Sheet.headingText(host: "PC", rejected: true))
+        XCTAssertEqual(sheet.fieldAccessibilityLabel, "Pairing token")
+    }
+
 }

@@ -83,7 +83,12 @@ enum TokenPrompt {
         }
 
         func retarget(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
-            heading.stringValue = Self.headingText(host: host, rejected: rejected)
+            let heading = Self.headingText(host: host, rejected: rejected)
+            // Said when it changes -- a token refused while the sheet is up --
+            // which nothing on screen announces by itself.
+            if heading != self.heading.stringValue { DS.announce(heading) }
+            self.heading.stringValue = heading
+            window.title = heading
             body.stringValue = Self.bodyText(rejected: rejected)
             self.completion = completion
             // A heading that went from one line to two, or back, resizes the
@@ -96,9 +101,13 @@ enum TokenPrompt {
                 var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
                 frame.origin = NSPoint(x: window.frame.minX,
                                        y: window.frame.maxY - frame.height)
-                window.setFrame(frame, display: true, animate: window.isVisible)
+                window.setFrame(frame, display: true, animate: window.isVisible
+                    && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
             }
         }
+
+        /// For the tests: what VoiceOver calls the token field.
+        var fieldAccessibilityLabel: String? { field.accessibilityLabel() }
 
         func withdraw() {
             completion = { _ in }
@@ -137,6 +146,9 @@ enum TokenPrompt {
 
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            // Hidden, but what VoiceOver names the sheet by, rather than nothing.
+            window.title = Self.headingText(host: host, rejected: rejected)
+            field.setAccessibilityLabel("Pairing token")
             window.backgroundColor = DS.ground
             window.isMovableByWindowBackground = false
 
@@ -226,6 +238,7 @@ enum TokenPrompt {
             // how to stop.
             guard !token.isEmpty else {
                 NSSound.beep()
+                DS.announce("Paste the pairing token first.")
                 window.makeFirstResponder(field)
                 return
             }
