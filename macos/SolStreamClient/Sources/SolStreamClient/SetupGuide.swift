@@ -28,9 +28,15 @@ enum SetupGuide {
     ///   - paired: this Mac holds a pairing token for some PC.
     ///   - discovered: how many SolStream PCs discovery has found.
     ///   - reachable: whether the host on show answered; nil while unknown.
-    static func steps(paired: Bool, discovered: Int, reachable: Bool?) -> [Step]? {
+    ///   - cannotSearch: this Mac can't look on the network -- Local Network
+    ///     access is off -- so finding nothing says nothing about the PC, and
+    ///     the guide is left out rather than asking for SolStream to be
+    ///     installed on a PC that may well have it.
+    static func steps(paired: Bool, discovered: Int, reachable: Bool?,
+                      cannotSearch: Bool = false) -> [Step]? {
         guard !paired else { return nil }
         let found = discovered > 0 || reachable == true
+        if cannotSearch, !found { return nil }
         return found ? [.done, .done, .current] : [.current, .upcoming, .upcoming]
     }
 }

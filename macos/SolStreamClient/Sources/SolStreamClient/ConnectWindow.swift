@@ -87,6 +87,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     /// worked out afresh each time, because "Checking…" says nothing either
     /// way and the words should neither appear nor go while a probe is out.
     private var showsTailscaleAdvice = false
+    /// The hint says the network can't be searched: the line under it offers
+    /// the Local Network settings, in Tailscale's place -- nothing on the
+    /// network can be found, Tailscale's PCs or any other, until it is allowed.
+    private var showsLocalNetworkLink = false
     /// What the window was last sized for: which of the two optional parts
     /// had room, and what the Tailscale line says, since its two wordings
     /// can wrap differently. The window is re-fitted when this changes and at
@@ -508,6 +512,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = certain ? ConnectHint.tailscaleOff : ConnectHint.maybeTailscale
         }
         hintLabel.textColor = DS.textMuted
+        showsLocalNetworkLink = hintLabel.stringValue == ConnectHint.cannotSearch
         // The whole of it on hover, should a long PC name still push a hint
         // past its two lines.
         hintLabel.toolTip = hintLabel.stringValue
@@ -529,7 +534,8 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // Mac paired with one PC knows how this works.
         let steps = SetupGuide.steps(paired: TokenStore.hasAnyToken,
                                      discovered: discovered.count,
-                                     reachable: state.isReachable)
+                                     reachable: state.isReachable,
+                                     cannotSearch: showsLocalNetworkLink)
         guide.isHidden = steps == nil
         if let steps { guide.show(steps) }
         refreshTailscaleAdvice(firstRun: steps != nil, tailscaleOff: tailscaleOff)
@@ -593,7 +599,16 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         } else if let reachable = state.isReachable {
             showsTailscaleAdvice = !reachable
         }
-        let advice = tailscale.advice
+        let advice = showsLocalNetworkLink ? nil : tailscale.advice
+        if showsLocalNetworkLink {
+            tailscaleRow.isHidden = false
+            tailscaleWords.isHidden = true
+            tailscaleLink.isHidden = false
+            tailscaleLink.words = ConnectHint.localNetworkAction
+            stack.setCustomSpacing(DS.Space.x1, after: hintLabel)
+            fitIfLayoutChanged(guide: !guide.isHidden, advice: ConnectHint.localNetworkAction)
+            return
+        }
         tailscaleRow.isHidden = advice == nil
         tailscaleWords.isHidden = !showsTailscaleAdvice
         // No link at all where the advice is a command to run.
@@ -947,6 +962,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func tailscaleTapped() {
+        if showsLocalNetworkLink {
+            NSWorkspace.shared.open(ConnectHint.localNetworkSettings)
+            return
+        }
         tailscale.act()
     }
 
@@ -1258,6 +1277,10 @@ enum ConnectHint {
     static func found(_ names: String) -> String { "Found \(names) on this network." }
     static let cannotSearch = "Can't search the network. Check this Mac is online and SolStream "
         + "has Local Network access, or type the PC's address."
+    /// Where Local Network access is given, and the link that opens it.
+    static let localNetworkSettings = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")!
+    static let localNetworkAction = "Open Local Network Settings"
     static let firstConnection = "The first connection asks for the token shown on the PC."
     static let tailscaleOff = "That's a Tailscale address, and Tailscale is off on this Mac."
     static let maybeTailscale = "If that's a Tailscale address, turn Tailscale on on this Mac."

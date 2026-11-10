@@ -35,3 +35,23 @@ final class SetupGuideTests: XCTestCase {
                        [.done, .done, .current])
     }
 }
+
+/// With Local Network access off, nothing found says nothing about the PC.
+final class SetupGuideBlockedSearchTests: XCTestCase {
+    func testABlockedSearchDoesNotAskToInstallOnThePC() {
+        XCTAssertNil(SetupGuide.steps(paired: false, discovered: 0, reachable: nil,
+                                      cannotSearch: true))
+        // A PC that answered is still found, and the guide goes on to connect.
+        XCTAssertEqual(SetupGuide.steps(paired: false, discovered: 0, reachable: true,
+                                        cannotSearch: true), [.done, .done, .current])
+        // Unchanged otherwise.
+        XCTAssertEqual(SetupGuide.steps(paired: false, discovered: 0, reachable: nil),
+                       [.current, .upcoming, .upcoming])
+    }
+
+    func testTheLinkOpensLocalNetworkPrivacy() {
+        XCTAssertEqual(ConnectHint.localNetworkSettings.scheme, "x-apple.systempreferences")
+        XCTAssertTrue(ConnectHint.localNetworkSettings.absoluteString.hasSuffix("Privacy_LocalNetwork"))
+        XCTAssertEqual(ConnectHint.localNetworkAction, "Open Local Network Settings")
+    }
+}
