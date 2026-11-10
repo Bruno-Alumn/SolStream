@@ -2697,7 +2697,12 @@ void TestPortTaken() {
     CHECK(ClassifyHolder(L"C:\\Users\\b\\SOLSTREAM.EXE", self) == PortHolder::SolStream);
     CHECK(ClassifyHolder(L"C:\\Tools\\other.exe", self) == PortHolder::Other);
     CHECK(ClassifyHolder(L"", self) == PortHolder::Unknown);
+    CHECK(ClassifyHolder(L"", self, false) == PortHolder::Nobody);
+    CHECK(ClassifyHolder(L"C:/x/solstreamagent.exe", self) == PortHolder::SolStream);
     const std::wstring log = L"C:\\Users\\b\\AppData\\Local\\SolStream\\solstream.log";
+    StartupTrouble nobody = PortTakenMessage(47630, PortHolder::Nobody, L"", log);
+    CHECK(nobody.detail.find(L"isn't free yet") != std::wstring::npos);
+    CHECK(nobody.detail.find(L"Another program") == std::wstring::npos);
     StartupTrouble mine = PortTakenMessage(47630, PortHolder::SolStream, self, log);
     CHECK(mine.detail.find(L"already running") != std::wstring::npos);
     CHECK(mine.detail.find(L"47630") != std::wstring::npos);
@@ -2706,7 +2711,8 @@ void TestPortTaken() {
     CHECK(other.detail.rfind(L"other.exe is using port 47630", 0) == 0);
     StartupTrouble unknown = PortTakenMessage(47630, PortHolder::Unknown, L"", L"");
     CHECK(unknown.detail.find(L"port 47630") != std::wstring::npos);
-    CHECK(unknown.detail.find(L"log") == std::wstring::npos);
+    CHECK(unknown.detail.find(L"SolStream's log:") == std::wstring::npos);
+    CHECK(other.detail.find(L"SolStream's log: " + log) != std::wstring::npos);
     CHECK(unknown.detail.rfind(L" is using", 0) != 0);
 }
 

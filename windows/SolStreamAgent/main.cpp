@@ -7196,8 +7196,11 @@ void RaiseToNormalPriority() {
 }
 
 /// The full path of the program listening on TCP `port`, or empty when it
-/// can't be told -- the table, or the process, out of this user's reach.
-std::wstring PortHolderImage(unsigned port) {
+/// can't be told -- the process out of this user's reach. `listening` says
+/// whether a listener was found at all; true too when the table itself
+/// couldn't be read, as nothing can then be said.
+std::wstring PortHolderImage(unsigned port, bool& listening) {
+    listening = true;
     ULONG size = 0;
     if (GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0)
         != ERROR_INSUFFICIENT_BUFFER) {
@@ -7209,9 +7212,11 @@ std::wstring PortHolderImage(unsigned port) {
         != NO_ERROR) {
         return {};
     }
+    listening = false;
     for (DWORD i = 0; i < table->dwNumEntries; ++i) {
         const MIB_TCPROW_OWNER_PID& row = table->table[i];
         if (ntohs((u_short) row.dwLocalPort) != port) continue;
+        listening = true;
         HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, row.dwOwningPid);
         if (!process) return {};
         wchar_t path[MAX_PATH * 2] = {};
@@ -7223,15 +7228,32 @@ std::wstring PortHolderImage(unsigned port) {
     return {};
 }
 
+/// Whether a box shown now can be seen and answered: not in session 0, nor on
+/// a window station with no visible desktop -- a copy started over SSH, or
+/// by a task with nobody signed in, where a box would wait for ever.
+bool CanAskSomebody() {
+    DWORD session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || session == 0) {
+        return false;
+    }
+    USEROBJECTFLAGS flags{};
+    return GetUserObjectInformationW(GetProcessWindowStation(), UOI_FLAGS, &flags,
+                                     sizeof(flags), nullptr)
+        && (flags.dwFlags & WSF_VISIBLE) != 0;
+}
+
 /// Say, in a message box, that the port is taken and by whom.
 void SayPortTaken(unsigned port) {
-    const std::wstring image = PortHolderImage(port);
+    bool listening = true;
+    const std::wstring image = PortHolderImage(port, listening);
     wchar_t self[MAX_PATH * 2] = {};
     GetModuleFileNameW(nullptr, self, (DWORD) (sizeof(self) / sizeof(self[0])));
-    const solstream::PortHolder holder = solstream::ClassifyHolder(image, self);
+    const solstream::PortHolder holder = solstream::ClassifyHolder(image, self, listening);
     Log("[agent] port %u is held by %s", port,
         holder == solstream::PortHolder::SolStream ? "another SolStream"
-        : holder == solstream::PortHolder::Other ? "another program" : "a program not known");
+        : holder == solstream::PortHolder::Other ? "another program"
+        : holder == solstream::PortHolder::Nobody ? "no listener (reserved, or closing)"
+                                                  : "a program not known");
     const solstream::StartupTrouble trouble = solstream::PortTakenMessage(
         port, holder, image, LocalDataPath(L"solstream.log"));
     MessageBoxW(nullptr, (trouble.headline + L"\n\n" + trouble.detail).c_str(), L"SolStream",
@@ -7892,7 +7914,7 @@ int wmain(int argc, wchar_t** argv) {
                     "start this one again.", port);
                 // Said, unless started at logon with nobody to see it: a
                 // click on the shortcut otherwise did nothing visible.
-                if (!start_hidden) {
+                if (!start_hidden && !headless && CanAskSomebody()) {
                     SayPortTaken(port);
                 }
             }

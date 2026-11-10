@@ -14,11 +14,19 @@
 
 namespace solstream {
 
-enum class PortHolder { SolStream, Other, Unknown };
+/// SolStream, another program, a listener whose program can't be named, or
+/// no listener at all -- the port reserved by Windows, or still being let go
+/// of by a copy that just closed.
+enum class PortHolder { SolStream, Other, Unknown, Nobody };
 
-/// Who `image` -- the full path of the program holding the port, or empty
-/// when it couldn't be found -- is, beside `self`, this program's own path.
-inline PortHolder ClassifyHolder(const std::wstring& image, const std::wstring& self) {
+/// Who `image` -- the full path of the program listening on the port, or
+/// empty when it couldn't be named -- is, beside `self`, this program's own
+/// path. `listening`: a listener was found on the port at all.
+inline PortHolder ClassifyHolder(const std::wstring& image, const std::wstring& self,
+                                 bool listening = true) {
+    if (!listening) {
+        return PortHolder::Nobody;
+    }
     if (image.empty()) {
         return PortHolder::Unknown;
     }
@@ -63,8 +71,14 @@ inline StartupTrouble PortTakenMessage(unsigned port, PortHolder holder,
             break;
         case PortHolder::Unknown:
             trouble.detail = L"Another program is using port " + number + L", which SolStream "
-                             L"needs -- often another SolStream, for another user signed in to "
-                             L"this PC. Quit it, or restart this PC, then open SolStream again.";
+                             L"needs \u2014 often another SolStream, for another user signed in "
+                             L"to this PC. Quit it, or restart this PC, then open SolStream again.";
+            break;
+        case PortHolder::Nobody:
+            trouble.detail = L"Port " + number + L", which SolStream needs, isn't free yet: "
+                             L"Windows may have set it aside, or a copy of SolStream that just "
+                             L"closed is still letting go of it. Wait a minute and open SolStream "
+                             L"again; if it keeps happening, restart this PC.";
             break;
     }
     if (!log.empty()) {
