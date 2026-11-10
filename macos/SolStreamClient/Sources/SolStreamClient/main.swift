@@ -1492,6 +1492,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.appWindows.first { $0.window?.isKeyWindow == true }?
                 .tell(ClipboardBridge.pictureTooLargeNote)
         }
+        bridge.onFilesCopied = { [weak self] in
+            self?.appWindows.first { $0.window?.isKeyWindow == true }?
+                .tell(ClipboardBridge.filesCopiedNote)
+        }
         bridge.onTextCut = { [weak self] note in
             guard let self else { return }
             (self.appWindows.first { $0.window?.isKeyWindow == true } ?? self.appWindows.first)?

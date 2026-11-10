@@ -612,6 +612,44 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(fake.writes, [])
     }
 
+    /// Files copied in Finder are said once, when the stream has the
+    /// keyboard, and again for another copy; nothing is sent either way.
+    func testACopyOfFilesIsSaidOnceAndNotSent() {
+        var told = 0
+        bridge.onFilesCopied = { told += 1 }
+        bridge.start(resuming: false)
+        func copyFiles() {
+            pasteboard.clearContents()
+            let item = NSPasteboardItem()
+            item.setString("file:///Users/someone/report.pdf", forType: .fileURL)
+            item.setString("report.pdf", forType: .string)
+            pasteboard.writeObjects([item])
+        }
+        copyFiles()
+        bridge.syncNow()
+        XCTAssertEqual(told, 0, "said while the stream did not have the keyboard")
+        streamHasKeyboard = true
+        bridge.syncNow()
+        bridge.syncNow()
+        XCTAssertEqual(told, 1)
+        // The PC's clipboard was asked for meanwhile; its answers free the
+        // next tick, and say nothing new.
+        func answerThePC() {
+            for _ in 0..<5 where fake.isWaiting {
+                fake.answerRead(sequence: 1, unchanged: true)
+                settle()
+            }
+        }
+        answerThePC()
+        XCTAssertEqual(told, 1, "the same copy was said again")
+        copyFiles()
+        bridge.syncNow()
+        answerThePC()
+        XCTAssertEqual(told, 2, "another copy of files is another note")
+        XCTAssertEqual(fake.writes, [])
+        XCTAssertEqual(fake.imageWrites, [])
+    }
+
     /// Copy a link, then open the stream or Switch App: a new bridge is built,
     /// and it used to take the link as its baseline and bring the PC's
     /// clipboard over it.

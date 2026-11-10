@@ -476,6 +476,10 @@ final class ClipboardBridge {
                     toldTooLarge = changeCount
                     onPictureTooLarge?()
                 }
+                if isFiles, toldFiles != changeCount {
+                    toldFiles = changeCount
+                    onFilesCopied?()
+                }
             }
         }
 
@@ -623,6 +627,15 @@ final class ClipboardBridge {
     /// otherwise ⌘V on the PC pastes what was there before, and nothing says why.
     var onPictureTooLarge: (() -> Void)?
     private var toldTooLarge: Int?
+
+    /// Files copied in Finder, said once per copy when the stream takes the
+    /// keyboard: they are not sent -- the PC's clipboard would get their
+    /// names -- so ⌘V there pasted what it had before, and nothing said why,
+    /// or that dropping them on the window sends them.
+    var onFilesCopied: (() -> Void)?
+    private var toldFiles: Int?
+    static let filesCopiedNote =
+        "Copied files don't paste on the PC. Drag them onto this window to send them."
 
     /// Text too long to carry whole was cut to fit, with the note to show:
     /// otherwise a paste of a long log silently loses its end.
