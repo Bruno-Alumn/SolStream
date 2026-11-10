@@ -19,6 +19,11 @@ final class FileReceiver {
 
     /// What to tell the person: a file arrived, or why it didn't.
     var onReport: ((String) -> Void)?
+    /// How far the file being fetched has come, said each whole percent: a
+    /// large file sent from the PC said nothing for minutes, and Send to Mac
+    /// looked as if it had not worked. Held until the report replaces it.
+    var onProgress: ((String) -> Void)?
+    private var lastPercent = -1
 
     let agent: AgentConnection
     private var queue: [Offer] = []
@@ -115,9 +120,21 @@ final class FileReceiver {
             return refuse("Couldn't save \(name) in Downloads › SolStream.")
         }
         Log.info("[files] receiving \(offer.size) bytes from the PC")
+        lastPercent = 0
+        onProgress?(Self.receivingText(name: name, percent: 0, queued: queue.count))
         // Held strongly until the download ends, replaced or not: the part file
         // is this closure's to move or delete either way.
-        agent.download(id: offer.id, size: offer.size, into: handle) { outcome in
+        agent.download(id: offer.id, size: offer.size, into: handle, progress: { received in
+            // Told on the connection's queue; said on the main one, once a percent.
+            DispatchQueue.main.async {
+                guard !self.abandoned, self.current == name else { return }
+                let percent = Self.percent(received: received, of: offer.size)
+                guard percent != self.lastPercent else { return }
+                self.lastPercent = percent
+                self.onProgress?(Self.receivingText(name: name, percent: percent,
+                                                    queued: self.queue.count))
+            }
+        }) { outcome in
             try? handle.close()
             switch outcome {
             case .done:
@@ -137,6 +154,8 @@ final class FileReceiver {
                     return
                 }
                 self.queue.insert(offer, at: 0)
+                // Not a percent left standing over a connection that went.
+                self.onProgress?(Self.waitingText(name: name))
                 return self.waitForConnection(since: Date())
             case .refused(let why):
                 try? FileManager.default.removeItem(at: partial)
@@ -193,6 +212,24 @@ final class FileReceiver {
         current = nil
         onReport?(report)
         next()
+    }
+
+    /// The progress line for a file coming from the PC.
+    static func receivingText(name: String, percent: Int, queued: Int) -> String {
+        "Receiving \(AppWindow.shortName(name)) from the PC… \(min(max(percent, 0), 100))%"
+            + (queued == 0 ? "" : " · \(queued) more to come")
+    }
+
+    /// What the progress line says while the connection is away.
+    static func waitingText(name: String) -> String {
+        "The connection to the PC dropped. \(AppWindow.shortName(name)) comes again once it's back."
+    }
+
+    /// How far `received` bytes are into a file of `size`, in whole percent;
+    /// an empty file is all there at once.
+    static func percent(received: Int64, of size: Int64) -> Int {
+        guard size > 0 else { return 100 }
+        return Int(min(max(received, 0), size) * 100 / size)
     }
 
     static let partSuffix = ".solstream-part"

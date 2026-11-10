@@ -2789,6 +2789,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     NSApp.requestUserAttention(.informationalRequest)
                 }
             }
+            // Held in the window in front, until the report replaces it.
+            receiver.onProgress = { [weak self] text in
+                (self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
+                    ?? self?.appWindows.first)?.tell(text, for: nil)
+            }
             // The old connection's queue: taken over, or said to be lost.
             fileReceiver?.replaced(by: receiver)
             fileReceiver = receiver

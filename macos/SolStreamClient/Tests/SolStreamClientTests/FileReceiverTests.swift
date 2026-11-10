@@ -129,4 +129,24 @@ final class FileReceiverTests: XCTestCase {
                        "ファイルが変更されました。")
         XCTAssertEqual(AgentConnection.downloadReason("Error 5!"), "Error 5!")
     }
+
+    /// A file from the PC says how far it has come, and what is still to come.
+    func testTheProgressLine() {
+        XCTAssertEqual(FileReceiver.receivingText(name: "photo.jpg", percent: 40, queued: 0),
+                       "Receiving photo.jpg from the PC… 40%")
+        XCTAssertEqual(FileReceiver.receivingText(name: "photo.jpg", percent: 140, queued: 2),
+                       "Receiving photo.jpg from the PC… 100% · 2 more to come")
+        XCTAssertTrue(FileReceiver.waitingText(name: "photo.jpg").contains("photo.jpg"))
+    }
+
+    func testThePercentIsWholeAndBounded() {
+        XCTAssertEqual(FileReceiver.percent(received: 0, of: 1000), 0)
+        XCTAssertEqual(FileReceiver.percent(received: 499, of: 1000), 49)
+        XCTAssertEqual(FileReceiver.percent(received: 2000, of: 1000), 100)
+        XCTAssertEqual(FileReceiver.percent(received: -5, of: 1000), 0)
+        XCTAssertEqual(FileReceiver.percent(received: 0, of: 0), 100)
+        // Large files do not overflow.
+        XCTAssertEqual(FileReceiver.percent(received: 4_000_000_000, of: 8_000_000_000), 50)
+    }
+
 }
