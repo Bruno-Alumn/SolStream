@@ -18,6 +18,7 @@
 #include "host_window.h"
 #include "tray_tip.h"
 #include "banner_advice.h"
+#include "window_keys.h"
 #include "crash_report.h"
 
 #include "media/log.h"
@@ -182,10 +183,7 @@ bool g_quit_requested = false;
 /// Which face the window is showing, fixed at creation.
 WindowMode g_mode = WindowMode::Host;
 
-/// Where setup has got to. Setup, uninstall and the display-driver button all
-/// have the same shape — choose, work, then say what happened — so they share
-/// one state machine rather than each inventing their own.
-enum class Phase { Choosing, Working, Done, Failed };
+/// Where setup has got to; see Phase in window_keys.h.
 Phase g_phase = Phase::Choosing;
 std::wstring g_step;      ///< what the working phase is doing right now
 std::wstring g_outcome;   ///< the sentence shown when it finishes, either way
@@ -2809,6 +2807,20 @@ void ApplyInstallerExited(HWND window, DWORD exit_code) {
 }
 
 /// Whether `id` is a button or checkbox drawn on the current screen.
+/// The button a KeyPress names.
+int KeyPressButton(KeyPress press) {
+    switch (press) {
+        case KeyPress::CopyToken: return kIdCopyToken;
+        case KeyPress::Install: return kIdInstall;
+        case KeyPress::Cancel: return kIdCancel;
+        case KeyPress::OpenApp: return kIdOpenApp;
+        case KeyPress::Close: return kIdClose;
+        case KeyPress::Retry: return kIdRetry;
+        case KeyPress::None: break;
+    }
+    return 0;
+}
+
 bool IsShownControl(int id) {
     const Button* button = FindButton(id);
     if (button != nullptr) {
@@ -3628,6 +3640,28 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 && (lparam & (1 << 30)) == 0 && IsShownControl(g_focus)) {
                 Activate(window, g_focus);
                 return 0;
+            }
+            // With nothing focused, Enter, Escape and Ctrl+C press the button
+            // window_keys.h names -- one on show, and on a fresh press only.
+            {
+                const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                Key key;
+                bool known = true;
+                if (wparam == VK_RETURN && g_focus == 0 && !ctrl) {
+                    key = Key::Enter;
+                } else if (wparam == VK_ESCAPE) {
+                    key = Key::Escape;
+                } else if (wparam == 'C' && ctrl) {
+                    key = Key::CtrlC;
+                } else {
+                    known = false;
+                    key = Key::Enter;
+                }
+                const int id = known ? KeyPressButton(KeyTarget(g_mode, g_phase, key)) : 0;
+                if (id != 0 && (lparam & (1 << 30)) == 0 && IsShownControl(id)) {
+                    Activate(window, id);
+                    return 0;
+                }
             }
             break;
         }

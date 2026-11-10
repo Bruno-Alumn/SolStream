@@ -66,6 +66,7 @@
 #include "token_store.h"
 #include "tray_tip.h"
 #include "banner_advice.h"
+#include "window_keys.h"
 #include "stranded.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
@@ -2785,6 +2786,32 @@ void TestAdvicePlace() {
     CHECK(std::wstring(AdviceCaption(AdvicePlace::DeviceManager)) == L"Device Manager");
 }
 
+void TestWindowKeys() {
+    using M = WindowMode;
+    using P = Phase;
+    // Setup: Enter installs, Escape cancels; once finished Enter opens it and
+    // Escape closes; nothing while working.
+    CHECK(KeyTarget(M::Setup, P::Choosing, Key::Enter) == KeyPress::Install);
+    CHECK(KeyTarget(M::Setup, P::Choosing, Key::Escape) == KeyPress::Cancel);
+    CHECK(KeyTarget(M::Setup, P::Working, Key::Enter) == KeyPress::None);
+    CHECK(KeyTarget(M::Setup, P::Working, Key::Escape) == KeyPress::None);
+    CHECK(KeyTarget(M::Setup, P::Done, Key::Enter) == KeyPress::OpenApp);
+    CHECK(KeyTarget(M::Setup, P::Done, Key::Escape) == KeyPress::Close);
+    CHECK(KeyTarget(M::Setup, P::Failed, Key::Enter) == KeyPress::Retry);
+    CHECK(KeyTarget(M::Setup, P::Failed, Key::Escape) == KeyPress::Close);
+    // Uninstall: Remove is never a key's, but Escape cancels and Enter closes
+    // once it has finished.
+    CHECK(KeyTarget(M::Uninstall, P::Choosing, Key::Enter) == KeyPress::None);
+    CHECK(KeyTarget(M::Uninstall, P::Choosing, Key::Escape) == KeyPress::Cancel);
+    CHECK(KeyTarget(M::Uninstall, P::Done, Key::Enter) == KeyPress::Close);
+    CHECK(KeyTarget(M::Uninstall, P::Failed, Key::Enter) == KeyPress::Retry);
+    // The host: Ctrl+C copies the token; its Escape is its own.
+    CHECK(KeyTarget(M::Host, P::Choosing, Key::CtrlC) == KeyPress::CopyToken);
+    CHECK(KeyTarget(M::Host, P::Choosing, Key::Escape) == KeyPress::None);
+    CHECK(KeyTarget(M::Host, P::Choosing, Key::Enter) == KeyPress::None);
+    CHECK(KeyTarget(M::Setup, P::Choosing, Key::CtrlC) == KeyPress::None);
+}
+
 void TestCharKeys() {
     using namespace media;
     INPUT out[32];
@@ -4893,6 +4920,7 @@ int wmain(int argc, wchar_t** argv) {
     TestCharKeys();
     TestTrayTip();
     TestAdvicePlace();
+    TestWindowKeys();
     TestTextInput();
     TestCapsLock();
     TestHoldOrder();
