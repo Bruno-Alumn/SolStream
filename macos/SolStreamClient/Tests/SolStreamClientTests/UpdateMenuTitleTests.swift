@@ -13,7 +13,8 @@ final class UpdateMenuTitleTests: XCTestCase {
         XCTAssertEqual(AppDelegate.updateMenuTitle(for: .downloading("1.0.9", 0.5)),
                        "Update 1.0.9 Available…")
         XCTAssertEqual(AppDelegate.updateMenuTitle(for: .waitingForStream("1.0.9")),
-                       "Update 1.0.9 Available…")
+                       "Update 1.0.9 Installs After the Stream…")
+        XCTAssertEqual(AppDelegate.updateMenuTitle(for: .installed("1.0.9")), "Update 1.0.9 Installed…")
         XCTAssertEqual(AppDelegate.updateMenuTitle(for: .ready("1.0.9")), "Install Update 1.0.9…")
     }
 }

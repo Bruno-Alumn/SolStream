@@ -1950,22 +1950,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// rid of and could not show a download's progress.
     @objc private func checkForUpdates() {
         showSettings()
-        // An update already found is what Settings now shows; asking again
-        // would only put "Checking…" in front of it for a moment.
-        MainActor.assumeIsolated {
-            if Updater.shared.announcedVersion == nil { Updater.shared.checkNow() }
-        }
+        // Asked again even with an update in hand: a newer release may have
+        // come out since, and the updater keeps a download it already has.
+        MainActor.assumeIsolated { Updater.shared.checkNow() }
     }
 
     /// The app menu's update item, named for what choosing it will show. A
     /// launcher or "Reopen the last app" goes straight to the stream, past the
-    /// connect window that says an update is waiting, so the menu says it too.
+    /// connect window that says an update is waiting, so the menu says it too,
+    /// in the words Settings, which choosing it opens, goes on to use.
     static func updateMenuTitle(for state: Updater.State) -> String {
         switch state {
         case .ready(let version): return "Install Update \(version)…"
         case .available(let version), .downloading(let version, _),
-             .waitingForStream(let version), .manualInstall(let version, _):
+             .manualInstall(let version, _):
             return "Update \(version) Available…"
+        case .waitingForStream(let version): return "Update \(version) Installs After the Stream…"
+        case .installed(let version): return "Update \(version) Installed…"
         default: return "Check for Updates…"
         }
     }
