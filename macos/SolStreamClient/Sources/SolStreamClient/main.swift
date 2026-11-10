@@ -1509,11 +1509,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let note = inputBlockedNow {
                 appWindow.tell(note)
                 inputBlockedShown = true
-            } else if let note = session.outdatedHostNote,
-                      toldOutdatedHosts.insert(host).inserted {
-                // Once per PC while SolStream runs: a reminder on every window
-                // would be nagging, and the log keeps it either way.
-                appWindow.tell(note)
             }
 
             // Size the host window to this one and pin it there. The window owns
@@ -1523,6 +1518,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindow.placeAndLock()
             agent.focus(windowID: target.id)
             Log.info("[app] \"\(target.title)\" -> tile \(tile)")
+        }
+
+        // Once per PC while SolStream runs, on the window opened last, which
+        // is the one in front: a reminder on every window would be nagging,
+        // and the log keeps it either way. Not over the input-blocked note,
+        // which matters more now; the next open says it instead.
+        if inputBlockedNow == nil, let note = session.outdatedHostNote,
+           let front = appWindows.last,
+           toldOutdatedHosts.insert(AppLink.hostKey(host)).inserted {
+            front.tell(note, for: 12)
         }
 
         wire(session, host: host, agent: agent)

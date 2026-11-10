@@ -82,10 +82,12 @@ struct AppLink: Codable, Equatable {
     /// Host names are not case-sensitive, and a trailing dot is the same name.
     static func sameHost(_ a: String?, _ b: String?) -> Bool {
         guard let a, let b else { return false }
-        func plain(_ host: String) -> String {
-            host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
-        }
-        return plain(a) == plain(b)
+        return hostKey(a) == hostKey(b)
+    }
+
+    /// A host name as `sameHost` compares it: lower case, no trailing dot.
+    static func hostKey(_ host: String) -> String {
+        host.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
     }
 
     // MARK: - Files

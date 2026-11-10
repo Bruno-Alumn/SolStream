@@ -1265,8 +1265,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// The note at the foot of the window: held while `seconds` is nil.
     /// Something for the person, shown where transfers are, for a few seconds.
-    func tell(_ text: String) {
-        say(text, for: 8)
+    func tell(_ text: String, for seconds: TimeInterval = 8) {
+        say(text, for: seconds)
     }
 
     private func say(_ text: String, for seconds: TimeInterval? = nil) {
