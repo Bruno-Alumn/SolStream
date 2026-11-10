@@ -56,7 +56,7 @@ final class HostDropdown: DS.Box {
     /// Fired when a row is committed, or when an address is typed into the last
     /// row and entered.
     var onPick: ((String) -> Void)?
-    /// Take a "Used before" address off the list: right-click, or ⌫ on its
+    /// Take a "Used before" address off the list: right-click, or ⌘⌫ on its
     /// highlighted row. Nil leaves recent rows as they are.
     var onForget: ((String) -> Void)?
 
@@ -76,6 +76,8 @@ final class HostDropdown: DS.Box {
     private var highlighted: Int = 0
     private var monitor: Any?
     private var typeAhead = ""
+    /// The same keys as typed, case and all, for the field they may go to.
+    private var typedAhead = ""
     private var typeAheadCleared: Date = .distantPast
 
     private var isOpen: Bool { panel != nil }
@@ -503,9 +505,24 @@ final class HostDropdown: DS.Box {
             return true
         case 53:   // ⎋ closes and restores
             closeList(commit: false); return true
-        case 51, 117:  // ⌫ and ⌦ take a used-before address off the list
-            if rows.indices.contains(highlighted), let forget = rows[highlighted].onForget {
-                forget()
+        case 51, 117:
+            // ⌘⌫ takes a used-before address off the list, as it removes an
+            // item from a list across macOS. ⌫ alone is a typing mistake
+            // being put right: it takes back the last key typed into the
+            // list, never a row -- typed "19", the highlight on 192.168.1.40,
+            // ⌫ would otherwise have taken that address away.
+            if event.modifierFlags.contains(.command) {
+                if rows.indices.contains(highlighted), let forget = rows[highlighted].onForget {
+                    forget()
+                }
+            } else if !typeAhead.isEmpty {
+                typeAhead.removeLast()
+                typedAhead.removeLast()
+                typeAheadCleared = Date()
+                if let index = rows.firstIndex(where: { $0.searchKey.hasPrefix(typeAhead) }) {
+                    highlighted = index
+                    applyHighlight()
+                }
             }
             return true
         default:
@@ -519,9 +536,10 @@ final class HostDropdown: DS.Box {
         applyHighlight()
     }
 
-    /// Typing jumps to the first row starting with what has been typed. The
-    /// buffer clears after a pause, so "of" finds OFFICE-TOWER but a later "o"
-    /// starts again rather than searching for "ofo".
+    /// Typing jumps to the first row starting with what has been typed. After
+    /// a pause a key starts afresh when it would match nothing added to what
+    /// came before, so "of" finds OFFICE-TOWER but a later "o" finds the next
+    /// o -- and "192.1", a pause, "6" still runs on to 192.168…
     ///
     /// What no row starts with is an address being typed: it goes to the
     /// last row's field, everything typed so far with it, and on from there.
@@ -529,17 +547,27 @@ final class HostDropdown: DS.Box {
     /// the open list saw nothing happen at all.
     private func jumpByPrefix(_ event: NSEvent) -> Bool {
         guard event.modifierFlags.isDisjoint(with: [.command, .control, .option]),
-              let characters = event.charactersIgnoringModifiers?.lowercased(),
-              let first = characters.first, Self.typesAddress(first) else { return false }
-        if Date().timeIntervalSince(typeAheadCleared) > 1.0 { typeAhead = "" }
-        typeAhead += characters
+              let typed = event.characters, let first = typed.first,
+              Self.typesAddress(first) else { return false }
+        let key = typed.lowercased()
+        let matches: (String) -> Int? = { prefix in
+            self.rows.firstIndex { $0.searchKey.hasPrefix(prefix) }
+        }
+        if Date().timeIntervalSince(typeAheadCleared) > 1.0,
+           matches(typeAhead + key) == nil, matches(key) != nil {
+            typeAhead = ""
+            typedAhead = ""
+        }
+        typeAhead += key
+        typedAhead += typed
         typeAheadCleared = Date()
-        if let index = rows.firstIndex(where: { $0.searchKey.hasPrefix(typeAhead) }) {
+        if let index = matches(typeAhead) {
             highlighted = index
             applyHighlight()
         } else if let field = manualField {
-            field.stringValue = typeAhead
+            field.stringValue = typedAhead
             typeAhead = ""
+            typedAhead = ""
             panel?.makeFirstResponder(field)
             let end = (field.stringValue as NSString).length
             field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)

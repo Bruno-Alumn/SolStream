@@ -5,12 +5,12 @@ import XCTest
 /// its field, and a used-before address can be taken off the list.
 final class HostListEditTests: XCTestCase {
     private var defaults: UserDefaults!
-    private let suite = "HostListEditTests"
+    /// Its own each run: two checkouts testing at once share a suite name.
+    private let suite = "HostListEditTests-\(UUID().uuidString)"
 
-    override func setUp() {
-        super.setUp()
-        defaults = UserDefaults(suiteName: suite)
-        defaults.removePersistentDomain(forName: suite)
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
     }
 
     override func tearDown() {

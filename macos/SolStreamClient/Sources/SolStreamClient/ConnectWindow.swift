@@ -209,7 +209,14 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         hostDropdown.onForget = { [weak self] address in
             guard let self else { return }
             Self.forget(host: address, in: self.defaults)
-            self.refresh()
+            // Forgetting the PC on show moves the window on to another --
+            // left on it, Connect would put it straight back.
+            if TokenStore.sameHost(address, self.state.address) {
+                let next = self.discovered.first?.connectTarget ?? self.recentHosts.first ?? ""
+                self.hostPicked(next)
+            } else {
+                self.refresh()
+            }
         }
 
         // Supporting text, so `textMuted` rather than secondary: the subheading
@@ -1128,7 +1135,9 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
 
     /// Take one address off the hosts used before -- a mistyped one, or a
     /// PC's old address -- and off "last used" if it is that. Its pairing
-    /// token stays: Forget Paired PCs is for that.
+    /// token stays: Forget Paired PCs is for that. An address forgotten is
+    /// also no longer tried as another route to a paired PC whose usual one
+    /// fails (`preferAnotherRoute`), which only looks among these.
     static func forget(host: String, in defaults: UserDefaults = .standard) {
         let kept = recentHosts(in: defaults).filter { !TokenStore.sameHost($0, host) }
         defaults.set(kept, forKey: recentHostsKey)
