@@ -1264,8 +1264,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     /// The note at the foot of the window: held while `seconds` is nil.
-    /// Something for the person, shown where transfers are, for a few seconds.
-    func tell(_ text: String, for seconds: TimeInterval = 8) {
+    /// Something for the person, shown where transfers are, for a few seconds,
+    /// or held until replaced when `seconds` is nil.
+    func tell(_ text: String, for seconds: TimeInterval? = 8) {
         say(text, for: seconds)
     }
 
@@ -1421,13 +1422,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// subtitle for as long as it lasts, in every window: the note at the
     /// foot fades after a few seconds, and after it clicks went nowhere with
     /// nothing to say why.
-    func setInputBlocked(_ blocked: Bool) {
-        inputBlocked = blocked
+    func setInputBlocked(_ short: String?) {
+        inputBlocked = short?.isEmpty == false ? short : nil
         applySubtitle()
     }
 
     private var occludedBy: String?
-    private var inputBlocked = false
+    private var inputBlocked: String?
 
     private func applySubtitle() {
         window?.subtitle = Self.subtitle(inputBlocked: inputBlocked, occludedBy: occludedBy)
@@ -1438,8 +1439,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// on a narrow window instead of being truncated clear of it. Input
     /// blocked first: it is why nothing works, where a window in front only
     /// covers part of the picture.
-    static func subtitle(inputBlocked: Bool, occludedBy: String?) -> String {
-        if inputBlocked { return "⚠ Input blocked on the PC" }
+    static func subtitle(inputBlocked: String?, occludedBy: String?) -> String {
+        if let inputBlocked, !inputBlocked.isEmpty { return "⚠ \(inputBlocked)" }
         if let occludedBy, !occludedBy.isEmpty { return "⚠ \(occludedBy) in front" }
         return ""
     }

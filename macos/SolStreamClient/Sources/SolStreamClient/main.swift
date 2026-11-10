@@ -3,6 +3,7 @@ import AppKit
 import SolStreamLogging
 import MediaSession
 import AgentChannel
+import DesignSystem
 import VideoDecoder
 
 /// SolStream macOS client entry point.
@@ -773,9 +774,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A new connection: the host says again what blocks it, if anything.
             inputBlockedNow = nil
             inputBlockedShown = false
-            appWindows.forEach { $0.setInputBlocked(false) }
+            inputBlockedShort = nil
+            appWindows.forEach { $0.setInputBlocked(nil) }
         }
         agent.onInputBlocked = { [weak self] reason, app in self?.inputBlocked(reason, app: app) }
+        agent.onPushesReset = { [weak self] in self?.inputBlockedReset() }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
             guard let self, let agent else { return }
             self.receiveFile(FileReceiver.Offer(id: id, name: name, size: size), from: agent)
@@ -1523,7 +1526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
             }
             appWindow.show()
-            appWindow.setInputBlocked(inputBlockedNow != nil)
+            appWindow.setInputBlocked(inputBlockedShort)
             if let note = inputBlockedNow {
                 appWindow.tell(note)
                 inputBlockedShown = true
@@ -2533,6 +2536,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// What the PC last said blocks its input, kept so a stream window opened
     /// while it lasts says it too. Nil when nothing is in the way.
     var inputBlockedNow: String?
+    /// Its few words for the stream windows' subtitles.
+    var inputBlockedShort: String?
     /// PCs already told this run that their SolStream is older than this Mac's.
     var toldOutdatedHosts: Set<String> = []
     /// Whether a blocked note was shown, so "can control again" is said only
@@ -2547,11 +2552,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let note = Self.inputBlockedNote(reason, app: app) else { return }
         Log.info("[input] \(reason ?? "unblocked")\(app.map { " (\($0))" } ?? "")")
         inputBlockedNow = reason == nil ? nil : note
-        appWindows.forEach { $0.setInputBlocked(reason != nil) }
+        inputBlockedShort = Self.inputBlockedShort(reason, app: app)
+        appWindows.forEach { $0.setInputBlocked(inputBlockedShort) }
         if reason == nil && !inputBlockedShown { return }
         let window = appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
-        window?.tell(note)
+        // Held while it lasts: in full screen the subtitle is out of sight,
+        // and the note is all there is to say why clicks go nowhere.
+        window?.tell(note, for: reason == nil ? 8 : nil)
+        MainActor.assumeIsolated { DS.announce(note) }
         inputBlockedShown = reason != nil && window != nil
+    }
+
+    /// The subtitle's few words for it: the app by name when it is an
+    /// administrator's app in front, since clicking another one clears it.
+    static func inputBlockedShort(_ reason: String?, app: String?) -> String? {
+        guard let reason else { return nil }
+        if reason == "elevated", let app, !app.isEmpty { return "\(app) runs as administrator" }
+        return "Input blocked on the PC"
+    }
+
+    /// The socket came back: what the PC said blocked its input may have
+    /// cleared while the Mac was away, and it says only what is true now.
+    func inputBlockedReset() {
+        guard inputBlockedNow != nil else { return }
+        Log.info("[input] reconnected; forgetting the block the PC reported before")
+        inputBlockedNow = nil
+        inputBlockedShort = nil
+        appWindows.forEach { $0.setInputBlocked(nil) }
     }
 
     static func inputBlockedNote(_ reason: String?, app: String?) -> String? {

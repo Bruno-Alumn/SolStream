@@ -304,6 +304,12 @@ public final class AgentConnection {
     /// The PC said its input is blocked -- "secureDesktop", "screenSaver" or
     /// "elevated", with the app's name -- or nil once it is not. Main queue.
     public var onInputBlocked: ((String?, String?) -> Void)?
+    /// The socket came back after being lost. What a push said before it is
+    /// stale: the host sends a state only when it changes, and after a login
+    /// only what is true now -- so a block that cleared while the Mac was
+    /// away is never said to have cleared. Main queue, and ahead of anything
+    /// the new socket pushes.
+    public var onPushesReset: (() -> Void)?
     /// A link clicked on the host, with SolStream chosen as its browser there,
     /// to open on this Mac. Checked with `linkToOpen` before anything opens it.
     public var onOpenLink: ((String) -> Void)?
@@ -998,6 +1004,9 @@ public final class AgentConnection {
                     // `announceReconnection`, which is called once the greeting
                     // is complete.
                     self.reconnectedNeedsAnnouncing = true
+                    // From this queue, as every push is passed on, so it
+                    // lands before the first of the new socket's.
+                    DispatchQueue.main.async { [weak self] in self?.onPushesReset?() }
                 }
             case .failed(let error):
                 // A socket `retryUnanswered` has replaced says nothing more.
