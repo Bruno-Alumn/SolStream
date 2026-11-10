@@ -2888,11 +2888,6 @@ void MoveFocus(HWND window, int direction) {
 
 float ToDip(int pixels) { return pixels * 96.0f / g_dpi; }
 
-/// `update_version` is g_update_tip_version, read under g_mutex by the caller.
-/// The host lives in the tray, so an update an automatic check found is said
-/// here as well -- quietly, where somebody pointing at the icon will see it,
-/// rather than with a balloon. Not while streaming: then the stream is what the
-/// icon is about, and Install has to wait for the Mac anyway.
 NOTIFYICONDATAW TrayData(HWND window) {
     NOTIFYICONDATAW data{};
     data.cbSize = sizeof(data);

@@ -14,7 +14,14 @@
 namespace solstream {
 
 /// The tooltip for `status`, with `update_version` the update on offer or
-/// empty. Short: the notification area cuts a tip at 127 characters.
+/// empty -- g_update_tip_version, read under g_mutex by the caller. Short: the
+/// notification area cuts a tip at 127 characters.
+///
+/// The host lives in the tray, so an update an automatic check found is said
+/// here as well -- quietly, where somebody pointing at the icon will see it,
+/// rather than with a balloon. Not while streaming: then the stream is what the
+/// icon is about, and Install has to wait for the Mac anyway. Nor over a hard
+/// failure, which the window leads with too.
 inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version) {
     if (!status.agent_listening) {
         return L"SolStream — not reachable yet";
