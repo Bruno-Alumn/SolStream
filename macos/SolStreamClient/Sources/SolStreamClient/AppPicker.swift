@@ -632,7 +632,19 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        PickerRowView()
+        let view = PickerRowView()
+        // On the row as well as its cell: VoiceOver's cursor usually rests on
+        // the row, and its Actions rotor lists what the focused element offers.
+        if onAddToDock != nil, rows.indices.contains(row) {
+            let choice = rows[row].choice
+            view.setAccessibilityCustomActions([
+                NSAccessibilityCustomAction(name: "Add to Dock") { [weak self] in
+                    self?.onAddToDock?(choice)
+                    return true
+                },
+            ])
+        }
+        return view
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,
@@ -868,9 +880,14 @@ private final class PickerCell: NSTableCellView {
 extension AppPicker: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        // The row right-clicked, or -- from the keyboard, ⌃Return or VoiceOver's
-        // menu -- the one selected: right-click alone left it out of reach.
-        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        // The row right-clicked, or -- opened without the mouse, from
+        // VoiceOver's menu command -- the one selected: right-click alone left
+        // it out of reach. Not the selected row for a click on empty space
+        // below the list, which would offer an app nobody pointed at.
+        let byMouse = [.rightMouseDown, .leftMouseDown, .otherMouseDown]
+            .contains(NSApp.currentEvent?.type)
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow
+            : byMouse ? -1 : tableView.selectedRow
         guard onAddToDock != nil, row >= 0, row < rows.count else { return }
         let item = NSMenuItem(title: "Add to Dock", action: #selector(addToDockChosen(_:)),
                               keyEquivalent: "")

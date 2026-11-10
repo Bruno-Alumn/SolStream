@@ -560,11 +560,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         Self.inform("\(link.name) is already in the Dock",
                                     "Its launcher has been refreshed from the PC.", over: parent)
                     case .failed:
-                        NSWorkspace.shared.activateFileViewerSelecting([launcher])
+                        // Said first, Finder after: revealed first, Finder came
+                        // to the front and the reason was left behind it.
                         Self.inform("Drag \(launcher.deletingPathExtension().lastPathComponent) "
                                         + "to the Dock",
-                                    "SolStream couldn't change the Dock on this Mac, so it's "
-                                        + "shown in Finder for you to drag there.", over: parent)
+                                    "SolStream couldn't change the Dock on this Mac, so it "
+                                        + "will show it in Finder for you to drag there.",
+                                    over: parent) {
+                            NSWorkspace.shared.activateFileViewerSelecting([launcher])
+                        }
                     }
                 } catch {
                     Log.error("[launcher] could not make one for \"\(link.name)\": \(error)")
@@ -579,16 +583,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private static func inform(_ message: String, _ detail: String, over parent: NSWindow?) {
+    private static func inform(_ message: String, _ detail: String, over parent: NSWindow?,
+                               then done: (() -> Void)? = nil) {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = detail
         // A sheet on a window still on screen: the picker can have been put
         // away while the icon was fetched, and a sheet on it would never show.
         if let parent, parent.isVisible {
-            alert.beginSheetModal(for: parent)
+            alert.beginSheetModal(for: parent) { _ in done?() }
         } else {
             alert.runModal()
+            done?()
         }
     }
 

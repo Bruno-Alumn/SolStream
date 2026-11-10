@@ -209,14 +209,6 @@ enum AppLauncher {
 
     // MARK: - The Dock
 
-    /// Pin `launcher` at the end of the Dock's applications, unless it is
-    /// there already. False when the Dock's settings could not be read or
-    /// written -- a managed Mac, say -- and the caller shows it in Finder
-    /// instead, to be dragged there by hand.
-    ///
-    /// There is no API for this. The Dock keeps its tiles in its preferences
-    /// and reads them when it starts, so the tile is added there and the Dock
-    /// restarted: it disappears for a moment and comes back with the tile.
     enum DockResult: Equatable { case added, alreadyThere, failed }
 
     /// Whether `tiles` hold `launcher`'s, by path as `tiles(_:without:)`
@@ -225,9 +217,20 @@ enum AppLauncher {
         Self.tiles(tiles, without: [launcher]).count != tiles.count
     }
 
+    /// Pin `launcher` at the end of the Dock's applications, unless it is
+    /// there already. `.failed` when the Dock's settings could not be read or
+    /// written -- a managed Mac, say -- and the caller shows it in Finder
+    /// instead, to be dragged there by hand.
+    ///
+    /// There is no API for this. The Dock keeps its tiles in its preferences
+    /// and reads them when it starts, so the tile is added there and the Dock
+    /// restarted: it disappears for a moment and comes back with the tile.
     static func addToDock(_ launcher: URL) -> DockResult {
         let domain = "com.apple.dock" as CFString
         let key = "persistent-apps" as CFString
+        // Read fresh, as `removeFromDock` does: a cached copy still held a tile
+        // dragged off the Dock since, and said it was there.
+        CFPreferencesAppSynchronize(domain)
         guard let tiles = CFPreferencesCopyAppValue(key, domain) as? [[String: Any]] else {
             Log.error("[launcher] could not read the Dock's applications")
             return .failed
@@ -255,8 +258,9 @@ enum AppLauncher {
         do {
             try restart.run()
         } catch {
-            Log.error("[launcher] could not restart the Dock: \(error)")
-            return .failed
+            // Saved, so it is there the next time the Dock starts: dragged in
+            // by hand as well, it would be there twice.
+            Log.error("[launcher] could not restart the Dock: \(error); the tile shows when it next starts")
         }
         Log.info("[launcher] added \(launcher.lastPathComponent) to the Dock")
         return .added
