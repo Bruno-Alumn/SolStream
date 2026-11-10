@@ -8,9 +8,14 @@ import XCTest
 /// remembered at quit.
 final class UIPolishTwoTests: XCTestCase {
     func testThePickerSaysWhatIsKnownOfThePC() {
-        XCTAssertEqual(HostDropdown.spokenValue(title: "DESKTOP", detail: "Not answering"),
+        XCTAssertEqual(HostDropdown.spokenValue(title: "DESKTOP", detail: [.words("Not answering")]),
                        "DESKTOP, Not answering")
-        XCTAssertEqual(HostDropdown.spokenValue(title: "DESKTOP", detail: "  "), "DESKTOP")
+        XCTAssertEqual(HostDropdown.spokenValue(title: "DESKTOP", detail: []), "DESKTOP")
+        // Commas between parts, not the line's dots, and no round trip.
+        XCTAssertEqual(HostDropdown.spokenValue(
+            title: "DESKTOP",
+            detail: [.data("192.168.1.5"), .words("Paired"), .data("14 ms")]),
+            "DESKTOP, 192.168.1.5, Paired")
     }
 
     func testTheClosedPickerReadsItsDetail() {

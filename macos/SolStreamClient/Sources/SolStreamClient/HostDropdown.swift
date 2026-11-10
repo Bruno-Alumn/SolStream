@@ -154,12 +154,13 @@ final class HostDropdown: DS.Box {
     /// up on, and Enter chose it again.
     func setSelection(address: String, name: String?, detail: [Detail], dotState: DS.Dot.State) {
         let moved = address != selectedAddress
+        let before = accessibilityValue() as? String
         selectedAddress = address
         titleLabel.stringValue = name ?? (address.isEmpty ? "Choose a PC" : address)
         // Without a name the title IS the address, and addresses are set in mono.
         titleLabel.font = (name == nil && !address.isEmpty) ? DS.mono : DS.body
-        let before = accessibilityValue() as? String
         detailLabel.attributedStringValue = Detail.line(detail, colour: DS.textMuted)
+        spokenDetail = detail
         dot.state = dotState
         // Said again when it changes -- a check coming back, a PC waking --
         // as a pop-up button's value is.
@@ -210,13 +211,23 @@ final class HostDropdown: DS.Box {
     /// name alone: the dot and the line under it are how everyone else sees
     /// whether it is awake, paired, or there at all.
     override func accessibilityValue() -> Any? {
-        Self.spokenValue(title: titleLabel.stringValue,
-                         detail: detailLabel.attributedStringValue.string)
+        Self.spokenValue(title: titleLabel.stringValue, detail: spokenDetail)
     }
 
-    static func spokenValue(title: String, detail: String) -> String {
-        let more = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        return more.isEmpty ? title : title + ", " + more
+    /// The detail as said: its parts joined with commas rather than the
+    /// line's dots, and without the round trip, which changes with every
+    /// probe and would have VoiceOver say the whole line again each time.
+    private var spokenDetail: [Detail] = []
+
+    static func spokenValue(title: String, detail: [Detail]) -> String {
+        let parts = detail.compactMap { part -> String? in
+            switch part {
+            case .words(let text), .data(let text):
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                return trimmed.isEmpty || trimmed.hasSuffix(" ms") ? nil : trimmed
+            }
+        }
+        return ([title] + parts).joined(separator: ", ")
     }
     override func accessibilityPerformPress() -> Bool {
         isOpen ? closeList(commit: false) : openList()

@@ -326,7 +326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// What opens next time: what is on screen now, or, with nothing on
     /// screen, what a launcher or Reopen the Last App is still waking the PC
-    /// for or connecting to. Quitting during one wake that failed used to
+    /// for or connecting to -- not one already handed to the PC to start,
+    /// which is `openingLink`'s and is kept after a failure too. Quitting during one wake that failed used to
     /// forget the app for good. Nothing at all, nothing does: an app walked
     /// away from -- Back, leaving the PC -- is no longer waiting.
     static func linkToRemember(streaming: AppLink?, waitingToOpen: AppLink?) -> AppLink? {
@@ -678,7 +679,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // `report` delivers on the main queue.
                 MainActor.assumeIsolated {
                     self?.promptForToken(host: host, rejected: rejected, over: picker?.window,
-                                         agent: agent) { picker?.showFailure($0) }
+                                         agent: agent) { message in
+                        // Declined: whatever a launcher was waiting to open is
+                        // no longer wanted, and must not open, or ask for the
+                        // token again, at the next launch.
+                        self?.pendingOpen = nil
+                        self?.launchWake?.stop()
+                        picker?.showFailure(message)
+                    }
                 }
             default:
                 break
