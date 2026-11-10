@@ -1500,6 +1500,7 @@ final class CaptureHint: DS.Box {
     func hold() {
         pendingDismiss?.cancel()
         pendingDismiss = nil
+        shownGeneration += 1
         isHidden = false
         fade(to: 1)
     }
@@ -1507,6 +1508,7 @@ final class CaptureHint: DS.Box {
     /// Show the note, and take it away again after `seconds`.
     func flash(for seconds: TimeInterval = 2.5) {
         pendingDismiss?.cancel()
+        shownGeneration += 1
         isHidden = false
         fade(to: 1)
         let dismiss = DispatchWorkItem { [weak self] in self?.dismiss() }
@@ -1518,12 +1520,20 @@ final class CaptureHint: DS.Box {
         pendingDismiss?.cancel()
         pendingDismiss = nil
         guard !isHidden else { return }
+        let generation = shownGeneration
         fade(to: 0) { [weak self] in
-            // Unless a flash arrived during the fade.
-            guard let self, self.pendingDismiss == nil else { return }
+            // Unless the note was shown again during the fade -- held or
+            // flashed. Asking only whether a dismissal was pending missed a
+            // hold, which leaves none: the next composition's note, or a new
+            // drop's "Sending…", vanished as the last one finished fading.
+            guard let self, self.shownGeneration == generation else { return }
             self.isHidden = true
         }
     }
+
+    /// Counts every time the note is shown, so a fade-out can tell whether
+    /// it is still the one it was hiding.
+    private(set) var shownGeneration = 0
 
     private func fade(to alpha: CGFloat, then completion: (() -> Void)? = nil) {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {

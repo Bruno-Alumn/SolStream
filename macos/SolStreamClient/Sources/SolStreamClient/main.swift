@@ -2638,7 +2638,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         if launchers.state == .on {
             let removed = AppLauncher.removeAll()
-            Log.info("[launcher] removed \(removed) launcher(s) with the pairings")
+            Log.info("[launcher] removed \(removed.count) launcher(s) with the pairings")
+            AppLauncher.removeFromDock(removed)
         }
         TokenStore.removeAll()
         // And how to wake each one: a PC's hardware address is about that PC.

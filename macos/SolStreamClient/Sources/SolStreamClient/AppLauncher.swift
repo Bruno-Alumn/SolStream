@@ -154,13 +154,15 @@ enum AppLauncher {
     }
 
     /// Remove every launcher this app made, for Forget Paired PCs: each
-    /// would only ask for a token now. Their Dock tiles stay until taken off.
-    static func removeAll(in folder: URL = AppLauncher.folder) -> Int {
+    /// would only ask for a token now. Returns the ones removed, whose Dock
+    /// tiles `removeFromDock` then takes off.
+    @discardableResult
+    static func removeAll(in folder: URL = AppLauncher.folder) -> [URL] {
         let items = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil)) ?? []
-        var removed = 0
+        var removed: [URL] = []
         for item in items where item.pathExtension == "app" && link(inLauncher: item) != nil {
-            if (try? FileManager.default.removeItem(at: item)) != nil { removed += 1 }
+            if (try? FileManager.default.removeItem(at: item)) != nil { removed.append(item) }
         }
         return removed
     }
@@ -250,6 +252,48 @@ enum AppLauncher {
         }
         Log.info("[launcher] added \(launcher.lastPathComponent) to the Dock")
         return true
+    }
+
+    /// Take the tiles of launchers just removed off the Dock. Left there,
+    /// each was a question mark that did nothing, straight after the person
+    /// had asked for the launchers to go. Only the Dock's own tiles for
+    /// those exact bundles; restarted only when one was taken off.
+    @discardableResult
+    static func removeFromDock(_ launchers: [URL]) -> Bool {
+        guard !launchers.isEmpty else { return true }
+        let domain = "com.apple.dock" as CFString
+        let key = "persistent-apps" as CFString
+        guard let tiles = CFPreferencesCopyAppValue(key, domain) as? [[String: Any]] else {
+            Log.error("[launcher] could not read the Dock's applications")
+            return false
+        }
+        let kept = Self.tiles(tiles, without: launchers)
+        guard kept.count != tiles.count else { return true }
+        CFPreferencesSetAppValue(key, kept as CFArray, domain)
+        guard CFPreferencesAppSynchronize(domain) else {
+            Log.error("[launcher] could not save the Dock's applications")
+            return false
+        }
+        let restart = Process()
+        restart.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        restart.arguments = ["Dock"]
+        do {
+            try restart.run()
+        } catch {
+            Log.error("[launcher] could not restart the Dock: \(error)")
+            return false
+        }
+        Log.info("[launcher] took \(tiles.count - kept.count) launcher tile(s) off the Dock")
+        return true
+    }
+
+    /// `tiles` without those of `launchers`, matched by the URL the Dock
+    /// keeps, as `addToDock` writes it.
+    static func tiles(_ tiles: [[String: Any]], without launchers: [URL]) -> [[String: Any]] {
+        let gone = Set(launchers.map {
+            URL(fileURLWithPath: $0.path, isDirectory: true).absoluteString
+        })
+        return tiles.filter { Self.url(ofTile: $0).map { !gone.contains($0) } ?? true }
     }
 
     static func url(ofTile tile: [String: Any]) -> String? {

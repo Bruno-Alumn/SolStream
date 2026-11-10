@@ -105,7 +105,7 @@ final class AppLauncherTests: XCTestCase {
         _ = try AppLauncher.make(notepad, icon: nil, opener: "x", in: folder)
         let foreign = folder.appendingPathComponent("Other.app", isDirectory: true)
         try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
-        XCTAssertEqual(AppLauncher.removeAll(in: folder), 1)
+        XCTAssertEqual(AppLauncher.removeAll(in: folder).count, 1)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), ["Other.app"])
     }
 
