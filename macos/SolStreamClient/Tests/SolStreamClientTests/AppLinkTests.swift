@@ -114,4 +114,32 @@ final class AppLinkTests: XCTestCase {
         try Data(count: 128 * 1024).write(to: huge)
         XCTAssertNil(AppDelegate.link(at: huge))
     }
+
+    /// Try Again opens the window it was streaming while the PC still lists
+    /// it -- another of the app's windows, or one retitled since, is not it --
+    /// and the app as a launcher finds it once that window has gone.
+    func testTryAgainOpensTheWindowItWasStreaming() {
+        let link = AppLink(host: "pc", app: notepad)
+        let streamed = window("Draft.txt - Notepad", id: 7)
+        let other = window("Notes.txt - Notepad", id: 8)
+        guard case .running(let found) = AppDelegate.choice(
+            for: link, windowID: 7, windows: [other, streamed], apps: [notepad]) else {
+            return XCTFail("the streamed window is still there")
+        }
+        XCTAssertEqual(found.id, 7)
+        let retitled = AppLink(host: "pc", name: "Old title")
+        guard case .running(let same) = AppDelegate.choice(
+            for: retitled, windowID: 7, windows: [streamed], apps: [notepad]) else {
+            return XCTFail("a window retitled since is still the one streamed")
+        }
+        XCTAssertEqual(same.id, 7)
+        guard case .launch(let app) = AppDelegate.choice(
+            for: link, windowID: 7, windows: [other], apps: [notepad]) else {
+            return XCTFail("with the window gone, the app is opened as a launcher would")
+        }
+        XCTAssertEqual(app, notepad)
+        XCTAssertNil(AppDelegate.choice(for: retitled, windowID: 7, windows: [other],
+                                        apps: [notepad]))
+    }
+
 }

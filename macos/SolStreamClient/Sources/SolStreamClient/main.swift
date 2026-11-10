@@ -61,7 +61,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// An application asked for from outside the picker -- by a launcher,
     /// or as the one reopened at launch -- waiting for the picker's lists to
     /// be found in. See `open(link:)`.
-    private var pendingOpen: AppLink?
+    private var pendingOpen: AppLink? {
+        // Whatever asks for an open asks afresh: only Try Again names a window.
+        didSet { pendingWindowID = nil }
+    }
+    /// The PC window Try Again asks for again, set just after `pendingOpen`:
+    /// the window itself, while it is still there, rather than the app by
+    /// name, which found another of its windows or launched a second copy.
+    private var pendingWindowID: UInt64?
     /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
     private weak var tokenPromptParent: NSWindow?
@@ -500,6 +507,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// What to open for `link`: the window `windowID` names while the PC still
+    /// lists it -- the one Try Again was streaming, whatever its title says
+    /// now -- and otherwise the app as a launcher finds it.
+    static func choice(for link: AppLink, windowID: UInt64?, windows: [RemoteWindow],
+                       apps: [RemoteApp]) -> AppPicker.Choice? {
+        if let windowID, let window = windows.first(where: { $0.id == windowID }) {
+            return .running(window)
+        }
+        return link.choice(windows: windows, apps: apps)
+    }
+
     /// The application `pendingOpen` asks for, now that the picker has lists
     /// to find it in.
     private func openPending(windows: [RemoteWindow], apps: [RemoteApp], host: String,
@@ -510,6 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu. Taken as the answer, it said "isn't on the PC any more" for an
         // app that was, after one timed-out list; the next fill brings it.
         guard !apps.isEmpty else { return }
+        let windowID = pendingWindowID
         pendingOpen = nil
         guard !picker.isOpening else {
             // One open at a time, as on the list itself; the picker is
@@ -518,7 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSSound.beep()
             return
         }
-        guard let choice = link.choice(windows: windows, apps: apps) else {
+        guard let choice = Self.choice(for: link, windowID: windowID, windows: windows,
+                                       apps: apps) else {
             Log.error("[app] \"\(link.name)\" is not on \(host) any more")
             picker.showFailure("\(link.name) isn't on \(host) any more. Choose another app.")
             return
@@ -1546,6 +1566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let link = self.streamLink {
                     Log.info("[app] retry after a lost stream; opening \"\(link.name)\" again")
                     self.pendingOpen = link
+                    self.pendingWindowID = self.appWindows.first?.remoteWindowID
                 } else {
                     Log.info("[app] retry after a lost stream; returning to the picker")
                 }
@@ -1895,7 +1916,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[app] \(display.name) changed while the stream was down; "
                      + "returning to the picker")
             showEnded("Lost the stream",
-                      detail: "\(host)'s display changed. Try Again to pick the app again.")
+                      detail: "\(host)'s display changed. "
+                          + (streamLink != nil ? "Try Again opens the app again."
+                                               : "Try Again goes back to the app list."))
             return
         }
 
