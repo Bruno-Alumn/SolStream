@@ -17,4 +17,13 @@ final class UpdateMenuTitleTests: XCTestCase {
         XCTAssertEqual(AppDelegate.updateMenuTitle(for: .installed("1.0.9")), "Update 1.0.9 Installed…")
         XCTAssertEqual(AppDelegate.updateMenuTitle(for: .ready("1.0.9")), "Install Update 1.0.9…")
     }
+
+    /// Settings says the update line once per stage, whatever its percentage.
+    func testStagesIgnoreTheirDetail() {
+        XCTAssertEqual(SettingsPane.updateStage(.downloading("1.0.9", 0.1)),
+                       SettingsPane.updateStage(.downloading("1.0.9", 0.9)))
+        XCTAssertNotEqual(SettingsPane.updateStage(.downloading("1.0.9", 0.9)),
+                          SettingsPane.updateStage(.ready("1.0.9")))
+    }
+
 }

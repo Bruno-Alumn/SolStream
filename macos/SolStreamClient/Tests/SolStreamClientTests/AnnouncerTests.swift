@@ -24,4 +24,30 @@ final class AnnouncerTests: XCTestCase {
         voice.say("Starting…")
         XCTAssertEqual(priorities, [.high, .medium])
     }
+
+    /// A line whose words move within one stage -- a download's percentage --
+    /// is said once per stage.
+    func testOncePerKey() {
+        var said: [String] = []
+        let voice = DS.Announcer { text, _ in said.append(text) }
+        voice.say("Downloading 1.0.9… 1%", key: "downloading")
+        voice.say("Downloading 1.0.9… 2%", key: "downloading")
+        voice.say("Ready to install 1.0.9.", key: "ready")
+        XCTAssertEqual(said, ["Downloading 1.0.9… 1%", "Ready to install 1.0.9."])
+    }
+
+    /// Only where a line settles is said.
+    func testOnlyTheSettledLineIsSaid() {
+        var said: [String] = []
+        let voice = DS.Announcer { text, _ in said.append(text) }
+        voice.sayWhenSettled("The first connection asks for the token.", after: 0.1)
+        voice.sayWhenSettled("Reachable and paired.", after: 0.1)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(said, ["Reachable and paired."])
+        voice.sayWhenSettled("Not answering.", after: 0.1)
+        voice.hush()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(said, ["Reachable and paired."])
+    }
+
 }

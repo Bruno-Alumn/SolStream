@@ -386,6 +386,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         guard showsFailure, failureIsConnection else { return }
         showsFailure = false
         failureIsConnection = false
+        // A drop after this is news again, in the same words or not.
+        MainActor.assumeIsolated { statusVoice.reset() }
     }
 
     /// Something is being waited for and will resolve by itself -- the PC
@@ -395,7 +397,9 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         setSpinning(true)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.textMuted
-        MainActor.assumeIsolated { _ = statusVoice.say(message) }
+        // Progress only from the window in front; a failure always, since it
+        // answers what the person just did.
+        if window.isKeyWindow { MainActor.assumeIsolated { _ = statusVoice.say(message) } }
     }
 
     /// A launch is slow — a cold start is many seconds — so the row grows a
@@ -406,7 +410,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         setSpinning(true)
         statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
-        MainActor.assumeIsolated { _ = statusVoice.say(message) }
+        if window.isKeyWindow { MainActor.assumeIsolated { _ = statusVoice.say(message) } }
         openButton.isEnabled = false
         // One open says it twice, "Opening…" and then "Starting…", and the
         // selection may have moved in between: the row is the first one's.

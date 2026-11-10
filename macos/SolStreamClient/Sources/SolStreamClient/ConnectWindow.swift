@@ -512,7 +512,15 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // Said to VoiceOver when it changes, in the window in front: the
         // probe's answer -- asleep, needs pairing, Tailscale off -- was only
         // ever drawn.
-        if window.isKeyWindow { MainActor.assumeIsolated { _ = hintVoice.say(hintLabel.stringValue) } }
+        // Not while the PC on show has yet to answer -- what the line says
+        // then is a placeholder -- and only once it has stayed put a moment.
+        MainActor.assumeIsolated {
+            if window.isKeyWindow, state.address.isEmpty || state.isReachable != nil {
+                hintVoice.sayWhenSettled(hintLabel.stringValue)
+            } else {
+                hintVoice.hush()
+            }
+        }
         connectButton.isEnabled = !state.address.isEmpty
 
         // "Paired" for the guide is about this Mac, not the host on show: a

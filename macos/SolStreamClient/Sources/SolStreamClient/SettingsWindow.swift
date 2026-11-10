@@ -235,7 +235,7 @@ final class SettingsPane: NSView {
         // A check moves on by itself, so the card follows it while open.
         observers.append(center.addObserver(forName: Updater.didChange, object: updater,
                                             queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshUpdates() }
+            MainActor.assumeIsolated { self?.refreshUpdates(announcing: true) }
         })
     }
 
@@ -331,15 +331,37 @@ final class SettingsPane: NSView {
     /// something to act on -- the one action it calls for. The line is a
     /// button's height whichever shows, so the card never moves under the
     /// pointer as a check runs.
-    func refreshUpdates() {
+    /// Which stage an update is at, without its percentage or its version:
+    /// what is said once, however often the words within it move.
+    static func updateStage(_ state: Updater.State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .checking: return "checking"
+        case .upToDate: return "upToDate"
+        case .available: return "available"
+        case .downloading: return "downloading"
+        case .ready: return "ready"
+        case .waitingForStream: return "waitingForStream"
+        case .installing: return "installing"
+        case .installed: return "installed"
+        case .manualInstall: return "manualInstall"
+        case .failed: return "failed"
+        }
+    }
+
+    /// `announcing`: from the updater's own change, which is when its line is
+    /// news; a refresh for a switch flipped is not.
+    func refreshUpdates(announcing: Bool = false) {
         versionLabel.stringValue = "Version \(updater.currentVersion)"
         versionLabel.setAccessibilityLabel("SolStream version \(updater.currentVersion)")
         automaticUpdatesSwitch.isOn = updater.checksAutomatically
         updateStatus.stringValue = updater.statusText
         // Checking, downloading, ready: said as it moves on, while Settings
         // is the window in front.
-        if window?.isKeyWindow == true {
-            MainActor.assumeIsolated { _ = updateVoice.say(updater.statusText) }
+        if announcing, window?.isKeyWindow == true {
+            MainActor.assumeIsolated {
+                _ = updateVoice.say(updater.statusText, key: Self.updateStage(updater.state))
+            }
         }
 
         let action: (title: String, style: DS.Button.Style, enabled: Bool)?

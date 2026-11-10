@@ -226,17 +226,49 @@ public enum DS {
             self.post = post
         }
 
-        /// Say `text` if it is new; true when it was said.
+        /// Say `text` if it is new -- or, given a `key`, if the key is: a line
+        /// whose words move on within one state, a download's percentage or a
+        /// "checked 5 minutes ago", is said once per state. True when said.
         @discardableResult
-        public func say(_ text: String, priority: NSAccessibilityPriorityLevel = .medium) -> Bool {
-            guard !text.isEmpty, text != last else { return false }
-            last = text
+        public func say(_ text: String, key: String? = nil,
+                        priority: NSAccessibilityPriorityLevel = .medium) -> Bool {
+            pending?.cancel()
+            pending = nil
+            let mark = key ?? text
+            guard !text.isEmpty, mark != last else { return false }
+            last = mark
             post(text, priority)
             return true
         }
 
-        /// Forget what was said, so the same words are said again next time.
-        public func reset() { last = nil }
+        /// Say `text` once it has stayed the same for `delay`: a line that
+        /// passes through two or three states in a second -- a window opening
+        /// on a PC not yet asked -- says only where it settles.
+        public func sayWhenSettled(_ text: String, after delay: TimeInterval = 0.8,
+                                   priority: NSAccessibilityPriorityLevel = .medium) {
+            pending?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { _ = self?.say(text, priority: priority) }
+            }
+            pending = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        /// Stop a settled line from being said, and forget what was: the same
+        /// words are said again next time.
+        public func reset() {
+            pending?.cancel()
+            pending = nil
+            last = nil
+        }
+
+        /// Stop a settled line from being said, remembering what was.
+        public func hush() {
+            pending?.cancel()
+            pending = nil
+        }
+
+        private var pending: DispatchWorkItem?
     }
 
     /// A card: `surface`, a hairline edge, radius 12. Content goes inside at
