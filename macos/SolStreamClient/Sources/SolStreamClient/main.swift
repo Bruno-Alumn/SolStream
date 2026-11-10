@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// for next time, and what Add to Dock adds.
     private var openingLink: AppLink?
     private var streamLink: AppLink?
+    private var lastStreamed: AppLink?
     /// Asking whether to leave one PC's stream for a launcher's (see `open`).
     private var askingToOpen = false
     /// Started with `--host`: a test, or someone at a terminal. Nothing they
@@ -407,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`openPending`) and opens it as a click on its row would.
     private func open(link: AppLink) {
         NSApp.activate(ignoringOtherApps: true)
-        if let streamLink, streamLink.sameApp(as: link), let window = appWindows.first?.window {
+        if let streamLink, streamLink.likelySameApp(as: link), let window = appWindows.first?.window {
             Log.info("[app] \"\(link.name)\" is on screen already; bringing it forward")
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
@@ -1421,6 +1422,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // With it, a launcher's request still waiting: this open beat it.
         forgetPicker()
         streamLink = openingLink
+        // The last app streamed this run, for the Dock menu's Reopen: what
+        // is remembered at quit is the previous run's.
+        if let opening = openingLink { lastStreamed = opening }
         // A stream after Forget Paired PCs is a pairing made again: what it
         // streams is worth reopening.
         forgotPairings = false
@@ -2491,7 +2495,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// One Quit, with Force Quit on ⌥, per streamed app.
     /// SolStream's own Dock menu. With nothing streaming it used to offer
     /// nothing at all: the apps added to the Dock, and the last one opened,
     /// could not be reached from SolStream's icon. Now it lists them to open,
@@ -2500,7 +2503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         let entries = Self.dockOpenEntries(launchers: Self.dockLaunchers(),
-                                           last: AppLink.last(),
+                                           last: lastStreamed ?? AppLink.last(),
                                            streaming: appWindows.isEmpty ? nil : streamLink)
         for entry in entries {
             let item = NSMenuItem(title: entry.title, action: #selector(dockOpen(_:)),
@@ -2534,33 +2537,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// where two PCs have an app of the same name.
     static func dockOpenEntries(launchers: [AppLink], last: AppLink?,
                                 streaming: AppLink?) -> [(title: String, link: AppLink)] {
-        let onScreen = { (link: AppLink) in streaming.map { $0.sameApp(as: link) } ?? false }
-        let sorted = launchers.filter { !onScreen($0) }.sorted {
+        let onScreen = { (link: AppLink) in streaming.map { $0.likelySameApp(as: link) } ?? false }
+        // Each app once, whatever repeats the folder holds.
+        var unique: [AppLink] = []
+        for link in launchers where !onScreen(link) && !unique.contains(where: { $0.likelySameApp(as: link) }) {
+            unique.append(link)
+        }
+        let sorted = unique.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+        let reopen = last.flatMap { last in
+            onScreen(last) || unique.contains(where: { $0.likelySameApp(as: last) }) ? nil : last
+        }
+        let listed = sorted + (reopen.map { [$0] } ?? [])
         func title(_ link: AppLink, _ verb: String) -> String {
-            let twins = launchers.filter {
+            let twins = listed.filter {
                 $0.name.caseInsensitiveCompare(link.name) == .orderedSame
                     && !AppLink.sameHost($0.host, link.host)
             }
             return twins.isEmpty ? "\(verb) \(link.name)" : "\(verb) \(link.name) on \(link.host)"
         }
         var entries = sorted.map { (title: title($0, "Open"), link: $0) }
-        if let last, !onScreen(last), !launchers.contains(where: { $0.sameApp(as: last) }) {
-            entries.insert((title: title(last, "Reopen"), link: last), at: 0)
+        if let reopen {
+            entries.insert((title: title(reopen, "Reopen"), link: reopen), at: 0)
         }
         return entries
     }
 
     /// The apps added to the Dock: every launcher in their folder that reads.
     private static func dockLaunchers() -> [AppLink] {
+        // Not a staging bundle a crash left behind, ".<uuid>.app", which has
+        // its link file already: `make` skips them too.
         let items = (try? FileManager.default.contentsOfDirectory(
-            at: AppLauncher.folder, includingPropertiesForKeys: nil)) ?? []
+            at: AppLauncher.folder, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])) ?? []
         return items.filter { $0.pathExtension == "app" }.compactMap(AppLauncher.link(inLauncher:))
     }
 
     @objc private func dockOpen(_ sender: NSMenuItem) {
-        guard let link = sender.representedObject as? AppLink else { return }
+        guard !testMode, let link = sender.representedObject as? AppLink else { return }
         open(link: link)
     }
 

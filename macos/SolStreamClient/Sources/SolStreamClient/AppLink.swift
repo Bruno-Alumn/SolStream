@@ -71,6 +71,14 @@ struct AppLink: Codable, Equatable {
     }
 
     /// Whether this is the same application on the same PC as `other`.
+    /// `sameApp`, or the same name on the same PC: a launcher made before an
+    /// installer moved the app's shortcut has the old path, and is still the
+    /// app on screen -- opening it again closed the stream to reopen it.
+    func likelySameApp(as other: AppLink) -> Bool {
+        sameApp(as: other) || (Self.sameHost(host, other.host)
+                               && name.caseInsensitiveCompare(other.name) == .orderedSame)
+    }
+
     func sameApp(as other: AppLink) -> Bool {
         guard Self.sameHost(host, other.host) else { return false }
         if let path, let otherPath = other.path {

@@ -29,4 +29,15 @@ final class DockMenuTests: XCTestCase {
                                                   streaming: nil)
         XCTAssertEqual(Set(entries.map(\.title)), ["Open Notepad on pc", "Open Notepad on office"])
     }
+
+    /// A launcher made before the app's shortcut moved is still the app on
+    /// screen, and the same app as the last one: listed once, or not at all.
+    func testAnOldShortcutIsStillTheSameApp() {
+        let oldNotepad = AppLink(host: "PC", name: "notepad", path: #"C:\Old\Notepad.lnk"#)
+        XCTAssertTrue(AppDelegate.dockOpenEntries(launchers: [oldNotepad], last: nil,
+                                                  streaming: notepad).isEmpty)
+        XCTAssertEqual(AppDelegate.dockOpenEntries(launchers: [oldNotepad, notepad], last: notepad,
+                                                   streaming: nil).count, 1)
+    }
+
 }
