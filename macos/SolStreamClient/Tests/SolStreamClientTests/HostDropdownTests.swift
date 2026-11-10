@@ -78,6 +78,25 @@ final class HostDropdownTests: XCTestCase {
         XCTAssertEqual(picked, ["192.168.1.20"])
     }
 
+    /// VoiceOver hears the arrows: the list's selected child is the row the
+    /// highlight is on, and moves with ↓.
+    func testTheHighlightIsTheListsSelectionToVoiceOver() throws {
+        let (dropdown, _) = makeDropdown()
+        dropdown.items = [Self.item("192.168.1.10"), Self.item("192.168.1.20")]
+        dropdown.setSelection(address: "192.168.1.10", name: nil, detail: [], dotState: .live)
+        dropdown.openForTesting()
+        let panel = try XCTUnwrap(dropdown.listWindow)
+        XCTAssertTrue(dropdown.accessibleCurrentRowForTesting?.hasPrefix("192.168.1.10") == true)
+        let down = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: panel.windowNumber, context: nil, characters: "\u{F701}",
+            charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125))
+        panel.contentView?.keyDown(with: down)
+        XCTAssertTrue(dropdown.accessibleCurrentRowForTesting?.hasPrefix("192.168.1.20") == true,
+                      dropdown.accessibleCurrentRowForTesting ?? "nil")
+        XCTAssertEqual(panel.contentView?.accessibilityRole(), .list)
+    }
+
     /// The list open, and an address half typed into its last row.
     private func typeIntoTheList(_ dropdown: HostDropdown, _ text: String) throws -> (NSWindow, DS.Field) {
         dropdown.openForTesting()

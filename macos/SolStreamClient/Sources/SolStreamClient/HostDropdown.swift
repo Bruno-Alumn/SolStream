@@ -196,6 +196,10 @@ final class HostDropdown: DS.Box {
     /// Open the list without a click. Used by `--test-dropdown` to photograph
     /// the open state, which is otherwise only reachable through the mouse.
     func openForTesting() { if !isOpen { openList() } }
+    /// What VoiceOver hears as the open list's current row, for the tests.
+    var accessibleCurrentRowForTesting: String? {
+        (listView?.accessibilitySelectedChildren()?.first as? NSView)?.accessibilityLabel()
+    }
 
     /// The list's own window, so a test can capture it rather than the screen.
     var listWindow: NSWindow? { panel }
@@ -266,6 +270,13 @@ final class HostDropdown: DS.Box {
         // because it has to hold its own against the window it covers.
         let content = ListView()
         content.onKey = { [weak self] key in self?.handle(key) ?? false }
+        content.accessibleRows = { [weak self] in self?.rows ?? [] }
+        content.accessibleCurrent = { [weak self] in
+            guard let self, self.rows.indices.contains(self.highlighted) else { return nil }
+            return self.rows[self.highlighted]
+        }
+        content.accessibleField = { [weak self] in self?.manualField }
+        listView = content
 
         let stack = NSStackView(views: listChildren())
         stack.orientation = .vertical
@@ -414,6 +425,7 @@ final class HostDropdown: DS.Box {
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let field = DS.Field(placeholder: "Enter a hostname or IP address", mono: true)
+        field.setAccessibilityLabel("PC address")
         field.target = self
         field.action = #selector(manualCommitted)
         manualField = field
@@ -473,7 +485,16 @@ final class HostDropdown: DS.Box {
             row.setHighlighted(index == highlighted)
             row.setChecked(row.address == selectedAddress)
         }
+        // The highlight is the list's selection to VoiceOver, which otherwise
+        // heard nothing as ↓ and ↑ moved it: the list has keyboard focus, and
+        // says which of its rows is current when that changes.
+        if let listView {
+            NSAccessibility.post(element: listView, notification: .selectedChildrenChanged)
+        }
     }
+
+    /// The open list's content, for VoiceOver: the rows and the field.
+    private weak var listView: ListView?
 
     @objc private func manualCommitted() {
         let typed = ConnectWindow.dialable(manualField?.stringValue ?? "")
@@ -709,7 +730,9 @@ final class HostDropdown: DS.Box {
             stroke = (isChecked && contrast) ? DS.accent : nil
             detailLabel.attributedStringValue = Detail.line(
                 detail, colour: isChecked ? DS.accentTintInk : DS.textMuted)
-            setAccessibilitySelected(isChecked)
+            // Selected to VoiceOver is where the arrows are; the PC already
+            // chosen is said as the row's value.
+            setAccessibilitySelected(isHighlighted)
         }
 
         override func mouseEntered(with event: NSEvent) { onHover?(true) }
@@ -736,6 +759,7 @@ final class HostDropdown: DS.Box {
             onClick?()
             return true
         }
+        override func accessibilityValue() -> Any? { isChecked ? "chosen" : nil }
     }
 
     /// A borderless panel returns false from `canBecomeKey`, whatever else is
@@ -759,6 +783,20 @@ final class HostDropdown: DS.Box {
         override var acceptsFirstResponder: Bool { true }
         override func keyDown(with event: NSEvent) {
             if onKey?(event) != true { super.keyDown(with: event) }
+        }
+
+        // A list to VoiceOver, its highlighted row the selected one.
+        var accessibleRows: (() -> [NSView])?
+        var accessibleCurrent: (() -> NSView?)?
+        var accessibleField: (() -> NSView?)?
+        override func isAccessibilityElement() -> Bool { true }
+        override func accessibilityRole() -> NSAccessibility.Role? { .list }
+        override func accessibilityLabel() -> String? { "PCs" }
+        override func accessibilityChildren() -> [Any]? {
+            (accessibleRows?() ?? []) + [accessibleField?()].compactMap { $0 }
+        }
+        override func accessibilitySelectedChildren() -> [Any]? {
+            accessibleCurrent?().map { [$0] } ?? []
         }
     }
 }
