@@ -2690,6 +2690,38 @@ void TestHolderHearing() {
     }
 }
 
+void TestTrayMenu() {
+    auto find = [](const std::vector<TrayItem>& items, unsigned id) -> const TrayItem* {
+        for (const TrayItem& item : items) {
+            if (item.id == id) return &item;
+        }
+        return nullptr;
+    };
+    TrayMenuState state;
+    auto items = TrayMenuItems(state);
+    // Show log is there and on, above Quit.
+    const TrayItem* log = find(items, kTrayShowLog);
+    CHECK(log && !log->greyed && log->caption == L"Show log");
+    CHECK(items.back().id == kTrayQuit && items[items.size() - 2].id == kTrayShowLog);
+    // And still while a Mac streams and a job runs, when most else is greyed.
+    state.connected = state.streaming = state.busy = state.job_running = true;
+    state.update_version = L"1.0.9";
+    items = TrayMenuItems(state);
+    CHECK(!find(items, kTrayShowLog)->greyed);
+    CHECK(find(items, kTrayCopyToken)->greyed);
+    CHECK(find(items, kTrayInstallUpdate)->greyed);
+    CHECK(find(items, kTrayQuit)->greyed);
+    CHECK(find(items, kTrayInstallUpdate)->caption == L"Install update 1.0.9\u2026");
+    // Install is offered only with an update, Set up only where it applies.
+    state = TrayMenuState{};
+    items = TrayMenuItems(state);
+    CHECK(!find(items, kTrayInstallUpdate) && !find(items, kTraySetUpDisplay));
+    state.no_token = true;
+    state.offer_display = true;
+    items = TrayMenuItems(state);
+    CHECK(find(items, kTrayCopyToken)->greyed && find(items, kTraySetUpDisplay));
+}
+
 void TestStaysDownloaded() {
     update::Release before;
     before.version = "1.0.9";
@@ -4949,6 +4981,7 @@ int wmain(int argc, wchar_t** argv) {
     TestCharKeys();
     TestTrayTip();
     TestStaysDownloaded();
+    TestTrayMenu();
     TestAdvicePlace();
     TestWindowKeys();
     TestTextInput();

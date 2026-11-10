@@ -8,6 +8,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "host_window.h"
 
@@ -74,6 +75,58 @@ inline std::wstring UpdateNoticeText(bool downloaded) {
         ? L"It's downloaded and checked. Click here to install it \u2014 Windows will ask "
           L"for permission."
         : L"Click here to download and install it \u2014 Windows will ask for permission.";
+}
+
+/// The tray menu's items, by the command each sends back.
+constexpr unsigned kTrayOpen = 1;
+constexpr unsigned kTrayCopyToken = 2;
+constexpr unsigned kTrayQuit = 3;
+constexpr unsigned kTrayInstallUpdate = 4;
+constexpr unsigned kTrayCheckUpdates = 5;
+constexpr unsigned kTraySetUpDisplay = 6;
+constexpr unsigned kTrayShowLog = 7;
+
+/// What the tray menu is drawn from.
+struct TrayMenuState {
+    bool connected = false;     ///< a Mac is streaming: the token is hidden
+    bool no_token = false;
+    bool busy = false;          ///< a job, a check or an install under way
+    bool job_running = false;
+    bool streaming = false;
+    std::wstring update_version;  ///< the update on offer, or empty
+    bool offer_display = false;   ///< the virtual display's Set up applies here
+};
+
+/// One item, or a separator where `id` is 0.
+struct TrayItem {
+    unsigned id = 0;
+    std::wstring caption;
+    bool greyed = false;
+};
+
+/// The tray menu for `state`. Items are greyed rather than left out while
+/// they can't be had, so the menu keeps its shape from one opening to the
+/// next: Copy while the token is hidden or not there yet; the update ones
+/// while something is under way, and Install while a Mac streams; Quit while
+/// a job runs, when closing is refused. Show log is always there: it is what
+/// to send along with a question, whatever is going on.
+inline std::vector<TrayItem> TrayMenuItems(const TrayMenuState& state) {
+    std::vector<TrayItem> items;
+    items.push_back({kTrayOpen, L"Open SolStream", false});
+    items.push_back({kTrayCopyToken, L"Copy pairing token", state.connected || state.no_token});
+    items.push_back({});
+    if (!state.update_version.empty()) {
+        items.push_back({kTrayInstallUpdate, L"Install update " + state.update_version + L"\u2026",
+                         state.busy || state.streaming});
+    }
+    items.push_back({kTrayCheckUpdates, L"Check for updates", state.busy});
+    if (state.offer_display) {
+        items.push_back({kTraySetUpDisplay, L"Set up virtual display\u2026", state.busy});
+    }
+    items.push_back({});
+    items.push_back({kTrayShowLog, L"Show log", false});
+    items.push_back({kTrayQuit, L"Quit SolStream", state.job_running});
+    return items;
 }
 
 }  // namespace solstream

@@ -138,12 +138,7 @@ constexpr UINT WM_SOLSTREAM_JOB_DISPLAY = WM_APP + 6;
 /// land after a newer update's.
 constexpr UINT WM_SOLSTREAM_STATUS = WM_APP + 7;
 constexpr UINT kTrayIconId = 1;
-constexpr UINT kTrayOpen = 1;
-constexpr UINT kTrayCopyToken = 2;
-constexpr UINT kTrayQuit = 3;
-constexpr UINT kTrayInstallUpdate = 4;
-constexpr UINT kTrayCheckUpdates = 5;
-constexpr UINT kTraySetUpDisplay = 6;
+// The tray menu's items: kTrayOpen and the rest, in tray_tip.h.
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -2853,6 +2848,28 @@ bool IsShownControl(int id) {
 /// first one's, not a request for the job the button now offers.
 ULONGLONG g_banner_changed_at = 0;
 
+/// `path` selected in its folder in Explorer, or the folder opened when the
+/// file is not there. Through the shell's own call, which opens in the
+/// signed-in user's Explorer whatever this window runs as; the folder itself
+/// rather than whatever Explorer falls back to for a path it cannot find.
+void ShowFileInExplorer(HWND window, const std::wstring& path) {
+    HRESULT hr = E_FAIL;
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(path.c_str())) {
+            hr = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+            ILFree(item);
+        }
+    }
+    if (FAILED(hr)) {
+        const size_t slash = path.find_last_of(L"\\/");
+        const std::wstring folder = slash == std::wstring::npos ? path : path.substr(0, slash);
+        if ((INT_PTR) ShellExecuteW(window, L"open", folder.c_str(), nullptr, nullptr,
+                                    SW_SHOWNORMAL) <= 32) {
+            media::Log("[window] couldn't show a log (0x%08lX)", hr);
+        }
+    }
+}
+
 void Activate(HWND window, int id) {
     switch (id) {
         case kIdCopyToken: {
@@ -2959,23 +2976,7 @@ void Activate(HWND window, int id) {
             // user's Explorer whatever this window runs as; and the folder
             // itself when there is no log in it, rather than whatever folder
             // Explorer falls back to for a path it cannot find.
-            const std::wstring log = InstallLogPath();
-            HRESULT hr = E_FAIL;
-            if (GetFileAttributesW(log.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                if (PIDLIST_ABSOLUTE item = ILCreateFromPathW(log.c_str())) {
-                    hr = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
-                    ILFree(item);
-                }
-            }
-            if (FAILED(hr)) {
-                const size_t slash = log.find_last_of(L"\\/");
-                const std::wstring folder =
-                    slash == std::wstring::npos ? log : log.substr(0, slash);
-                if ((INT_PTR) ShellExecuteW(window, L"open", folder.c_str(), nullptr, nullptr,
-                                            SW_SHOWNORMAL) <= 32) {
-                    media::Log("[window] couldn't show the setup log (0x%08lX)", hr);
-                }
-            }
+            ShowFileInExplorer(window, InstallLogPath());
             break;
         }
 
@@ -3207,51 +3208,27 @@ void ShowTrayMenu(HWND window) {
     if (!menu) {
         return;
     }
-    AppendMenuW(menu, MF_STRING, kTrayOpen, L"Open SolStream");
-    // Greyed while a Mac is connected, as the window hides the token then:
-    // the two said different things.
-    // And while there is no token yet to copy.
-    bool connected = false;
-    bool no_token = false;
+    TrayMenuState state;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        connected = g_status.connected_clients > 0;
-        no_token = g_status.pairing_token.empty();
+        state.connected = g_status.connected_clients > 0;
+        state.no_token = g_status.pairing_token.empty();
+        state.offer_display = !g_status.virtual_display && !g_status.driver_off
+                           && !g_status.driver_failing && !g_status.driver_restart_pending;
     }
-    AppendMenuW(menu, MF_STRING | (connected || no_token ? MF_GRAYED : 0), kTrayCopyToken,
-                L"Copy pairing token");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Greyed rather than left out while something else is under way, or while
-    // a Mac is streaming, so the menu keeps its shape from one opening to the
-    // next and says the update is there even when it cannot be had right now.
-    const bool busy = g_job_running || g_update_checking || g_update_installing;
-    const UINT when_free = MF_STRING | (busy ? MF_GRAYED : 0);
-    if (g_update_found) {
-        const std::wstring install = L"Install update " + ToWide(g_update.version) + L"…";
-        AppendMenuW(menu, when_free | (StreamingNow() ? MF_GRAYED : 0), kTrayInstallUpdate,
-                    install.c_str());
+    state.busy = g_job_running || g_update_checking || g_update_installing;
+    state.job_running = g_job_running;
+    state.streaming = StreamingNow();
+    state.update_version = g_update_found ? ToWide(g_update.version) : std::wstring();
+    state.offer_display = state.offer_display && CanInstallDisplayDriver();
+    for (const TrayItem& item : TrayMenuItems(state)) {
+        if (item.id == 0) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        } else {
+            AppendMenuW(menu, MF_STRING | (item.greyed ? MF_GRAYED : 0), item.id,
+                        item.caption.c_str());
+        }
     }
-    AppendMenuW(menu, when_free, kTrayCheckUpdates, L"Check for updates");
-    // The driver advisory's own button is behind the update banner while an
-    // update is on offer, so it has a way in here too: neither banner can hide
-    // the other's action. Offered exactly where that button is, and nowhere it
-    // can only fail -- a driver that is here, switched off or failing, an ARM
-    // PC -- or where only a restart is left to do.
-    bool offer_display = false;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        offer_display = !g_status.virtual_display && !g_status.driver_off
-                     && !g_status.driver_failing && !g_status.driver_restart_pending;
-    }
-    if (offer_display && CanInstallDisplayDriver()) {
-        AppendMenuW(menu, when_free, kTraySetUpDisplay, L"Set up virtual display…");
-    }
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Greyed while a job runs: closing then is refused (WM_CLOSE), and a Quit
-    // that silently did nothing would leave an update's permission prompt to
-    // come up after somebody asked SolStream to go away.
-    AppendMenuW(menu, MF_STRING | (g_job_running ? MF_GRAYED : 0), kTrayQuit,
-                L"Quit SolStream");
     SetMenuDefaultItem(menu, kTrayOpen, FALSE);
     POINT at{};
     GetCursorPos(&at);
@@ -3297,6 +3274,11 @@ void ShowTrayMenu(HWND window) {
         case kTrayCheckUpdates:
             ShowFromTray(window);
             StartUpdateCheck(window);
+            break;
+        case kTrayShowLog:
+            // SolStream's own log, the file to send with a question; the
+            // window had a way to setup's log only, and this one none.
+            ShowFileInExplorer(window, LocalDataPath(L"solstream.log"));
             break;
         case kTraySetUpDisplay:
             ShowFromTray(window);
