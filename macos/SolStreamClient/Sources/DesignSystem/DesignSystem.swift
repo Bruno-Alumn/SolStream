@@ -205,11 +205,38 @@ public enum DS {
     /// cannot see the window would otherwise not hear -- a token refused, a
     /// field still empty.
     @MainActor
-    public static func announce(_ text: String) {
+    public static func announce(_ text: String,
+                                priority: NSAccessibilityPriorityLevel = .high) {
         guard let element: Any = NSApp?.keyWindow ?? NSApp?.mainWindow ?? NSApp else { return }
         NSAccessibility.post(element: element, notification: .announcementRequested,
-                             userInfo: [.announcement: text,
-                                        .priority: NSAccessibilityPriorityLevel.high.rawValue])
+                             userInfo: [.announcement: text, .priority: priority.rawValue])
+    }
+
+    /// A status line's voice: says its text when it changes, and only then.
+    /// A line rewritten with the same words on every refresh -- a probe
+    /// coming back, a list refilled -- must not have VoiceOver repeat it.
+    @MainActor
+    public final class Announcer {
+        private var last: String?
+        private let post: @MainActor (String, NSAccessibilityPriorityLevel) -> Void
+
+        public init(post: @escaping @MainActor (String, NSAccessibilityPriorityLevel) -> Void = {
+            DS.announce($0, priority: $1)
+        }) {
+            self.post = post
+        }
+
+        /// Say `text` if it is new; true when it was said.
+        @discardableResult
+        public func say(_ text: String, priority: NSAccessibilityPriorityLevel = .medium) -> Bool {
+            guard !text.isEmpty, text != last else { return false }
+            last = text
+            post(text, priority)
+            return true
+        }
+
+        /// Forget what was said, so the same words are said again next time.
+        public func reset() { last = nil }
     }
 
     /// A card: `surface`, a hairline edge, radius 12. Content goes inside at

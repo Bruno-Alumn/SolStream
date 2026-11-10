@@ -46,6 +46,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let hostDropdown = HostDropdown()
     private let hintLabel = NSTextField(wrappingLabelWithString: "")
+    private lazy var hintVoice = MainActor.assumeIsolated { DS.Announcer() }
     private let connectButton: DS.Button
     private let quitButton: DS.Button
     /// Sends the PC a wake-on-LAN packet; shown while it is silent and this
@@ -508,6 +509,10 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         // The whole of it on hover, should a long PC name still push a hint
         // past its two lines.
         hintLabel.toolTip = hintLabel.stringValue
+        // Said to VoiceOver when it changes, in the window in front: the
+        // probe's answer -- asleep, needs pairing, Tailscale off -- was only
+        // ever drawn.
+        if window.isKeyWindow { MainActor.assumeIsolated { _ = hintVoice.say(hintLabel.stringValue) } }
         connectButton.isEnabled = !state.address.isEmpty
 
         // "Paired" for the guide is about this Mac, not the host on show: a
@@ -920,6 +925,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
             hintLabel.stringValue = ConnectHint.enterAddress
             hintLabel.toolTip = hintLabel.stringValue
             hintLabel.textColor = DS.danger
+            MainActor.assumeIsolated { hintVoice.reset(); _ = hintVoice.say(ConnectHint.enterAddress, priority: .high) }
             return
         }
         // Not a name that was found to lead nowhere: a typo would push a good

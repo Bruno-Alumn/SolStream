@@ -372,7 +372,12 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         setSpinning(false)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.danger
+        // Focus stays in the search field, so a failure was a red line only
+        // the sighted saw: Open simply "did nothing".
+        MainActor.assumeIsolated { _ = statusVoice.say(message, priority: .high) }
     }
+
+    private lazy var statusVoice = MainActor.assumeIsolated { DS.Announcer() }
 
     /// The connection is back. Its failure no longer stands, and the refill
     /// that follows puts the counts in its place; red beside a list that
@@ -390,6 +395,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         setSpinning(true)
         statusLabel.stringValue = message
         statusLabel.textColor = DS.textMuted
+        MainActor.assumeIsolated { _ = statusVoice.say(message) }
     }
 
     /// A launch is slow — a cold start is many seconds — so the row grows a
@@ -400,6 +406,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         setSpinning(true)
         statusLabel.textColor = DS.textMuted
         statusLabel.stringValue = message
+        MainActor.assumeIsolated { _ = statusVoice.say(message) }
         openButton.isEnabled = false
         // One open says it twice, "Opening…" and then "Starting…", and the
         // selection may have moved in between: the row is the first one's.

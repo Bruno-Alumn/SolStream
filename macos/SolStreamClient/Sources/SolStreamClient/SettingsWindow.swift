@@ -149,6 +149,7 @@ private final class SettingsPanelWindow: NSWindow {
 /// the clipboard and updates on the right. In one column the same rows stand
 /// some 1,000 points tall, more than a 13-inch MacBook shows under its menu bar.
 final class SettingsPane: NSView {
+    private lazy var updateVoice = MainActor.assumeIsolated { DS.Announcer() }
     static let columnWidth: CGFloat = 344
     /// Two columns, the gutter between them and the window's inset either side.
     static var width: CGFloat { DS.Metric.inset * 2 + columnWidth * 2 + DS.Space.x6 }
@@ -335,6 +336,11 @@ final class SettingsPane: NSView {
         versionLabel.setAccessibilityLabel("SolStream version \(updater.currentVersion)")
         automaticUpdatesSwitch.isOn = updater.checksAutomatically
         updateStatus.stringValue = updater.statusText
+        // Checking, downloading, ready: said as it moves on, while Settings
+        // is the window in front.
+        if window?.isKeyWindow == true {
+            MainActor.assumeIsolated { _ = updateVoice.say(updater.statusText) }
+        }
 
         let action: (title: String, style: DS.Button.Style, enabled: Bool)?
         switch updater.state {
