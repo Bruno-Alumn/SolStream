@@ -44,8 +44,20 @@ final class QualityPill: DS.Box {
     static var commandLineOverrides: Set<StreamSettings.Override> = []
 
     private let dot = DS.Dot(state: .idle)
+    /// In the dot's place while the sound is muted. Mute is remembered across
+    /// launches, so a silent stream may be one muted days ago, and the pill is
+    /// the one thing always in view that can say so.
+    private let muteMark: NSImageView = {
+        let view = NSImageView()
+        let symbol = NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: nil)
+        view.image = symbol?.withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        view.contentTintColor = DS.textSecondary
+        view.isHidden = true
+        return view
+    }()
     private let label = NSTextField(labelWithString: "—")
     private var popover: NSPopover?
+    private var settingsObserver: NSObjectProtocol?
 
     var stats = Stats() {
         didSet { refresh() }
@@ -69,7 +81,7 @@ final class QualityPill: DS.Box {
         setAccessibilityRole(.button)
         setAccessibilityLabel("Stream quality")
 
-        for child in [dot, label] as [NSView] {
+        for child in [dot, muteMark, label] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             addSubview(child)
         }
@@ -79,10 +91,22 @@ final class QualityPill: DS.Box {
             heightAnchor.constraint(equalToConstant: DS.Metric.chipHeight),
             dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DS.Space.x2),
             dot.centerYAnchor.constraint(equalTo: centerYAnchor),
+            muteMark.centerXAnchor.constraint(equalTo: dot.centerXAnchor),
+            muteMark.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: DS.Space.x1),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x2),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        // Muted from the popover, Settings or the menu: said at once, not at
+        // the next stats tick.
+        settingsObserver = NotificationCenter.default.addObserver(
+            forName: StreamSettings.didChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.refresh() }
+        refresh()
+    }
+
+    deinit {
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
     }
 
     @available(*, unavailable)
@@ -97,8 +121,31 @@ final class QualityPill: DS.Box {
         // an blue dot there cried wolf on every dialog. A stream that really
         // is in trouble says so in the status card, in words.
         dot.state = stats.fps > 0 ? .live : .idle
+        let muted = StreamSettings.shared.isMuted
+        dot.isHidden = muted
+        muteMark.isHidden = !muted
+        let tip = Self.toolTip(stats, muted: muted)
+        if toolTip != tip { toolTip = tip }
         refreshDetail()
     }
+
+    /// What pointing at the pill says: the numbers it stands for, the sound
+    /// when it is muted, and that a click opens the controls -- nothing about
+    /// a 56-point chip with a number in it says it can be clicked.
+    static func toolTip(_ stats: Stats, muted: Bool) -> String {
+        var numbers = [stats.fps > 0 ? "\(stats.fps) fps" : "No frames yet"]
+        if stats.fps > 0 {
+            if let latency = stats.latencyMs { numbers.append("\(latency) ms") }
+            if let rate = stats.bitrateMbps { numbers.append(megabits(rate)) }
+        }
+        var lines = [numbers.joined(separator: " · ")]
+        if muted { lines.append("Sound is muted.") }
+        lines.append("Click for sound, mouse and quality.")
+        return lines.joined(separator: "\n")
+    }
+
+    /// Whether the mute mark stands in the dot's place, for tests.
+    var isShowingMute: Bool { !muteMark.isHidden }
 
     private func showAccessibilityValue() {
         let rate = stats.fps > 0 ? "\(stats.fps) frames per second" : "no frames"

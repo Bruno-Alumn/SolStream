@@ -490,4 +490,33 @@ final class QualityPillTests: XCTestCase {
         pill.accessibilityPerformPress()   // and closed again
         window.close()
     }
+
+    /// Pointing at the pill says its numbers, a mute, and that it opens.
+    func testTheToolTipSaysTheNumbersAndTheMute() {
+        var stats = QualityPill.Stats()
+        XCTAssertEqual(QualityPill.toolTip(stats, muted: false),
+                       "No frames yet\nClick for sound, mouse and quality.")
+        stats.fps = 60
+        stats.latencyMs = 12
+        stats.bitrateMbps = 9.8
+        XCTAssertEqual(QualityPill.toolTip(stats, muted: false),
+                       "60 fps · 12 ms · 9.8 Mbps\nClick for sound, mouse and quality.")
+        stats.latencyMs = nil
+        XCTAssertEqual(QualityPill.toolTip(stats, muted: true),
+                       "60 fps · 9.8 Mbps\nSound is muted.\nClick for sound, mouse and quality.")
+    }
+
+    /// The mark takes the dot's place while muted, and follows a mute made
+    /// anywhere at once, not at the next stats tick.
+    func testTheMuteMarkFollowsTheSetting() {
+        let pill = QualityPill()
+        XCTAssertFalse(pill.isShowingMute)
+        StreamSettings.shared.isMuted = true
+        XCTAssertTrue(pill.isShowingMute)
+        XCTAssertTrue(pill.toolTip?.contains("Sound is muted.") ?? false)
+        StreamSettings.shared.toggleMute()
+        XCTAssertFalse(pill.isShowingMute)
+        XCTAssertFalse(pill.toolTip?.contains("muted") ?? true)
+    }
+
 }
