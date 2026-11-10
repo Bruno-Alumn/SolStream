@@ -2849,7 +2849,8 @@ extension AppDelegate: NSMenuItemValidation {
                                               muted: StreamSettings.shared.isMuted,
                                               mode: StreamSettings.shared.pointerMode) {
             menuItem.state = state
-            return true
+            // Nothing to mute while no sound is asked of the PC.
+            return menuItem.action != #selector(toggleMuteFromMenu) || !QualityPill.sendsNoSound
         }
         if menuItem.action == #selector(checkForUpdates) {
             menuItem.title = Self.updateMenuTitle(for: MainActor.assumeIsolated { Updater.shared.state })

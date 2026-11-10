@@ -323,6 +323,7 @@ final class QualityPill: DS.Box {
         modes.target = self
         modes.action = #selector(pointerModeChosen(_:))
         modes.selectedSegment = settings.pointerMode == .gaming ? 1 : 0
+        self.modes = modes
         let mouseHint = note(Self.pointerHint(settings.pointerMode, followsGame: followsGame))
         self.mouseHint = mouseHint
 
@@ -454,6 +455,7 @@ final class QualityPill: DS.Box {
         guard detailStack != nil else { return }
         showFigures()
         let hint = Self.pointerHint(StreamSettings.shared.pointerMode, followsGame: followsGame)
+        modes?.selectedSegment = StreamSettings.shared.pointerMode == .gaming ? 1 : 0
         // Either note growing a line moves the link, so both are asked.
         let soundMoved = showSound(movingSlider: false)
         let hintMoved = Self.show(hint, in: mouseHint)
@@ -489,6 +491,9 @@ final class QualityPill: DS.Box {
     private weak var soundQualityMenu: NSPopUpButton?
     private weak var soundQualityNote: NSTextField?
     private weak var mouseHint: NSTextField?
+    /// Desktop or Gaming, set again when the mode changes elsewhere -- the
+    /// Host menu's ⌃⌘G with the popover open.
+    private weak var modes: SolarSegments?
     private weak var qualityNote: NSTextField?
     private weak var muteButton: NSButton?
     private weak var volumeSlider: NSSlider?
@@ -619,6 +624,13 @@ final class QualityPill: DS.Box {
     /// off the PC sends none, and "nothing playing" would send you looking at
     /// the PC for the cause. `.audio` among the overrides is `--no-audio`, the
     /// one flag that sets it.
+    /// Whether no sound is asked of the PC at all -- by the flag or in
+    /// Settings -- so there is nothing to mute: the Host menu's Mute Sound is
+    /// off then, as the popover's mute button is.
+    static var sendsNoSound: Bool {
+        commandLineOverrides.contains(.audio) || !StreamSettings.shared.streamsAudio
+    }
+
     private static func soundOff(audioActive: Bool) -> SoundOff? {
         guard !audioActive else { return nil }
         if commandLineOverrides.contains(.audio) { return .byFlag }

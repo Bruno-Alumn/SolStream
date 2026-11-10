@@ -520,4 +520,28 @@ final class QualityPillTests: XCTestCase {
         XCTAssertFalse(pill.toolTip?.contains("muted") ?? true)
     }
 
+
+    /// With sound off there is nothing for the Host menu's Mute Sound to do.
+    func testNoSoundIsSaidForTheMenu() {
+        XCTAssertFalse(QualityPill.sendsNoSound)
+        StreamSettings.shared.streamsAudio = false
+        XCTAssertTrue(QualityPill.sendsNoSound)
+        StreamSettings.shared.streamsAudio = true
+        QualityPill.commandLineOverrides = [.audio]
+        XCTAssertTrue(QualityPill.sendsNoSound)
+    }
+
+
+    /// The mode changed elsewhere -- the Host menu's ⌃⌘G -- moves the open
+    /// popover's switch with it.
+    func testTheMouseSwitchFollowsAModeSetElsewhere() throws {
+        let detail = detail()
+        let modes = try XCTUnwrap(Self.all(SolarSegments.self, in: detail).first)
+        XCTAssertEqual(modes.selectedSegment, 0)
+        StreamSettings.shared.pointerMode = .gaming
+        XCTAssertEqual(modes.selectedSegment, 1)
+        StreamSettings.shared.pointerMode = .desktop
+        XCTAssertEqual(modes.selectedSegment, 0)
+    }
+
 }
