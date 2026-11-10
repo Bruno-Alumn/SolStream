@@ -22,7 +22,11 @@ namespace solstream {
 /// rather than with a balloon. Not while streaming: then the stream is what the
 /// icon is about, and Install has to wait for the Mac anyway. Nor over a hard
 /// failure, which the window leads with too.
-inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version) {
+/// `update_ready`: the update is downloaded and checked, so Install goes
+/// straight to the permission prompt -- "ready to install" rather than
+/// "available", as the notification says it.
+inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update_version,
+                            bool update_ready = false) {
     if (!status.agent_listening) {
         return L"SolStream — not reachable yet";
     }
@@ -38,7 +42,8 @@ inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update
         return L"SolStream — streaming to your Mac";
     }
     if (!update_version.empty()) {
-        return L"SolStream — update " + update_version + L" available";
+        return L"SolStream — update " + update_version
+             + (update_ready ? L" ready to install" : L" available");
     }
     // As the window leads with it, after an update as there: "ready" over a
     // restart still owed read as nothing left to do.
@@ -51,8 +56,9 @@ inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update
 /// The host window's title: the tooltip's words. The title is what Alt+Tab,
 /// the taskbar's thumbnail and Narrator say of the window, and a plain
 /// "SolStream" there said nothing of how it is.
-inline std::wstring HostWindowTitle(const HostStatus& status, const std::wstring& update_version) {
-    return TrayTip(status, update_version);
+inline std::wstring HostWindowTitle(const HostStatus& status, const std::wstring& update_version,
+                                    bool update_ready = false) {
+    return TrayTip(status, update_version, update_ready);
 }
 
 /// The title of the notification a scheduled check puts up. "Ready to

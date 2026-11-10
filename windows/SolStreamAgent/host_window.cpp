@@ -270,6 +270,11 @@ DWORD g_update_exit_code = 0;
 /// The version the tray's tooltip announces, empty for none. Behind g_mutex,
 /// unlike the rest of the update state: the status thread builds the tooltip.
 std::wstring g_update_tip_version;
+/// Beside it: that update is downloaded and checked. Behind g_mutex too.
+bool g_update_tip_ready = false;
+/// The update on offer is downloaded and checked, by a scheduled check's
+/// prefetch: the window, the tooltip and the title say "ready to install".
+bool g_update_downloaded = false;
 
 HWND g_window = nullptr;
 HWND g_token_edit = nullptr;
@@ -1031,7 +1036,8 @@ Screen Describe(const HostStatus& status) {
     // can't be pressed then anyway, and that is exactly when the advisory is
     // true -- everything on the main display is going to the Mac.
     if (g_update_found && !(screen.connected && !status.virtual_display)) {
-        screen.what = L"Update available: " + ToWide(g_update.version);
+        screen.what = (g_update_downloaded ? L"Update ready to install: " : L"Update available: ")
+                    + ToWide(g_update.version);
         screen.mark = Mark::NeedsYou;
         screen.code.clear();
         if (screen.connected) {
@@ -2643,8 +2649,8 @@ void RefreshTrayTip(HWND window) {
     std::wstring title;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        tip = TrayTip(g_status, g_update_tip_version);
-        title = HostWindowTitle(g_status, g_update_tip_version);
+        tip = TrayTip(g_status, g_update_tip_version, g_update_tip_ready);
+        title = HostWindowTitle(g_status, g_update_tip_version, g_update_tip_ready);
     }
     // The host window only; Setup and Uninstall keep their own names. Only
     // when it changed: Narrator says a window's new name.
@@ -2672,6 +2678,7 @@ void PublishUpdateForTip(HWND window) {
         g_update_tip_version = g_update_found && !g_update_installing
                                    ? ToWide(g_update.version)
                                    : std::wstring();
+        g_update_tip_ready = g_update_downloaded;
     }
     RefreshTrayTip(window);
 }
@@ -2744,6 +2751,11 @@ void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, 
         (g_job_running && g_host_job == HostJob::Update) || g_update_installing;
     if (!installing) {
         if (result->outcome == update::Outcome::Found) {
+            // An asked check does not download; one that finds the version a
+            // scheduled check already downloaded leaves it ready.
+            g_update_downloaded = result->downloaded
+                || (g_update_found && g_update_downloaded
+                    && g_update.version == result->release.version);
             g_update_found = true;
             g_update = result->release;
             if (!asked) {
@@ -2753,6 +2765,7 @@ void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, 
             // Withdrawn, or this copy has caught up. A failed check says
             // nothing either way, so it changes nothing.
             g_update_found = false;
+            g_update_downloaded = false;
         }
         PublishUpdateForTip(window);
     }
@@ -3118,7 +3131,8 @@ void AddTrayIcon(HWND window) {
     data.hIcon = load.icon;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
+        wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version, g_update_tip_ready).c_str(),
+                  _TRUNCATE);
     }
     g_tray_added = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
     // Already there -- the taskbar can announce itself again without having

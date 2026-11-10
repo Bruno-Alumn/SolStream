@@ -2697,6 +2697,9 @@ void TestTrayTip() {
     status.streaming_ready = true;
     CHECK(TrayTip(status, L"") == L"SolStream \u2014 ready for your Mac");
     CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 update 1.0.9 available");
+    // Downloaded and checked: ready to install, as the notification says.
+    CHECK(TrayTip(status, L"1.0.9", true) == L"SolStream \u2014 update 1.0.9 ready to install");
+    CHECK(HostWindowTitle(status, L"1.0.9", true) == TrayTip(status, L"1.0.9", true));
     // The notification says "ready" only once the installer is downloaded;
     // until then it says "available", as the tip above and the banner do.
     CHECK(UpdateNoticeTitle(L"1.0.9", false) == L"SolStream 1.0.9 is available");
