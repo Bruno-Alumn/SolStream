@@ -1552,7 +1552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appWindow.onHostClipboardSet = { [weak self] sequence in
                 self?.clipboard?.adopt(remoteSequence: sequence)
             }
-            appWindow.setStatus("Connecting to \(host)", detail: target.title)
+            appWindow.setStatus("Connecting to \(pcLabel(host))", detail: target.title)
             // A StreamSession cannot be restarted in place — stop() releases the
             // decoder and start() does not build another — so recovering means a
             // new session. Closing the windows runs the path that already exists
@@ -1760,7 +1760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // back by restarting it, and Try Again is the honest offer
                     // rather than a fourth "Reconnecting…" and a fifth.
                     self.showEnded("Lost the stream",
-                                   detail: "No picture from \(host). Check the PC isn't locked "
+                                   detail: "No picture from \(pcLabel(host)). Check the PC isn't locked "
                                        + "or showing a Windows prompt, and that nothing on the "
                                        + "network blocks SolStream, then choose Try Again.")
                     return
@@ -1818,7 +1818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let channel = agent.map {
             Self.outlook(isConnected: $0.isConnected, willReconnect: $0.willReconnect)
         } ?? .gone
-        return Self.notice(for: trouble, channel: channel, host: host,
+        return Self.notice(for: trouble, channel: channel, host: pcLabel(host),
                            canRestart: canRestart ?? (mediaRecoveryAttempts < 3),
                            finalErrorShown: connectionLostShown)
     }
@@ -1916,7 +1916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[app] \(display.name) changed while the stream was down; "
                      + "returning to the picker")
             showEnded("Lost the stream",
-                      detail: "\(host)'s display changed. "
+                      detail: "\(pcLabel(host))'s display changed. "
                           + (streamLink != nil ? "Try Again opens the app again."
                                                : "Try Again goes back to the app list."))
             return
@@ -1930,7 +1930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.error("[app] \(Self.restartLimit.count) restarts in "
                           + "\(Int(Self.restartLimit.within)) s; not restarting again")
                 showEnded("The stream keeps stopping",
-                          detail: "The stream from \(host) stopped \(Self.restartLimit.count) times in "
+                          detail: "The stream from \(pcLabel(host)) stopped \(Self.restartLimit.count) times in "
                               + "two minutes. Check the PC isn't locked or short of memory, and "
                               + "that no other Mac is connecting to it, then choose Try Again.")
                 return
@@ -1951,7 +1951,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             old.stop()
         }
         session = nil
-        let status = status ?? ("Reconnecting…", "Restarting the stream from \(host)")
+        let status = status ?? ("Reconnecting…", "Restarting the stream from \(pcLabel(host))")
         appWindows.forEach {
             $0.setStatus(status.title, detail: status.detail)
         }
@@ -2137,7 +2137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard agent.isConnected else { return }
         mediaRecoveryAttempts = 0
         recoverMedia(host: host, agent: agent,
-                     status: ("Applying settings…", "Restarting the picture from \(host)"))
+                     status: ("Applying settings…", "Restarting the picture from \(pcLabel(host))"))
     }
 
     /// `request` and `config` with the settings' frame rate, bitrate, video
@@ -2517,6 +2517,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// What to call the PC at `host` in what the stream windows say: its own
+    /// name, as it gave it when paired, over an address -- "Connecting to
+    /// 100.101.7.42" said nothing a person knows the PC by.
+    static func pcLabel(_ host: String, name: String?) -> String {
+        let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? host : name
+    }
+
+    private func pcLabel(_ host: String) -> String {
+        Self.pcLabel(host, name: TokenStore.name(for: host))
+    }
+
+    /// The Host menu's Disconnect, named for the PC it leaves.
+    static func disconnectTitle(pc: String?) -> String {
+        pc.map { "Disconnect from \u{201C}\($0)\u{201D}" } ?? "Disconnect"
+    }
+
     /// Whether a Host menu item has anything to act on. Disconnect was on with
     /// nothing connected, and choosing it built a second connect window.
     static func hostMenuAllows(_ action: Selector?, connected: Bool, streaming: Bool) -> Bool {
@@ -2878,6 +2895,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(disconnectHost), menuItem.representedObject == nil {
+            let connected = agent != nil || picker != nil || session != nil
+            menuItem.title = Self.disconnectTitle(
+                pc: connected ? (streamHost ?? pickerHost).map(pcLabel) : nil)
+        }
         if let state = Self.streamSwitchState(menuItem.action,
                                               muted: StreamSettings.shared.isMuted,
                                               mode: StreamSettings.shared.pointerMode) {

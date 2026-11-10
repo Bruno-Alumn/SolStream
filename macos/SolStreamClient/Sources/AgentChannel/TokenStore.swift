@@ -160,6 +160,14 @@ public enum TokenStore {
         return tokens.count == 1 ? tokens.first : nil
     }
 
+    /// The PC's own name, as its greeting gave it once paired at `host`.
+    public static func name(for host: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let names = defaults.dictionary(forKey: namesKey) as? [String: String] ?? [:]
+        return names[host] ?? names.first { sameHost($0.key, host) }?.value
+    }
+
     /// Every address the PC at `address` is paired at: that one, and the
     /// others recorded under its name -- `name`, or the one its greeting gave
     /// at `address` -- that hold the same token. Two PCs can share a name; a

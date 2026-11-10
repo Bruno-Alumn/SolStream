@@ -88,4 +88,13 @@ final class PairingForgetTests: XCTestCase {
         XCTAssertEqual(ConnectWindow.forgetPairingQuestion("DESK"), "Forget the pairing with DESK?")
         XCTAssertTrue(ConnectWindow.forgetPairingDetail.contains("Other PCs stay paired."))
     }
+
+    /// The name a PC gave when paired, found again by its address.
+    func testThePCsNameIsFoundByItsAddress() {
+        XCTAssertNil(TokenStore.name(for: "desk.invalid"))
+        TokenStore.setName("DESK", for: "desk.invalid")
+        XCTAssertEqual(TokenStore.name(for: "desk.invalid"), "DESK")
+        XCTAssertEqual(TokenStore.name(for: "DESK.invalid"), "DESK")
+    }
+
 }

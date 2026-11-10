@@ -62,4 +62,14 @@ final class HostMenuTests: XCTestCase {
         }
     }
 
+
+    /// The PC by its own name where it gave one, its address otherwise.
+    func testThePCIsNamedByItsName() {
+        XCTAssertEqual(AppDelegate.pcLabel("100.101.7.42", name: "DESK"), "DESK")
+        XCTAssertEqual(AppDelegate.pcLabel("100.101.7.42", name: nil), "100.101.7.42")
+        XCTAssertEqual(AppDelegate.pcLabel("100.101.7.42", name: "  "), "100.101.7.42")
+        XCTAssertEqual(AppDelegate.disconnectTitle(pc: "DESK"), "Disconnect from \u{201C}DESK\u{201D}")
+        XCTAssertEqual(AppDelegate.disconnectTitle(pc: nil), "Disconnect")
+    }
+
 }
