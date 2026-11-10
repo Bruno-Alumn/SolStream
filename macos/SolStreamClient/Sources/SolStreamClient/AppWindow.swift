@@ -80,7 +80,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private let transferNote = CaptureHint(text: "")
     /// One sending at a time across every window: they share one connection,
     /// and the host keeps one upload at a time.
-    private static var isSendingFiles = false
+    private(set) static var isSendingFiles = false
     /// Stops this window's files on their way to the PC when it closes.
     private var sendingFiles: AgentConnection.UploadCancellation?
     /// Told the host clipboard's new sequence once dropped files are on it,

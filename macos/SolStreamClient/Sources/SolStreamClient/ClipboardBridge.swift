@@ -252,8 +252,19 @@ final class ClipboardBridge {
             self.adoptsRemoteBaseline = true
         } else {
             self.lastLocalChangeCount = pasteboard.changeCount
+            noteFilesAtBaseline()
         }
         Self.handledChangeCounts[pasteboard.name] = self.lastLocalChangeCount
+    }
+
+    /// Files already on the clipboard when this bridge takes it as its
+    /// baseline -- copied in Finder before the stream opened -- are not a
+    /// copy to cross, but ⌘V on the PC still won't paste them: said when
+    /// the stream first takes the keyboard.
+    private func noteFilesAtBaseline() {
+        if pasteboard.types?.contains(.fileURL) == true, !Self.isPrivate(types: pasteboard.types) {
+            filesNoteAtBaseline = pasteboard.changeCount
+        }
     }
 
     deinit {
@@ -282,6 +293,7 @@ final class ClipboardBridge {
         // sync on pulls the PC's clipboard over, as it always has.
         if resuming {
             lastLocalChangeCount = pasteboard.changeCount
+            noteFilesAtBaseline()
             adoptsRemoteBaseline = true
             lastSyncedText = nil
             lastSyncedImage = nil
@@ -373,6 +385,10 @@ final class ClipboardBridge {
         // Local change wins when both moved: what was just copied on this
         // machine is the more recent intent.
         let changeCount = pasteboard.changeCount
+        if streamHasKeyboard, filesNoteAtBaseline == changeCount, changeCount == lastLocalChangeCount {
+            filesNoteAtBaseline = nil
+            tellFilesCopied(changeCount)
+        }
         if changeCount != lastLocalChangeCount {
             if Self.isPrivate(types: pasteboard.types) {
                 lastLocalChangeCount = changeCount
@@ -476,10 +492,7 @@ final class ClipboardBridge {
                     toldTooLarge = changeCount
                     onPictureTooLarge?()
                 }
-                if isFiles, toldFiles != changeCount {
-                    toldFiles = changeCount
-                    onFilesCopied?()
-                }
+                if isFiles { tellFilesCopied(changeCount) }
             }
         }
 
@@ -632,10 +645,32 @@ final class ClipboardBridge {
     /// keyboard: they are not sent -- the PC's clipboard would get their
     /// names -- so ⌘V there pasted what it had before, and nothing said why,
     /// or that dropping them on the window sends them.
-    var onFilesCopied: (() -> Void)?
+    var onFilesCopied: ((String) -> Void)?
     private var toldFiles: Int?
+    /// The baseline's change count while its files are still to be said.
+    private var filesNoteAtBaseline: Int?
     static let filesCopiedNote =
         "Copied files don't paste on the PC. Drag them onto this window to send them."
+    /// Folders, apps and packages are refused by a drop too: they go zipped.
+    static let foldersCopiedNote =
+        "Copied folders don't paste on the PC. Compress one, then drag the .zip onto this window."
+
+    /// The note for the copy on `pasteboard`: the folders' only when every
+    /// item is known to be one.
+    static func filesCopiedNote(on pasteboard: NSPasteboard) -> String {
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self],
+                                          options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let allFolders = !urls.isEmpty && urls.allSatisfy {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        }
+        return allFolders ? foldersCopiedNote : filesCopiedNote
+    }
+
+    private func tellFilesCopied(_ changeCount: Int) {
+        guard toldFiles != changeCount else { return }
+        toldFiles = changeCount
+        onFilesCopied?(Self.filesCopiedNote(on: pasteboard))
+    }
 
     /// Text too long to carry whole was cut to fit, with the note to show:
     /// otherwise a paste of a long log silently loses its end.

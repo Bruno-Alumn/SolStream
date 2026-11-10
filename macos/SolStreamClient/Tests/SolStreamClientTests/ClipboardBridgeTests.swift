@@ -616,7 +616,10 @@ final class ClipboardBridgeTests: XCTestCase {
     /// keyboard, and again for another copy; nothing is sent either way.
     func testACopyOfFilesIsSaidOnceAndNotSent() {
         var told = 0
-        bridge.onFilesCopied = { told += 1 }
+        bridge.onFilesCopied = { note in
+            XCTAssertEqual(note, ClipboardBridge.filesCopiedNote)
+            told += 1
+        }
         bridge.start(resuming: false)
         func copyFiles() {
             pasteboard.clearContents()
@@ -648,6 +651,35 @@ final class ClipboardBridgeTests: XCTestCase {
         XCTAssertEqual(told, 2, "another copy of files is another note")
         XCTAssertEqual(fake.writes, [])
         XCTAssertEqual(fake.imageWrites, [])
+    }
+
+    /// Files copied before the stream opened -- the bridge's baseline -- are
+    /// said too, once, when it first has the keyboard.
+    func testFilesCopiedBeforeTheStreamAreSaidOnce() throws {
+        bridge.stop()
+        bridge.forgetHandledCopies()
+        pasteboard.clearContents()
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("solstream-copied-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        pasteboard.writeObjects([folder as NSURL])
+        bridge = makeBridge(settleTime: 0)
+        var notes: [String] = []
+        bridge.onFilesCopied = { notes.append($0) }
+        bridge.start(resuming: false)
+        bridge.syncNow()
+        XCTAssertEqual(notes, [], "said before the stream had the keyboard")
+        streamHasKeyboard = true
+        bridge.syncNow()
+        for _ in 0..<5 where fake.isWaiting {
+            fake.answerRead(sequence: 1, unchanged: true)
+            settle()
+        }
+        bridge.syncNow()
+        // A folder alone is said as one: a drop refuses it unzipped.
+        XCTAssertEqual(notes, [ClipboardBridge.foldersCopiedNote])
+        XCTAssertEqual(fake.writes, [])
     }
 
     /// Copy a link, then open the stream or Switch App: a new bridge is built,
