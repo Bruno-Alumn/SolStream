@@ -1,3 +1,4 @@
+import AppKit
 import CoreVideo
 import XCTest
 @testable import VideoDecoder
@@ -48,4 +49,36 @@ final class StatusCardTests: XCTestCase {
         view.hideStatus()
         XCTAssertFalse(view.isShowingStatus)
     }
+
+    private func visibleButtons(in view: NSView) -> [String] {
+        var found: [String] = []
+        func walk(_ v: NSView) {
+            if let button = v as? NSButton, !button.isHiddenOrHasHiddenAncestor { found.append(button.title) }
+            v.subviews.forEach(walk)
+        }
+        walk(view)
+        return found
+    }
+
+    /// A busy card that has lasted offers the way back to the apps beside its
+    /// spinner; an error after it says Try Again, as before.
+    func testALingeringBusyCardOffersAWayOut() {
+        let view = MetalView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        view.onRetry = {}
+        view.setStatus("Reconnecting…", detail: "Waiting for the PC to answer.")
+        XCTAssertEqual(visibleButtons(in: view), [])
+        view.offerWayOut()
+        XCTAssertEqual(visibleButtons(in: view), ["Back to Apps"])
+        view.setError("Lost the connection")
+        XCTAssertEqual(visibleButtons(in: view), ["Try Again"])
+    }
+
+    /// Without a way back to offer, nothing is offered.
+    func testNoWayOutWithoutAHandler() {
+        let view = MetalView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        view.setStatus("Reconnecting…")
+        view.offerWayOut()
+        XCTAssertEqual(visibleButtons(in: view), [])
+    }
+
 }

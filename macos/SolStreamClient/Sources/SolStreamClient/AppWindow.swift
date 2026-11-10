@@ -1375,7 +1375,38 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // A newer card is not the one a held hide was meant for.
         hideStatusWhenPlaced = false
         metalView?.setStatus(title, detail: detail, busy: true)
+        // A card that stays -- "Reconnecting…, waiting for the PC to answer"
+        // can last as long as the PC is gone -- offers a way back to the apps
+        // after a while, and lets go of a game's mouse so it can be clicked:
+        // it had no button, and the pointer could be held hidden over it. A
+        // short stall never gets that far. Counted from the first busy card,
+        // not the latest: a card whose words move on while it waits would
+        // otherwise put the offer off for ever.
+        if wayOutOffered {
+            metalView?.offerWayOut()
+        } else if wayOut == nil {
+            let offer = DispatchWorkItem { [weak self] in
+                guard let self, !self.isClosing else { return }
+                self.wayOutOffered = true
+                self.metalView?.offerWayOut()
+                self.inputCapture?.releasePointer("still waiting")
+            }
+            wayOut = offer
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.wayOutAfter, execute: offer)
+        }
     }
+
+    /// How long a busy card stays before it offers a way out.
+    static let wayOutAfter: TimeInterval = 10
+    private var wayOutOffered = false
+
+    /// The busy card is gone, or has become an error with its own button.
+    private func endWayOut() {
+        wayOut?.cancel()
+        wayOut = nil
+        wayOutOffered = false
+    }
+    private var wayOut: DispatchWorkItem?
 
     func setError(_ title: String, detail: String? = nil) {
         // The mouse back first: a game that had it, and a stream that has
@@ -1383,6 +1414,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // not reach -- and the way to get it back is only said the first time.
         inputCapture?.streamEnded()
         hideStatusWhenPlaced = false
+        endWayOut()
         metalView?.setError(title, detail: detail)
     }
 
@@ -1391,6 +1423,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// as big as it was on the PC, about to be moved and laid out again; the
     /// card stays over them for the fraction of a second that takes.
     func hideStatus() {
+        endWayOut()
         guard firstPlacementDone else {
             hideStatusWhenPlaced = true
             return

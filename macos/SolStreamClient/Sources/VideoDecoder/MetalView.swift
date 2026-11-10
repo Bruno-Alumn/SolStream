@@ -236,6 +236,12 @@ public final class MetalView: NSView {
         overlay.update(title: title, detail: detail, busy: false, isError: true)
     }
 
+    /// A busy card that has gone on too long: offer the way back to the apps
+    /// beside its spinner, as an error card offers Try Again.
+    public func offerWayOut() {
+        overlay.offerWayOut()
+    }
+
     public var onRetry: (() -> Void)? {
         get { overlay.onRetry }
         set { overlay.onRetry = newValue }
@@ -459,9 +465,20 @@ private final class StatusOverlay: NSView {
         spinner.isHidden = !busy
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
 
+        retryButton.title = "Try Again"
+        retryButton.style = .primary
         retryButton.isHidden = !(isError && onRetry != nil)
 
         setHidden(false)
+    }
+
+    /// The same button, as a way out rather than an answer: secondary, beside
+    /// a spinner that goes on.
+    func offerWayOut() {
+        guard onRetry != nil, !isHidden else { return }
+        retryButton.title = "Back to Apps"
+        retryButton.style = .secondary
+        retryButton.isHidden = false
     }
 
     func setHidden(_ hidden: Bool) {
