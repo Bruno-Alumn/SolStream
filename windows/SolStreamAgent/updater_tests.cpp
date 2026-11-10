@@ -2704,6 +2704,20 @@ void TestTrayTip() {
     // A notification's title is cut at 63 characters, its text at 255.
     CHECK(UpdateNoticeTitle(L"10.20.300", true).size() < 64);
     CHECK(UpdateNoticeText(true).size() < 256 && UpdateNoticeText(false).size() < 256);
+    // A restart still owed for the virtual display is said, after an update
+    // as the window has them, and not while streaming.
+    status.driver_restart_pending = true;
+    CHECK(TrayTip(status, L"") ==
+          L"SolStream \u2014 restart this PC to finish the virtual display");
+    CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 update 1.0.9 available");
+    status.virtual_display = true;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 ready for your Mac");
+    status.virtual_display = false;
+    status.connected_clients = 1;
+    CHECK(TrayTip(status, L"") == L"SolStream \u2014 streaming to your Mac");
+    status.driver_restart_pending = false;
+    // The window's title says the same as the tooltip.
+    CHECK(HostWindowTitle(status, L"") == TrayTip(status, L""));
     status.connected_clients = 1;
     CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 streaming to your Mac");
     // The window's hard failures, not "ready" over them.

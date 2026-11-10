@@ -40,7 +40,19 @@ inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update
     if (!update_version.empty()) {
         return L"SolStream — update " + update_version + L" available";
     }
+    // As the window leads with it, after an update as there: "ready" over a
+    // restart still owed read as nothing left to do.
+    if (!status.virtual_display && status.driver_restart_pending) {
+        return L"SolStream — restart this PC to finish the virtual display";
+    }
     return L"SolStream — ready for your Mac";
+}
+
+/// The host window's title: the tooltip's words. The title is what Alt+Tab,
+/// the taskbar's thumbnail and Narrator say of the window, and a plain
+/// "SolStream" there said nothing of how it is.
+inline std::wstring HostWindowTitle(const HostStatus& status, const std::wstring& update_version) {
+    return TrayTip(status, update_version);
 }
 
 /// The title of the notification a scheduled check puts up. "Ready to

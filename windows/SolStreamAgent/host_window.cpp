@@ -2616,18 +2616,26 @@ void StartUpdateCheck(HWND window) {
 }
 
 /// A check's answer, on the UI thread. Takes ownership of `result`.
-/// The tooltip, rebuilt from the status and update state as they are now. The
-/// status thread rewrites it too, but only when the status changes.
+/// The tooltip and the host window's title, rebuilt from the status and update
+/// state as they are now. The status thread rewrites them too, but only when
+/// the status changes.
 void RefreshTrayTip(HWND window) {
+    std::wstring tip;
+    std::wstring title;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        tip = TrayTip(g_status, g_update_tip_version);
+        title = HostWindowTitle(g_status, g_update_tip_version);
+    }
+    if (g_mode == WindowMode::Host) {
+        SetWindowTextW(window, title.c_str());
+    }
     if (!g_tray_added) {
         return;
     }
     NOTIFYICONDATAW data = TrayData(window);
     data.uFlags = NIF_TIP | NIF_SHOWTIP;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        wcsncpy_s(data.szTip, TrayTip(g_status, g_update_tip_version).c_str(), _TRUNCATE);
-    }
+    wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
@@ -3929,6 +3937,7 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
 
 void UpdateHostStatus(const HostStatus& status) {
     std::wstring tip;
+    std::wstring title;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         // The agent reports once a second and almost nothing changes between
@@ -3941,8 +3950,17 @@ void UpdateHostStatus(const HostStatus& status) {
         first = false;
         g_status = status;
         tip = TrayTip(status, g_update_tip_version);
+        title = HostWindowTitle(status, g_update_tip_version);
     }
     if (g_window) {
+        // The host window only; Setup and Uninstall keep their own names.
+        if (g_mode == WindowMode::Host) {
+            wchar_t current[128] = {0};
+            GetWindowTextW(g_window, current, 128);
+            if (title != current) {
+                SetWindowTextW(g_window, title.c_str());
+            }
+        }
         // Only when it has actually changed, which is almost never. SetWindowText
         // on an EDIT clears the selection and puts the caret back at nought, so
         // writing the same token over the top of itself on every status update
