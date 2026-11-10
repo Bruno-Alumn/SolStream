@@ -29,6 +29,10 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shellscalingapi.h>
+// CLSID_AccPropServices and PROPID_ACC_NAME are declared by oleacc.h and
+// defined by no import library MSVC ships, so this file defines them, as
+// driver_install.cpp does its own.
+#include <initguid.h>
 #include <oleacc.h>
 
 #include <algorithm>
