@@ -124,24 +124,26 @@ final class QualityPill: DS.Box {
         let muted = StreamSettings.shared.isMuted
         dot.isHidden = muted
         muteMark.isHidden = !muted
-        let tip = Self.toolTip(stats, muted: muted)
+        let tip = Self.toolTip(muted: muted)
         if toolTip != tip { toolTip = tip }
         refreshDetail()
     }
 
-    /// What pointing at the pill says: the numbers it stands for, the sound
-    /// when it is muted, and that a click opens the controls -- nothing about
-    /// a 56-point chip with a number in it says it can be clicked.
-    static func toolTip(_ stats: Stats, muted: Bool) -> String {
-        var numbers = [stats.fps > 0 ? "\(stats.fps) fps" : "No frames yet"]
-        if stats.fps > 0 {
-            if let latency = stats.latencyMs { numbers.append("\(latency) ms") }
-            if let rate = stats.bitrateMbps { numbers.append(megabits(rate)) }
-        }
-        var lines = [numbers.joined(separator: " · ")]
-        if muted { lines.append("Sound is muted.") }
-        lines.append("Click for sound, mouse and quality.")
-        return lines.joined(separator: "\n")
+    /// What pointing at the pill says: the sound when it is muted, and that a
+    /// click opens the controls -- nothing about a 56-point chip with a number
+    /// in it says it can be clicked. The controls by the popover's own row
+    /// names. No live numbers: the stats come every second, and a tooltip set
+    /// again closes the one on screen; the popover has them.
+    static func toolTip(muted: Bool) -> String {
+        muted ? "Sound is muted.\nClick for sound, mouse and video."
+              : "Click for sound, mouse and video."
+    }
+
+    /// VoiceOver's hint, said apart from the tooltip, which AppKit would
+    /// otherwise read as one: the value already says the rate and the mute,
+    /// and "Click" is no instruction to VoiceOver or Voice Control.
+    override func accessibilityHelp() -> String? {
+        "Shows the sound, mouse and video controls."
     }
 
     /// Whether the mute mark stands in the dot's place, for tests.

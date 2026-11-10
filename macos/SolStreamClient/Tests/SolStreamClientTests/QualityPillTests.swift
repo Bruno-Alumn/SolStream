@@ -491,19 +491,20 @@ final class QualityPillTests: XCTestCase {
         window.close()
     }
 
-    /// Pointing at the pill says its numbers, a mute, and that it opens.
-    func testTheToolTipSaysTheNumbersAndTheMute() {
+    /// Pointing at the pill says a mute and that it opens, in words that do
+    /// not change with every second's stats; VoiceOver gets a hint of its own.
+    func testTheToolTipSaysTheMuteAndWhatAClickOpens() {
+        XCTAssertEqual(QualityPill.toolTip(muted: false), "Click for sound, mouse and video.")
+        XCTAssertEqual(QualityPill.toolTip(muted: true),
+                       "Sound is muted.\nClick for sound, mouse and video.")
+        let pill = QualityPill()
+        let tip = pill.toolTip
         var stats = QualityPill.Stats()
-        XCTAssertEqual(QualityPill.toolTip(stats, muted: false),
-                       "No frames yet\nClick for sound, mouse and quality.")
         stats.fps = 60
-        stats.latencyMs = 12
         stats.bitrateMbps = 9.8
-        XCTAssertEqual(QualityPill.toolTip(stats, muted: false),
-                       "60 fps · 12 ms · 9.8 Mbps\nClick for sound, mouse and quality.")
-        stats.latencyMs = nil
-        XCTAssertEqual(QualityPill.toolTip(stats, muted: true),
-                       "60 fps · 9.8 Mbps\nSound is muted.\nClick for sound, mouse and quality.")
+        pill.stats = stats
+        XCTAssertEqual(pill.toolTip, tip, "the stats must not reset the tooltip")
+        XCTAssertEqual(pill.accessibilityHelp(), "Shows the sound, mouse and video controls.")
     }
 
     /// The mark takes the dot's place while muted, and follows a mute made
