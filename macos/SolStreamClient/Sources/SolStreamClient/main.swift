@@ -2396,6 +2396,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         action: #selector(NSWindow.performClose(_:)),
                                         keyEquivalent: "w"))
         windowMenu.addItem(.separator())
+        // ⌃⌘` rather than ⌘`: a stream keeps every plain ⌘ key for the PC, so
+        // ⌘` reached Windows as Ctrl+` and the stream windows of one PC could
+        // be gone between only with the mouse or this menu. ⇧ goes backwards,
+        // as the Mac's own does.
+        Self.reserve(windowMenu.addItem(withTitle: "Cycle Through Windows",
+                                        action: #selector(cycleWindows(_:)), keyEquivalent: "`"))
+        let backwards = windowMenu.addItem(withTitle: "Cycle Backwards Through Windows",
+                                           action: #selector(cycleWindows(_:)),
+                                           keyEquivalent: "`")
+        backwards.keyEquivalentModifierMask = [.control, .shift, .command]
+        backwards.isAlternate = true
+        backwards.tag = 1
+        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Bring All to Front",
                            action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         windowMenuItem.submenu = windowMenu
@@ -2535,6 +2548,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The Host menu's Disconnect, named for the PC it leaves.
     static func disconnectTitle(pc: String?) -> String {
         pc.map { "Disconnect from \u{201C}\($0)\u{201D}" } ?? "Disconnect"
+    }
+
+    /// The window to bring forward in a cycle through `count` windows from
+    /// the one at `current` (nil: none of them is in front), or nil when
+    /// there is nowhere to go.
+    static func nextWindowIndex(current: Int?, count: Int, backwards: Bool) -> Int? {
+        guard count > 0 else { return nil }
+        guard let current else { return backwards ? count - 1 : 0 }
+        guard count > 1 else { return nil }
+        return (current + (backwards ? count - 1 : 1)) % count
+    }
+
+    /// SolStream's windows a cycle goes through: those the Window menu lists,
+    /// on screen, in a fixed order, so going round comes back where it began.
+    private var cyclableWindows: [NSWindow] {
+        NSApp.windows
+            .filter { $0.isVisible && !$0.isExcludedFromWindowsMenu && $0.canBecomeKey
+                && $0.sheetParent == nil && $0.parent == nil }
+            .sorted { $0.windowNumber < $1.windowNumber }
+    }
+
+    @objc func cycleWindows(_ sender: NSMenuItem) {
+        let windows = cyclableWindows
+        let current = windows.firstIndex { $0.isKeyWindow }
+        guard let next = Self.nextWindowIndex(current: current, count: windows.count,
+                                              backwards: sender.tag == 1) else { return }
+        windows[next].makeKeyAndOrderFront(nil)
     }
 
     /// Whether a Host menu item has anything to act on. Disconnect was on with
@@ -2898,6 +2938,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(cycleWindows(_:)) {
+            let windows = cyclableWindows
+            return Self.nextWindowIndex(current: windows.firstIndex { $0.isKeyWindow },
+                                        count: windows.count, backwards: false) != nil
+        }
         if menuItem.action == #selector(disconnectHost), menuItem.representedObject == nil {
             let connected = agent != nil || picker != nil || session != nil
             menuItem.title = Self.disconnectTitle(

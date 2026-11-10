@@ -72,4 +72,20 @@ final class HostMenuTests: XCTestCase {
         XCTAssertEqual(AppDelegate.disconnectTitle(pc: nil), "Disconnect")
     }
 
+
+    /// ⌃⌘` goes round the windows and comes back; ⇧ the other way; with one
+    /// window already in front there is nowhere to go.
+    func testCyclingGoesRoundTheWindows() {
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: 0, count: 3, backwards: false), 1)
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: 2, count: 3, backwards: false), 0)
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: 0, count: 3, backwards: true), 2)
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: nil, count: 3, backwards: false), 0)
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: nil, count: 3, backwards: true), 2)
+        XCTAssertEqual(AppDelegate.nextWindowIndex(current: nil, count: 1, backwards: false), 0)
+        XCTAssertNil(AppDelegate.nextWindowIndex(current: 0, count: 1, backwards: false))
+        XCTAssertNil(AppDelegate.nextWindowIndex(current: nil, count: 0, backwards: false))
+        XCTAssertTrue(InputCapture.isReserved(keyCode: 0x32, flags: [.control, .command],
+                                              characters: "`"))
+    }
+
 }
