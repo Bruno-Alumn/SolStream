@@ -5143,6 +5143,10 @@ std::string HandleMedia(const std::string& line) {
            + (videoCodecReply.empty() ? std::string()
                                       : ",\"videoCodec\":\"" + videoCodecReply + "\"")
            + inputReply
+           // This host's version, so a Mac newer than it can say the PC wants
+           // updating: a feature both ends must have does nothing, silently,
+           // while one end is behind. After authentication, unlike the greeting.
+           + ",\"appVersion\":\"" SOLSTREAM_VERSION_STRING "\""
            + ",\"hport\":" + std::to_string(solstream::kDefaultMediaPort) + "}";
 }
 

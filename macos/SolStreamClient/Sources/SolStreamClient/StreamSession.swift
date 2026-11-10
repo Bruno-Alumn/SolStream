@@ -149,6 +149,9 @@ final class StreamSession {
     /// The host types the character this Mac's layout made for a key, sent
     /// with it, so a Spanish Mac types Spanish on a US PC. See InputCapture.
     let hostTakesKeyCharacters: Bool
+    /// What to tell the person when SolStream on the PC is older than this
+    /// Mac's, or nil when it is not. See `outdatedHostNote`.
+    let outdatedHostNote: String?
 
     var onPhase: ((StreamPhase) -> Void)?
 
@@ -202,6 +205,10 @@ final class StreamSession {
                                                       stated: session.audioSourceStated)
         self.hostTakesScanCodes = session.takesScanCodes
         self.hostTakesKeyCharacters = session.takesScanCodes && session.takesKeyCharacters
+        self.outdatedHostNote = Self.outdatedHostNote(
+            hostVersion: session.hostVersion,
+            macVersion: Updater.bundleVersion(.main))
+        if let note = outdatedHostNote { Log.info("[app] \(note)") }
         // Said once a session, because it decides what every key types and
         // nothing on screen shows which way they are going.
         Log.info("[input] keys go to \(host) "
@@ -707,5 +714,26 @@ struct LivenessWatch {
         guard !reportedLost else { return .quiet }
         reportedLost = true
         return .lost(seconds: stalled)
+    }
+}
+
+extension StreamSession {
+    /// A sentence for a PC whose SolStream is older than this Mac's.
+    ///
+    /// Features that need both ends -- keys typed with this Mac's layout was
+    /// the first -- do nothing while the PC is behind, and nothing says why:
+    /// the PC updates only when somebody clicks its notification, and it had
+    /// sat at 1.0.5 for three releases. A host that says no version predates
+    /// saying one, so it is older than any Mac that reads it. Nil for a Mac
+    /// with no version of its own -- a development build -- which cannot say.
+    static func outdatedHostNote(hostVersion: String?, macVersion: String) -> String? {
+        guard let mac = ReleaseVersion(macVersion), mac.parts != [0, 0, 0] else { return nil }
+        if let said = hostVersion {
+            guard let host = ReleaseVersion(said), host < mac else { return nil }
+            return "SolStream on the PC is \(host.text), older than this Mac's \(mac.text). "
+                + "Update it on the PC so everything works."
+        }
+        return "SolStream on the PC is older than this Mac's \(mac.text). "
+            + "Update it on the PC so everything works."
     }
 }

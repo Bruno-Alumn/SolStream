@@ -1477,6 +1477,9 @@ public final class AgentConnection {
         /// The host takes, with a key by position, the character this Mac's
         /// layout typed, and types that instead: "scancodes" 2 or more.
         public var takesKeyCharacters = false
+        /// The SolStream version the host said it is, or nil from one that
+        /// predates saying so -- every host before 1.0.9.
+        public var hostVersion: String?
         /// What the host said its picture is coded in. H.264 from a host that
         /// said nothing, because that is all one that predates the choice
         /// sends.
@@ -1718,6 +1721,7 @@ public final class AgentConnection {
                             audioSourceStated: reply["audioSource"] != nil,
                             takesScanCodes: Self.takesScanCodes(inReply: reply),
                             takesKeyCharacters: Self.takesKeyCharacters(inReply: reply),
+                            hostVersion: reply["appVersion"] as? String,
                             videoCodec: videoCodec, address: currentIPv4())
     }
 

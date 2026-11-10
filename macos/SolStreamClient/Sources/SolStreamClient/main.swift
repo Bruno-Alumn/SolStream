@@ -1509,6 +1509,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let note = inputBlockedNow {
                 appWindow.tell(note)
                 inputBlockedShown = true
+            } else if let note = session.outdatedHostNote,
+                      toldOutdatedHosts.insert(host).inserted {
+                // Once per PC while SolStream runs: a reminder on every window
+                // would be nagging, and the log keeps it either way.
+                appWindow.tell(note)
             }
 
             // Size the host window to this one and pin it there. The window owns
@@ -2466,6 +2471,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// What the PC last said blocks its input, kept so a stream window opened
     /// while it lasts says it too. Nil when nothing is in the way.
     var inputBlockedNow: String?
+    /// PCs already told this run that their SolStream is older than this Mac's.
+    var toldOutdatedHosts: Set<String> = []
     /// Whether a blocked note was shown, so "can control again" is said only
     /// after one.
     var inputBlockedShown = false
