@@ -5,6 +5,7 @@ import MediaSession
 import AgentChannel
 import DesignSystem
 import VideoDecoder
+import InputCapture
 
 /// SolStream macOS client entry point.
 struct SolStreamApp {
@@ -2319,6 +2320,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hostMenu.addItem(withTitle: "Add App to Dock", action: #selector(addStreamToDock),
                          keyEquivalent: "")
         hostMenu.addItem(.separator())
+        // The stream's two quick switches, also in the quality pill's popover.
+        // Here as well, on ⌃⌘ keys a stream never takes: the pill hides with
+        // the title bar in full screen, and with the mouse held for a game it
+        // is out of reach until ⌃⌥ lets go.
+        Self.reserve(hostMenu.addItem(withTitle: "Mute Sound",
+                                      action: #selector(toggleMuteFromMenu), keyEquivalent: "k"))
+        Self.reserve(hostMenu.addItem(withTitle: "Gaming Mouse",
+                                      action: #selector(togglePointerModeFromMenu),
+                                      keyEquivalent: "g"))
+        hostMenu.addItem(.separator())
         // Closing the window only stops streaming it; these end it on the PC.
         // Force Quit is the ⌥ alternate, as in the Dock.
         for item in Self.quitItems(for: nil) {
@@ -2435,6 +2446,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         closing()
         if !keepsSession {
             MainActor.assumeIsolated { Updater.shared.isStreaming = false }
+        }
+    }
+
+    /// Mute Sound's and Gaming Mouse's tick, from the settings they switch;
+    /// nil for any other item.
+    static func streamSwitchState(_ action: Selector?, muted: Bool,
+                                  mode: InputCapture.PointerMode) -> NSControl.StateValue? {
+        switch action {
+        case #selector(toggleMuteFromMenu): return muted ? .on : .off
+        case #selector(togglePointerModeFromMenu): return mode == .gaming ? .on : .off
+        default: return nil
+        }
+    }
+
+    /// What a switch from the menu did, said to VoiceOver: from the keyboard
+    /// nothing else on screen may say it.
+    static func streamSwitchAnnouncement(muted: Bool) -> String {
+        muted ? "Sound muted" : "Sound on"
+    }
+
+    static func streamSwitchAnnouncement(mode: InputCapture.PointerMode) -> String {
+        mode == .gaming ? "Gaming mouse" : "Desktop mouse"
+    }
+
+    @objc func toggleMuteFromMenu() {
+        let settings = StreamSettings.shared
+        settings.toggleMute()
+        MainActor.assumeIsolated { DS.announce(Self.streamSwitchAnnouncement(muted: settings.isMuted)) }
+    }
+
+    @objc func togglePointerModeFromMenu() {
+        let settings = StreamSettings.shared
+        settings.pointerMode = settings.pointerMode == .gaming ? .desktop : .gaming
+        MainActor.assumeIsolated {
+            DS.announce(Self.streamSwitchAnnouncement(mode: settings.pointerMode))
         }
     }
 
@@ -2799,6 +2845,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if let state = Self.streamSwitchState(menuItem.action,
+                                              muted: StreamSettings.shared.isMuted,
+                                              mode: StreamSettings.shared.pointerMode) {
+            menuItem.state = state
+            return true
+        }
         if menuItem.action == #selector(checkForUpdates) {
             menuItem.title = Self.updateMenuTitle(for: MainActor.assumeIsolated { Updater.shared.state })
             return true

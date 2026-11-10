@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+@testable import InputCapture
 @testable import SolStreamClient
 
 /// The Host menu greys out what has nothing to act on, found by the actions'
@@ -39,4 +40,26 @@ final class HostMenuTests: XCTestCase {
         XCTAssertTrue(delegate.responds(to: disconnect))
         XCTAssertTrue(delegate.responds(to: switchApp))
     }
+
+    /// Mute Sound and Gaming Mouse tick what is set, and only themselves.
+    func testTheStreamSwitchesTickWhatIsSet() {
+        let mute = #selector(AppDelegate.toggleMuteFromMenu)
+        let mouse = #selector(AppDelegate.togglePointerModeFromMenu)
+        XCTAssertEqual(AppDelegate.streamSwitchState(mute, muted: true, mode: .desktop), .on)
+        XCTAssertEqual(AppDelegate.streamSwitchState(mute, muted: false, mode: .gaming), .off)
+        XCTAssertEqual(AppDelegate.streamSwitchState(mouse, muted: true, mode: .desktop), .off)
+        XCTAssertEqual(AppDelegate.streamSwitchState(mouse, muted: false, mode: .gaming), .on)
+        XCTAssertNil(AppDelegate.streamSwitchState(disconnect, muted: true, mode: .gaming))
+        XCTAssertEqual(AppDelegate.streamSwitchAnnouncement(muted: true), "Sound muted")
+        XCTAssertEqual(AppDelegate.streamSwitchAnnouncement(mode: .gaming), "Gaming mouse")
+    }
+
+    /// Their keys are ⌃⌘ ones, which a streamed window keeps for the Mac.
+    func testTheStreamSwitchesKeysStayOnTheMac() {
+        for key in ["k", "g"] {
+            XCTAssertTrue(InputCapture.isReserved(keyCode: 0, flags: [.control, .command],
+                                                  characters: key), key)
+        }
+    }
+
 }
