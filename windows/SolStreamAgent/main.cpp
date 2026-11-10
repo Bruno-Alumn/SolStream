@@ -409,6 +409,20 @@ std::vector<Display> EnumerateDisplays() {
     return displays;
 }
 
+/// The capture display as the host window says it: "ready", and its size
+/// when Windows will say it -- "ready · 2560×1440".
+std::wstring VirtualDisplaySummary(const std::wstring& device) {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (device.empty()
+        || !EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &mode)
+        || mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0) {
+        return L"ready";
+    }
+    return L"ready \u00B7 " + std::to_wstring(mode.dmPelsWidth) + L"\u00D7"
+         + std::to_wstring(mode.dmPelsHeight);
+}
+
 /// Pick what is captured: the virtual display when there is one, so a crop
 /// can never be a crop out of somebody's real screen. At startup, again once
 /// the window has installed one, and again whenever the displays change under
@@ -8168,8 +8182,11 @@ int wmain(int argc, wchar_t** argv) {
             status.driver_off = off;
             status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
+            // Its size rather than its device name: "\\.\DISPLAY9" says
+            // nothing to the person reading the window, and the name stays in
+            // the log.
             status.display_detail = status.virtual_display
-                ? (CaptureDisplay().empty() ? L"ready" : CaptureDisplay())
+                ? VirtualDisplaySummary(CaptureDisplay())
                 : L"not installed";
 
             solstream::UpdateHostStatus(status);

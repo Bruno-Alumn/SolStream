@@ -90,6 +90,14 @@ constexpr const wchar_t* kClassName = kHostWindowClass;
 /// every step reported success.
 constexpr wchar_t kSetupClassName[] = L"SolStreamSetupWindow";
 constexpr UINT kTimerId = 1;
+/// One-shot: the Copy button's "Copied" is over.
+constexpr UINT kTimerCopied = 2;
+/// When the pairing token was last copied, for the Copy button to say
+/// "Copied" for a moment: it said nothing, and a Copy that answers nothing
+/// gets pressed again, or the token typed out by hand.
+ULONGLONG g_token_copied_at = 0;
+constexpr ULONGLONG kCopiedShownMs = 1500;
+
 constexpr int kEditId = 200;
 
 /// Posted by the worker thread when a long job finishes. wparam is non-zero on
@@ -1937,7 +1945,9 @@ void LayoutAndPaint(HWND window) {
         // action. Reserve its width plus a gutter, or the field runs underneath
         // it — and a child EDIT always paints above Direct2D content, so the
         // overlap is total.
-        const float copy_w = ButtonWidth(L"Copy", false, 64.0f);
+        // As wide as its wider caption, so "Copied" does not move the field.
+        const float copy_w = (std::max)(ButtonWidth(L"Copy", false, 64.0f),
+                                        ButtonWidth(L"Copied", false, 64.0f));
         const float field_right = right - copy_w - space::kSm;
         const D2D1_RECT_F field{pad, y, field_right, y + metric::kFieldH};
         const bool field_focus = GetFocus() == g_token_edit;
@@ -1983,7 +1993,9 @@ void LayoutAndPaint(HWND window) {
             const float mid = y + metric::kFieldH / 2.0f;
             copy->rect = D2D1::RectF(right - copy_w, mid - metric::kButtonH / 2.0f,
                                      right, mid + metric::kButtonH / 2.0f);
-            copy->caption = L"Copy";
+            const bool copied = g_token_copied_at != 0
+                && GetTickCount64() - g_token_copied_at < kCopiedShownMs;
+            copy->caption = copied ? L"Copied" : L"Copy";
             copy->kind = ButtonKind::Secondary;
             copy->visible = true;
             DrawButton(*copy);
@@ -2184,18 +2196,19 @@ void SetEditFont() {
 /// open now -- a clipboard manager reading the last copy -- lets go within
 /// milliseconds, and a Copy that did nothing on the first refusal said nothing
 /// either.
-void CopyToClipboard(const std::wstring& text) {
+bool CopyToClipboard(const std::wstring& text) {
     if (text.empty()) {
-        return;
+        return false;
     }
     bool open = false;
     for (int attempt = 0; attempt < 10 && !(open = OpenClipboard(g_window) != FALSE); ++attempt) {
         Sleep(20);
     }
     if (!open) {
-        return;
+        return false;
     }
     EmptyClipboard();
+    bool copied = false;
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     if (HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
         if (void* target = GlobalLock(handle)) {
@@ -2203,6 +2216,7 @@ void CopyToClipboard(const std::wstring& text) {
             GlobalUnlock(handle);
             if (SetClipboardData(CF_UNICODETEXT, handle)) {
                 MarkClipboardPrivate();
+                copied = true;
             } else {
                 GlobalFree(handle);
             }
@@ -2211,6 +2225,26 @@ void CopyToClipboard(const std::wstring& text) {
         }
     }
     CloseClipboard();
+    return copied;
+}
+
+/// Copy the pairing token, and say how it went: "Copied" on the button, or
+/// why it could not be.
+void CopyTokenAndSay(const std::wstring& token) {
+    if (CopyToClipboard(token)) {
+        g_token_copied_at = GetTickCount64();
+        // Back to "Copy" once the moment is over, rather than at the next
+        // second's repaint.
+        SetTimer(g_window, kTimerCopied, (UINT) kCopiedShownMs, nullptr);
+    } else if (token.empty()) {
+        SetNotice(L"There's no pairing token to copy yet.",
+                  L"SolStream is still starting. Try again in a moment.", Mark::None, false);
+    } else {
+        SetNotice(L"Couldn't copy the pairing token.",
+                  L"Another program is using the clipboard. Try again, or type the "
+                  L"token from this window.", Mark::None, false);
+    }
+    InvalidateRect(g_window, nullptr, FALSE);
 }
 
 /// The token field's own copy -- Ctrl+C, or Copy on its right-click menu --
@@ -2710,7 +2744,7 @@ void Activate(HWND window, int id) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 token = g_status.pairing_token;
             }
-            CopyToClipboard(token);
+            CopyTokenAndSay(token);
             break;
         }
         case kIdBannerFix: {
@@ -3094,7 +3128,7 @@ void ShowTrayMenu(HWND window) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 token = g_status.pairing_token;
             }
-            CopyToClipboard(token);
+            CopyTokenAndSay(token);
             break;
         }
         // Both open the window: it is where the progress and the answer are
@@ -3567,6 +3601,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
 
         case WM_TIMER:
+            if (wparam == kTimerCopied) {
+                KillTimer(window, kTimerCopied);
+            }
             InvalidateRect(window, nullptr, FALSE);
             return 0;
 
