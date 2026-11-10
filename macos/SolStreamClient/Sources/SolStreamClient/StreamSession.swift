@@ -304,10 +304,7 @@ final class StreamSession {
             DispatchQueue.main.async {
                 // Said as what happened: the PC ending the stream is not the
                 // same as it going quiet, and the second is the network's.
-                self?.onPhase?(.failed(reason == .hostEnded
-                    ? "The PC ended the stream. Try Again to open the app again."
-                    : "The PC stopped sending the picture. Try Again to go back and "
-                        + "open the app again."))
+                self?.onPhase?(.failed(StreamSession.endedMessage(reason)))
             }
         }
         // Holding as well as asking: until the IDR, every P-frame would only
@@ -735,5 +732,18 @@ extension StreamSession {
         }
         return "SolStream on the PC is older than this Mac's \(mac.text). "
             + "Update it on the PC so everything works."
+    }
+}
+
+extension StreamSession {
+    /// Why the stream ended, and what Try Again does about it: it goes back
+    /// to the app list -- it used to be said to open the app again, which it
+    /// never has.
+    static func endedMessage(_ reason: MediaClient.EndReason) -> String {
+        reason == .hostEnded
+            ? "The PC ended the stream. Try Again goes back to the app list, where you can "
+                + "open it again."
+            : "The PC stopped sending the picture. Try Again goes back to the app list, "
+                + "where you can open it again."
     }
 }

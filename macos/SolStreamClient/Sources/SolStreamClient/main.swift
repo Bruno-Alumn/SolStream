@@ -324,11 +324,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// What opens next time: what is on screen now, or, with nothing on
+    /// screen, what a launcher or Reopen the Last App is still waking the PC
+    /// for or connecting to. Quitting during one wake that failed used to
+    /// forget the app for good. Nothing at all, nothing does: an app walked
+    /// away from -- Back, leaving the PC -- is no longer waiting.
+    static func linkToRemember(streaming: AppLink?, waitingToOpen: AppLink?) -> AppLink? {
+        streaming ?? waitingToOpen
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // What is on screen now is what opens next time; nothing on screen,
-        // nothing does.
         if !commandLineSession, !testMode, !forgotPairings {
-            AppLink.setLast(appWindows.isEmpty ? nil : streamLink)
+            AppLink.setLast(Self.linkToRemember(streaming: appWindows.isEmpty ? nil : streamLink,
+                                                waitingToOpen: pendingOpen))
         }
         // Synchronous: the process is about to exit and the host needs to see
         // us go, or it stays busy for every other client.

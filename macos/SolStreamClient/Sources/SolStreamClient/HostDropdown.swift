@@ -158,8 +158,14 @@ final class HostDropdown: DS.Box {
         titleLabel.stringValue = name ?? (address.isEmpty ? "Choose a PC" : address)
         // Without a name the title IS the address, and addresses are set in mono.
         titleLabel.font = (name == nil && !address.isEmpty) ? DS.mono : DS.body
+        let before = accessibilityValue() as? String
         detailLabel.attributedStringValue = Detail.line(detail, colour: DS.textMuted)
         dot.state = dotState
+        // Said again when it changes -- a check coming back, a PC waking --
+        // as a pop-up button's value is.
+        if accessibilityValue() as? String != before {
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
         if isOpen, moved {
             // The same rule as opening the list: the selected row, or the first.
             highlighted = rows.firstIndex { $0.address == address } ?? 0
@@ -200,7 +206,18 @@ final class HostDropdown: DS.Box {
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .popUpButton }
     override func accessibilityLabel() -> String? { "PC" }
-    override func accessibilityValue() -> Any? { titleLabel.stringValue }
+    /// The PC and what is known of it -- "DESKTOP, Not answering" -- not its
+    /// name alone: the dot and the line under it are how everyone else sees
+    /// whether it is awake, paired, or there at all.
+    override func accessibilityValue() -> Any? {
+        Self.spokenValue(title: titleLabel.stringValue,
+                         detail: detailLabel.attributedStringValue.string)
+    }
+
+    static func spokenValue(title: String, detail: String) -> String {
+        let more = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        return more.isEmpty ? title : title + ", " + more
+    }
     override func accessibilityPerformPress() -> Bool {
         isOpen ? closeList(commit: false) : openList()
         return true
