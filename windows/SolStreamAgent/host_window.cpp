@@ -17,6 +17,7 @@
 
 #include "host_window.h"
 #include "tray_tip.h"
+#include "banner_advice.h"
 #include "crash_report.h"
 
 #include "media/log.h"
@@ -893,7 +894,7 @@ void DrawCheck(const Check& check) {
 
 /// What the banner's button does. Decided by Describe, the same function that
 /// decides what the button SAYS, so the two cannot disagree.
-enum class BannerAction { None, Dismiss, InstallDriver, InstallUpdate };
+enum class BannerAction { None, Dismiss, InstallDriver, InstallUpdate, OpenAdvice };
 
 struct Screen {
     // A short title and the sentence under it, the same shape as setup's. One
@@ -936,6 +937,19 @@ void SetNotice(std::wstring what, std::wstring why, Mark mark, bool about_update
     g_notice_mark = mark;
     g_notice_about_update = about_update;
     g_notice_about_display = about_display;
+}
+
+/// The button that opens the place the banner's advice names, if it names
+/// one. The quiet button and no shield: it opens a window, it changes nothing.
+void ShowAdviceButton(Screen& screen, const HostStatus& status) {
+    const AdvicePlace place = AdvicePlaceFor(status);
+    if (place == AdvicePlace::None) {
+        return;
+    }
+    screen.fix = AdviceCaption(place);
+    screen.fix_primary = false;
+    screen.shield = false;
+    screen.action = BannerAction::OpenAdvice;
 }
 
 /// Derive what to show from what the agent last reported. One banner at a time:
@@ -1037,6 +1051,7 @@ Screen Describe(const HostStatus& status) {
         return screen;
     }
     if (failing) {
+        ShowAdviceButton(screen, status);
         return screen;
     }
 
@@ -1074,10 +1089,12 @@ Screen Describe(const HostStatus& status) {
         if (status.driver_off) {
             screen.why += L"This PC's Virtual Display Driver is turned off; turn it on in "
                           L"Device Manager (Display adapters) to stream to it.";
+            ShowAdviceButton(screen, status);
         } else if (status.driver_failing) {
             screen.why += L"This PC's Virtual Display Driver isn't running. Restarting this "
                           L"PC may start it; if not, Device Manager (Display adapters) says "
                           L"why.";
+            ShowAdviceButton(screen, status);
         } else if (!CanInstallDisplayDriver()) {
             screen.why += L"SolStream can't install a virtual display on an ARM PC. "
                         + ToWide(ManualInstallAdvice());
@@ -2846,6 +2863,16 @@ void Activate(HWND window, int id) {
                 case BannerAction::InstallUpdate:
                     StartUpdateJob(window);
                     break;
+                case BannerAction::OpenAdvice: {
+                    const AdvicePlace place = AdvicePlaceFor(status);
+                    const INT_PTR opened = (INT_PTR) ShellExecuteW(
+                        window, L"open", AdviceTarget(place), nullptr, nullptr, SW_SHOWNORMAL);
+                    if (opened <= 32) {
+                        media::Log("[window] couldn't open %ls (%lld)", AdviceTarget(place),
+                                   (long long) opened);
+                    }
+                    break;
+                }
                 case BannerAction::None:
                     break;
             }
@@ -3946,7 +3973,8 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.connected_clients == b.connected_clients
         && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off
         && a.driver_failing == b.driver_failing
-        && a.driver_restart_pending == b.driver_restart_pending;
+        && a.driver_restart_pending == b.driver_restart_pending
+        && a.windows_too_old == b.windows_too_old;
 }
 
 void UpdateHostStatus(const HostStatus& status) {

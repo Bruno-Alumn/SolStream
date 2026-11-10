@@ -47,6 +47,9 @@ struct HostStatus {
     /// The Virtual Display Driver is installed and Windows starts it once this
     /// PC restarts: the window says to restart, and offers nothing else.
     bool driver_restart_pending = false;
+    /// Streaming cannot start because this Windows is older than the capture
+    /// it needs: the banner offers Windows Update.
+    bool windows_too_old = false;
     /// This PC's Tailscale address, or empty when it is not on Tailscale.
     std::wstring tailscale_address;
 };

@@ -65,6 +65,7 @@
 #include "session_takeover.h"
 #include "token_store.h"
 #include "tray_tip.h"
+#include "banner_advice.h"
 #include "stranded.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
@@ -2749,6 +2750,41 @@ void TestTrayTip() {
     CHECK(TrayTip(status, L"999999999.999999999.999999999").size() < 128);
 }
 
+void TestAdvicePlace() {
+    HostStatus status;
+    status.agent_listening = true;
+    status.address = L"192.168.1.5";
+    status.streaming_ready = true;
+    status.virtual_display = true;
+    // A PC with nothing to fix names no place.
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::None);
+    CHECK(std::wstring(AdviceCaption(AdvicePlace::None)).empty());
+    // A driver that is here and switched off, or failing: Device Manager.
+    status.virtual_display = false;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::None);  // SolStream's own Set up
+    status.driver_off = true;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::DeviceManager);
+    status.driver_off = false;
+    status.driver_failing = true;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::DeviceManager);
+    // A restart owed is the thing to do; no place.
+    status.driver_restart_pending = true;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::None);
+    status.driver_restart_pending = false;
+    // Streaming that cannot start: Windows Update only for a Windows too old.
+    status.streaming_ready = false;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::None);
+    status.windows_too_old = true;
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::WindowsUpdate);
+    // No address outranks the rest, as in the window.
+    status.address.clear();
+    CHECK(AdvicePlaceFor(status) == AdvicePlace::NetworkSettings);
+    CHECK(std::wstring(AdviceTarget(AdvicePlace::NetworkSettings)) == L"ms-settings:network-status");
+    CHECK(std::wstring(AdviceTarget(AdvicePlace::WindowsUpdate)) == L"ms-settings:windowsupdate");
+    CHECK(std::wstring(AdviceTarget(AdvicePlace::DeviceManager)) == L"devmgmt.msc");
+    CHECK(std::wstring(AdviceCaption(AdvicePlace::DeviceManager)) == L"Device Manager");
+}
+
 void TestCharKeys() {
     using namespace media;
     INPUT out[32];
@@ -4856,6 +4892,7 @@ int wmain(int argc, wchar_t** argv) {
     TestScanKeys();
     TestCharKeys();
     TestTrayTip();
+    TestAdvicePlace();
     TestTextInput();
     TestCapsLock();
     TestHoldOrder();
