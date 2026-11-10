@@ -466,8 +466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             askingToOpen = true
             defer { askingToOpen = false }
             let alert = NSAlert()
-            alert.messageText = "Open \(link.name) on \(link.host)?"
-            alert.informativeText = "This ends the stream from \(current)"
+            alert.messageText = "Open \(link.name) on \(pcLabel(link.host))?"
+            alert.informativeText = "This ends the stream from \(pcLabel(current))"
                 + (streamLink.map { " (\($0.name))" } ?? "") + "."
             alert.addButton(withTitle: "Open")
             alert.addButton(withTitle: "Cancel")
@@ -481,7 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showPicker(host: link.host)
         // Said from the start, so a slow PC reads as one being reached for
         // this app rather than a list nobody asked for.
-        picker?.showWaiting("Connecting to \(link.host) to open \(link.name)…")
+        picker?.showWaiting("Connecting to \(pcLabel(link.host)) to open \(link.name)…")
     }
 
     /// Wake the PC a launcher asked for, when it does not answer and this Mac
@@ -540,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let choice = Self.choice(for: link, windowID: windowID, windows: windows,
                                        apps: apps) else {
             Log.error("[app] \"\(link.name)\" is not on \(host) any more")
-            picker.showFailure("\(link.name) isn't on \(host) any more. Choose another app.")
+            picker.showFailure("\(link.name) isn't on \(pcLabel(host)) any more. Choose another app.")
             return
         }
         picker.highlight(choice)
@@ -681,6 +681,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         self.picker = picker
         pickerHost = host
+        // The name the Window menu and VoiceOver call the picker by, as the
+        // stream's cards call the PC.
+        picker.window.title = pcLabel(host)
         picker.show()
 
         // [weak agent] throughout: `agent` stores these closures, so a strong
@@ -836,7 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !agent.willReconnect {
             // Refused for good (busy, impersonation) or already closed: nothing
             // is coming, so do not leave the spinner up.
-            picker.showFailure(Self.openFailedOffline(host: host, reconnecting: false,
+            picker.showFailure(Self.openFailedOffline(host: pcLabel(host), reconnecting: false,
                                                       lastFailure: agent.lastFailureMessage))
         }
         // Otherwise the connection is in its reconnect backoff: the spinner
@@ -938,7 +941,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // request to see it, not to start a second copy. Only a window
             // that is surely its own, though, or the one that could be; see
             // `LaunchMatch`.
-            picker?.showBusy("Opening \(app.name) on \(host)…")
+            picker?.showBusy("Opening \(app.name) on \(pcLabel(host))…")
             agent.windows { [weak self] windows in
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -974,13 +977,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func launch(app: RemoteApp, host: String, agent: AgentConnection,
                         knownPIDs: Set<Int>) {
         guard isCurrent(agent) else { return }
-        picker?.showBusy("Starting \(app.name) on \(host)…")
+        picker?.showBusy("Starting \(app.name) on \(pcLabel(host))…")
         agent.launch(path: app.path) { [weak self] id, trouble in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let trouble {
                     // Nothing to look for: no window can have come of it yet.
-                    self.failOpen(Self.launchTroubleText(trouble, app: app.name, host: host),
+                    self.failOpen(Self.launchTroubleText(trouble, app: app.name, host: self.pcLabel(host)),
                                   for: agent)
                     return
                 }
@@ -1036,7 +1039,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // With no connection every request fails at once, and the open's
             // own words -- restart SolStream on the PC, the app opened no
             // window -- blamed the PC or the app for a dropped connection.
-            picker?.showFailure(Self.openFailedOffline(host: agent.hostName,
+            picker?.showFailure(Self.openFailedOffline(host: pcLabel(agent.hostName),
                                                        reconnecting: agent.willReconnect,
                                                        lastFailure: agent.lastFailureMessage),
                                 isConnection: true)
@@ -1125,7 +1128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// puts its reason on the picker the person is still looking at.
     private func attach(_ window: RemoteWindow, host: String, agent: AgentConnection) {
         guard isCurrent(agent) else { return }
-        picker?.showBusy("Opening \(window.title) on \(host)…")
+        picker?.showBusy("Opening \(window.title) on \(pcLabel(host))…")
         start(host: host, agent: agent, targets: [window])
     }
 
@@ -1209,7 +1212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard isCurrent(agent) else { return }
         guard let capture = Self.selectDisplay(from: displays, preferring: displayQuery) else {
             Log.error("[app] host reported no displays")
-            failOpen("\(host) didn't offer a screen to capture. Check someone is signed in to "
+            failOpen("\(pcLabel(host)) didn't offer a screen to capture. Check someone is signed in to "
                      + "Windows on the PC, then try again.", for: agent)
             return
         }
@@ -1343,7 +1346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .critical
         // Not `display.name`, which is Windows' device name, \\.\DISPLAY1.
-        alert.messageText = "Streaming this would send everything on \(host)'s monitor"
+        alert.messageText = "Streaming this would send everything on \(pcLabel(host))'s monitor"
         alert.informativeText = """
             \(host) has no virtual display for SolStream to put \(names) on, so it will \
             capture that whole monitor and show you a piece of the picture. Everything \
@@ -1371,7 +1374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The host encodes the whole display and each window shows a crop, so
         // on a real monitor everything on it is sent; asked before any of it is.
         guard confirmWholeDisplayCapture(host: host, display: display, targets: targets) else {
-            failOpen("Nothing was streamed. Set up SolStream's virtual display on \(host) "
+            failOpen("Nothing was streamed. Set up SolStream's virtual display on \(pcLabel(host)) "
                      + "to send one app on its own.",
                      for: agent)
             return
@@ -1428,7 +1431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // has had the flag set by whatever left it.
                 if self.isCurrent(agent) { Updater.shared.isStreaming = wasStreaming }
                 Log.error("[app] \(host) refused the media session")
-                self.failOpen("\(host) didn't start streaming. Try again; if it keeps happening, "
+                self.failOpen("\(self.pcLabel(host)) didn't start streaming. Try again; if it keeps happening, "
                               + "restart SolStream on the PC.", for: agent)
                 return
             }
@@ -1436,7 +1439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.isCurrent(agent) { Updater.shared.isStreaming = wasStreaming }
                 Log.error("[app] \(host) agreed keys but did not start: "
                           + (media.message ?? "no reason given"))
-                self.failOpen(Self.startTroubleText(media.message, host: host), for: agent)
+                self.failOpen(Self.startTroubleText(media.message, host: self.pcLabel(host)), for: agent)
                 return
             }
             // Agreed with a PC that has since been left: its connection is
@@ -2517,8 +2520,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// What to call the PC at `host` in what the stream windows say: its own
-    /// name, as it gave it when paired, over an address -- "Connecting to
+    /// What to call the PC at `host` in what the stream windows and the
+    /// picker say: its own name, as it gave it when paired, over an address -- "Connecting to
     /// 100.101.7.42" said nothing a person knows the PC by.
     static func pcLabel(_ host: String, name: String?) -> String {
         let name = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
