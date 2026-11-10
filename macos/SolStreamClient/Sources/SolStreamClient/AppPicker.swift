@@ -453,7 +453,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     private func applyFilter() {
-        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        let needle = searchField.stringValue.trimmingCharacters(in: .whitespaces)
         var scored: [Row] = []
         for var row in allRows {
             guard !needle.isEmpty else {
@@ -462,7 +462,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                 scored.append(row)
                 continue
             }
-            guard let score = Self.match(row.title.lowercased(), needle) else { continue }
+            guard let score = Self.score(title: row.title, query: needle) else { continue }
             // An open window keeps a bonus: what you can see is usually what you
             // meant, and attaching is instant where launching is not.
             row.score = score + (row.isRunning ? 40 : 0)
@@ -511,6 +511,30 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.enumerateAvailableRowViews { view, row in
             (view as? PickerRowView)?.hovering = row == under
         }
+    }
+
+    /// A title's score for what was typed, or nil when it does not match.
+    /// Each word typed has to be in the title, in any order -- "code visual"
+    /// finds Visual Studio Code -- and case, accents and width are let go, so
+    /// "cafe" finds Café. The words as typed, together, rank above the same
+    /// words apart; one word scores as `match` does.
+    static func score(title: String, query: String) -> Int? {
+        let haystack = fold(title)
+        let needle = fold(query).trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = needle.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count > 1 else { return match(haystack, needle) }
+        var total = 0
+        for word in words {
+            guard let score = match(haystack, word) else { return nil }
+            total += score
+        }
+        return total + (haystack.contains(needle) ? 50 : 0)
+    }
+
+    /// Lower case, without accents, and narrow, as a search should compare.
+    static func fold(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                     locale: nil)
     }
 
     /// Prefix beats word-start beats substring; nil means no match at all.
