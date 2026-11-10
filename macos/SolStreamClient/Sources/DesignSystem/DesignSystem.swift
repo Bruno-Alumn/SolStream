@@ -201,18 +201,19 @@ public enum DS {
         }
     }
 
-    /// A card: `surface`, a hairline edge, radius 12. Content goes inside at
-    /// `Metric.cardInset`.
     /// Have VoiceOver say `text` now: something changed that a person who
     /// cannot see the window would otherwise not hear -- a token refused, a
     /// field still empty.
+    @MainActor
     public static func announce(_ text: String) {
-        guard let element: Any = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp else { return }
+        guard let element: Any = NSApp?.keyWindow ?? NSApp?.mainWindow ?? NSApp else { return }
         NSAccessibility.post(element: element, notification: .announcementRequested,
                              userInfo: [.announcement: text,
                                         .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
+    /// A card: `surface`, a hairline edge, radius 12. Content goes inside at
+    /// `Metric.cardInset`.
     public static func card() -> Box {
         Box(fill: surface, stroke: hairline, radius: Metric.cardRadius)
     }

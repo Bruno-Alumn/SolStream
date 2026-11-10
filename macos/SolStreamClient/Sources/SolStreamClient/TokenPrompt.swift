@@ -84,9 +84,9 @@ enum TokenPrompt {
 
         func retarget(host: String, rejected: Bool, completion: @escaping (String?) -> Void) {
             let heading = Self.headingText(host: host, rejected: rejected)
-            // Said when it changes -- a token refused while the sheet is up --
-            // which nothing on screen announces by itself.
-            if heading != self.heading.stringValue { DS.announce(heading) }
+            // Said when it changes on a sheet that can be seen -- one brought
+            // back for a refused token -- which nothing announces by itself.
+            if heading != self.heading.stringValue, window.isVisible { DS.announce(heading) }
             self.heading.stringValue = heading
             window.title = heading
             body.stringValue = Self.bodyText(rejected: rejected)
@@ -148,6 +148,7 @@ enum TokenPrompt {
             window.titleVisibility = .hidden
             // Hidden, but what VoiceOver names the sheet by, rather than nothing.
             window.title = Self.headingText(host: host, rejected: rejected)
+            window.isExcludedFromWindowsMenu = true
             field.setAccessibilityLabel("Pairing token")
             window.backgroundColor = DS.ground
             window.isMovableByWindowBackground = false
@@ -238,8 +239,10 @@ enum TokenPrompt {
             // how to stop.
             guard !token.isEmpty else {
                 NSSound.beep()
+                // Focus first: moving it makes VoiceOver say the field, which
+                // would cut the announcement off.
+                if field.currentEditor() == nil { window.makeFirstResponder(field) }
                 DS.announce("Paste the pairing token first.")
-                window.makeFirstResponder(field)
                 return
             }
             finish(token)
