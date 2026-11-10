@@ -11,8 +11,9 @@ if (-not (Test-Path $installed)) {
 # uninstall has happened. A copy run directly does the work and reports it. The
 # copy goes next to this script, in the package's own folder, which only
 # administrators can write to, so nothing else can swap it before it runs
-# elevated. (Not $env:ChocolateyPackageFolder: Chocolatey's moderation counts it
-# as private, rule CPMR0072, and fails the package for it.)
+# elevated. (Not the package-folder environment variable: Chocolatey's
+# moderation counts it as private, rule CPMR0072, and matches its name even in
+# a comment.)
 $toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $copy = Join-Path $toolsDir 'SolStream-uninstall.exe'
 Copy-Item $installed $copy -Force
