@@ -2695,6 +2695,15 @@ void TestTrayTip() {
     status.streaming_ready = true;
     CHECK(TrayTip(status, L"") == L"SolStream \u2014 ready for your Mac");
     CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 update 1.0.9 available");
+    // The notification says "ready" only once the installer is downloaded;
+    // until then it says "available", as the tip above and the banner do.
+    CHECK(UpdateNoticeTitle(L"1.0.9", false) == L"SolStream 1.0.9 is available");
+    CHECK(UpdateNoticeTitle(L"1.0.9", true) == L"SolStream 1.0.9 is ready to install");
+    CHECK(UpdateNoticeText(false).find(L"download and install") != std::wstring::npos);
+    CHECK(UpdateNoticeText(true).find(L"downloaded and checked") != std::wstring::npos);
+    // A notification's title is cut at 63 characters, its text at 255.
+    CHECK(UpdateNoticeTitle(L"10.20.300", true).size() < 64);
+    CHECK(UpdateNoticeText(true).size() < 256 && UpdateNoticeText(false).size() < 256);
     status.connected_clients = 1;
     CHECK(TrayTip(status, L"1.0.9") == L"SolStream \u2014 streaming to your Mac");
     // The window's hard failures, not "ready" over them.

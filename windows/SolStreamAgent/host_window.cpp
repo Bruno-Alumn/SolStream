@@ -29,6 +29,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shellscalingapi.h>
+#include <oleacc.h>
 
 #include <algorithm>
 #include <atomic>
@@ -265,6 +266,50 @@ std::wstring g_update_tip_version;
 
 HWND g_window = nullptr;
 HWND g_token_edit = nullptr;
+
+/// COM as the window thread took it for the token's accessible name, given
+/// back in WM_DESTROY; and whether the name went on, so it is taken off there.
+HRESULT g_token_name_com = E_FAIL;
+bool g_token_named = false;
+
+/// The token field's name for a screen reader. The label above it is drawn,
+/// not a STATIC, so Windows has nothing to name the EDIT from, and Narrator
+/// read it as "edit, read only" and the token. The name is an annotation on
+/// the EDIT's own accessible object, which UI Automation's proxy for it reads
+/// as well; COM stays up on this thread while the annotation is needed.
+void NameTokenEdit() {
+    g_token_name_com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    IAccPropServices* services = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_IAccPropServices, (void**) &services))) {
+        g_token_named = SUCCEEDED(services->SetHwndPropStr(g_token_edit, (DWORD) OBJID_CLIENT,
+                                                           CHILDID_SELF, PROPID_ACC_NAME,
+                                                           L"Pairing token"));
+        services->Release();
+    }
+    if (!g_token_named) {
+        media::Log("[window] the pairing token field has no accessible name");
+    }
+}
+
+/// Takes the annotation off before the EDIT goes, as Windows asks, and gives
+/// back the COM NameTokenEdit took.
+void UnnameTokenEdit() {
+    if (g_token_named) {
+        IAccPropServices* services = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IAccPropServices, (void**) &services))) {
+            MSAAPROPID name = PROPID_ACC_NAME;
+            services->ClearHwndProps(g_token_edit, (DWORD) OBJID_CLIENT, CHILDID_SELF, &name, 1);
+            services->Release();
+        }
+        g_token_named = false;
+    }
+    if (SUCCEEDED(g_token_name_com)) {
+        CoUninitialize();
+        g_token_name_com = E_FAIL;
+    }
+}
 HFONT g_edit_font = nullptr;
 Palette g_palette = DarkPalette();
 float g_dpi = 96.0f;
@@ -2643,17 +2688,15 @@ void NotifyUpdate(HWND window, const update::CheckResult& result) {
     NOTIFYICONDATAW data = TrayData(window);
     data.uFlags = NIF_INFO;
     data.dwInfoFlags = NIIF_USER;
-    const std::wstring title = L"SolStream " + ToWide(result.release.version) + L" is ready";
-    const std::wstring text = result.downloaded
-        ? L"It's downloaded and checked. Click here to install it \u2014 Windows will ask "
-          L"for permission."
-        : L"Click here to download and install it \u2014 Windows will ask for permission.";
+    const std::wstring title = UpdateNoticeTitle(ToWide(result.release.version), result.downloaded);
+    const std::wstring text = UpdateNoticeText(result.downloaded);
     wcsncpy_s(data.szInfoTitle, title.c_str(), _TRUNCATE);
     wcsncpy_s(data.szInfo, text.c_str(), _TRUNCATE);
     if (Shell_NotifyIconW(NIM_MODIFY, &data)) {
         g_update_balloon_said = true;
         RememberNotified(result.release.version);
-        media::Log("[update] said %s is ready, in a notification", result.release.version.c_str());
+        media::Log("[update] said %s is %s, in a notification", result.release.version.c_str(),
+                   result.downloaded ? "ready to install" : "available");
     }
 }
 
@@ -3320,6 +3363,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 SetEditFont();
                 g_token_edit_proc = (WNDPROC) SetWindowLongPtrW(
                     g_token_edit, GWLP_WNDPROC, (LONG_PTR) TokenEditProc);
+                NameTokenEdit();
                 AddTrayIcon(window);
             }
 
@@ -3732,6 +3776,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 g_shell_hook_message = 0;
             }
             RemoveTrayIcon(window);
+            // Children are still alive in the parent's WM_DESTROY.
+            UnnameTokenEdit();
             DiscardTarget();
             PostQuitMessage(0);
             return 0;

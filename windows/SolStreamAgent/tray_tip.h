@@ -43,4 +43,19 @@ inline std::wstring TrayTip(const HostStatus& status, const std::wstring& update
     return L"SolStream — ready for your Mac";
 }
 
+/// The title of the notification a scheduled check puts up. "Ready to
+/// install" only once the installer is downloaded and checked; until then it
+/// is "available", as the window's banner and the tooltip say it.
+inline std::wstring UpdateNoticeTitle(const std::wstring& version, bool downloaded) {
+    return L"SolStream " + version + (downloaded ? L" is ready to install" : L" is available");
+}
+
+/// The notification's text: what a click on it does, and the prompt it leads to.
+inline std::wstring UpdateNoticeText(bool downloaded) {
+    return downloaded
+        ? L"It's downloaded and checked. Click here to install it \u2014 Windows will ask "
+          L"for permission."
+        : L"Click here to download and install it \u2014 Windows will ask for permission.";
+}
+
 }  // namespace solstream

@@ -203,6 +203,8 @@ target_link_libraries(SolStreamAgent PRIVATE
     # The host window draws with Direct2D and lays out text with DirectWrite.
     # Both are in-box, so this adds nothing to what has to be installed.
     d2d1 dwrite
+    # IAccPropServices, which names the pairing token's EDIT for screen readers.
+    oleacc
 )
 
 if(MSVC)
