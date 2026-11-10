@@ -773,6 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A new connection: the host says again what blocks it, if anything.
             inputBlockedNow = nil
             inputBlockedShown = false
+            appWindows.forEach { $0.setInputBlocked(false) }
         }
         agent.onInputBlocked = { [weak self] reason, app in self?.inputBlocked(reason, app: app) }
         agent.onFileOffer = { [weak self, weak agent] id, name, size in
@@ -1522,6 +1523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
             }
             appWindow.show()
+            appWindow.setInputBlocked(inputBlockedNow != nil)
             if let note = inputBlockedNow {
                 appWindow.tell(note)
                 inputBlockedShown = true
@@ -2545,6 +2547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let note = Self.inputBlockedNote(reason, app: app) else { return }
         Log.info("[input] \(reason ?? "unblocked")\(app.map { " (\($0))" } ?? "")")
         inputBlockedNow = reason == nil ? nil : note
+        appWindows.forEach { $0.setInputBlocked(reason != nil) }
         if reason == nil && !inputBlockedShown { return }
         let window = appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
         window?.tell(note)

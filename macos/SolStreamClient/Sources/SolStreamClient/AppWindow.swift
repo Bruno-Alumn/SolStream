@@ -1412,14 +1412,36 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// and is silently clipped to nothing. AppKit sizes and truncates the
     /// subtitle itself, next to the title, and cannot lose it.
     func setOccludedBy(_ name: String?) {
-        guard let name, !name.isEmpty else {
-            window?.subtitle = ""
-            return
-        }
-        // Kept short on purpose. AppKit centres the title and the quality pill
-        // sits in a right-hand accessory, so a long subtitle runs under the pill
-        // on a narrow window instead of being truncated clear of it.
-        window?.subtitle = "⚠ \(name) in front"
+        occludedBy = name?.isEmpty == false ? name : nil
+        applySubtitle()
+    }
+
+    /// The PC says its input is blocked -- a secure screen, the screen saver,
+    /// an administrator's app in front -- or no longer is. Said in the
+    /// subtitle for as long as it lasts, in every window: the note at the
+    /// foot fades after a few seconds, and after it clicks went nowhere with
+    /// nothing to say why.
+    func setInputBlocked(_ blocked: Bool) {
+        inputBlocked = blocked
+        applySubtitle()
+    }
+
+    private var occludedBy: String?
+    private var inputBlocked = false
+
+    private func applySubtitle() {
+        window?.subtitle = Self.subtitle(inputBlocked: inputBlocked, occludedBy: occludedBy)
+    }
+
+    /// Kept short on purpose. AppKit centres the title and the quality pill
+    /// sits in a right-hand accessory, so a long subtitle runs under the pill
+    /// on a narrow window instead of being truncated clear of it. Input
+    /// blocked first: it is why nothing works, where a window in front only
+    /// covers part of the picture.
+    static func subtitle(inputBlocked: Bool, occludedBy: String?) -> String {
+        if inputBlocked { return "⚠ Input blocked on the PC" }
+        if let occludedBy, !occludedBy.isEmpty { return "⚠ \(occludedBy) in front" }
+        return ""
     }
 
     /// Handler for the overlay's "Try Again" button. Only shown alongside an
