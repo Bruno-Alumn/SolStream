@@ -2690,6 +2690,31 @@ void TestHolderHearing() {
     }
 }
 
+void TestStaysDownloaded() {
+    update::Release before;
+    before.version = "1.0.9";
+    before.sha256 = "aa";
+    before.installer.size = 10;
+    update::CheckResult now;
+    now.outcome = update::Outcome::Found;
+    now.release = before;
+    // A check that downloaded says so whatever came before.
+    now.downloaded = true;
+    CHECK(update::StaysDownloaded(false, false, before, now));
+    now.downloaded = false;
+    // An asked check finding the same installer keeps it ready.
+    CHECK(update::StaysDownloaded(true, true, before, now));
+    // A scheduled one that did not download tried and failed: not ready.
+    CHECK(!update::StaysDownloaded(false, true, before, now));
+    // Nor when it was not ready before, or the installer is another.
+    CHECK(!update::StaysDownloaded(true, false, before, now));
+    now.release.sha256 = "bb";
+    CHECK(!update::StaysDownloaded(true, true, before, now));
+    now.release = before;
+    now.release.version = "1.0.10";
+    CHECK(!update::StaysDownloaded(true, true, before, now));
+}
+
 void TestTrayTip() {
     HostStatus status;
     status.agent_listening = true;
@@ -4923,6 +4948,7 @@ int wmain(int argc, wchar_t** argv) {
     TestScanKeys();
     TestCharKeys();
     TestTrayTip();
+    TestStaysDownloaded();
     TestAdvicePlace();
     TestWindowKeys();
     TestTextInput();

@@ -109,6 +109,21 @@ struct CheckResult {
     bool downloaded = false;
 };
 
+/// Whether the update on offer is still downloaded and checked after a
+/// check's answer `now`: when `now` says so; or, for an asked check -- which
+/// never downloads -- when it found the very installer one before had
+/// (`before`, `was_downloaded`). A scheduled check that did not download had
+/// tried and failed, and may have deleted a copy no longer good.
+inline bool StaysDownloaded(bool asked, bool was_downloaded, const Release& before,
+                            const CheckResult& now) {
+    if (now.downloaded) {
+        return true;
+    }
+    return asked && was_downloaded && before.version == now.release.version
+        && before.sha256 == now.release.sha256
+        && before.installer.size == now.release.installer.size;
+}
+
 /// One check, start to finish. Blocks on the network: never call it on the UI
 /// thread. Logs [update] lines.
 CheckResult CheckForUpdate();
@@ -131,7 +146,7 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
                    const std::function<void(const std::wstring&)>& step,
                    const std::function<bool()>& may_install,
                    const std::function<void(DWORD exit_code)>& installer_exited,
-                   std::string& error);
+                   std::string& error, bool* prepared = nullptr);
 
 /// Download and verify the installer ahead of time, and leave it where
 /// InstallUpdate looks first, so Install goes straight to the prompt -- as the

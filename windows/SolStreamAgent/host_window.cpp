@@ -275,6 +275,9 @@ bool g_update_tip_ready = false;
 /// The update on offer is downloaded and checked, by a scheduled check's
 /// prefetch: the window, the tooltip and the title say "ready to install".
 bool g_update_downloaded = false;
+/// Set by the update job: it got the installer downloaded and checked, which
+/// stays so whether or not it then installed.
+std::atomic<bool> g_update_prepared{false};
 
 HWND g_window = nullptr;
 HWND g_token_edit = nullptr;
@@ -2599,8 +2602,10 @@ void StartUpdateJob(HWND window) {
               L"Getting the update ready.", Mark::NeedsYou, true);
     InvalidateRect(window, nullptr, FALSE);
 
+    g_update_prepared = false;
     std::thread([window, release, options] {
         std::string error;
+        bool prepared = false;
         const bool ok = update::InstallUpdate(
             release, window, options,
             [window](const std::wstring& text) { PostStep(window, text); },
@@ -2610,7 +2615,8 @@ void StartUpdateJob(HWND window) {
             [window](DWORD exit_code) {
                 PostMessageW(window, WM_SOLSTREAM_UPDATE_EXITED, exit_code, 0);
             },
-            error);
+            error, &prepared);
+        g_update_prepared = prepared;
         // The new copy opens its window to say it is back (main.cpp reads the
         // note InstallUpdate left), so this one closing is not the last word.
         PostDone(window, ok,
@@ -2753,9 +2759,8 @@ void ApplyUpdateCheck(HWND window, std::unique_ptr<update::CheckResult> result, 
         if (result->outcome == update::Outcome::Found) {
             // An asked check does not download; one that finds the version a
             // scheduled check already downloaded leaves it ready.
-            g_update_downloaded = result->downloaded
-                || (g_update_found && g_update_downloaded
-                    && g_update.version == result->release.version);
+            g_update_downloaded = update::StaysDownloaded(
+                asked, g_update_found && g_update_downloaded, g_update, *result);
             g_update_found = true;
             g_update = result->release;
             if (!asked) {
@@ -3497,6 +3502,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                                  : L"SolStream couldn't install the update.",
                               *text, ok ? Mark::NeedsYou : Mark::Failed, true);
                     g_update_installing = ok;
+                    // Stopped short -- the permission prompt closed, a Mac
+                    // connected -- with the installer kept: ready to install.
+                    if (g_update_prepared) {
+                        g_update_downloaded = true;
+                    }
                     PublishUpdateForTip(window);
                     if (ok && g_update_exit_early) {
                         // The installer's end overtook this message.

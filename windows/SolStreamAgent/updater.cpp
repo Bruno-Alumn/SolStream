@@ -1784,7 +1784,8 @@ std::string TakeLastInstallFailure() {
 bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& options,
                    const std::function<void(const std::wstring&)>& step,
                    const std::function<bool()>& may_install,
-                   const std::function<void(DWORD)>& installer_exited, std::string& error) {
+                   const std::function<void(DWORD)>& installer_exited, std::string& error,
+                   bool* prepared) {
     // Never sideways or down -- against the version this copy was BUILT as,
     // not the one it reports: SOLSTREAM_PRETEND_VERSION makes the check find
     // older releases, and without this an override set for testing would run
@@ -1804,6 +1805,10 @@ bool InstallUpdate(const Release& release, HWND owner, const InstallOptions& opt
     std::wstring path;
     if (!PrepareInstaller(release, step, held, path, error)) {
         return false;
+    }
+    // Downloaded and checked, and kept whatever happens next.
+    if (prepared) {
+        *prepared = true;
     }
     // Closed to new Macs first, then asked: a Mac that proves its token after
     // this line is refused at the door instead (main.cpp's accept loop).
