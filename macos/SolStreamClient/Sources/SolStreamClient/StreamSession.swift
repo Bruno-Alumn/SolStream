@@ -194,6 +194,11 @@ final class StreamSession {
         return counters
     }
 
+    /// Whether Try Again opens the same app again: true for an app, which the
+    /// app delegate can name; false for a whole display, where it goes back to
+    /// the app list. Set by whoever made the session, on the main thread.
+    var retryReopensApp = false
+
     init(host: String, config: StreamConfig, session: AgentConnection.MediaSession) {
         self.host = host
         self.canvasSize = CGSize(width: config.width, height: config.height)
@@ -304,7 +309,9 @@ final class StreamSession {
             DispatchQueue.main.async {
                 // Said as what happened: the PC ending the stream is not the
                 // same as it going quiet, and the second is the network's.
-                self?.onPhase?(.failed(StreamSession.endedMessage(reason)))
+                guard let self else { return }
+                self.onPhase?(.failed(StreamSession.endedMessage(reason,
+                                                                 reopens: self.retryReopensApp)))
             }
         }
         // Holding as well as asking: until the IDR, every P-frame would only
@@ -736,14 +743,13 @@ extension StreamSession {
 }
 
 extension StreamSession {
-    /// Why the stream ended, and what Try Again does about it: it goes back
-    /// to the app list -- it used to be said to open the app again, which it
-    /// never has.
-    static func endedMessage(_ reason: MediaClient.EndReason) -> String {
-        reason == .hostEnded
-            ? "The PC ended the stream. Try Again goes back to the app list, where you can "
-                + "open it again."
-            : "The PC stopped sending the picture. Try Again goes back to the app list, "
-                + "where you can open it again."
+    /// Why the stream ended, and what Try Again does about it: it opens the
+    /// app again, through the app list, which says why when it can't; a whole
+    /// display, with no app to open, goes back to the list.
+    static func endedMessage(_ reason: MediaClient.EndReason, reopens: Bool) -> String {
+        let ended = reason == .hostEnded ? "The PC ended the stream."
+                                         : "The PC stopped sending the picture."
+        return ended + (reopens ? " Try Again opens the app again."
+                                : " Try Again goes back to the app list.")
     }
 }

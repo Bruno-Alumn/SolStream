@@ -27,14 +27,17 @@ final class UIPolishTwoTests: XCTestCase {
         XCTAssertTrue(value.contains("Not answering"), value)
     }
 
-    /// Try Again goes back to the app list; the message no longer promises
-    /// that it opens the app again.
+    /// Try Again opens an app again, and says so; a whole display has none,
+    /// and goes back to the app list.
     func testTheEndedMessageSaysWhatTryAgainDoes() {
         for reason in [MediaClient.EndReason.hostEnded, .silent] {
-            let text = StreamSession.endedMessage(reason)
-            XCTAssertTrue(text.contains("goes back to the app list"), text)
-            XCTAssertFalse(text.contains("Try Again to open"), text)
+            XCTAssertTrue(StreamSession.endedMessage(reason, reopens: true)
+                .hasSuffix("Try Again opens the app again."))
+            XCTAssertTrue(StreamSession.endedMessage(reason, reopens: false)
+                .hasSuffix("Try Again goes back to the app list."))
         }
+        XCTAssertTrue(StreamSession.endedMessage(.hostEnded, reopens: true)
+            .hasPrefix("The PC ended the stream."))
     }
 
     func testQuitRemembersWhatIsOnScreenOrStillOpening() {

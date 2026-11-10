@@ -1482,6 +1482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let session = StreamSession(host: host, config: config, session: media)
+        session.retryReopensApp = streamLink != nil
         self.session = session
         stayAwake.hold()
         streamConfig = config
@@ -1536,10 +1537,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // decoder and start() does not build another — so recovering means a
             // new session. Closing the windows runs the path that already exists
             // for that, back to the picker with the host connection still up,
-            // where the same application is one click away.
+            // and the picker opens the same application again, as Switch App
+            // does for a launcher: Try Again said it would, and left the app to
+            // be found and clicked again. A whole display, with no app to name,
+            // goes back to the list.
             appWindow.onRetry = { [weak self] in
                 guard let self else { return }
-                Log.info("[app] retry after a lost stream; returning to the picker")
+                if let link = self.streamLink {
+                    Log.info("[app] retry after a lost stream; opening \"\(link.name)\" again")
+                    self.pendingOpen = link
+                } else {
+                    Log.info("[app] retry after a lost stream; returning to the picker")
+                }
                 self.appWindows.forEach { $0.close() }
             }
             appWindows.append(appWindow)
@@ -1961,6 +1970,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             let fresh = StreamSession(host: host, config: config, session: media)
+            fresh.retryReopensApp = self.streamLink != nil
             self.session = fresh
             self.wire(fresh, host: host, agent: agent)
             self.appWindows.forEach { $0.rebind(to: fresh) }
