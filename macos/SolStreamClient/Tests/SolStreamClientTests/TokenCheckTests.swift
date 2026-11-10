@@ -15,6 +15,10 @@ final class TokenCheckTests: XCTestCase {
     func testWhiteSpaceAndALabelAreDropped() {
         XCTAssertEqual(try TokenPrompt.check("  0011223344556677\n8899aabbccddeeff \t").get(), token)
         XCTAssertEqual(try TokenPrompt.check("Pairing token: \(token)").get(), token)
+        // Nor what cannot be seen: a zero-width space, a byte-order mark, a
+        // soft hyphen, a no-break space.
+        XCTAssertEqual(try TokenPrompt.check("\u{FEFF}0011223344\u{200B}5566778899\u{00AD}aabb\u{00A0}ccddeeff").get(),
+                       token)
     }
 
     /// The shortest token a PC accepts, 16, is let through: an older one
@@ -41,7 +45,8 @@ final class TokenCheckTests: XCTestCase {
         XCTAssertEqual(TokenPrompt.problemText(.notHex("l")),
                        "A token has only 0–9 and a–f, not “l”. An l may be a one.")
         XCTAssertEqual(TokenPrompt.problemText(.notHex("g")), "A token has only 0–9 and a–f, not “g”.")
-        XCTAssertTrue(TokenPrompt.problemText(.incomplete(31)).hasPrefix("That's 31 characters"))
+        XCTAssertTrue(TokenPrompt.problemText(.incomplete(31)).hasPrefix("That's 31 characters,"))
+        XCTAssertTrue(TokenPrompt.problemText(.incomplete(1)).hasPrefix("That's 1 character,"))
     }
 
     /// Connect with a bad paste keeps the sheet, says why under the field,

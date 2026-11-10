@@ -83,7 +83,11 @@ enum TokenPrompt {
            token[..<colon].lowercased().contains("token") {
             token = String(token[token.index(after: colon)...])
         }
-        token.removeAll { $0.isWhitespace }
+        // And what cannot be seen: a zero-width space or a byte-order mark a
+        // chat or a web page slipped in would be named as the wrong
+        // character between empty quotes.
+        token.unicodeScalars.removeAll { $0.properties.isWhitespace
+            || $0.properties.generalCategory == .format }
         guard !token.isEmpty else { return .failure(.empty) }
         // ASCII only: a full-width digit is a hex digit to Swift, not to the PC.
         if let bad = token.first(where: { !($0.isASCII && $0.isHexDigit) }) {
@@ -109,7 +113,7 @@ enum TokenPrompt {
             }
             return "A token has only 0–9 and a–f, not “\(character)”.\(lookalike)"
         case .incomplete(let count):
-            return "That's \(count) characters, so part of the token was missed. "
+            return "That's \(count) character\(count == 1 ? "" : "s"), so part of the token was missed. "
                 + "Press Copy on the PC and paste again."
         }
     }
@@ -127,6 +131,23 @@ enum TokenPrompt {
         private let body: NSTextField
         /// What is wrong with what was pasted, while something is.
         private let problem = NSTextField(wrappingLabelWithString: "")
+        /// The line with a red mark before it: the words themselves in the
+        /// secondary ink, as red caption text is too faint to read on the
+        /// light ground.
+        private let problemRow: NSStackView = {
+            let mark = NSImageView()
+            mark.image = NSImage(systemSymbolName: "exclamationmark.circle.fill",
+                                 accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+            mark.contentTintColor = DS.danger
+            mark.setContentHuggingPriority(.required, for: .horizontal)
+            let row = NSStackView(views: [mark])
+            row.orientation = .horizontal
+            row.alignment = .firstBaseline
+            row.spacing = DS.Space.x1
+            row.isHidden = true
+            return row
+        }()
         private var editObserver: NSObjectProtocol?
         private weak var parent: NSWindow?
         /// Every sheet up now; see `TokenPrompt.present`.
@@ -149,7 +170,7 @@ enum TokenPrompt {
             window.title = heading
             body.stringValue = Self.bodyText(rejected: rejected)
             self.completion = completion
-            problem.isHidden = true
+            problemRow.isHidden = true
             // A heading that went from one line to two, or back, resizes the
             // sheet with it.
             fit()
@@ -171,7 +192,7 @@ enum TokenPrompt {
         }
 
         /// For the tests: the line under the field, nil while hidden.
-        var problemShown: String? { problem.isHidden ? nil : problem.stringValue }
+        var problemShown: String? { problemRow.isHidden ? nil : problem.stringValue }
 
         /// For the tests: the field's text, set as a paste would.
         var typed: String {
@@ -264,10 +285,10 @@ enum TokenPrompt {
             let fieldBox = DS.FieldBox(field: field)
 
             problem.font = DS.caption
-            problem.textColor = DS.danger
-            problem.isHidden = true
+            problem.textColor = DS.textSecondary
+            problemRow.addArrangedSubview(problem)
 
-            let stack = NSStackView(views: [heading, body, fieldBox, problem, buttons])
+            let stack = NSStackView(views: [heading, body, fieldBox, problemRow, buttons])
             stack.orientation = .vertical
             stack.alignment = .leading
             stack.spacing = DS.Space.x2
@@ -293,15 +314,15 @@ enum TokenPrompt {
                 body.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
                 fieldBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
-                problem.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                problemRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             ])
             // Wrong no longer once it is being fixed.
             editObserver = NotificationCenter.default.addObserver(
                 forName: NSControl.textDidChangeNotification, object: field, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self, !self.problem.isHidden else { return }
-                    self.problem.isHidden = true
+                    guard let self, !self.problemRow.isHidden else { return }
+                    self.problemRow.isHidden = true
                     self.fit()
                 }
             }
@@ -333,7 +354,7 @@ enum TokenPrompt {
             case .failure(let reason):
                 let text = TokenPrompt.problemText(reason)
                 problem.stringValue = text
-                problem.isHidden = false
+                problemRow.isHidden = false
                 fit()
                 NSSound.beep()
                 // Focus first: moving it makes VoiceOver say the field, which
