@@ -643,6 +643,8 @@ enum ButtonId {
     // In the summary setup ends on: where to get the Mac app, and Tailscale.
     kIdGetMacApp,
     kIdGetTailscale,
+    // A failed setup or removal: the log it wrote, selected in Explorer.
+    kIdShowLog,
     // The tick boxes on the setup screen, in the order they are drawn.
     kIdCheckDesktop = 100,
     kIdCheckStartMenu,
@@ -1062,6 +1064,15 @@ void DrawLockup(float left, float top, float right) {
     Text(L"SolStream", g_fmt_display,
          D2D1::RectF(left + kLockupMark + gap, top, right, top + kLockupH),
          g_palette.text);
+    // Which SolStream this is, quietly, at the line's end: asked "which
+    // version are you on?", the answer was only in an update's notice.
+    const std::wstring version = std::wstring(L"Version ") + kVersion;
+    const float version_w = MeasureWidth(version, g_fmt_caption);
+    const float caption_h = MeasureHeight(version, g_fmt_caption, version_w + 1.0f);
+    const float caption_top = top + (kLockupH - caption_h) / 2.0f;
+    Text(version, g_fmt_caption,
+         D2D1::RectF(right - version_w - 1.0f, caption_top, right, caption_top + caption_h),
+         g_palette.textMuted);
 }
 
 /// Make the window exactly as tall as what was just laid out.
@@ -1665,6 +1676,9 @@ void LayoutAndPaintSetup(HWND window) {
             break;
         case Phase::Failed:
             specs.push_back({kIdRetry, L"Try again", ButtonKind::Primary, copy.shield});
+            // The path is on screen too, but drawn text: it cannot be clicked,
+            // selected or copied, and it is a long one to type.
+            specs.push_back({kIdShowLog, L"Show log", ButtonKind::Secondary, false});
             specs.push_back({kIdClose, L"Close", ButtonKind::Secondary, false});
             break;
     }
@@ -2811,6 +2825,15 @@ void Activate(HWND window, int id) {
             PostMessageW(window, WM_CLOSE, 0, 0);
             break;
 
+        case kIdShowLog: {
+            // Selected in its folder rather than opened: it is the file to
+            // send along with a question, and Explorer shows where it is.
+            const std::wstring select = L"/select,\"" + InstallLogPath() + L"\"";
+            ShellExecuteW(window, L"open", L"explorer.exe", select.c_str(), nullptr,
+                          SW_SHOWNORMAL);
+            break;
+        }
+
         default:
             if (Check* check = FindCheck(id)) {
                 check->checked = !check->checked;
@@ -3238,7 +3261,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             g_buttons.push_back({kIdBannerFix, L"", ButtonKind::Primary, false, {}, false});
             g_buttons.push_back({kIdCopyToken, L"Copy", ButtonKind::Secondary, false, {}, false});
             for (int id : {kIdInstall, kIdCancel, kIdOpenApp, kIdClose, kIdRetry,
-                           kIdRemove, kIdGetTailscale, kIdGetMacApp}) {
+                           kIdRemove, kIdGetTailscale, kIdGetMacApp, kIdShowLog}) {
                 g_buttons.push_back({id, L"", ButtonKind::Secondary, false, {}, false});
             }
 
