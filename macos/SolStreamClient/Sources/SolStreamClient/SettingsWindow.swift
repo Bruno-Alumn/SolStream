@@ -194,6 +194,11 @@ final class SettingsPane: NSView {
     private lazy var showDockAppsButton = LinkButton(title: "Dock apps", font: DS.caption,
                                                      target: self, action: #selector(showDockApps))
     // Updates
+    /// What is in the update on offer: its release page. Beside the version,
+    /// while there is one -- the card said an update was there and asked for
+    /// a download and a relaunch without a word about what it brings.
+    private lazy var whatsNewLink = LinkButton(title: "What's new", font: DS.caption,
+                                               target: self, action: #selector(showWhatsNew))
     let updater: Updater
     let versionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
     let updateStatus = NSTextField(wrappingLabelWithString: "")
@@ -375,6 +380,12 @@ final class SettingsPane: NSView {
         versionLabel.setAccessibilityLabel("SolStream version \(updater.currentVersion)")
         automaticUpdatesSwitch.isOn = updater.checksAutomatically
         updateStatus.stringValue = updater.statusText
+        let notesVersion = Self.notesVersion(for: updater.state)
+        whatsNewLink.isHidden = notesVersion.flatMap(UpdateSource.releaseNotes(for:)) == nil
+        if let notesVersion {
+            whatsNewLink.words = "What's new in \(notesVersion)"
+            whatsNewLink.setAccessibilityHelp("Opens the release notes for SolStream \(notesVersion)")
+        }
         // Checking, downloading, ready: said as it moves on, while Settings
         // is the window in front.
         if announcing, window?.isKeyWindow == true {
@@ -781,7 +792,9 @@ final class SettingsPane: NSView {
         automaticUpdatesSwitch.action = #selector(automaticUpdatesToggled(_:))
         let updateButtons = Self.line([installButton, checkButton], spacing: DS.Space.x2)
         let statusRow = row(label: updateStatus, trailing: updateButtons)
-        let updates = section("Updates", accessory: versionLabel, rows: [
+        let updates = section("Updates",
+                              accessory: Self.line([whatsNewLink, versionLabel], spacing: DS.Space.x3),
+                              rows: [
             statusRow,
             // No caption: what the switch does fits in its name, and the right
             // column is already the taller, by the height of this card's
@@ -983,6 +996,25 @@ final class SettingsPane: NSView {
     }
 
     /// The folder itself, open: selecting it showed its parent instead.
+    /// The update whose notes are worth a look: one on offer, on its way, or
+    /// in. Not while checking, nor once up to date or failed.
+    static func notesVersion(for state: Updater.State) -> String? {
+        switch state {
+        case .available(let version), .downloading(let version, _), .ready(let version),
+             .waitingForStream(let version), .installing(let version),
+             .installed(let version), .manualInstall(let version, _):
+            return version
+        case .idle, .checking, .upToDate, .failed:
+            return nil
+        }
+    }
+
+    @objc private func showWhatsNew() {
+        guard let version = Self.notesVersion(for: updater.state),
+              let url = UpdateSource.releaseNotes(for: version) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func showDockApps() {
         NSWorkspace.shared.open(AppLauncher.folder)
     }

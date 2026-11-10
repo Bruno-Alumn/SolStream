@@ -13,6 +13,16 @@ enum UpdateSource {
     static let latestRelease = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")!
     static let bundleIdentifier = "com.solstream.macclient"
 
+    /// The release page for `version`, where its notes are: built here from
+    /// the repository rather than taken from what a server sent. Nil for a
+    /// version that is not plain letters, digits, dots and dashes.
+    static func releaseNotes(for version: String) -> URL? {
+        guard !version.isEmpty, version.allSatisfy({
+            $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "." || $0 == "-")
+        }) else { return nil }
+        return URL(string: "https://github.com/\(repository)/releases/tag/v\(version)")
+    }
+
     static let sumsName = "SHA256SUMS"
     static let signatureName = "SHA256SUMS.sig"
     static func zipName(for version: String) -> String { "SolStream-\(version)-macOS.zip" }
