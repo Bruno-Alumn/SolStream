@@ -469,9 +469,13 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // An empty card with the footer still counting the PC's apps read as
         // broken. Nothing before the list first arrives: the footer is
         // already saying it is being asked for.
-        let empty = Self.emptyText(query: needle, hasPresented: hasPresented)
+        let typed = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        let empty = Self.emptyText(query: typed, hasPresented: hasPresented)
         emptyLabel.stringValue = empty ?? ""
         emptyLabel.isHidden = !rows.isEmpty || empty == nil
+        // Read out by VoiceOver on reaching the list, which is otherwise
+        // simply empty.
+        tableView.setAccessibilityHelp(rows.isEmpty ? empty : nil)
         refreshHover()
     }
 
@@ -479,7 +483,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     static func emptyText(query: String, hasPresented: Bool) -> String? {
         guard hasPresented else { return nil }
         if !query.isEmpty {
-            return "Nothing on the PC matches \u{201C}\(query)\u{201D}. Esc clears the search."
+            return "Nothing on the PC matches \u{201C}\(query)\u{201D}."
         }
         return "The PC has no open windows or apps to show."
     }

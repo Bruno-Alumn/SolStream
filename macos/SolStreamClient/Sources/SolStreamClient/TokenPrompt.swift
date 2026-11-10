@@ -88,9 +88,15 @@ enum TokenPrompt {
             self.completion = completion
             // A heading that went from one line to two, or back, resizes the
             // sheet with it.
+            // Grown or shrunk from the bottom, so the top stays against the
+            // parent's title bar as a sheet's does.
             if let content = window.contentView {
                 content.layoutSubtreeIfNeeded()
-                window.setContentSize(content.fittingSize)
+                let size = content.fittingSize
+                var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+                frame.origin = NSPoint(x: window.frame.minX,
+                                       y: window.frame.maxY - frame.height)
+                window.setFrame(frame, display: true, animate: window.isVisible)
             }
         }
 
@@ -143,6 +149,9 @@ enum TokenPrompt {
             heading.cell?.wraps = true
             heading.lineBreakMode = .byWordWrapping
             heading.maximumNumberOfLines = 2
+            // A name too long even for two lines ends in an ellipsis rather
+            // than losing the line that says what happened.
+            heading.cell?.truncatesLastVisibleLine = true
             heading.preferredMaxLayoutWidth = 440 - DS.Metric.inset * 2
 
             body.font = DS.body

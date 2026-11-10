@@ -5,7 +5,7 @@ import XCTest
 final class AppPickerEmptyTests: XCTestCase {
     func testASearchThatMatchesNothingSaysSo() {
         XCTAssertEqual(AppPicker.emptyText(query: "zzz", hasPresented: true),
-                       "Nothing on the PC matches \u{201C}zzz\u{201D}. Esc clears the search.")
+                       "Nothing on the PC matches \u{201C}zzz\u{201D}.")
     }
 
     func testAnEmptyPCSaysSo() {

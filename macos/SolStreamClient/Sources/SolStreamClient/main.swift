@@ -2265,6 +2265,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // already the list of what is open — AppKit maintains it for us.
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
+        // Minimize on ⌃⌘M, as Close is on ⌃⌘W: ⌘M alone is the PC's Ctrl+M.
+        Self.reserve(windowMenu.addItem(withTitle: "Minimize",
+                                        action: #selector(NSWindow.performMiniaturize(_:)),
+                                        keyEquivalent: "m"))
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)),
+                           keyEquivalent: "")
         // ⌃⌘F is the system's own full-screen shortcut, so this is where it
         // should have been all along.
         Self.reserve(windowMenu.addItem(withTitle: "Enter Full Screen",
@@ -2273,12 +2279,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.reserve(windowMenu.addItem(withTitle: "Close",
                                         action: #selector(NSWindow.performClose(_:)),
                                         keyEquivalent: "w"))
-        // Minimize on ⌃⌘M, as Close is on ⌃⌘W: ⌘M alone is the PC's Ctrl+M.
-        Self.reserve(windowMenu.addItem(withTitle: "Minimize",
-                                        action: #selector(NSWindow.performMiniaturize(_:)),
-                                        keyEquivalent: "m"))
-        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)),
-                           keyEquivalent: "")
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Bring All to Front",
                            action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")

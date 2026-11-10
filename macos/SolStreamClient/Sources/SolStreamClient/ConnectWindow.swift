@@ -906,6 +906,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         let host = state.address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
             hintLabel.stringValue = ConnectHint.enterAddress
+            hintLabel.toolTip = hintLabel.stringValue
             hintLabel.textColor = DS.danger
             return
         }
@@ -1180,22 +1181,23 @@ enum ConnectHint {
     static let pairingNeeded = "Pairing needed — SolStream on the PC shows a token to type in."
     static let paired = "Reachable and paired. Connecting is one step."
     static func found(_ names: String) -> String { "Found \(names) on this network." }
-    static let cannotSearch = "Can't search this network. Allow Local Network for SolStream "
-        + "in System Settings, or type the PC's address."
+    static let cannotSearch = "Can't search the network. Check this Mac is online and SolStream "
+        + "has Local Network access, or type the PC's address."
     static let firstConnection = "The first connection asks for the token shown on the PC."
     static let tailscaleOff = "That's a Tailscale address, and Tailscale is off on this Mac."
     static let maybeTailscale = "If that's a Tailscale address, turn Tailscale on on this Mac."
     static func unknownName(_ address: String) -> String {
-        "No PC called \(address). Check the spelling, or use the address SolStream shows on the PC."
+        "Couldn't find \(address). Check the spelling and that this Mac is online, "
+            + "or use the PC's address."
     }
     static let ipv6Only = "SolStream on the PC listens on IPv4 only. Use its IPv4 address, "
         + "or its Tailscale one starting 100."
-    static let refused = "Something answers here, but not SolStream. If it's your PC, "
-        + "sign in to Windows or open SolStream."
+    static let refused = "Something is at this address, but SolStream isn't answering. "
+        + "If it's your PC, sign in to Windows or open SolStream."
     static let wakeFailed = "Couldn't send the wake signal from this Mac. Check it's on a network."
     static let waking = "Waking the PC… This can take up to a minute."
     static let stillNotAnswering = "Still not answering. If the PC is awake, sign in to Windows; "
-        + "if not, Wake-on-LAN may be off."
+        + "if not, Wake-on-LAN may be off, or it's on another network."
     static let asleep = "Not answering. The PC may be asleep, or nobody is signed in to Windows."
     static let notAnswering = "Not answering. Check the PC is awake and signed in, "
         + "and SolStream is running there."
