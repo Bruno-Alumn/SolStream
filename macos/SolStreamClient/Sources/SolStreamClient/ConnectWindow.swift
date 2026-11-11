@@ -57,6 +57,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     private var wokeAt: Date?
     /// The last Wake could not send its packet at all.
     private var wakeFailed = false
+    /// The last wake went out to a network this Mac isn't on: it can't reach
+    /// the PC, and a minute of "Waking…" would only say so late.
+    private var wakeElsewhere = false
+    /// This Mac's networks' broadcasts; a test's own.
+    var interfaceBroadcasts: () -> [in_addr_t] = HostBrowser.interfaceBroadcasts
     /// "Update 1.1.0 available", in the corner the buttons leave free. Not an
     /// alert and not the accent: the one thing this window is for is the PC,
     /// and the update waits in Settings until somebody wants it.
@@ -472,6 +477,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         if state.isReachable == true {
             wokeAt = nil
             wakeFailed = false
+            wakeElsewhere = false
         }
 
         switch (state.isReachable, state.needsPairing) {
@@ -945,6 +951,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         state.addressProblem = nil
         wokeAt = nil
         wakeFailed = false
+        wakeElsewhere = false
         state.latency = nil
         refresh()
         scheduleProbe()
@@ -1036,6 +1043,7 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
         if state.addressProblem == .ipv6Only { return ConnectHint.ipv6Only }
         if state.isRefused { return ConnectHint.refused }
         if wakeFailed { return ConnectHint.wakeFailed }
+        if wakeElsewhere { return ConnectHint.wakeOtherNetwork }
         if let wokeAt {
             return Date().timeIntervalSince(wokeAt) < Self.wakeWait
                 ? ConnectHint.waking : ConnectHint.stillNotAnswering
@@ -1049,7 +1057,11 @@ final class ConnectWindow: NSObject, NSWindowDelegate {
     @objc private func wakeTapped() {
         let targets = WakeOnLAN.targets(for: state.address, in: defaults)
         wakeFailed = !WakeOnLAN.wake(targets)
-        wokeAt = wakeFailed ? nil : Date()
+        // Sent all the same -- it is a guess -- but said at once, rather than
+        // after a minute's wait that could not end in the PC answering.
+        wakeElsewhere = !wakeFailed
+            && WakeOnLAN.reaches(targets, fromBroadcasts: interfaceBroadcasts()) == false
+        wokeAt = wakeFailed || wakeElsewhere ? nil : Date()
         refresh()
         // The window rechecks a silent PC every few seconds already; this
         // only brings the hint round when the wait is up -- on the window
@@ -1311,6 +1323,8 @@ enum ConnectHint {
         + "If it's your PC, sign in to Windows or open SolStream."
     static let wakeFailed = "Couldn't send the wake signal from this Mac. Check it's on a network."
     static let waking = "Waking the PC… This can take up to a minute."
+    static let wakeOtherNetwork = "This Mac isn't on the PC's network, so Wake can't reach it "
+        + "from here."
     static let stillNotAnswering = "Still not answering. If the PC is awake, sign in to Windows; "
         + "if not, Wake-on-LAN may be off, or it's on another network."
     static let asleep = "Not answering. The PC may be asleep, or nobody is signed in to Windows."
@@ -1322,6 +1336,7 @@ enum ConnectHint {
     static func all(address: String, names: String) -> [String] {
         [pairingNeeded, paired, found(names), cannotSearch, firstConnection, tailscaleOff,
          maybeTailscale, unknownName(address), ipv6Only, refused, wakeFailed, waking,
+         wakeOtherNetwork,
          stillNotAnswering, asleep, notAnswering, enterAddress]
     }
 

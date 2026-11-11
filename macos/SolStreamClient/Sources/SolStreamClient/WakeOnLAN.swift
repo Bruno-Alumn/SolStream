@@ -108,6 +108,18 @@ enum WakeOnLAN {
 
     // MARK: - Sending
 
+    /// Whether a wake for `targets` can reach the PC from this Mac's networks,
+    /// whose broadcast addresses are `broadcasts`: true when one of them is
+    /// a network the PC was on, false when none is -- this Mac is away from
+    /// it, and a broadcast never leaves its network -- and nil when the PC
+    /// never said its network (an older host), and nothing can be said.
+    static func reaches(_ targets: [Target], fromBroadcasts broadcasts: [in_addr_t]) -> Bool? {
+        let theirs = targets.compactMap(\.broadcast).map { inet_addr($0) }
+            .filter { $0 != INADDR_NONE }
+        guard !theirs.isEmpty else { return nil }
+        return theirs.contains { broadcasts.contains($0) }
+    }
+
     /// Where a magic packet goes: everywhere on this network, and the PC's own
     /// network's broadcast when it is a different one this Mac can reach.
     static func destinations(for targets: [Target]) -> [String] {

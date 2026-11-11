@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import SolStreamClient
 
@@ -70,4 +71,20 @@ final class WakeOnLANTests: XCTestCase {
         XCTAssertEqual(kept.count, WakeOnLAN.maxTargets)
         XCTAssertEqual(kept.first?.mac, "02:00:00:00:00:1D", "the newest first")
     }
+
+    /// A wake reaches the PC only from a network it was on; from another the
+    /// window says so at once. Nothing is said for a PC that never told.
+    func testAWakeKnowsWhenThisMacIsAwayFromThePCsNetwork() {
+        let home = [WakeOnLAN.Target(mac: "AA:BB:CC:DD:EE:FF", broadcast: "192.168.1.255")]
+        XCTAssertEqual(WakeOnLAN.reaches(home, fromBroadcasts: [inet_addr("192.168.1.255")]), true)
+        XCTAssertEqual(WakeOnLAN.reaches(home, fromBroadcasts: [inet_addr("10.0.0.255")]), false)
+        XCTAssertEqual(WakeOnLAN.reaches(home, fromBroadcasts: []), false, "offline")
+        let older = [WakeOnLAN.Target(mac: "AA:BB:CC:DD:EE:FF", broadcast: nil)]
+        XCTAssertNil(WakeOnLAN.reaches(older, fromBroadcasts: [inet_addr("10.0.0.255")]))
+        // Either of its networks will do.
+        let both = home + [WakeOnLAN.Target(mac: "11:22:33:44:55:66", broadcast: "10.0.0.255")]
+        XCTAssertEqual(WakeOnLAN.reaches(both, fromBroadcasts: [inet_addr("10.0.0.255")]), true)
+        XCTAssertTrue(LaunchWake.otherNetwork("DESK").hasPrefix("DESK is asleep or off"))
+    }
+
 }

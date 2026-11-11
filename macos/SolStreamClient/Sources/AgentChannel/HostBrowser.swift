@@ -226,7 +226,7 @@ public final class HostBrowser {
     /// The broadcast address of each IPv4 network this Mac is up on, loopback
     /// and point-to-point links left out. In network byte order, as
     /// `sin_addr` takes it.
-    static func interfaceBroadcasts() -> [in_addr_t] {
+    public static func interfaceBroadcasts() -> [in_addr_t] {
         var list: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&list) == 0, let head = list else { return [] }
         defer { freeifaddrs(list) }

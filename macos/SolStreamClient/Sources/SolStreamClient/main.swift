@@ -498,6 +498,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { return false }
         let targets = WakeOnLAN.targets(for: host)
         guard !targets.isEmpty, WakeOnLAN.wake(targets) else { return false }
+        // From another network the wake can't reach it: said at once, not
+        // after a minute of "Waking…".
+        if WakeOnLAN.reaches(targets, fromBroadcasts: HostBrowser.interfaceBroadcasts()) == false {
+            Log.info("[app] \(host) is on a network this Mac isn't on; a wake can't reach it")
+            picker.showFailure(LaunchWake.otherNetwork(pcLabel(host)), isConnection: true)
+            return true
+        }
         Log.info("[app] \(host) is not answering; woke it to open \"\(link.name)\"")
         picker.showWaiting(LaunchWake.waking(host, app: link.name))
         launchWake = LaunchWake(retry: { [weak agent] in

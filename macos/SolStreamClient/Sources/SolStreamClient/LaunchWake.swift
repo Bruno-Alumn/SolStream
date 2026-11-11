@@ -34,6 +34,12 @@ final class LaunchWake {
     }
 
     /// What it says when the minute is up.
+    /// The PC is on a network this Mac isn't on: a wake can't reach it.
+    static func otherNetwork(_ host: String) -> String {
+        "\(host) is asleep or off, and this Mac isn't on its network, so Wake can't reach it. "
+            + "Wake it from that network, then open this again."
+    }
+
     static func notWoken(_ host: String) -> String {
         "\(host) hasn't woken. Wake-on-LAN may be off on it, or it's on another network, "
             + "or nobody is signed in to Windows. SolStream keeps trying while this is open."
