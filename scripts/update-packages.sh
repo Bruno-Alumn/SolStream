@@ -51,6 +51,7 @@ echo "packaging/solstream.rb: $version $sha"
 sed -i.bak -E \
     -e "s|<version>[^<]*</version>|<version>$version</version>|" \
     -e "s|<projectSourceUrl>[^<]*</projectSourceUrl>|<projectSourceUrl>https://github.com/$repo/tree/$tag</projectSourceUrl>|" \
+    -e "s|<iconUrl>[^<]*</iconUrl>|<iconUrl>https://cdn.jsdelivr.net/gh/$repo@$tag/docs/media/logo.png</iconUrl>|" \
     "$nuspec"
 sed -i.bak -E \
     -e "s|^( *url64bit *= *)'[^']*'|\\1'https://github.com/$repo/releases/download/$tag/SolStreamSetup-$version.exe'|" \
@@ -59,9 +60,10 @@ sed -i.bak -E \
 rm -f "$nuspec.bak" "$choco_install.bak"
 grep -q "<version>$version</version>" "$nuspec" &&
     grep -q "<projectSourceUrl>https://github.com/$repo/tree/$tag</projectSourceUrl>" "$nuspec" &&
+    grep -q "<iconUrl>https://cdn.jsdelivr.net/gh/$repo@$tag/docs/media/logo.png</iconUrl>" "$nuspec" &&
     grep -q "/$tag/SolStreamSetup-$version.exe'\$" "$choco_install" &&
     grep -q "^ *checksum64 *= *'$setup_sha'\$" "$choco_install" ||
-    { echo "packaging/chocolatey has no version, projectSourceUrl, url64bit or checksum64 to set" >&2; exit 1; }
+    { echo "packaging/chocolatey has no version, projectSourceUrl, iconUrl, url64bit or checksum64 to set" >&2; exit 1; }
 echo "packaging/chocolatey: $version $setup_sha"
 
 if $push; then

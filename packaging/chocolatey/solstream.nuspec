@@ -3,7 +3,9 @@
      sets the version and projectSourceUrl here and the download in
      tools/chocolateyinstall.ps1 from a release; .github/workflows/chocolatey.yml
      packs, tests and publishes it. projectSourceUrl is the release's source, so
-     it differs from projectUrl as Chocolatey's moderation asks (CPMR0041). -->
+     it differs from projectUrl as Chocolatey's moderation asks (CPMR0041). The
+     icon is served by jsDelivr from the release's tag: moderation doesn't allow
+     raw.githubusercontent.com for icons. -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>solstream</id>
@@ -11,6 +13,7 @@
     <title>SolStream</title>
     <authors>Bruno-Alumn</authors>
     <owners>Bruno-Alumn</owners>
+    <copyright>Copyright (c) 2026 Bruno-Alumn</copyright>
     <projectUrl>https://github.com/Bruno-Alumn/SolStream</projectUrl>
     <packageSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/main/packaging/chocolatey</packageSourceUrl>
     <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/v1.0.8</projectSourceUrl>
@@ -18,7 +21,7 @@
     <docsUrl>https://github.com/Bruno-Alumn/SolStream#readme</docsUrl>
     <bugTrackerUrl>https://github.com/Bruno-Alumn/SolStream/issues</bugTrackerUrl>
     <releaseNotes>https://github.com/Bruno-Alumn/SolStream/releases</releaseNotes>
-    <iconUrl>https://raw.githubusercontent.com/Bruno-Alumn/SolStream/main/docs/media/logo.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/Bruno-Alumn/SolStream@v1.0.8/docs/media/logo.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>solstream streaming remote-desktop game-streaming mac windows</tags>
     <summary>Stream Windows apps from your PC into their own windows on your Mac.</summary>
