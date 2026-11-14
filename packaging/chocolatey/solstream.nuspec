@@ -9,19 +9,19 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>solstream</id>
-    <version>1.0.8</version>
+    <version>2.0.0</version>
     <title>SolStream</title>
     <authors>Bruno-Alumn</authors>
     <owners>Bruno-Alumn</owners>
     <copyright>Copyright (c) 2026 Bruno-Alumn</copyright>
     <projectUrl>https://github.com/Bruno-Alumn/SolStream</projectUrl>
     <packageSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/main/packaging/chocolatey</packageSourceUrl>
-    <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/v1.0.8</projectSourceUrl>
+    <projectSourceUrl>https://github.com/Bruno-Alumn/SolStream/tree/v2.0.0</projectSourceUrl>
     <licenseUrl>https://github.com/Bruno-Alumn/SolStream/blob/main/LICENSE</licenseUrl>
     <docsUrl>https://github.com/Bruno-Alumn/SolStream#readme</docsUrl>
     <bugTrackerUrl>https://github.com/Bruno-Alumn/SolStream/issues</bugTrackerUrl>
     <releaseNotes>https://github.com/Bruno-Alumn/SolStream/releases</releaseNotes>
-    <iconUrl>https://cdn.jsdelivr.net/gh/Bruno-Alumn/SolStream@v1.0.8/docs/media/logo.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/Bruno-Alumn/SolStream@v2.0.0/docs/media/logo.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>solstream streaming remote-desktop game-streaming mac windows</tags>
     <summary>Stream Windows apps from your PC into their own windows on your Mac.</summary>

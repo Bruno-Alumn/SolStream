@@ -97,11 +97,16 @@ With [Homebrew](https://brew.sh), step 2 is one command instead:
 brew install --cask bruno-alumn/solstream/solstream
 ```
 
-> **A note about signing:** the installers aren’t signed with a paid
-> certificate yet, so each system warns you the first time. On the Mac, open
-> SolStream, dismiss the warning, then choose **Open Anyway** in System
-> Settings › Privacy & Security. On the PC, choose **More info** › **Run
-> anyway** on the “Windows protected your PC” screen.
+On the PC, with [Chocolatey](https://chocolatey.org), step 1 is one command:
+
+```powershell
+choco install solstream
+```
+
+> **A note about signing:** the Mac app is signed with a Developer ID and
+> notarized by Apple, so it opens like any other app. The Windows setup isn’t
+> signed with a paid certificate yet, so Windows warns the first time: choose
+> **More info** › **Run anyway** on the “Windows protected your PC” screen.
 
 ## Using SolStream
 
