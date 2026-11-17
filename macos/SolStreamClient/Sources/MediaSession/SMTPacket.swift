@@ -133,16 +133,27 @@ public enum SMTPacket {
     public static func seal(_ plaintext: Data, direction: SMTDirection,
                             sessionTag: UInt8) -> Data? {
         let counter = direction.nextCounter()
+        let counterBytes = be(counter, 6)
         var header = Data(capacity: SMT.headerBytes)
         header.append((1 << 4) | 0)      // version 1, epoch 0
         header.append(sessionTag)
-        header.append(be(counter, 6))
+        header.append(counterBytes)
 
-        guard let nonce = try? AES.GCM.Nonce(data: direction.fixed + be(counter, 6)),
+        var nonceBytes = Data(capacity: 12)
+        nonceBytes.append(direction.fixed)
+        nonceBytes.append(counterBytes)
+        guard let nonce = try? AES.GCM.Nonce(data: nonceBytes),
               let box = try? AES.GCM.seal(plaintext, using: direction.key,
                                           nonce: nonce, authenticating: header)
         else { return nil }
-        return header + box.ciphertext + box.tag
+        // One buffer, one copy of the ciphertext: `header + ciphertext + tag`
+        // made two intermediate Datas, each a whole copy -- ~700 KB apiece for
+        // a control-channel transfer chunk.
+        var packet = Data(capacity: SMT.headerBytes + box.ciphertext.count + SMT.tagBytes)
+        packet.append(header)
+        packet.append(box.ciphertext)
+        packet.append(box.tag)
+        return packet
     }
 
     /// Verify and decrypt. Returns nil for anything that does not authenticate,
