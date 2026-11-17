@@ -10,10 +10,20 @@ import InputCapture
 /// SolStream macOS client entry point.
 struct SolStreamApp {
     static func main() {
+        ignoreSIGPIPE()
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
         app.run()
+    }
+
+    /// A write to a socket or pipe that has been shut answers EPIPE instead of
+    /// ending SolStream. The default for SIGPIPE is to end the process with no
+    /// crash report: a stream stopping or restarting quit the app, as a send
+    /// on its media socket raced the shutdown. The sockets SolStream makes
+    /// refuse the signal themselves; this covers any other, in any library.
+    static func ignoreSIGPIPE() {
+        signal(SIGPIPE, SIG_IGN)
     }
 }
 
