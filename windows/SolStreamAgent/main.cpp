@@ -4708,7 +4708,14 @@ bool FieldString(const std::string& json, const char* key, std::string& out) {
             return true;
         }
         if (c != '\\') {
-            value.push_back(c);
+            // A run with no quote or escape in it, copied whole: a transfer
+            // chunk's base64 is ~700 KB with neither.
+            const size_t end = json.find_first_of("\"\\", i);
+            if (end == std::string::npos) {
+                return false;  // no closing quote, as the byte loop would find
+            }
+            value.append(json, i, end - i);
+            i = end - 1;  // the loop's ++i lands on the quote or backslash
             continue;
         }
         if (++i >= json.size()) {
@@ -5759,17 +5766,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
 // A line torn in half by another thread's send() is a protocol desync the Mac
 // cannot recover from -- it has no request ids to resynchronise against, so it
 // drops the connection. `g_send_cs` is declared with the push channel, above.
-/// Write all of `payload`, or false.
-bool SendAll(SOCKET client, const std::string& payload) {
+/// Write all of `size` bytes at `data`, or false.
+bool SendAll(SOCKET client, const char* data, size_t size) {
     size_t sent = 0;
-    while (sent < payload.size()) {
-        const int n = send(client, payload.data() + sent, (int) (payload.size() - sent), 0);
+    while (sent < size) {
+        const int n = send(client, data + sent, (int) (size - sent), 0);
         if (n <= 0) {
             return false;
         }
         sent += static_cast<size_t>(n);
     }
     return true;
+}
+
+/// Write all of `payload`, or false.
+bool SendAll(SOCKET client, const std::string& payload) {
+    return SendAll(client, payload.data(), payload.size());
 }
 
 /// A line to a socket no session has yet: a knock being answered, or turned
@@ -5815,7 +5827,12 @@ bool SendLine(SOCKET client, const std::string& text) {
             shutdown(client, SD_BOTH);
             return false;
         }
-        payload.assign((const char*) record.data(), record.size());
+        if (!SendAll(client, (const char*) record.data(), record.size())) {
+            // As below: a torn record leaves the channel unusable.
+            shutdown(client, SD_BOTH);
+            return false;
+        }
+        return true;
     } else {
         payload = text;
         payload += '\n';
@@ -6424,7 +6441,9 @@ void ServeClient(SOCKET client) {
     std::string buffer;
     /// How far into `buffer` a newline has already been looked for.
     size_t scanned = 0;
-    char chunk[4096];
+    // Transfers move ~700 KB records; 4 KB per pass was ~170 passes each, every
+    // one an ioctlsocket, a select, a mutex and a second ioctlsocket.
+    std::vector<char> chunk(64 * 1024);
     // Per connection, deliberately: a fresh socket is a fresh three guesses, and
     // the point is not to make guessing hard — the token is 16 random bytes —
     // but to stop one socket guessing for ever while holding the slot.
@@ -6455,7 +6474,7 @@ void ServeClient(SOCKET client) {
         if (!idle) {
             // The receive timeout set above still stands behind this, for a
             // recv() that blocks although select() said there was something.
-            n = recv(client, chunk, sizeof(chunk), 0);
+            n = recv(client, chunk.data(), static_cast<int>(chunk.size()), 0);
             idle = n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT;
         }
         if (idle) {
@@ -6480,7 +6499,7 @@ void ServeClient(SOCKET client) {
                 "dropping", (unsigned long long) (kPreAuthDeadlineMs / 1000));
             return;
         }
-        buffer.append(chunk, static_cast<size_t>(n));
+        buffer.append(chunk.data(), static_cast<size_t>(n));
 
         if (discarding) {
             const size_t end = buffer.find('\n');

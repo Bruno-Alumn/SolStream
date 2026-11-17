@@ -430,11 +430,9 @@ bool Base64Decode(const std::string& text, std::vector<unsigned char>& out) {
     if (text.empty()) {
         return true;
     }
-    DWORD size = 0;
-    if (!CryptStringToBinaryA(text.c_str(), static_cast<DWORD>(text.size()), CRYPT_STRING_BASE64,
-                              nullptr, &size, nullptr, nullptr)) {
-        return false;
-    }
+    // One pass: base64 never decodes to more than 3 bytes per 4 characters,
+    // and whitespace or padding only make it shorter.
+    DWORD size = static_cast<DWORD>(text.size() / 4 * 3 + 3);
     out.resize(size);
     if (!CryptStringToBinaryA(text.c_str(), static_cast<DWORD>(text.size()), CRYPT_STRING_BASE64,
                               out.data(), &size, nullptr, nullptr)) {
