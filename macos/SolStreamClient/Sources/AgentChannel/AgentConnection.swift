@@ -2156,7 +2156,9 @@ public final class AgentConnection {
                 }
             }
         }
-        next()
+        // On the agent queue, like every later chunk: the 512 KB read and its
+        // base64 are not work for the main thread, which the only caller is on.
+        queue.async { next() }
     }
 
     /// Tell the host an upload under way will not be finished, so it deletes
