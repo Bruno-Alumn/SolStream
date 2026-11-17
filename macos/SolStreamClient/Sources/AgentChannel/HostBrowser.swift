@@ -94,7 +94,7 @@ public final class HostBrowser {
         }
         var yes: Int32 = 1
         setsockopt(descriptor, SOL_SOCKET, SO_BROADCAST, &yes, socklen_t(MemoryLayout<Int32>.size))
-        // A send after `stop()` shuts it fails rather than ending the app.
+        // Defensive: a send on this socket fails rather than raising SIGPIPE.
         setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         // The receive timeout is what gets the thread back out to look at

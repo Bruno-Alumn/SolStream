@@ -1,7 +1,6 @@
 import Foundation
 import Darwin
 import AgentChannel
-import MediaSession
 import SolStreamLogging
 
 /// Waking a PC that is asleep, from the connect window.
@@ -128,7 +127,7 @@ enum WakeOnLAN {
         defer { Darwin.close(fd) }
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, socklen_t(MemoryLayout<Int32>.size))
-        MediaClient.refuseSIGPIPE(fd)
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         var sent = false
         for target in targets {
             guard let mac = bytes(of: target.mac) else { continue }

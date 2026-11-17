@@ -27,8 +27,9 @@ final class SIGPIPETests: XCTestCase {
         }
         shutdown(fd, SHUT_RDWR)
         let sent = send(fd, "x", 1, 0)
+        let error = errno
         XCTAssertEqual(sent, -1)
-        XCTAssertEqual(errno, EPIPE)
+        XCTAssertEqual(error, EPIPE)
     }
 
     /// App-wide, for any socket or pipe SolStream doesn't make itself.

@@ -462,6 +462,16 @@ public final class MediaClient {
 
     // MARK: - Sending
 
+    /// A send on `fd` once it is shut fails with EPIPE rather than killing
+    /// the process. `stop()` shuts the socket while the receive thread may
+    /// still answer a packet, and input may still be going out: each of those
+    /// sends raised SIGPIPE, whose default is to end the app on the spot, with
+    /// no crash report -- SolStream quit as a stream stopped or restarted.
+    public static func refuseSIGPIPE(_ fd: Int32) {
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     /// Seal and send, with the descriptor held for the whole of it.
     ///
     /// `fd` used to be read outside this lock while `stop()` was free to close it
@@ -474,16 +484,6 @@ public final class MediaClient {
     ///
     /// `stop()` therefore sends its BYE before it takes this lock to clear `fd`,
     /// and never while holding it — NSLock is not recursive.
-    /// A send on `fd` once it is shut fails with EPIPE rather than killing
-    /// the process. `stop()` shuts the socket while the receive thread may
-    /// still answer a packet, and input may still be going out: each of those
-    /// sends raised SIGPIPE, whose default is to end the app on the spot, with
-    /// no crash report -- SolStream quit as a stream stopped or restarted.
-    public static func refuseSIGPIPE(_ fd: Int32) {
-        var on: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-    }
-
     private func sendRaw(_ plaintext: Data) {
         sendLock.lock()
         defer { sendLock.unlock() }
