@@ -1875,12 +1875,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// failed for want of a route. And only for the session that was showing
     /// when the Mac woke, if no picture has come since: a stream already back
     /// by itself, or one a recovery started meanwhile, is left alone.
+    /// A picture means one DECODED, as for the watchdog and the pill: after a
+    /// wake, packets can come back to a decoder that shows nothing.
     private func restartStreamAfterWake() {
         guard let woken = session else { return }
-        let framesAtWake = woken.mediaCounters.frames
+        let framesAtWake = woken.framesDecoded
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak woken] in
             guard let self, let woken, self.session === woken,
-                  woken.mediaCounters.frames == framesAtWake,
+                  woken.framesDecoded == framesAtWake,
                   !self.appWindows.isEmpty, !self.connectionLostShown,
                   let host = self.streamHost, let agent = self.agent, agent.isConnected
             else { return }
