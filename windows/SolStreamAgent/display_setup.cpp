@@ -7,11 +7,13 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
+#include "display_demand.h"
 #include "display_mode.h"
 #include "util.h"
 #include "vdd.h"
@@ -792,6 +794,15 @@ bool TurnHdrOff(const DISPLAYCONFIG_PATH_INFO& path, const AdvancedColorInfo& in
     return true;
 }
 
+/// How many ConfigureVirtualDisplay calls are running in this process.
+std::atomic<int> g_configuring{0};
+
+/// Where the size the virtual display had when it was last detached is kept,
+/// for the next attach (ParseDisplaySize).
+std::wstring RememberedSizePath() {
+    return LocalDataPath(L"virtual-display-size.txt");
+}
+
 }  // namespace
 
 std::wstring VirtualDisplayDevice() {
@@ -803,6 +814,12 @@ std::wstring VirtualDisplayDevice() {
 
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                              std::string& note, std::string& error) {
+    // Held for the whole of it, so the host does not detach the display it is
+    // attaching and scaling; see ConfiguringVirtualDisplay.
+    struct Configuring {
+        Configuring() { g_configuring.fetch_add(1); }
+        ~Configuring() { g_configuring.fetch_sub(1); }
+    } configuring;
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
         error = "A streaming canvas has to be within 4096 pixels on both axes; "
                 "larger starts a session that never delivers a frame.";
@@ -1080,6 +1097,114 @@ void CheckVirtualDisplay(std::string& note) {
                         "on your Mac the way Windows drew them."
                       : hdr_error);
     }
+}
+
+bool ConfiguringVirtualDisplay() {
+    return g_configuring.load() > 0;
+}
+
+bool AttachVirtualDisplay(std::string& note, std::string& error) {
+    Adapter adapter;
+    if (!FindVirtualAdapter(adapter) || !adapter.ours) {
+        error = "SolStream's virtual display is not running.";
+        return false;
+    }
+    if (adapter.attached) {
+        return true;
+    }
+    // The size it was detached at, which is the size the last Mac's `canvas`
+    // chose: the same Mac asks for it again, and finds it already there. Then
+    // the default canvas, then the largest ladder size it offers.
+    int width = 0, height = 0;
+    std::string text;
+    unsigned w = 0, h = 0;
+    if (ReadFileText(RememberedSizePath(), text) && ParseDisplaySize(text, w, h)
+        && OffersMode(adapter.gdi_name, (int) w, (int) h)) {
+        width = (int) w;
+        height = (int) h;
+    } else if (OffersMode(adapter.gdi_name, kDefaultCanvasWidth, kDefaultCanvasHeight)) {
+        width = kDefaultCanvasWidth;
+        height = kDefaultCanvasHeight;
+    } else {
+        for (int i = (int) (sizeof(kLadder) / sizeof(kLadder[0])) - 1; i >= 0; --i) {
+            if (OffersMode(adapter.gdi_name, kLadder[i].width, kLadder[i].height)) {
+                width = kLadder[i].width;
+                height = kLadder[i].height;
+                break;
+            }
+        }
+    }
+    if (width == 0) {
+        error = "The display driver offers no size SolStream can stream.";
+        return false;
+    }
+    if (!AttachAt(adapter.gdi_name, width, height, error)) {
+        return false;
+    }
+    Add(note, "Attached the virtual display " + ToUtf8(adapter.gdi_name) + " at "
+              + std::to_string(width) + "x" + std::to_string(height) + ".");
+    return true;
+}
+
+bool DetachVirtualDisplay(std::string& note) {
+    Adapter adapter;
+    if (!FindVirtualAdapter(adapter) || !adapter.ours || !adapter.attached) {
+        return false;
+    }
+    // Never the primary, and never the last display on the desktop: a PC with
+    // no monitor of its own -- headless, or its monitor off at the wall -- has
+    // only this one, and taking it away leaves Windows nothing to draw on.
+    bool primary = false;
+    int others = 0;
+    DISPLAY_DEVICEW device{};
+    device.cb = sizeof(device);
+    for (DWORD n = 0; EnumDisplayDevicesW(nullptr, n, &device, 0); ++n) {
+        if ((device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0) {
+            if (adapter.gdi_name == device.DeviceName) {
+                primary = (device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+            } else {
+                ++others;
+            }
+        }
+        device = DISPLAY_DEVICEW{};
+        device.cb = sizeof(device);
+    }
+    if (primary || others == 0) {
+        Add(note, "Left the virtual display " + ToUtf8(adapter.gdi_name) + " attached: it is "
+                  + (primary ? "the main display." : "the only display."));
+        return false;
+    }
+
+    DEVMODEW current{};
+    current.dmSize = sizeof(current);
+    if (EnumDisplaySettingsW(adapter.gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &current)
+        && KeepsAttachedSize(current.dmPelsWidth, current.dmPelsHeight)) {
+        WriteFileText(RememberedSizePath(), std::to_string(current.dmPelsWidth) + "x"
+                                                + std::to_string(current.dmPelsHeight) + "\n");
+    }
+
+    // No size and no place is Windows' "off the desktop". Into the registry,
+    // as the attach is, so a host that crashes after this cannot have Windows
+    // bring the display back at the next logon.
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    wcsncpy_s(mode.dmDeviceName, adapter.gdi_name.c_str(), _TRUNCATE);
+    mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+    LONG rc = ChangeDisplaySettingsExW(adapter.gdi_name.c_str(), &mode, nullptr,
+                                       CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+    if (rc != DISP_CHANGE_SUCCESSFUL) {
+        Add(note, "Windows would not detach the virtual display " + ToUtf8(adapter.gdi_name)
+                  + " (" + std::to_string(rc) + ").");
+        return false;
+    }
+    rc = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+    if (rc != DISP_CHANGE_SUCCESSFUL) {
+        Add(note, "Windows would not apply the detach of the virtual display "
+                  + ToUtf8(adapter.gdi_name) + " (" + std::to_string(rc) + ").");
+        return false;
+    }
+    Add(note, "Detached the virtual display " + ToUtf8(adapter.gdi_name) + ".");
+    return true;
 }
 
 }  // namespace solstream

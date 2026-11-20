@@ -62,6 +62,27 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 /// attach, resize, move or rescale it, or touch the driver's settings.
 void CheckVirtualDisplay(std::string& note);
 
+/// Attach SolStream's running virtual display to the desktop, when it is not:
+/// at the size it had when it was last detached, or the default canvas, or the
+/// largest ladder size it offers, and at the rate ChooseRefresh picks, to the
+/// right of everything else. Nothing more -- no driver settings, no device
+/// restart, no scaling: Windows keeps scaling per monitor, and is expected to
+/// keep it across a detach (the host logs it after each attach). True
+/// when it is attached at the end, with what was done in `note`. For a Mac
+/// that has just connected; see display_demand.h.
+bool AttachVirtualDisplay(std::string& note, std::string& error);
+
+/// Take SolStream's virtual display off the desktop: no size and no position,
+/// written to the registry and then applied, so it stays off across a crash
+/// and a restart. Its size is written down first, for the next attach. Never
+/// when it is the primary display or the only one attached. True when this
+/// call detached it; what stopped it, if anything, is said in `note`.
+bool DetachVirtualDisplay(std::string& note);
+
+/// Whether ConfigureVirtualDisplay is running in this process, attaching and
+/// scaling the display: the host does not detach it from under that.
+bool ConfiguringVirtualDisplay();
+
 /// The scaling SolStream's attached virtual display is at, as a percentage, or
 /// 0 when it is not attached or its scaling cannot be read. Read only: the
 /// window offers Set up when it is not kDefaultScalePercent.

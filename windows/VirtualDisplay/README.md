@@ -93,6 +93,21 @@ does it ask for the rights, as it does to install a missing driver.
 `SolStream.exe --configure-display`, from an elevated prompt in the interactive
 session, runs just this part for a driver that is already there.
 
+**On demand (draft).** The display is on the desktop only while a Mac is
+connected, as Apollo's SudoVDA and Parsec's VDD do theirs; the MTT driver has no
+watchdog of its own, so the host does it (`display_demand.h`). It attaches the
+display when a Mac proves the token, before the display list the Mac picks its
+capture display from, at the size it had when it was last detached. The
+watcher detaches it once nothing has used it for 10 seconds: no Mac in the
+slot, no windows still being given back, and Set up not running. That covers a
+Mac leaving, a reconnect or takeover within the delay (which keeps it), and a
+host starting after a crash with it attached. A clean exit detaches it too.
+The detach is written to the registry, so a crash cannot leave it on across a
+restart. Neither happens while a full-screen game is in front: the detach waits
+for the game to go, and a Mac connecting meanwhile streams the primary monitor.
+It is never detached while it is the primary display or the only one.
+`--keep-virtual-display` turns all of this off for that copy of the host.
+
 The host then captures that display: the one `FindVirtualAdapter` scores best
 (SolStream's own driver first), else any display whose adapter is the Virtual
 Display Driver, else the primary monitor, with a line in the log saying so
@@ -225,9 +240,10 @@ Get-PnpDevice -Class Display | Where-Object FriendlyName -like '*Virtual Display
     Disable-PnpDevice -Confirm:$false
 ```
 
-Detaching it in Settings > System > Display ("Disconnect") lasts until Set up
-is chosen again: SolStream then captures the primary monitor, and the host
-window offers Set up to attach it. A disabled
+Detaching it in Settings > System > Display ("Disconnect") lasts until the
+next Mac connects, which attaches it again (with `--keep-virtual-display`,
+until Set up is chosen: SolStream then captures the primary monitor, and the
+host window offers Set up to attach it). A disabled
 one is left alone: SolStream captures the primary monitor, and the host window
 says the display is off rather than installing another over it.
 
