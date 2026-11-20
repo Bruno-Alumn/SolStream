@@ -2747,6 +2747,12 @@ void TestTrayMenu() {
     state.offer_display = true;
     items = TrayMenuItems(state);
     CHECK(find(items, kTrayCopyToken)->greyed && find(items, kTraySetUpDisplay));
+    CHECK(!find(items, kTraySetUpDisplay)->greyed);
+    // Set up is there but greyed while a Mac streams: it can change the
+    // display layout under the capture.
+    state.streaming = true;
+    items = TrayMenuItems(state);
+    CHECK(find(items, kTraySetUpDisplay) && find(items, kTraySetUpDisplay)->greyed);
 }
 
 void TestStaysDownloaded() {
@@ -4901,6 +4907,15 @@ void TestDisplayMode() {
     CHECK(ReachesScaleStep(1, -1, 0));   // the recommended step itself
     CHECK(!ReachesScaleStep(2, -1, 0));
     CHECK(!ReachesScaleStep(-1, -6, 4));  // not one of Windows' steps
+
+    // Set up is offered over the scaling only when it is not 200% and the
+    // display's size lets it be: a `canvas` can choose 1920x1080, which stops
+    // at 175%, and a banner offering what Set up can't do never went away.
+    CHECK(OffScale(150, 200, true) == 150);
+    CHECK(OffScale(250, 200, true) == 250);
+    CHECK(OffScale(175, 200, false) == 0);
+    CHECK(OffScale(200, 200, true) == 0);
+    CHECK(OffScale(0, 200, true) == 0);    // not read
 }
 
 void TestFullScreen() {

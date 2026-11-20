@@ -229,13 +229,13 @@ bool g_ready_offers_set_up = false;
 std::string g_display_result;
 
 /// The host's own test for offering Set up with the driver running, as
-/// main.cpp's status thread makes it: not attached, or not at the scaling.
+/// main.cpp's status thread makes it: not attached, or not at the scaling at a
+/// size that can reach it.
 bool DisplayOffersSetUp() {
     if (VirtualDisplayDevice().empty()) {
         return true;
     }
-    const int scale = VirtualDisplayScale();
-    return scale != 0 && scale != kDefaultScalePercent;
+    return VirtualDisplayOffScale() != 0;
 }
 /// What was ticked when Install was pressed, for the summary afterwards.
 InstallOptions g_chosen;
@@ -968,6 +968,20 @@ void ShowAdviceButton(Screen& screen, const HostStatus& status) {
     screen.action = BannerAction::OpenAdvice;
 }
 
+/// The banner's Set up, or while a Mac is connected, when it can be had. Every
+/// Set up can attach, resize or rescale a display, and with a Mac connected
+/// that is the layout changing under a running capture, or under a game
+/// running full screen.
+void OfferSetUp(Screen& screen, bool shield) {
+    if (screen.connected) {
+        screen.why += L" You can set it up once your Mac has disconnected.";
+        return;
+    }
+    screen.fix = L"Set up";
+    screen.shield = shield;
+    screen.action = BannerAction::InstallDriver;
+}
+
 /// Derive what to show from what the agent last reported. One banner at a time:
 /// failures cascade, and four banners describing one broken link is noise.
 Screen Describe(const HostStatus& status) {
@@ -1098,9 +1112,7 @@ Screen Describe(const HostStatus& status) {
                      L"Set up attaches it, so the picture fits your Mac and nothing dragged "
                      L"over the application goes with it.";
         screen.mark = Mark::NeedsYou;
-        screen.fix = L"Set up";
-        screen.shield = false;
-        screen.action = BannerAction::InstallDriver;
+        OfferSetUp(screen, false);
         return screen;
     }
 
@@ -1114,9 +1126,7 @@ Screen Describe(const HostStatus& status) {
                      L"own. Set up sets it to "
                    + std::to_wstring(kDefaultScalePercent) + L"%, to match a Retina Mac.";
         screen.mark = Mark::NeedsYou;
-        screen.fix = L"Set up";
-        screen.shield = false;
-        screen.action = BannerAction::InstallDriver;
+        OfferSetUp(screen, false);
         return screen;
     }
 
@@ -1154,9 +1164,7 @@ Screen Describe(const HostStatus& status) {
         } else {
             screen.why += L"A virtual display fixes both: SolStream downloads the free "
                           L"Virtual Display Driver, checks it, and sets it up.";
-            screen.fix = L"Set up";
-            screen.shield = true;
-            screen.action = BannerAction::InstallDriver;
+            OfferSetUp(screen, true);
         }
     }
     return screen;
@@ -2562,6 +2570,8 @@ void StartUninstallJob(HWND window) {
     }).detach();
 }
 
+bool StreamingNow();
+
 /// Install the display driver and then actually set it up.
 ///
 /// The second half is the part that was missing. Installing the driver on its
@@ -2569,13 +2579,17 @@ void StartUninstallJob(HWND window) {
 /// turned on — and that last one is why streamed content used to arrive as a
 /// black rectangle with its window chrome drawn correctly around it.
 void StartDisplayJob(HWND window) {
-    if (g_job_running) {
+    // Not while a Mac is connected, for OfferSetUp's reason. The banner and
+    // the tray don't offer it then; this is a Mac that connected since.
+    if (g_job_running || StreamingNow()) {
         return;
     }
     // A driver that is already running needs only attaching and scaling, and
     // those need this session rather than administrator rights: no prompt, so
     // a standard account can do it, and the scaling is written for whoever is
-    // signed in rather than for the administrator who answered a prompt.
+    // signed in rather than for the administrator who answered a prompt. The
+    // prompt comes after, and only when the driver's settings file still needs
+    // writing.
     bool running = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2596,17 +2610,32 @@ void StartDisplayJob(HWND window) {
         // install, create the device, set it up.
         std::string error;
         std::string display;
+        // What was done here when the rest still needs the rights: said if
+        // the prompt for them is refused, rather than nothing at all.
+        std::string in_place;
         if (running && !IsElevated()) {
             std::string note;
-            if (ConfigureVirtualDisplay(kDefaultCanvasWidth, kDefaultCanvasHeight,
-                                        kDefaultScalePercent, note, error)) {
+            bool settings_refused = false;
+            // A Mac that connects while this runs keeps the size it has.
+            const bool configured = ConfigureVirtualDisplay(
+                kDefaultCanvasWidth, kDefaultCanvasHeight, kDefaultScalePercent, note,
+                error, [] { return !StreamingNow(); }, &settings_refused);
+            if (configured && !settings_refused) {
                 display = DisplayDriverResult(true, false, false, note, error);
             } else {
-                // What is left needs the rights after all: a driver offering
-                // no size SolStream streams, which only writing its settings
-                // file fixes. So the prompt, as for a missing one.
-                media::Log("[window] setting the display up here failed: %s",
-                           error.c_str());
+                // What is left needs the rights after all: the driver's
+                // settings file wanted writing -- a mode list without the
+                // ladder, or HDR on in the driver -- or the driver offers no
+                // size SolStream streams, which only writing that file fixes.
+                // So the prompt, as for a missing one.
+                if (configured) {
+                    in_place = DisplayDriverResult(true, false, false, note, error);
+                    media::Log("[window] setting the display up here could not write "
+                               "the driver's settings: %s", note.c_str());
+                } else {
+                    media::Log("[window] setting the display up here failed: %s",
+                               error.c_str());
+                }
                 error.clear();
             }
         }
@@ -2622,7 +2651,7 @@ void StartDisplayJob(HWND window) {
             if (RelaunchElevated(progress, error, true)) {
                 ReadInstallResult(error, &display);
             } else {
-                display = "failed " + error;
+                display = in_place.empty() ? "failed " + error : in_place;
             }
         }
         const bool ok = display.rfind("ready", 0) == 0;

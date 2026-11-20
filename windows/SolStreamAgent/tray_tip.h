@@ -106,10 +106,12 @@ struct TrayItem {
 
 /// The tray menu for `state`. Items are greyed rather than left out while
 /// they can't be had, so the menu keeps its shape from one opening to the
-/// next: Copy while the token is hidden or not there yet; the update ones
-/// while something is under way, and Install while a Mac streams; Quit while
-/// a job runs, when closing is refused. Show log is always there: it is what
-/// to send along with a question, whatever is going on.
+/// next: Copy while the token is hidden or not there yet; the update ones and
+/// Set up while something is under way, and Install and Set up while a Mac
+/// streams -- one restarts the host, the other can change the display layout
+/// under the capture; Quit while a job runs, when closing is refused. Show log
+/// is always there: it is what to send along with a question, whatever is
+/// going on.
 inline std::vector<TrayItem> TrayMenuItems(const TrayMenuState& state) {
     std::vector<TrayItem> items;
     items.push_back({kTrayOpen, L"Open SolStream", false});
@@ -121,7 +123,8 @@ inline std::vector<TrayItem> TrayMenuItems(const TrayMenuState& state) {
     }
     items.push_back({kTrayCheckUpdates, L"Check for updates", state.busy});
     if (state.offer_display) {
-        items.push_back({kTraySetUpDisplay, L"Set up virtual display\u2026", state.busy});
+        items.push_back({kTraySetUpDisplay, L"Set up virtual display\u2026",
+                         state.busy || state.streaming});
     }
     items.push_back({});
     items.push_back({kTrayShowLog, L"Show log", false});

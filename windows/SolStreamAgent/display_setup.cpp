@@ -327,9 +327,11 @@ bool HasResolution(const std::string& xml, int width, int height) {
 
 /// Patch the driver's settings: every ladder mode it does not already offer, and
 /// HDR off. Returns true when the file changed, which is what decides whether
-/// the device has to be cycled.
+/// the device has to be cycled. `refused` is set when it needed changing and
+/// keeping a copy or writing it was refused, which administrator rights fix.
 bool PatchVddSettings(const std::wstring& path, int width, int height,
-                      std::string& note, std::string& error) {
+                      std::string& note, std::string& error, bool& refused) {
+    refused = false;
     std::string xml;
     if (!ReadFileText(path, xml)) {
         error = "Could not read " + ToUtf8(path);
@@ -393,11 +395,13 @@ bool PatchVddSettings(const std::wstring& path, int width, int height,
         error = "Could not keep a copy of " + ToUtf8(path)
               + " before changing it, so it was left as it is. Setting up the "
                 "display driver needs administrator rights.";
+        refused = true;
         return false;
     }
     if (!WriteFileText(path, xml)) {
         error = "Could not write " + ToUtf8(path)
               + ". Installing the display driver needs administrator rights.";
+        refused = true;
         return false;
     }
     if (added > 0) {
@@ -802,7 +806,12 @@ std::wstring VirtualDisplayDevice() {
 }
 
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
-                             std::string& note, std::string& error) {
+                             std::string& note, std::string& error,
+                             const std::function<bool()>& may_reattach,
+                             bool* settings_refused) {
+    if (settings_refused) {
+        *settings_refused = false;
+    }
     if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
         error = "A streaming canvas has to be within 4096 pixels on both axes; "
                 "larger starts a session that never delivers a frame.";
@@ -817,13 +826,18 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                   "list was left as it is.");
     } else {
         std::string patch_error;
-        cycle = PatchVddSettings(settings, width, height, note, patch_error);
+        bool refused = false;
+        cycle = PatchVddSettings(settings, width, height, note, patch_error, refused);
+        if (settings_refused) {
+            *settings_refused = refused;
+        }
         // Not fatal. Run without administrator rights (--configure-display from
         // a plain prompt), writing under C:\ is refused and there is usually
         // nothing to write anyway, and everything below — attaching, scaling,
         // HDR — needs the session rather than the rights. Failing here would
         // throw away the part that works to report the part that was not
-        // needed.
+        // needed. Said, and passed back in `settings_refused`: a caller that
+        // can ask for the rights does.
         if (!cycle && !patch_error.empty()) {
             Add(note, patch_error);
         }
@@ -981,11 +995,19 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     }
     // A size kept in step 4 can be one Windows will not scale that far: the
     // driver's own stock mode, which Windows attaches a new display at, may be
-    // 1080p, and Windows stops a display that size at about 175%. Nothing after
-    // setup puts that right -- `canvas` changes the size and rate, never the
-    // scaling -- so the Mac would get its canvas with tiny text. Attached at
-    // the size asked for instead, once, and only when that is another size.
-    if (kept && ScaleOutOfReach(path, scale_percent)) {
+    // 1080p, and Windows stops a display that size at about 175%. `canvas`
+    // puts the scaling back only when it switches to a size that reaches it,
+    // and the Mac's own may be no bigger, so the Mac would get its canvas with
+    // tiny text. Attached at the size asked for instead, once, and only when
+    // that is another size.
+    //
+    // Not while the caller says no: with a Mac connected, that is the topology
+    // changing under its capture, or under a full-screen game.
+    const bool out_of_reach = kept && ScaleOutOfReach(path, scale_percent);
+    if (out_of_reach && may_reattach && !may_reattach()) {
+        Add(note, "Left the display at its size while your Mac is connected, so it "
+                  "cannot be scaled to " + std::to_string(scale_percent) + "% yet.");
+    } else if (out_of_reach) {
         DEVMODEW current{};
         current.dmSize = sizeof(current);
         const bool same_size =
@@ -1017,13 +1039,29 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     return true;
 }
 
-int VirtualDisplayScale() {
+int VirtualDisplayOffScale() {
     const std::wstring device = VirtualDisplayDevice();
     DISPLAYCONFIG_PATH_INFO path{};
     if (device.empty() || !FindPathFor(device, path)) {
         return 0;
     }
-    return ScaleOf(path);
+    return OffScale(ScaleOf(path), kDefaultScalePercent,
+                    !ScaleOutOfReach(path, kDefaultScalePercent));
+}
+
+bool RestoreVirtualDisplayScale(const std::wstring& gdi_name, std::string& note) {
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (!FindPathFor(gdi_name, path)) {
+        Add(note, "Could not read the display's configuration, so its scaling was "
+                  "left alone.");
+        return false;
+    }
+    // Said nothing of: a size that stops short of it is the Mac's choice, and
+    // SetScale would only say it cannot.
+    if (ScaleOutOfReach(path, kDefaultScalePercent)) {
+        return false;
+    }
+    return SetScale(path, kDefaultScalePercent, note);
 }
 
 void CheckVirtualDisplay(std::string& note) {
@@ -1060,7 +1098,8 @@ void CheckVirtualDisplay(std::string& note) {
         line += ", " + std::to_string(scale) + "% scaling";
     }
     Add(note, line + ".");
-    if (scale != 0 && scale != kDefaultScalePercent) {
+    if (OffScale(scale, kDefaultScalePercent,
+                 !ScaleOutOfReach(path, kDefaultScalePercent)) != 0) {
         // Said, not changed: a scaling change re-lays out the whole desktop,
         // and Set up is where SolStream makes that kind of change.
         Add(note, "SolStream sets it up at " + std::to_string(kDefaultScalePercent)

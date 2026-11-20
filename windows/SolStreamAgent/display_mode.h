@@ -76,4 +76,14 @@ inline bool ReachesScaleStep(int target, int min_relative, int max_relative) {
     return target >= 0 && target <= -min_relative + max_relative;
 }
 
+/// The scaling to offer Set up over, or 0 for none: the display's own, when it
+/// is read, is not the one wanted, and Windows would go as far as the one
+/// wanted at this size. A `canvas` can choose a size that stops short of it --
+/// 1920x1080 stops at 175% -- and the only way past that is attaching at
+/// another size, which the Mac's next `canvas` undoes. Offered there, Set up
+/// was a banner that never went away.
+inline int OffScale(int scale, int wanted, bool wanted_in_reach) {
+    return scale != 0 && scale != wanted && wanted_in_reach ? scale : 0;
+}
+
 }  // namespace solstream

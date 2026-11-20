@@ -312,6 +312,13 @@ modes are seeded once, ahead of time, by `display_setup.cpp`: setup runs it, and
 so does `SolStream.exe --configure-display`. The older, manual route to the same
 thing is `windows/VirtualDisplay/setup-virtual-display.ps1`.
 
+Windows keeps a display's scaling relative to what it recommends for its size,
+so a new mode can leave a 200% display at 150%. After `canvas` has switched
+the mode -- not when it found it already there -- it puts the scaling back to
+200% when Windows allows that at the new size. A size that stops short of it
+(1920×1080 stops at about 175%) is left at what it has, and the host window
+does not offer Set up over it.
+
 The Mac only asks this of a **virtual** display. A physical monitor is somebody's
 actual screen and its mode is not ours to change, and the host does not take the
 Mac's word for it: it changes only the virtual display it is capturing, and

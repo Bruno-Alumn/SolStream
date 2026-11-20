@@ -21,6 +21,7 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <string>
 
 namespace solstream {
@@ -53,8 +54,20 @@ constexpr int kDefaultScalePercent = 200;
 /// Run by Set up and the command-line setups only, never at the host's start:
 /// each step it takes can be a display reconfiguration, and the host starts at
 /// every logon and again after every crash.
+///
+/// `may_reattach`, when given, is asked before the one step that attaches a
+/// display already attached at another size; false leaves it at its size. The
+/// host's Set up says no while a Mac is connected: that is the topology
+/// changing under a running capture, or under a full-screen game.
+///
+/// `settings_refused`, when given, is set when the driver's settings file
+/// needed changing and writing it was refused -- no administrator rights.
+/// Everything else may still have worked, so the call can return true with it
+/// set; a caller that can ask for the rights should.
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
-                             std::string& note, std::string& error);
+                             std::string& note, std::string& error,
+                             const std::function<bool()>& may_reattach = {},
+                             bool* settings_refused = nullptr);
 
 /// What the host does with the virtual display when it starts: says, into
 /// `note`, whether SolStream's is attached and at what size, rate and scaling,
@@ -62,10 +75,19 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 /// attach, resize, move or rescale it, or touch the driver's settings.
 void CheckVirtualDisplay(std::string& note);
 
-/// The scaling SolStream's attached virtual display is at, as a percentage, or
-/// 0 when it is not attached or its scaling cannot be read. Read only: the
-/// window offers Set up when it is not kDefaultScalePercent.
-int VirtualDisplayScale();
+/// The scaling SolStream's attached virtual display is at, as a percentage,
+/// when the window should offer Set up for it: not kDefaultScalePercent, and
+/// at a size where Windows would let it be (OffScale). 0 otherwise, and when it
+/// is not attached or its scaling cannot be read. Read only.
+int VirtualDisplayOffScale();
+
+/// Put `gdi_name` back at kDefaultScalePercent after its size changed, when
+/// Windows lets it be at the new size. Windows keeps scaling relative to what
+/// it recommends for a size, so a mode switch alone can leave a 200% display
+/// at 150%. True when it is at kDefaultScalePercent afterwards. What was done,
+/// or why it could not be, goes into `note`; a size that stops short of it is
+/// left without a word.
+bool RestoreVirtualDisplayScale(const std::wstring& gdi_name, std::string& note);
 
 /// The folder the Virtual Display Driver reads vdd_settings.xml from: VDDPATH
 /// under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when set, otherwise

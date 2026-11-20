@@ -507,8 +507,11 @@ void RechooseCaptureDisplayIfStale(const std::vector<Display>& displays) {
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
 /// Then, at that size, the rate ChooseRefresh picks (display_mode.h).
+/// `applied` says whether a mode was put on the display, rather than found
+/// there already.
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
-                    int& out_w, int& out_h, int& out_hz) {
+                    int& out_w, int& out_h, int& out_hz, bool& applied) {
+    applied = false;
     // The size first, and the rate apart from it. Ranking on area alone left
     // the winner as whichever rate the driver happened to enumerate first, and
     // the virtual display offers every resolution at several rates, so that
@@ -605,6 +608,7 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
             best.dmPelsWidth, best.dmPelsHeight, rc);
         return false;
     }
+    applied = true;
     out_w = (int) best.dmPelsWidth;
     out_h = (int) best.dmPelsHeight;
     out_hz = (int) best.dmDisplayFrequency;
@@ -5455,9 +5459,22 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         }
         int got_w = 0, got_h = 0;
         int got_hz = 0;
+        bool applied = false;
         if (!SetDisplayMode(wanted, (int) want_w, (int) want_h,
-                            got_w, got_h, got_hz)) {
+                            got_w, got_h, got_hz, applied)) {
             return "{\"type\":\"canvas\",\"ok\":false,\"message\":\"could not set a display mode\"}";
+        }
+        // Windows keeps a display's scaling relative to what it recommends for
+        // its size, so a new size can leave a 200% display at 150%, and the
+        // window would then offer Set up during and after every stream. Put
+        // back after a switch only -- a mode found already there is left as it
+        // was -- and only where the new size reaches it.
+        if (applied) {
+            std::string note;
+            solstream::RestoreVirtualDisplayScale(wanted, note);
+            if (!note.empty()) {
+                Log("[agent] canvas %dx%d: %s", got_w, got_h, note.c_str());
+            }
         }
         char buffer[192];
         // The rate goes back so the Mac can log it. A capture display stuck at
@@ -8294,17 +8311,18 @@ int wmain(int argc, wchar_t** argv) {
             // Its scaling, at most every ten seconds like the driver's state:
             // it changes only when somebody changes it, and reading it is a
             // walk of the display configuration.
+            // 0 at a size that cannot reach the scaling Set up chooses: Set up
+            // could not do better there, short of a size the Mac would undo.
             static ULONGLONG scale_checked = 0;
-            static int scale = 0;
+            static int off_scale = 0;
             if (virtual_device.empty()) {
-                scale = 0;
+                off_scale = 0;
                 scale_checked = 0;
             } else if (scale_checked == 0 || GetTickCount64() - scale_checked > 10000) {
-                scale = solstream::VirtualDisplayScale();
+                off_scale = solstream::VirtualDisplayOffScale();
                 scale_checked = GetTickCount64();
             }
-            status.display_off_scale =
-                scale != 0 && scale != solstream::kDefaultScalePercent ? scale : 0;
+            status.display_off_scale = off_scale;
             // Its size rather than its device name: "\\.\DISPLAY9" says
             // nothing to the person reading the window, and the name stays in
             // the log.

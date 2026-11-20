@@ -83,12 +83,14 @@ The host does not run it when it starts. It starts at every logon and again
 after every crash, and each of these steps can be a display reconfiguration
 that moves every window on the PC. At start it only logs whether the display is
 attached and at what size, rate and scaling, and turns "Use HDR" off if it is
-on. A display that is not attached, or not at 200%, is left so, and the host
-window and the tray then offer **Set up**. With the driver already running,
-**Set up** runs this in the host's own process, without a permission prompt:
-attaching, scaling and HDR need the session rather than administrator rights,
-and the settings file it cannot write is reported as undone. Only if that fails
-does it ask for the rights, as it does to install a missing driver.
+on. A display that is not attached, or not at 200% at a size that can be, is
+left so, and the host window and the tray then offer **Set up** -- but not
+while a Mac is connected, since every step can change the display layout under
+the capture or a full-screen game. With the driver already running, **Set up**
+runs this in the host's own process first: attaching, scaling and HDR need the
+session rather than administrator rights. If the settings file needed writing
+and that was refused, or nothing usable came of it, it then asks for the rights
+and runs it all again elevated, as it does to install a missing driver.
 `SolStream.exe --install-display-driver` runs all of it elevated.
 `SolStream.exe --configure-display`, from an elevated prompt in the interactive
 session, runs just this part for a driver that is already there.
