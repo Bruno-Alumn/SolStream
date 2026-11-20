@@ -68,20 +68,22 @@ driver on a PC that has none, and then `ConfigureVirtualDisplay`
    The original file is kept once, as `vdd_settings.xml.solstream-backup`.
 2. It restarts the device (`pnputil /restart-device`) so the driver re-reads the
    file, when the file changed.
-3. It attaches the display to the desktop at 3600×2338, to the right of every
-   other display, so it never overlaps a real monitor's coordinates. If it is
-   already attached at any ladder mode it is left alone, and if the driver does
+3. It attaches the display to the desktop at 3600×2338 and 60 Hz, to the right
+   of every other display, so it never overlaps a real monitor's coordinates.
+   If it is already attached at any size up to 4096 on both axes it is left
+   alone -- the Mac's `canvas` may have chosen one -- and if the driver does
    not offer 3600×2338 yet, the largest smaller ladder mode it does offer is
    used and the log says so.
 4. It sets the display's DPI scaling to 200%.
 5. It turns "Use HDR" off on the display itself.
 
-The host runs the same function every time it starts, at logon and unelevated.
-What is already right is left alone, because re-applying a mode is a display
-reconfiguration that moves every window on the PC, and the part that writes the
-driver's file under `C:\` needs administrator rights and is reported as undone.
-The host window's **Set up** button, the tray's *Set up virtual display…* and
-`SolStream.exe --install-display-driver` run all of it elevated.
+The host does not run it when it starts. It starts at every logon and again
+after every crash, and each of these steps can be a display reconfiguration
+that moves every window on the PC. At start it only logs whether the display is
+attached and at what size, rate and scaling, and turns "Use HDR" off if it is
+on. A display that is not attached is left so, and the host window then offers
+**Set up**. The host window's **Set up** button, the tray's *Set up virtual
+display…* and `SolStream.exe --install-display-driver` run all of it elevated.
 `SolStream.exe --configure-display`, from an elevated prompt in the interactive
 session, runs just this part for a driver that is already there.
 
@@ -217,8 +219,9 @@ Get-PnpDevice -Class Display | Where-Object FriendlyName -like '*Virtual Display
     Disable-PnpDevice -Confirm:$false
 ```
 
-Detaching it in Settings > System > Display ("Disconnect") only lasts until
-SolStream next starts, which attaches a running virtual display again. A disabled
+Detaching it in Settings > System > Display ("Disconnect") lasts until Set up
+is chosen again: SolStream then captures the primary monitor, and the host
+window offers Set up to attach it. A disabled
 one is left alone: SolStream captures the primary monitor, and the host window
 says the display is off rather than installing another over it.
 

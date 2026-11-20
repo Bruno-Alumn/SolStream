@@ -302,8 +302,11 @@ and sixty seconds (twenty if absent).
 
 `canvas` points a display at the mode that best fits what the Mac asks for — the
 smallest offered mode covering both axes, so a window is never upscaled, falling
-back to the largest if nothing covers it, and the highest refresh rate among
-equals. It only ever *switches* between modes the driver already offers, which is
+back to the largest if nothing covers it, and at that size the lowest refresh
+rate of at least 60 Hz (the highest offered when none reaches 60;
+`display_mode.h`). The request carries no frame rate and comes before the
+stream opens, and the Mac asks for 30 or 60 frames a second, so 60 Hz covers
+both without the display being changed between them. It only ever *switches* between modes the driver already offers, which is
 immediate. Adding a mode is the expensive operation (a device restart), so the
 modes are seeded once, ahead of time, by `display_setup.cpp`: setup runs it, and
 so does `SolStream.exe --configure-display`. The older, manual route to the same

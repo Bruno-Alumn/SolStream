@@ -81,8 +81,9 @@ std::string ManualInstallAdvice();
 /// `owner` is the window waiting on this, for Windows' own prompts to come up
 /// over. True when a virtual display is ready at the end, including when one
 /// already was (`already`), and when Windows wants a restart to finish
-/// (`restart`): the display may not start until then, and SolStream sets it up
-/// when it starts after the restart. `note` collects what was done; `error`
+/// (`restart`): the display may not start until then, and if Windows does not
+/// attach it after the restart, the window offers Set up again. `note`
+/// collects what was done; `error`
 /// says why not, in words a person can act on.
 bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND owner,
                           bool& already, bool& restart, std::string& note,

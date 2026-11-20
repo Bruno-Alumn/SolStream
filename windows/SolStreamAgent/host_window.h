@@ -47,6 +47,10 @@ struct HostStatus {
     /// The Virtual Display Driver is installed and Windows starts it once this
     /// PC restarts: the window says to restart, and offers nothing else.
     bool driver_restart_pending = false;
+    /// SolStream's virtual display is running but not attached to the desktop,
+    /// so the main display is what is captured: the window offers Set up,
+    /// which attaches it. The host no longer attaches it on its own at start.
+    bool display_detached = false;
     /// Streaming cannot start because this Windows is older than the capture
     /// it needs: the banner offers Windows Update.
     bool windows_too_old = false;

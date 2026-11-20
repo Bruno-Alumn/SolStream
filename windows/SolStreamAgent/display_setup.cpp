@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "display_mode.h"
 #include "util.h"
 #include "vdd.h"
 
@@ -506,15 +507,15 @@ int RightOfEverythingElse(const std::wstring& skip) {
     return right;
 }
 
-/// Already attached at a size SolStream streams? Then leave it alone.
+/// Already attached at a size SolStream can stream? Then leave it alone.
 ///
-/// This runs at every logon, and re-applying a mode costs a display
-/// reconfiguration -- every window on the machine gets moved and every
-/// full-screen application blinks. Any ladder size counts, not only the
-/// default: the Mac's `canvas` request switches the display to the Mac's own
-/// size and persists it, and comparing against the default here undid that at
-/// every logon, only for the Mac to put it back on connecting.
-bool AlreadyAttachedAtLadderMode(const std::wstring& gdi_name) {
+/// Re-applying a mode costs a display reconfiguration -- every window on the
+/// machine gets moved and every full-screen application blinks. Any size the
+/// encoder takes counts, not only the ladder's: the Mac's `canvas` request
+/// switches the display to the mode that best fits the Mac and persists it,
+/// and that can be one of the driver's own modes. Comparing against the ladder
+/// here put it back, only for the Mac to change it again on connecting.
+bool AlreadyAttachedAtStreamableSize(const std::wstring& gdi_name) {
     DISPLAY_DEVICEW device{};
     device.cb = sizeof(device);
     bool attached = false;
@@ -534,30 +535,25 @@ bool AlreadyAttachedAtLadderMode(const std::wstring& gdi_name) {
     if (!EnumDisplaySettingsW(gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &mode)) {
         return false;
     }
-    for (const Mode& ladder : kLadder) {
-        if ((int) mode.dmPelsWidth == ladder.width && (int) mode.dmPelsHeight == ladder.height) {
-            return true;
-        }
-    }
-    return false;
+    return KeepsAttachedSize(mode.dmPelsWidth, mode.dmPelsHeight);
 }
 
-/// The highest refresh rate the display offers at this size, or 0 when it
+/// The rate to attach at this size, by ChooseRefresh, or 0 when the display
 /// offers none. The same choice the agent's `canvas` makes, so attaching and
 /// resizing do not disagree about the rate.
-DWORD BestRefreshAt(const std::wstring& gdi_name, int width, int height) {
-    DWORD best = 0;
+DWORD RefreshAt(const std::wstring& gdi_name, int width, int height) {
+    std::vector<unsigned> offered;
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
     for (DWORD i = 0; EnumDisplaySettingsW(gdi_name.c_str(), i, &mode); ++i) {
         if ((int) mode.dmPelsWidth == width && (int) mode.dmPelsHeight == height
-            && mode.dmBitsPerPel == 32 && mode.dmDisplayFrequency > best) {
-            best = mode.dmDisplayFrequency;
+            && mode.dmBitsPerPel == 32) {
+            offered.push_back(mode.dmDisplayFrequency);
         }
         mode = DEVMODEW{};
         mode.dmSize = sizeof(mode);
     }
-    return best;
+    return ChooseRefresh(offered, kDisplayRefreshTarget);
 }
 
 bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& error) {
@@ -570,7 +566,7 @@ bool AttachAt(const std::wstring& gdi_name, int width, int height, std::string& 
     mode.dmPosition.x = RightOfEverythingElse(gdi_name);
     mode.dmPosition.y = 0;
     mode.dmFields = DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
-    if (const DWORD hz = BestRefreshAt(gdi_name, width, height); hz != 0) {
+    if (const DWORD hz = RefreshAt(gdi_name, width, height); hz != 0) {
         mode.dmDisplayFrequency = hz;
         mode.dmFields |= DM_DISPLAYFREQUENCY;
     }
@@ -657,6 +653,25 @@ bool FindPathFor(const std::wstring& gdi_name, DISPLAYCONFIG_PATH_INFO& out) {
     return false;
 }
 
+/// The scaling a path's source is at, as a percentage, or 0 when it cannot be
+/// read or is not one of Windows' steps.
+int ScaleOf(const DISPLAYCONFIG_PATH_INFO& path) {
+    DpiGetRequest get{};
+    get.header.type = kGetDpiScale;
+    get.header.size = sizeof(get);
+    get.header.adapter = path.sourceInfo.adapterId;
+    get.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*) &get)
+        != ERROR_SUCCESS) {
+        return 0;
+    }
+    const int index = -get.min_relative + get.current_relative;
+    if (index < 0 || index >= (int) (sizeof(kScaleSteps) / sizeof(kScaleSteps[0]))) {
+        return 0;
+    }
+    return kScaleSteps[index];
+}
+
 bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& note) {
     int target = -1;
     for (int i = 0; i < (int) (sizeof(kScaleSteps) / sizeof(kScaleSteps[0])); ++i) {
@@ -685,10 +700,9 @@ bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& not
         Add(note, "This display cannot scale to " + std::to_string(percent) + "%.");
         return false;
     }
-    // Already there, which is every start after the first. Setting it anyway is
-    // a display reconfiguration at every logon: Windows re-lays out the desktop
-    // and every window on it gets a WM_DPICHANGED, for a value that did not
-    // change. A background program must not do that to the person at the PC.
+    // Already there, which is every Set up after the first. Setting it anyway
+    // is a display reconfiguration: Windows re-lays out the desktop and every
+    // window on it gets a WM_DPICHANGED, for a value that did not change.
     if (recommended + get.current_relative == target) {
         return true;
     }
@@ -779,11 +793,12 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     } else {
         std::string patch_error;
         cycle = PatchVddSettings(settings, width, height, note, patch_error);
-        // Not fatal. This same function runs unprivileged at every logon, where
-        // writing under C:\ is refused and there is usually nothing to write
-        // anyway, and everything below — attaching, scaling, HDR — needs the
-        // session rather than the rights. Failing here would throw away the part
-        // that works to report the part that was not needed.
+        // Not fatal. Run without administrator rights (--configure-display from
+        // a plain prompt), writing under C:\ is refused and there is usually
+        // nothing to write anyway, and everything below — attaching, scaling,
+        // HDR — needs the session rather than the rights. Failing here would
+        // throw away the part that works to report the part that was not
+        // needed.
         if (!cycle && !patch_error.empty()) {
             Add(note, patch_error);
         }
@@ -830,7 +845,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     Adapter adapter;
     // The retry is only for the case where the device was just restarted. With
     // no cycle the answer is already known, and ten seconds of sleeping to
-    // rediscover that would be ten seconds on every logon.
+    // rediscover that would be ten seconds added to every Set up.
     const int tries = cycle ? 10 : 1;
     for (int attempt = 0; attempt < tries; ++attempt) {
         // Ours, not merely any: another product's display is listed straight
@@ -844,8 +859,8 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
         }
     }
     if (adapter.gdi_name.empty()) {
-        error = "Windows hasn't started the virtual display yet. Restart this PC; SolStream "
-                "finishes setting it up when it starts.";
+        error = "Windows hasn't started the virtual display yet. Restart this PC, then "
+                "choose Set up in SolStream if it still streams your main display.";
         return false;
     }
     // Another product's virtual display -- Parsec's, Sunshine's, spacedesk's --
@@ -871,8 +886,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 
     // Only wait if the device was just cycled — it comes back before its mode
     // list does. Without the cycle the answer is already final, and waiting
-    // fifteen seconds for it would be fifteen seconds added to every logon,
-    // since this same function runs at startup to keep the display correct.
+    // fifteen seconds for it would be fifteen seconds added to every Set up.
     bool offered = OffersMode(adapter.gdi_name, width, height);
     for (int attempt = 0; cycle && !offered && attempt < 15; ++attempt) {
         Sleep(1000);
@@ -912,7 +926,7 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     }
 
     // 4. Attach it.
-    if (!AlreadyAttachedAtLadderMode(adapter.gdi_name)) {
+    if (!AlreadyAttachedAtStreamableSize(adapter.gdi_name)) {
         if (!AttachAt(adapter.gdi_name, width, height, error)) {
             return false;
         }
@@ -946,6 +960,62 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                       : hdr_error);
     }
     return true;
+}
+
+void CheckVirtualDisplay(std::string& note) {
+    Adapter adapter;
+    if (!FindVirtualAdapter(adapter) || !adapter.ours) {
+        Add(note, "SolStream's virtual display is not running, so the main display is "
+                  "captured.");
+        return;
+    }
+    if (!adapter.attached) {
+        // Left so. Attaching it here is a display reconfiguration at every
+        // start of the host, and somebody may have turned it off in Windows'
+        // display settings on purpose.
+        Add(note, "The virtual display " + ToUtf8(adapter.gdi_name)
+                  + " is not attached, so the main display is captured. Choose Set "
+                    "up in SolStream's window or tray menu to attach it.");
+        return;
+    }
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    std::string line = "The virtual display " + ToUtf8(adapter.gdi_name) + " is attached";
+    if (EnumDisplaySettingsW(adapter.gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &mode)) {
+        line += " at " + std::to_string(mode.dmPelsWidth) + "x"
+              + std::to_string(mode.dmPelsHeight) + " @ "
+              + std::to_string(mode.dmDisplayFrequency) + "Hz";
+    }
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (!FindPathFor(adapter.gdi_name, path)) {
+        Add(note, line + "; its scaling and HDR could not be read.");
+        return;
+    }
+    const int scale = ScaleOf(path);
+    if (scale != 0) {
+        line += ", " + std::to_string(scale) + "% scaling";
+    }
+    Add(note, line + ".");
+    if (scale != 0 && scale != kDefaultScalePercent) {
+        // Said, not changed: a scaling change re-lays out the whole desktop,
+        // and Set up is where SolStream makes that kind of change.
+        Add(note, "SolStream sets it up at " + std::to_string(kDefaultScalePercent)
+                  + "% to match a Retina Mac; SolStream.exe --configure-display does "
+                    "that.");
+    }
+
+    // The one thing changed here. "Use HDR" is a per-display toggle any user
+    // can set, it changes how the display composes and not its size or place,
+    // and left on it is what made streamed content arrive as a black
+    // rectangle inside correctly drawn window chrome.
+    AdvancedColorInfo colour{};
+    if (GetAdvancedColour(path, colour) && (colour.flags & 0x2) != 0) {
+        std::string hdr_error;
+        Add(note, TurnHdrOff(path, colour, hdr_error)
+                      ? "Turned HDR off on the virtual display, so colours arrive "
+                        "on your Mac the way Windows drew them."
+                      : hdr_error);
+    }
 }
 
 }  // namespace solstream

@@ -642,8 +642,9 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
     }
     if (state == DriverState::RestartPending) {
         // Installed already, by an earlier Set up or by hand, and Windows
-        // starts it at the restart. Nothing here can hurry that, and the host
-        // sets the display up when it starts after the restart.
+        // starts it at the restart. Nothing here can hurry that. Windows
+        // attaches a new display when it starts it; if it does not, the window
+        // offers Set up again after the restart.
         restart = true;
         note += "Windows hasn't finished installing the Virtual Display Driver yet. Restart "
                 "this PC to finish setting up the virtual display.";
@@ -896,16 +897,17 @@ bool InstallDisplayDriver(const std::function<void(DriverStep)>& progress, HWND 
             // Windows finishes the install at the restart, and until then the
             // device may not start at all, so there is no display yet to set
             // up. That is not a failure: the modes went into the settings file
-            // just now, which needs no display, and the host does the rest
-            // when it starts after the restart. Reported as one, the install was
+            // just now, which needs no display, and Windows attaches the display
+            // when it starts it after the restart -- or, if not, the window
+            // offers Set up again, which finishes. Reported as one, the install was
             // called failed, and a Set up offered that would only find the
             // device not started and call it somebody's switched-off driver.
             note += configured;
             if (!configured.empty()) {
                 note += "\n";
             }
-            note += "SolStream finishes setting the virtual display up when it starts after "
-                    "the restart.";
+            note += "After the restart, choose Set up in SolStream if it still streams your "
+                    "main display.";
             return true;
         }
         error = configure_error;

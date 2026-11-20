@@ -70,6 +70,7 @@
 #include "startup_trouble.h"
 #include "capture_display.h"
 #include "clipboard.h"
+#include "display_mode.h"
 #include "display_setup.h"
 #include "driver_install.h"
 #include "foreground.h"
@@ -505,13 +506,15 @@ void RechooseCaptureDisplayIfStale(const std::vector<Display>& displays) {
 /// needs a device restart — so the modes are seeded once at setup instead.
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
+/// Then, at that size, the rate ChooseRefresh picks (display_mode.h).
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
                     int& out_w, int& out_h, int& out_hz) {
-    DEVMODEW best{};
-    DEVMODEW largest{};
-    bool have_best = false;
-    bool have_largest = false;
-
+    // The size first, and the rate apart from it. Ranking on area alone left
+    // the winner as whichever rate the driver happened to enumerate first, and
+    // the virtual display offers every resolution at several rates, so that
+    // was a coin toss between 30 Hz and 120 Hz.
+    DWORD best_w = 0, best_h = 0;
+    DWORD largest_w = 0, largest_h = 0;
     for (DWORD i = 0;; ++i) {
         DEVMODEW mode{};
         mode.dmSize = sizeof(mode);
@@ -525,42 +528,56 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
         // ConfigureVirtualDisplay keeps -- and the driver offers bigger. The
         // request is checked against 8192, and the "largest" fallback below
         // would otherwise pick a size that never streams a frame.
-        if (mode.dmPelsWidth > 4096 || mode.dmPelsHeight > 4096) {
+        if (mode.dmPelsWidth > solstream::kLargestCanvas
+            || mode.dmPelsHeight > solstream::kLargestCanvas) {
             continue;
         }
         const long long area = (long long) mode.dmPelsWidth * mode.dmPelsHeight;
-        const long long largest_area =
-            (long long) largest.dmPelsWidth * largest.dmPelsHeight;
-        if (!have_largest || area > largest_area
-            || (area == largest_area
-                && mode.dmDisplayFrequency > largest.dmDisplayFrequency)) {
-            largest = mode;
-            have_largest = true;
+        if (area > (long long) largest_w * largest_h) {
+            largest_w = mode.dmPelsWidth;
+            largest_h = mode.dmPelsHeight;
         }
         if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
             continue;
         }
-        // Smallest area that still covers the request — and, among equals, the
-        // highest refresh rate. Ranking on area alone left the winner as
-        // whichever mode the driver happened to enumerate first, and the virtual
-        // display offers every resolution at every rate, so that was a coin toss
-        // between 30 Hz and 120 Hz. The choice is then written with
-        // CDS_UPDATEREGISTRY, so a bad flip persists; and since the early-out
-        // below used to compare only width and height, nothing ever corrected
-        // it. A display pinned at 30 Hz is indistinguishable, from the Mac, from
-        // a network problem.
-        const long long best_area = (long long) best.dmPelsWidth * best.dmPelsHeight;
-        if (!have_best || area < best_area
-            || (area == best_area && mode.dmDisplayFrequency > best.dmDisplayFrequency)) {
-            best = mode;
-            have_best = true;
+        if (best_w == 0 || area < (long long) best_w * best_h) {
+            best_w = mode.dmPelsWidth;
+            best_h = mode.dmPelsHeight;
         }
     }
-    if (!have_best) {
-        if (!have_largest) {
+    if (best_w == 0) {
+        if (largest_w == 0) {
             return false;
         }
-        best = largest;
+        best_w = largest_w;
+        best_h = largest_h;
+    }
+
+    // As few frames a second as the stream needs, rather than as many as the
+    // display offers: on the virtual display that can be 120 Hz or more, and
+    // Windows then composes it that often for a stream that takes 60. The
+    // choice is written with CDS_UPDATEREGISTRY, so it persists. Not under the
+    // stream's rate either: a display pinned at 30 Hz is indistinguishable,
+    // from the Mac, from a network problem.
+    std::vector<unsigned> offered;
+    DEVMODEW best{};
+    for (DWORD i = 0;; ++i) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsW(device.c_str(), i, &mode)) {
+            break;
+        }
+        if (mode.dmBitsPerPel == 32 && mode.dmPelsWidth == best_w
+            && mode.dmPelsHeight == best_h) {
+            offered.push_back(mode.dmDisplayFrequency);
+            if (offered.size() == 1) {
+                best = mode;
+            }
+        }
+    }
+    const unsigned best_hz = solstream::ChooseRefresh(offered, solstream::kDisplayRefreshTarget);
+    if (best_hz != 0) {
+        best.dmDisplayFrequency = best_hz;
     }
 
     DEVMODEW current{};
@@ -568,17 +585,19 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     if (EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &current)
         && current.dmPelsWidth == best.dmPelsWidth
         && current.dmPelsHeight == best.dmPelsHeight
-        // Refresh rate counts as "already there" too, or a display left pinned
-        // at the wrong rate by an earlier run would never be corrected: the
-        // resolution matches, so nothing would ever be applied again.
-        && current.dmDisplayFrequency >= best.dmDisplayFrequency) {
+        // The rate counts as "already there" too, and only the rate chosen: a
+        // display left at another by an earlier run -- 30 Hz, or the 120 Hz this
+        // used to choose -- is otherwise never corrected, since the resolution
+        // matches and nothing would ever be applied again.
+        && (best_hz == 0 || current.dmDisplayFrequency == best_hz)) {
         out_w = (int) current.dmPelsWidth;
         out_h = (int) current.dmPelsHeight;
         out_hz = (int) current.dmDisplayFrequency;
         return true;  // already there; do not make the screen flash for nothing
     }
 
-    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
+                  | (best_hz != 0 ? DM_DISPLAYFREQUENCY : 0);
     const LONG rc = ChangeDisplaySettingsExW(device.c_str(), &best, nullptr,
                                              CDS_UPDATEREGISTRY, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
@@ -7987,27 +8006,21 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Make the virtual display fit to stream, before deciding what to capture —
-    // this is what attaches it, so doing it afterwards would pick from a list it
-    // was not on yet.
+    // Say how the virtual display is, and change nothing about it but HDR.
     //
-    // The privileged half of this (teaching the driver its mode list) needs
-    // rights the agent does not have and will simply be noted as undone; the
-    // half that matters most does not. Turning "Use HDR" off is a per-display
+    // This used to set the display up -- attach it, move it, size it, scale
+    // it -- at every start, which is every logon and every restart after a
+    // crash. Each of those can be a display reconfiguration of the whole
+    // desktop, and it fought the size the Mac's `canvas` had chosen. Set up
+    // does all that, once. Turning "Use HDR" off stays: it is a per-display
     // toggle any user can set, and leaving it on is what made streamed content
     // arrive as a black rectangle inside correctly drawn window chrome — worst
     // in terminals and browsers, invisible in anything pure black-on-white.
     if (solstream::HasVirtualDisplay()) {
         std::string note;
-        std::string display_error;
-        const bool ready = solstream::ConfigureVirtualDisplay(
-            solstream::kDefaultCanvasWidth, solstream::kDefaultCanvasHeight,
-            solstream::kDefaultScalePercent, note, display_error);
+        solstream::CheckVirtualDisplay(note);
         for (const std::string& line : SplitLines(note)) {
             Log("[display] %s", line.c_str());
-        }
-        if (!ready) {
-            Log("[display] %s", display_error.c_str());
         }
     }
 
@@ -8274,6 +8287,10 @@ int wmain(int argc, wchar_t** argv) {
             status.driver_off = off;
             status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
+            // Running and not attached, which the host leaves for Set up.
+            const std::wstring virtual_device =
+                status.virtual_display ? solstream::VirtualDisplayDevice() : std::wstring();
+            status.display_detached = status.virtual_display && virtual_device.empty();
             // Its size rather than its device name: "\\.\DISPLAY9" says
             // nothing to the person reading the window, and the name stays in
             // the log.
@@ -8281,7 +8298,8 @@ int wmain(int argc, wchar_t** argv) {
             // falling back to the main one for a moment, it would have shown
             // the main monitor's size under the virtual display's name.
             status.display_detail = !status.virtual_display ? L"not installed"
-                : CaptureDisplay() == solstream::VirtualDisplayDevice()
+                : status.display_detached ? L"not attached"
+                : CaptureDisplay() == virtual_device
                 ? VirtualDisplaySummary(CaptureDisplay())
                 : L"ready";
 

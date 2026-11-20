@@ -42,6 +42,7 @@
 #include "agent_crypto.h"
 #include "capture_display.h"
 #include "clipboard.h"
+#include "display_mode.h"
 #include "transfer.h"
 #include "app_ids.h"
 #include "wake.h"
@@ -4848,6 +4849,48 @@ void TestResampler() {
     CHECK(!positive);
 }
 
+void TestDisplayMode() {
+    using namespace solstream;
+    const unsigned target = kDisplayRefreshTarget;
+    CHECK(target == 60);
+    // The lowest rate that keeps up with the stream, not the highest offered.
+    CHECK(ChooseRefresh({30, 60, 120, 144}, target) == 60);
+    CHECK(ChooseRefresh({144, 120, 60, 30}, target) == 60);
+    CHECK(ChooseRefresh({60}, target) == 60);
+    // Nothing at 60: the next one up, never one below.
+    CHECK(ChooseRefresh({59, 75, 120}, target) == 75);
+    CHECK(ChooseRefresh({30, 50, 90}, target) == 90);
+    // Nothing that keeps up: the fastest there is.
+    CHECK(ChooseRefresh({24, 30, 50}, target) == 50);
+    CHECK(ChooseRefresh({30}, target) == 30);
+    // Duplicates, one per bit depth or scaling the driver lists.
+    CHECK(ChooseRefresh({120, 60, 120, 60}, target) == 60);
+    // None, and Windows' "hardware default" placeholders, which say nothing.
+    CHECK(ChooseRefresh({}, target) == 0);
+    CHECK(ChooseRefresh({0, 1}, target) == 0);
+    CHECK(ChooseRefresh({1, 120}, target) == 120);
+    // A stream that asked for more than 60.
+    CHECK(ChooseRefresh({60, 120, 144}, 120) == 120);
+    CHECK(ChooseRefresh({60, 144}, 120) == 144);
+
+    CHECK(BetterRefresh(60, 120, target));
+    CHECK(!BetterRefresh(120, 60, target));
+    CHECK(BetterRefresh(60, 30, target));
+    CHECK(BetterRefresh(50, 30, target));
+    CHECK(!BetterRefresh(60, 60, target));
+
+    // Setup keeps any attached size the encoder takes, the Mac's own included,
+    // and not one past 4096 or an empty one.
+    CHECK(KeepsAttachedSize(3600, 2338));
+    CHECK(KeepsAttachedSize(3024, 1964));
+    CHECK(KeepsAttachedSize(1920, 1080));
+    CHECK(KeepsAttachedSize(4096, 4096));
+    CHECK(!KeepsAttachedSize(4097, 2160));
+    CHECK(!KeepsAttachedSize(3840, 4097));
+    CHECK(!KeepsAttachedSize(7680, 4320));
+    CHECK(!KeepsAttachedSize(0, 0));
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -5029,6 +5072,7 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferNames();
     TestTransferEncoding();
     TestWake();
+    TestDisplayMode();
     TestFullScreen();
     TestResampler();
     TestAudioTree();

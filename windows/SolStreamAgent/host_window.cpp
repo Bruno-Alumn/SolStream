@@ -1030,10 +1030,12 @@ Screen Describe(const HostStatus& status) {
     // and not while a Mac is streaming, because the installer restarts this
     // host and that would end the stream under whoever is using it.
     //
-    // Except while a Mac is connected without the virtual display: Install
-    // can't be pressed then anyway, and that is exactly when the advisory is
-    // true -- everything on the main display is going to the Mac.
-    if (g_update_found && !(screen.connected && !status.virtual_display)) {
+    // Except while a Mac is connected without the virtual display, or with it
+    // not attached: Install can't be pressed then anyway, and that is exactly
+    // when the advisory is true -- everything on the main display is going to
+    // the Mac.
+    if (g_update_found
+        && !(screen.connected && (!status.virtual_display || status.display_detached))) {
         screen.what = (g_update_downloaded ? L"Update ready to install: " : L"Update available: ")
                     + ToWide(g_update.version);
         screen.mark = Mark::NeedsYou;
@@ -1062,11 +1064,25 @@ Screen Describe(const HostStatus& status) {
         // restart is the one thing left, and Device Manager has nothing to
         // turn on.
         screen.what = L"Restart this PC to finish setting up the virtual display.";
-        screen.why = L"Windows finishes installing it when this PC restarts, and SolStream "
-                     L"sets it up for your Mac after that. Until then it streams your main "
-                     L"display.";
+        screen.why = L"Windows finishes installing it when this PC restarts. Until then "
+                     L"SolStream streams your main display.";
         screen.mark = Mark::NeedsYou;
         return screen;
+    }
+
+    // Running, and not attached: Windows has it, but not on the desktop, so
+    // there is nothing on it to capture. The host leaves it so when it starts
+    // -- attaching it is a reconfiguration of the whole desktop -- and Set up
+    // is what attaches it.
+    if (status.virtual_display && status.display_detached) {
+        screen.what = L"Streaming your main display.";
+        screen.why = L"SolStream's virtual display is installed, but Windows isn't using it. "
+                     L"Set up attaches it, so the picture fits your Mac and nothing dragged "
+                     L"over the application goes with it.";
+        screen.mark = Mark::NeedsYou;
+        screen.fix = L"Set up";
+        screen.shield = true;
+        screen.action = BannerAction::InstallDriver;
     }
 
     // Missing driver is an advisory, not a failure. SolStream captures the main
@@ -1465,8 +1481,8 @@ float DrawSetupSummary(float pad, float top, float right) {
         display.mark = restart ? Mark::NeedsYou : Mark::Live;
         display.title = restart ? L"Restart this PC to finish" : L"Virtual display ready";
         display.detail = restart
-            ? L"Windows finishes installing the virtual display when this PC restarts, "
-              L"and SolStream sets it up for your Mac after that."
+            ? L"Windows finishes installing the virtual display when this PC restarts. "
+              L"If SolStream still streams your main display after that, choose Set up."
             : L"Your Mac gets a screen of its own on this PC, so nothing on your monitor "
               L"is streamed.";
     } else if (result.rfind("failed", 0) == 0) {
@@ -1497,8 +1513,9 @@ float DrawSetupSummary(float pad, float top, float right) {
                                   L"says why.";
                 break;
             case DriverState::Ready:
-                // It runs, and the host sets it up again each time it starts.
-                display.detail += L" SolStream tries again each time it starts.";
+                // It runs, and the window offers Set up again while it is not
+                // attached. The host no longer sets it up when it starts.
+                display.detail += L" Choose Set up to try again.";
                 break;
         }
     } else if (g_driver_state == DriverState::Ready) {
@@ -1968,7 +1985,9 @@ void LayoutAndPaint(HWND window) {
     // display: not installed" reads as a broken component; "Display: your main
     // display" reads as a choice, which is what it is — and its dot is the
     // accent that means "works, but there is something to do", not coral.
-    rows.push_back(status.virtual_display
+    rows.push_back(status.virtual_display && status.display_detached
+        ? Row{L"Virtual display", L"not attached", Mark::NeedsYou}
+        : status.virtual_display
         ? Row{L"Virtual display",
               status.display_detail.empty() ? L"—" : status.display_detail,
               Mark::Live}
@@ -2553,8 +2572,9 @@ void StartDisplayJob(HWND window) {
         // time the answer's headline is chosen from it.
         PostOwned(window, WM_SOLSTREAM_JOB_DISPLAY, 0, new std::string(display));
         PostDone(window, ok,
-                 ok ? (restart ? L"Windows finishes installing it when this PC restarts, "
-                                 L"and SolStream sets it up for your Mac after that."
+                 ok ? (restart ? L"Windows finishes installing it when this PC restarts. "
+                                 L"If SolStream still streams your main display after "
+                                 L"that, choose Set up."
                                : L"Your Mac gets a screen of its own from the next time it "
                                  L"connects.")
                     : ToWide(display.substr(7)) + L" Then choose Set up again.");
@@ -3239,8 +3259,9 @@ void ShowTrayMenu(HWND window) {
         std::lock_guard<std::mutex> lock(g_mutex);
         state.connected = g_status.connected_clients > 0;
         state.no_token = g_status.pairing_token.empty();
-        state.offer_display = !g_status.virtual_display && !g_status.driver_off
-                           && !g_status.driver_failing && !g_status.driver_restart_pending;
+        state.offer_display = (!g_status.virtual_display && !g_status.driver_off
+                               && !g_status.driver_failing && !g_status.driver_restart_pending)
+                           || (g_status.virtual_display && g_status.display_detached);
     }
     state.busy = g_job_running || g_update_checking || g_update_installing;
     state.job_running = g_job_running;
@@ -4061,6 +4082,7 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off
         && a.driver_failing == b.driver_failing
         && a.driver_restart_pending == b.driver_restart_pending
+        && a.display_detached == b.display_detached
         && a.windows_too_old == b.windows_too_old;
 }
 

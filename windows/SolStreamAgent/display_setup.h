@@ -49,8 +49,18 @@ constexpr int kDefaultScalePercent = 200;
 /// Returns false only when there is no usable virtual display at the end of it.
 /// The parts that are improvements rather than requirements — scaling, the HDR
 /// toggle — report into `note` instead of failing the whole thing.
+///
+/// Run by Set up and the command-line setups only, never at the host's start:
+/// each step it takes can be a display reconfiguration, and the host starts at
+/// every logon and again after every crash.
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                              std::string& note, std::string& error);
+
+/// What the host does with the virtual display when it starts: says, into
+/// `note`, whether SolStream's is attached and at what size, rate and scaling,
+/// and turns "Use HDR" off on it if it is on. Nothing else -- it does not
+/// attach, resize, move or rescale it, or touch the driver's settings.
+void CheckVirtualDisplay(std::string& note);
 
 /// The folder the Virtual Display Driver reads vdd_settings.xml from: VDDPATH
 /// under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when set, otherwise
