@@ -654,7 +654,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         return event.isARepeat
     }
 
-    /// The red button (or Close in the File menu). Back and Escape go back to
+    /// The red button (or Close in the Window menu, ⌘W). Back and Escape go back to
     /// the PC list; closing the window is leaving, so the owner may quit.
     /// `close()` only orders the window out, so it never lands here.
     func windowWillClose(_ notification: Notification) {
