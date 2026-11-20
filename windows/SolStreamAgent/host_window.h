@@ -51,6 +51,12 @@ struct HostStatus {
     /// so the main display is what is captured: the window offers Set up,
     /// which attaches it. The host no longer attaches it on its own at start.
     bool display_detached = false;
+    /// The scaling SolStream's attached virtual display is at, when it is not
+    /// the kDefaultScalePercent setup sets, or 0 when it is or cannot be read:
+    /// the window offers Set up, which sets it. Nothing else does -- Windows
+    /// attaches a new display at its own recommended scaling, and the host no
+    /// longer sets it up at start.
+    int display_off_scale = 0;
     /// Streaming cannot start because this Windows is older than the capture
     /// it needs: the banner offers Windows Update.
     bool windows_too_old = false;

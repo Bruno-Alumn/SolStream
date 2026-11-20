@@ -1,5 +1,5 @@
-// display_mode.h — the virtual display's refresh rate, and which sizes setup
-// leaves alone.
+// display_mode.h — the virtual display's refresh rate, which sizes setup
+// leaves alone, and which scaling a size allows.
 //
 // Both used to ask for as much as they could get. The rate was the highest the
 // display offered at a size, which on this driver can be 120 Hz or more:
@@ -63,6 +63,17 @@ inline unsigned ChooseRefresh(const std::vector<unsigned>& offered, unsigned tar
 /// putting it back meant the two took turns reconfiguring the display.
 inline bool KeepsAttachedSize(unsigned width, unsigned height) {
     return width > 0 && height > 0 && width <= kLargestCanvas && height <= kLargestCanvas;
+}
+
+/// Whether Windows lets a display be scaled to the step at `target` in its
+/// list of scaling steps, given the range it reports for that display: its
+/// recommended step is at `-min_relative`, and it goes no further than
+/// `max_relative` steps above that. The range follows the display's size, so a
+/// size setup kept can be one too small for the scaling it wants -- Windows
+/// stops a 1080p display at about 175% -- and setup then attaches it at its own
+/// size instead.
+inline bool ReachesScaleStep(int target, int min_relative, int max_relative) {
+    return target >= 0 && target <= -min_relative + max_relative;
 }
 
 }  // namespace solstream

@@ -672,13 +672,38 @@ int ScaleOf(const DISPLAYCONFIG_PATH_INFO& path) {
     return kScaleSteps[index];
 }
 
-bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& note) {
-    int target = -1;
+/// Where `percent` is in Windows' scaling steps, or -1 when it is not one.
+int ScaleStep(int percent) {
     for (int i = 0; i < (int) (sizeof(kScaleSteps) / sizeof(kScaleSteps[0])); ++i) {
         if (kScaleSteps[i] == percent) {
-            target = i;
+            return i;
         }
     }
+    return -1;
+}
+
+/// Whether Windows says no to `percent` on this path's display at its present
+/// size. False when that cannot be read or `percent` is not a step: neither is
+/// the size's fault, and attaching the display at another would not help.
+bool ScaleOutOfReach(const DISPLAYCONFIG_PATH_INFO& path, int percent) {
+    const int target = ScaleStep(percent);
+    if (target < 0) {
+        return false;
+    }
+    DpiGetRequest get{};
+    get.header.type = kGetDpiScale;
+    get.header.size = sizeof(get);
+    get.header.adapter = path.sourceInfo.adapterId;
+    get.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*) &get)
+        != ERROR_SUCCESS) {
+        return false;
+    }
+    return !ReachesScaleStep(target, get.min_relative, get.max_relative);
+}
+
+bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& note) {
+    const int target = ScaleStep(percent);
     if (target < 0) {
         Add(note, "Left the display's scaling alone: "
                   + std::to_string(percent) + "% is not one of Windows' steps.");
@@ -696,7 +721,7 @@ bool SetScale(const DISPLAYCONFIG_PATH_INFO& path, int percent, std::string& not
         return false;
     }
     const int recommended = -get.min_relative;
-    if (target > recommended + get.max_relative) {
+    if (!ReachesScaleStep(target, get.min_relative, get.max_relative)) {
         Add(note, "This display cannot scale to " + std::to_string(percent) + "%.");
         return false;
     }
@@ -926,18 +951,23 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
     }
 
     // 4. Attach it.
-    if (!AlreadyAttachedAtStreamableSize(adapter.gdi_name)) {
+    const auto attach = [&]() {
         if (!AttachAt(adapter.gdi_name, width, height, error)) {
             return false;
         }
         Sleep(2000);
-        // Said only when it happened: with the display already at a size of the
-        // ladder, the size fallen back to was never put on it.
+        // Said only when it happened: with the display already at a size it
+        // keeps, the size fallen back to was never put on it.
         if (!fallback.empty()) {
             Add(note, fallback);
         }
         Add(note, "Attached the virtual display at " + std::to_string(width) + "x"
                   + std::to_string(height) + ".");
+        return true;
+    };
+    const bool kept = AlreadyAttachedAtStreamableSize(adapter.gdi_name);
+    if (!kept && !attach()) {
+        return false;
     }
 
     // 5. Scaling and HDR. Both are session-bound rather than privileged, and
@@ -948,6 +978,31 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
         Add(note, "Could not read the display's configuration, so its scaling and "
                   "HDR were left alone.");
         return true;
+    }
+    // A size kept in step 4 can be one Windows will not scale that far: the
+    // driver's own stock mode, which Windows attaches a new display at, may be
+    // 1080p, and Windows stops a display that size at about 175%. Nothing after
+    // setup puts that right -- `canvas` changes the size and rate, never the
+    // scaling -- so the Mac would get its canvas with tiny text. Attached at
+    // the size asked for instead, once, and only when that is another size.
+    if (kept && ScaleOutOfReach(path, scale_percent)) {
+        DEVMODEW current{};
+        current.dmSize = sizeof(current);
+        const bool same_size =
+            EnumDisplaySettingsW(adapter.gdi_name.c_str(), ENUM_CURRENT_SETTINGS, &current)
+            && (int) current.dmPelsWidth == width && (int) current.dmPelsHeight == height;
+        if (!same_size) {
+            if (!attach() && !error.empty()) {
+                // Still attached at the size it had, so still streams.
+                Add(note, error);
+                error.clear();
+            }
+            if (!FindPathFor(adapter.gdi_name, path)) {
+                Add(note, "Could not read the display's configuration, so its scaling "
+                          "and HDR were left alone.");
+                return true;
+            }
+        }
     }
     SetScale(path, scale_percent, note);
 
@@ -960,6 +1015,15 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                       : hdr_error);
     }
     return true;
+}
+
+int VirtualDisplayScale() {
+    const std::wstring device = VirtualDisplayDevice();
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (device.empty() || !FindPathFor(device, path)) {
+        return 0;
+    }
+    return ScaleOf(path);
 }
 
 void CheckVirtualDisplay(std::string& note) {
@@ -1000,8 +1064,8 @@ void CheckVirtualDisplay(std::string& note) {
         // Said, not changed: a scaling change re-lays out the whole desktop,
         // and Set up is where SolStream makes that kind of change.
         Add(note, "SolStream sets it up at " + std::to_string(kDefaultScalePercent)
-                  + "% to match a Retina Mac; SolStream.exe --configure-display does "
-                    "that.");
+                  + "% to match a Retina Mac; Set up in SolStream's window or tray "
+                    "menu does that.");
     }
 
     // The one thing changed here. "Use HDR" is a per-display toggle any user

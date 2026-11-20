@@ -62,6 +62,11 @@ bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
 /// attach, resize, move or rescale it, or touch the driver's settings.
 void CheckVirtualDisplay(std::string& note);
 
+/// The scaling SolStream's attached virtual display is at, as a percentage, or
+/// 0 when it is not attached or its scaling cannot be read. Read only: the
+/// window offers Set up when it is not kDefaultScalePercent.
+int VirtualDisplayScale();
+
 /// The folder the Virtual Display Driver reads vdd_settings.xml from: VDDPATH
 /// under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when set, otherwise
 /// C:\VirtualDisplayDriver -- both read out of MttVDD.dll itself. One answer

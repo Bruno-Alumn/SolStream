@@ -74,16 +74,22 @@ driver on a PC that has none, and then `ConfigureVirtualDisplay`
    alone -- the Mac's `canvas` may have chosen one -- and if the driver does
    not offer 3600×2338 yet, the largest smaller ladder mode it does offer is
    used and the log says so.
-4. It sets the display's DPI scaling to 200%.
+4. It sets the display's DPI scaling to 200%. If Windows will not scale a size
+   step 3 kept that far (a 1080p display stops at about 175%), it attaches the
+   display at 3600×2338 first, once.
 5. It turns "Use HDR" off on the display itself.
 
 The host does not run it when it starts. It starts at every logon and again
 after every crash, and each of these steps can be a display reconfiguration
 that moves every window on the PC. At start it only logs whether the display is
 attached and at what size, rate and scaling, and turns "Use HDR" off if it is
-on. A display that is not attached is left so, and the host window then offers
-**Set up**. The host window's **Set up** button, the tray's *Set up virtual
-display…* and `SolStream.exe --install-display-driver` run all of it elevated.
+on. A display that is not attached, or not at 200%, is left so, and the host
+window and the tray then offer **Set up**. With the driver already running,
+**Set up** runs this in the host's own process, without a permission prompt:
+attaching, scaling and HDR need the session rather than administrator rights,
+and the settings file it cannot write is reported as undone. Only if that fails
+does it ask for the rights, as it does to install a missing driver.
+`SolStream.exe --install-display-driver` runs all of it elevated.
 `SolStream.exe --configure-display`, from an elevated prompt in the interactive
 session, runs just this part for a driver that is already there.
 

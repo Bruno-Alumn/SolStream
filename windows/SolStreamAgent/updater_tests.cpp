@@ -4889,6 +4889,18 @@ void TestDisplayMode() {
     CHECK(!KeepsAttachedSize(3840, 4097));
     CHECK(!KeepsAttachedSize(7680, 4320));
     CHECK(!KeepsAttachedSize(0, 0));
+
+    // Windows' scaling range for a display. Steps: 100, 125, 150, 175, 200, ...
+    // so 200% is step 4. A 1080p display recommends 125% (step 1, min -1) and
+    // goes three steps above it, to 200%; a 3600x2338 one recommends 250%
+    // (step 6, min -6) and goes well past 200%.
+    CHECK(ReachesScaleStep(4, -1, 3));
+    CHECK(!ReachesScaleStep(4, -1, 2));  // stops at 175%: setup re-attaches
+    CHECK(ReachesScaleStep(4, -6, 4));
+    CHECK(ReachesScaleStep(0, -6, 4));   // down to 100% is always there
+    CHECK(ReachesScaleStep(1, -1, 0));   // the recommended step itself
+    CHECK(!ReachesScaleStep(2, -1, 0));
+    CHECK(!ReachesScaleStep(-1, -6, 4));  // not one of Windows' steps
 }
 
 void TestFullScreen() {

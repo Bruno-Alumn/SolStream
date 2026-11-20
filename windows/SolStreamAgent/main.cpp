@@ -8291,6 +8291,20 @@ int wmain(int argc, wchar_t** argv) {
             const std::wstring virtual_device =
                 status.virtual_display ? solstream::VirtualDisplayDevice() : std::wstring();
             status.display_detached = status.virtual_display && virtual_device.empty();
+            // Its scaling, at most every ten seconds like the driver's state:
+            // it changes only when somebody changes it, and reading it is a
+            // walk of the display configuration.
+            static ULONGLONG scale_checked = 0;
+            static int scale = 0;
+            if (virtual_device.empty()) {
+                scale = 0;
+                scale_checked = 0;
+            } else if (scale_checked == 0 || GetTickCount64() - scale_checked > 10000) {
+                scale = solstream::VirtualDisplayScale();
+                scale_checked = GetTickCount64();
+            }
+            status.display_off_scale =
+                scale != 0 && scale != solstream::kDefaultScalePercent ? scale : 0;
             // Its size rather than its device name: "\\.\DISPLAY9" says
             // nothing to the person reading the window, and the name stays in
             // the log.
