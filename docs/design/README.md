@@ -15,5 +15,6 @@ the decision is.
 | [Handing an update to the elevated installer](update-handover.md) | A live check of an update on the PC from a build with the fix to one after it |
 | [How a launcher finds the PC](launcher-routes.md) | Which of three ways a Dock launcher should reach a PC away from home, and wake it |
 | [Mouse acceleration in games](mouse-acceleration.md) | Whether SolStream may change the PC's pointer speed and "Enhance pointer precision" during a game |
+| [Updating Windows without the permission prompt](silent-windows-update.md) | Whether SolStream may run anything as SYSTEM, or should install per user instead |
 
 A note leaves this list when it is built, and the code says what it does.
