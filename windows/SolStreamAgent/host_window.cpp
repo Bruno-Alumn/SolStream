@@ -2610,9 +2610,11 @@ void StartDisplayJob(HWND window) {
         // install, create the device, set it up.
         std::string error;
         std::string display;
-        // What was done here when the rest still needs the rights: said if
-        // the prompt for them is refused, rather than nothing at all.
-        std::string in_place;
+        // Whether the run here got as far as a display, when the rest still
+        // needs the rights. Refusing the prompt is still a failure -- the
+        // driver's settings are as they were -- but the display it attached
+        // is there to capture.
+        bool in_place = false;
         if (running && !IsElevated()) {
             std::string note;
             bool settings_refused = false;
@@ -2629,7 +2631,7 @@ void StartDisplayJob(HWND window) {
                 // size SolStream streams, which only writing that file fixes.
                 // So the prompt, as for a missing one.
                 if (configured) {
-                    in_place = DisplayDriverResult(true, false, false, note, error);
+                    in_place = true;
                     media::Log("[window] setting the display up here could not write "
                                "the driver's settings: %s", note.c_str());
                 } else {
@@ -2651,14 +2653,14 @@ void StartDisplayJob(HWND window) {
             if (RelaunchElevated(progress, error, true)) {
                 ReadInstallResult(error, &display);
             } else {
-                display = in_place.empty() ? "failed " + error : in_place;
+                display = "failed " + error;
             }
         }
         const bool ok = display.rfind("ready", 0) == 0;
         // Not once the host is quitting -- an installer asked it to, mid-job:
         // there is nothing left to capture for. Hidden in the tray is not
         // closed, and still chooses.
-        if (ok && g_display_ready && !HostWindowClosed()) {
+        if ((ok || in_place) && g_display_ready && !HostWindowClosed()) {
             // This host chose what to capture as it started, when there was
             // no virtual display to choose.
             g_display_ready();

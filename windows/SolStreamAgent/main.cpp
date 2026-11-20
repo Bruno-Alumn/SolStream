@@ -5471,7 +5471,9 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         // was -- and only where the new size reaches it.
         if (applied) {
             std::string note;
-            solstream::RestoreVirtualDisplayScale(wanted, note);
+            // By the capture display's own spelling: the path is found by
+            // an exact match, and `wanted` matched it ignoring case.
+            solstream::RestoreVirtualDisplayScale(capture_display, note);
             if (!note.empty()) {
                 Log("[agent] canvas %dx%d: %s", got_w, got_h, note.c_str());
             }
