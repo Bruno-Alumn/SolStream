@@ -15,5 +15,6 @@ the decision is.
 | [Handing an update to the elevated installer](update-handover.md) | A live check of an update on the PC from a build with the fix to one after it |
 | [How a launcher finds the PC](launcher-routes.md) | Which of three ways a Dock launcher should reach a PC away from home, and wake it |
 | [Mouse acceleration in games](mouse-acceleration.md) | Whether SolStream may change the PC's pointer speed and "Enhance pointer precision" during a game |
+| [Quality presets, a connection test, and commands around an app](presets-and-app-commands.md) | Whether SolStream may offer to lower quality mid-stream, and whether a Mac may ever set commands the PC runs |
 
 A note leaves this list when it is built, and the code says what it does.
