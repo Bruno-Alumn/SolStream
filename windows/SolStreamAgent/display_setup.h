@@ -23,6 +23,8 @@
 
 #include <string>
 
+#include "display_demand.h"
+
 namespace solstream {
 
 /// The canvas SolStream sets up by default: 1800x1169 points at 2x, which is
@@ -67,17 +69,30 @@ void CheckVirtualDisplay(std::string& note);
 /// largest ladder size it offers, and at the rate ChooseRefresh picks, to the
 /// right of everything else. Nothing more -- no driver settings, no device
 /// restart, no scaling: Windows keeps scaling per monitor, and is expected to
-/// keep it across a detach (the host logs it after each attach). True
-/// when it is attached at the end, with what was done in `note`. For a Mac
-/// that has just connected; see display_demand.h.
+/// keep it across a detach. ScaleVirtualDisplayToDefault, once Windows lists
+/// it, puts right a scaling it did not keep. True when it is attached at the
+/// end, with what was done in `note`. For a Mac that has just connected; see
+/// display_demand.h.
 bool AttachVirtualDisplay(std::string& note, std::string& error);
+
+/// Set the attached virtual display's scaling to kDefaultScalePercent when it
+/// is at another: Windows attaches a display it has not seen at its own
+/// recommended scaling, which is what it is after Set up waited on a restart,
+/// and the Mac would then get text the wrong size for the whole session. Per
+/// session and needs no rights. Nothing when it is already there or not
+/// attached; what was done, or why not, in `note`.
+void ScaleVirtualDisplayToDefault(std::string& note);
 
 /// Take SolStream's virtual display off the desktop: no size and no position,
 /// written to the registry and then applied, so it stays off across a crash
 /// and a restart. Its size is written down first, for the next attach. Never
-/// when it is the primary display or the only one attached. True when this
-/// call detached it; what stopped it, if anything, is said in `note`.
-bool DetachVirtualDisplay(std::string& note);
+/// when it is the primary display or the only one attached (Kept). What
+/// stopped it, if anything, is said in `note`.
+DetachOutcome DetachVirtualDisplay(std::string& note);
+
+/// The displays on the desktop, as a refused detach is compared against
+/// (TopologyText): how many are attached, and which is the primary.
+std::string DisplayTopology();
 
 /// Whether ConfigureVirtualDisplay is running in this process, attaching and
 /// scaling the display: the host does not detach it from under that.

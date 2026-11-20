@@ -47,15 +47,16 @@ struct HostStatus {
     /// The Virtual Display Driver is installed and Windows starts it once this
     /// PC restarts: the window says to restart, and offers nothing else.
     bool driver_restart_pending = false;
-    /// SolStream's virtual display is running but not attached to the desktop,
-    /// so the main display is what is captured: the window offers Set up,
-    /// which attaches it. The host no longer attaches it on its own at start.
+    /// SolStream's virtual display is running but not attached to the desktop
+    /// while a Mac is connected, or with --keep-virtual-display, so the main
+    /// display is what is captured: the window offers Set up, which attaches
+    /// it. Off with no Mac connected is how the host keeps it, and not this.
     bool display_detached = false;
-    /// The scaling SolStream's attached virtual display is at, when it is not
-    /// the kDefaultScalePercent setup sets, or 0 when it is or cannot be read:
-    /// the window offers Set up, which sets it. Nothing else does -- Windows
-    /// attaches a new display at its own recommended scaling, and the host no
-    /// longer sets it up at start.
+    /// The scaling SolStream's virtual display is at -- or was at, the last time
+    /// it was attached, while it is off between Macs -- when it is not the
+    /// kDefaultScalePercent setup sets, or 0 when it is or is not known: the
+    /// window offers Set up, which sets it. The host sets it at each attach for
+    /// a Mac too, so this is a scaling Windows would not take there.
     int display_off_scale = 0;
     /// Streaming cannot start because this Windows is older than the capture
     /// it needs: the banner offers Windows Update.

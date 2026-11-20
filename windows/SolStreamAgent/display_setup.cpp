@@ -1079,7 +1079,9 @@ void CheckVirtualDisplay(std::string& note) {
     Add(note, line + ".");
     if (scale != 0 && scale != kDefaultScalePercent) {
         // Said, not changed: a scaling change re-lays out the whole desktop,
-        // and Set up is where SolStream makes that kind of change.
+        // and Set up is where SolStream makes that kind of change. A Mac's
+        // attach is the other (ScaleVirtualDisplayToDefault), before this
+        // looks, so after one this is a scaling Windows would not take.
         Add(note, "SolStream sets it up at " + std::to_string(kDefaultScalePercent)
                   + "% to match a Retina Mac; Set up in SolStream's window or tray "
                     "menu does that.");
@@ -1146,10 +1148,24 @@ bool AttachVirtualDisplay(std::string& note, std::string& error) {
     return true;
 }
 
-bool DetachVirtualDisplay(std::string& note) {
+void ScaleVirtualDisplayToDefault(std::string& note) {
+    const std::wstring device = VirtualDisplayDevice();
+    DISPLAYCONFIG_PATH_INFO path{};
+    if (device.empty() || !FindPathFor(device, path)) {
+        return;
+    }
+    const int scale = ScaleOf(path);
+    if (scale == 0 || scale == kDefaultScalePercent) {
+        return;
+    }
+    Add(note, "The virtual display came back at " + std::to_string(scale) + "% scaling.");
+    SetScale(path, kDefaultScalePercent, note);
+}
+
+DetachOutcome DetachVirtualDisplay(std::string& note) {
     Adapter adapter;
     if (!FindVirtualAdapter(adapter) || !adapter.ours || !adapter.attached) {
-        return false;
+        return DetachOutcome::Failed;
     }
     // Never the primary, and never the last display on the desktop: a PC with
     // no monitor of its own -- headless, or its monitor off at the wall -- has
@@ -1172,7 +1188,7 @@ bool DetachVirtualDisplay(std::string& note) {
     if (primary || others == 0) {
         Add(note, "Left the virtual display " + ToUtf8(adapter.gdi_name) + " attached: it is "
                   + (primary ? "the main display." : "the only display."));
-        return false;
+        return DetachOutcome::Kept;
     }
 
     DEVMODEW current{};
@@ -1195,16 +1211,34 @@ bool DetachVirtualDisplay(std::string& note) {
     if (rc != DISP_CHANGE_SUCCESSFUL) {
         Add(note, "Windows would not detach the virtual display " + ToUtf8(adapter.gdi_name)
                   + " (" + std::to_string(rc) + ").");
-        return false;
+        return DetachOutcome::Failed;
     }
     rc = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
         Add(note, "Windows would not apply the detach of the virtual display "
                   + ToUtf8(adapter.gdi_name) + " (" + std::to_string(rc) + ").");
-        return false;
+        return DetachOutcome::Failed;
     }
     Add(note, "Detached the virtual display " + ToUtf8(adapter.gdi_name) + ".");
-    return true;
+    return DetachOutcome::Detached;
+}
+
+std::string DisplayTopology() {
+    int attached = 0;
+    std::wstring primary;
+    DISPLAY_DEVICEW device{};
+    device.cb = sizeof(device);
+    for (DWORD n = 0; EnumDisplayDevicesW(nullptr, n, &device, 0); ++n) {
+        if ((device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0) {
+            ++attached;
+            if ((device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0) {
+                primary = device.DeviceName;
+            }
+        }
+        device = DISPLAY_DEVICEW{};
+        device.cb = sizeof(device);
+    }
+    return TopologyText(attached, ToUtf8(primary));
 }
 
 }  // namespace solstream

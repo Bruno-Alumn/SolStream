@@ -229,10 +229,13 @@ bool g_ready_offers_set_up = false;
 std::string g_display_result;
 
 /// The host's own test for offering Set up with the driver running, as
-/// main.cpp's status thread makes it: not attached, or not at the scaling.
+/// main.cpp's status thread makes it: attached at another scaling. Not for a
+/// display that is off the desktop: the host attaches it for each Mac and has
+/// it off otherwise, and its window offers Set up for that only at a scaling
+/// it saw the last time it was attached, which setup cannot see.
 bool DisplayOffersSetUp() {
     if (VirtualDisplayDevice().empty()) {
-        return true;
+        return false;
     }
     const int scale = VirtualDisplayScale();
     return scale != 0 && scale != kDefaultScalePercent;

@@ -103,9 +103,15 @@ slot, no windows still being given back, and Set up not running. That covers a
 Mac leaving, a reconnect or takeover within the delay (which keeps it), and a
 host starting after a crash with it attached. A clean exit detaches it too.
 The detach is written to the registry, so a crash cannot leave it on across a
-restart. Neither happens while a full-screen game is in front: the detach waits
-for the game to go, and a Mac connecting meanwhile streams the primary monitor.
-It is never detached while it is the primary display or the only one.
+restart. The detach waits while anything is full screen on the PC. The attach is
+skipped only for a game in exclusive full screen, which the reconfiguration
+would throw out of its mode: that Mac's session streams the primary monitor,
+and so do its reconnects and takeovers until the slot has been empty for 10
+seconds, so the desktop is never moved under a stream already running. Each
+attach sets the display's scaling to 200% when Windows brings it back at
+another. It is not detached while it is the primary display or the only one;
+that is tried again once the displays on the desktop change, and a detach
+Windows refuses is tried again a minute later.
 `--keep-virtual-display` turns all of this off for that copy of the host.
 
 The host then captures that display: the one `FindVirtualAdapter` scores best
