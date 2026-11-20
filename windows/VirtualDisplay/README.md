@@ -68,22 +68,51 @@ driver on a PC that has none, and then `ConfigureVirtualDisplay`
    The original file is kept once, as `vdd_settings.xml.solstream-backup`.
 2. It restarts the device (`pnputil /restart-device`) so the driver re-reads the
    file, when the file changed.
-3. It attaches the display to the desktop at 3600×2338, to the right of every
-   other display, so it never overlaps a real monitor's coordinates. If it is
-   already attached at any ladder mode it is left alone, and if the driver does
+3. It attaches the display to the desktop at 3600×2338 and 60 Hz, to the right
+   of every other display, so it never overlaps a real monitor's coordinates.
+   If it is already attached at any size up to 4096 on both axes it is left
+   alone -- the Mac's `canvas` may have chosen one -- and if the driver does
    not offer 3600×2338 yet, the largest smaller ladder mode it does offer is
    used and the log says so.
-4. It sets the display's DPI scaling to 200%.
+4. It sets the display's DPI scaling to 200%. If Windows will not scale a size
+   step 3 kept that far (a 1080p display stops at about 175%), it attaches the
+   display at 3600×2338 first, once.
 5. It turns "Use HDR" off on the display itself.
 
-The host runs the same function every time it starts, at logon and unelevated.
-What is already right is left alone, because re-applying a mode is a display
-reconfiguration that moves every window on the PC, and the part that writes the
-driver's file under `C:\` needs administrator rights and is reported as undone.
-The host window's **Set up** button, the tray's *Set up virtual display…* and
-`SolStream.exe --install-display-driver` run all of it elevated.
+The host does not run it when it starts. It starts at every logon and again
+after every crash, and each of these steps can be a display reconfiguration
+that moves every window on the PC. At start it only logs whether the display is
+attached and at what size, rate and scaling, and turns "Use HDR" off if it is
+on. A display that is not attached, or not at 200%, is left so, and the host
+window and the tray then offer **Set up**. With the driver already running,
+**Set up** runs this in the host's own process, without a permission prompt:
+attaching, scaling and HDR need the session rather than administrator rights,
+and the settings file it cannot write is reported as undone. Only if that fails
+does it ask for the rights, as it does to install a missing driver.
+`SolStream.exe --install-display-driver` runs all of it elevated.
 `SolStream.exe --configure-display`, from an elevated prompt in the interactive
 session, runs just this part for a driver that is already there.
+
+**On demand (draft).** The display is on the desktop only while a Mac is
+connected, as Apollo's SudoVDA and Parsec's VDD do theirs; the MTT driver has no
+watchdog of its own, so the host does it (`display_demand.h`). It attaches the
+display when a Mac proves the token, before the display list the Mac picks its
+capture display from, at the size it had when it was last detached. The
+watcher detaches it once nothing has used it for 10 seconds: no Mac in the
+slot, no windows still being given back, and Set up not running. That covers a
+Mac leaving, a reconnect or takeover within the delay (which keeps it), and a
+host starting after a crash with it attached. A clean exit detaches it too.
+The detach is written to the registry, so a crash cannot leave it on across a
+restart. The detach waits while anything is full screen on the PC. The attach is
+skipped only for a game in exclusive full screen, which the reconfiguration
+would throw out of its mode: that Mac's session streams the primary monitor,
+and so do its reconnects and takeovers until the slot has been empty for 10
+seconds, so the desktop is never moved under a stream already running. Each
+attach sets the display's scaling to 200% when Windows brings it back at
+another. It is not detached while it is the primary display or the only one;
+that is tried again once the displays on the desktop change, and a detach
+Windows refuses is tried again a minute later.
+`--keep-virtual-display` turns all of this off for that copy of the host.
 
 The host then captures that display: the one `FindVirtualAdapter` scores best
 (SolStream's own driver first), else any display whose adapter is the Virtual
@@ -217,8 +246,10 @@ Get-PnpDevice -Class Display | Where-Object FriendlyName -like '*Virtual Display
     Disable-PnpDevice -Confirm:$false
 ```
 
-Detaching it in Settings > System > Display ("Disconnect") only lasts until
-SolStream next starts, which attaches a running virtual display again. A disabled
+Detaching it in Settings > System > Display ("Disconnect") lasts until the
+next Mac connects, which attaches it again (with `--keep-virtual-display`,
+until Set up is chosen: SolStream then captures the primary monitor, and the
+host window offers Set up to attach it). A disabled
 one is left alone: SolStream captures the primary monitor, and the host window
 says the display is off rather than installing another over it.
 

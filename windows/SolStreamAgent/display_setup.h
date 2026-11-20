@@ -23,6 +23,8 @@
 
 #include <string>
 
+#include "display_demand.h"
+
 namespace solstream {
 
 /// The canvas SolStream sets up by default: 1800x1169 points at 2x, which is
@@ -49,8 +51,57 @@ constexpr int kDefaultScalePercent = 200;
 /// Returns false only when there is no usable virtual display at the end of it.
 /// The parts that are improvements rather than requirements — scaling, the HDR
 /// toggle — report into `note` instead of failing the whole thing.
+///
+/// Run by Set up and the command-line setups only, never at the host's start:
+/// each step it takes can be a display reconfiguration, and the host starts at
+/// every logon and again after every crash.
 bool ConfigureVirtualDisplay(int width, int height, int scale_percent,
                              std::string& note, std::string& error);
+
+/// What the host does with the virtual display when it starts: says, into
+/// `note`, whether SolStream's is attached and at what size, rate and scaling,
+/// and turns "Use HDR" off on it if it is on. Nothing else -- it does not
+/// attach, resize, move or rescale it, or touch the driver's settings.
+void CheckVirtualDisplay(std::string& note);
+
+/// Attach SolStream's running virtual display to the desktop, when it is not:
+/// at the size it had when it was last detached, or the default canvas, or the
+/// largest ladder size it offers, and at the rate ChooseRefresh picks, to the
+/// right of everything else. Nothing more -- no driver settings, no device
+/// restart, no scaling: Windows keeps scaling per monitor, and is expected to
+/// keep it across a detach. ScaleVirtualDisplayToDefault, once Windows lists
+/// it, puts right a scaling it did not keep. True when it is attached at the
+/// end, with what was done in `note`. For a Mac that has just connected; see
+/// display_demand.h.
+bool AttachVirtualDisplay(std::string& note, std::string& error);
+
+/// Set the attached virtual display's scaling to kDefaultScalePercent when it
+/// is at another: Windows attaches a display it has not seen at its own
+/// recommended scaling, which is what it is after Set up waited on a restart,
+/// and the Mac would then get text the wrong size for the whole session. Per
+/// session and needs no rights. Nothing when it is already there or not
+/// attached; what was done, or why not, in `note`.
+void ScaleVirtualDisplayToDefault(std::string& note);
+
+/// Take SolStream's virtual display off the desktop: no size and no position,
+/// written to the registry and then applied, so it stays off across a crash
+/// and a restart. Its size is written down first, for the next attach. Never
+/// when it is the primary display or the only one attached (Kept). What
+/// stopped it, if anything, is said in `note`.
+DetachOutcome DetachVirtualDisplay(std::string& note);
+
+/// The displays on the desktop, as a refused detach is compared against
+/// (TopologyText): how many are attached, and which is the primary.
+std::string DisplayTopology();
+
+/// Whether ConfigureVirtualDisplay is running in this process, attaching and
+/// scaling the display: the host does not detach it from under that.
+bool ConfiguringVirtualDisplay();
+
+/// The scaling SolStream's attached virtual display is at, as a percentage, or
+/// 0 when it is not attached or its scaling cannot be read. Read only: the
+/// window offers Set up when it is not kDefaultScalePercent.
+int VirtualDisplayScale();
 
 /// The folder the Virtual Display Driver reads vdd_settings.xml from: VDDPATH
 /// under HKLM\SOFTWARE\MikeTheTech\VirtualDisplayDriver when set, otherwise

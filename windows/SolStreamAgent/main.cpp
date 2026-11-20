@@ -70,6 +70,8 @@
 #include "startup_trouble.h"
 #include "capture_display.h"
 #include "clipboard.h"
+#include "display_demand.h"
+#include "display_mode.h"
 #include "display_setup.h"
 #include "driver_install.h"
 #include "foreground.h"
@@ -155,6 +157,9 @@ std::atomic<int> g_clients_connected{0};
 /// real session and exactly backwards here. The one thing the user needs at that
 /// moment is the token, and connecting is what made it disappear.
 std::atomic<int> g_clients_authenticated{0};
+/// Sessions whose windows are still being put back where they were, after the
+/// slot was freed. See ServeAndRetire.
+std::atomic<int> g_windows_restoring{0};
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -505,13 +510,15 @@ void RechooseCaptureDisplayIfStale(const std::vector<Display>& displays) {
 /// needs a device restart — so the modes are seeded once at setup instead.
 /// Picks the smallest mode that still covers the request, so the Mac's window is
 /// never upscaled, and falls back to the largest available if nothing covers it.
+/// Then, at that size, the rate ChooseRefresh picks (display_mode.h).
 bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
                     int& out_w, int& out_h, int& out_hz) {
-    DEVMODEW best{};
-    DEVMODEW largest{};
-    bool have_best = false;
-    bool have_largest = false;
-
+    // The size first, and the rate apart from it. Ranking on area alone left
+    // the winner as whichever rate the driver happened to enumerate first, and
+    // the virtual display offers every resolution at several rates, so that
+    // was a coin toss between 30 Hz and 120 Hz.
+    DWORD best_w = 0, best_h = 0;
+    DWORD largest_w = 0, largest_h = 0;
     for (DWORD i = 0;; ++i) {
         DEVMODEW mode{};
         mode.dmSize = sizeof(mode);
@@ -525,42 +532,56 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
         // ConfigureVirtualDisplay keeps -- and the driver offers bigger. The
         // request is checked against 8192, and the "largest" fallback below
         // would otherwise pick a size that never streams a frame.
-        if (mode.dmPelsWidth > 4096 || mode.dmPelsHeight > 4096) {
+        if (mode.dmPelsWidth > solstream::kLargestCanvas
+            || mode.dmPelsHeight > solstream::kLargestCanvas) {
             continue;
         }
         const long long area = (long long) mode.dmPelsWidth * mode.dmPelsHeight;
-        const long long largest_area =
-            (long long) largest.dmPelsWidth * largest.dmPelsHeight;
-        if (!have_largest || area > largest_area
-            || (area == largest_area
-                && mode.dmDisplayFrequency > largest.dmDisplayFrequency)) {
-            largest = mode;
-            have_largest = true;
+        if (area > (long long) largest_w * largest_h) {
+            largest_w = mode.dmPelsWidth;
+            largest_h = mode.dmPelsHeight;
         }
         if ((int) mode.dmPelsWidth < want_w || (int) mode.dmPelsHeight < want_h) {
             continue;
         }
-        // Smallest area that still covers the request — and, among equals, the
-        // highest refresh rate. Ranking on area alone left the winner as
-        // whichever mode the driver happened to enumerate first, and the virtual
-        // display offers every resolution at every rate, so that was a coin toss
-        // between 30 Hz and 120 Hz. The choice is then written with
-        // CDS_UPDATEREGISTRY, so a bad flip persists; and since the early-out
-        // below used to compare only width and height, nothing ever corrected
-        // it. A display pinned at 30 Hz is indistinguishable, from the Mac, from
-        // a network problem.
-        const long long best_area = (long long) best.dmPelsWidth * best.dmPelsHeight;
-        if (!have_best || area < best_area
-            || (area == best_area && mode.dmDisplayFrequency > best.dmDisplayFrequency)) {
-            best = mode;
-            have_best = true;
+        if (best_w == 0 || area < (long long) best_w * best_h) {
+            best_w = mode.dmPelsWidth;
+            best_h = mode.dmPelsHeight;
         }
     }
-    if (!have_best) {
-        if (!have_largest) {
+    if (best_w == 0) {
+        if (largest_w == 0) {
             return false;
         }
-        best = largest;
+        best_w = largest_w;
+        best_h = largest_h;
+    }
+
+    // As few frames a second as the stream needs, rather than as many as the
+    // display offers: on the virtual display that can be 120 Hz or more, and
+    // Windows then composes it that often for a stream that takes 60. The
+    // choice is written with CDS_UPDATEREGISTRY, so it persists. Not under the
+    // stream's rate either: a display pinned at 30 Hz is indistinguishable,
+    // from the Mac, from a network problem.
+    std::vector<unsigned> offered;
+    DEVMODEW best{};
+    for (DWORD i = 0;; ++i) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsW(device.c_str(), i, &mode)) {
+            break;
+        }
+        if (mode.dmBitsPerPel == 32 && mode.dmPelsWidth == best_w
+            && mode.dmPelsHeight == best_h) {
+            offered.push_back(mode.dmDisplayFrequency);
+            if (offered.size() == 1) {
+                best = mode;
+            }
+        }
+    }
+    const unsigned best_hz = solstream::ChooseRefresh(offered, solstream::kDisplayRefreshTarget);
+    if (best_hz != 0) {
+        best.dmDisplayFrequency = best_hz;
     }
 
     DEVMODEW current{};
@@ -568,17 +589,19 @@ bool SetDisplayMode(const std::wstring& device, int want_w, int want_h,
     if (EnumDisplaySettingsW(device.c_str(), ENUM_CURRENT_SETTINGS, &current)
         && current.dmPelsWidth == best.dmPelsWidth
         && current.dmPelsHeight == best.dmPelsHeight
-        // Refresh rate counts as "already there" too, or a display left pinned
-        // at the wrong rate by an earlier run would never be corrected: the
-        // resolution matches, so nothing would ever be applied again.
-        && current.dmDisplayFrequency >= best.dmDisplayFrequency) {
+        // The rate counts as "already there" too, and only the rate chosen: a
+        // display left at another by an earlier run -- 30 Hz, or the 120 Hz this
+        // used to choose -- is otherwise never corrected, since the resolution
+        // matches and nothing would ever be applied again.
+        && (best_hz == 0 || current.dmDisplayFrequency == best_hz)) {
         out_w = (int) current.dmPelsWidth;
         out_h = (int) current.dmPelsHeight;
         out_hz = (int) current.dmDisplayFrequency;
         return true;  // already there; do not make the screen flash for nothing
     }
 
-    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
+                  | (best_hz != 0 ? DM_DISPLAYFREQUENCY : 0);
     const LONG rc = ChangeDisplaySettingsExW(device.c_str(), &best, nullptr,
                                              CDS_UPDATEREGISTRY, nullptr);
     if (rc != DISP_CHANGE_SUCCESSFUL) {
@@ -2839,6 +2862,9 @@ void NotifyStreamedWindows() {
 /// deliberately drags one onto the capture display is not fought over it.
 /// Watcher thread only.
 std::vector<HWND> g_rescued;
+/// Set when the virtual display is attached for a Mac; the watcher then
+/// forgets g_rescued. See RescueStrandedWindows.
+std::atomic<bool> g_forget_rescued{false};
 
 /// Where a stranded window should go, if the capture display is one nobody can
 /// see. False when SolStream is capturing a real monitor: what is on that is
@@ -2896,6 +2922,250 @@ void LookAtDisplays() {
     RechooseCaptureDisplayIfStale(displays);
     g_capture_visibility.invisible = WorkOutCaptureDisplayIsInvisible(
         displays, g_capture_visibility.capture, g_capture_visibility.rescue_to);
+}
+
+// ── The virtual display on demand ────────────────────────────────────────────
+// See display_demand.h. Attached for a Mac as it proves the token, detached by
+// the watcher once nothing has used it for a while: not attached under a game
+// in exclusive full screen, and not detached under anything full screen.
+
+/// Whether the host attaches and detaches the virtual display itself. On
+/// unless --keep-virtual-display says to leave it as Windows has it.
+bool g_display_on_demand = true;
+/// Held across every attach and detach, and the looks that decide them, so
+/// the two never cross: a Mac arriving waits for a detach under way, then
+/// attaches.
+std::mutex g_display_demand_mutex;
+/// The watcher's record of the display going unused. Watcher thread only.
+solstream::DisplayIdle g_display_idle;
+/// Refused detaches by Windows in a row, so only the first is logged while it
+/// is tried again every minute. Watcher thread only.
+int g_detach_failures = 0;
+/// The Mac last served without the display, under g_display_demand_mutex; see
+/// StaysWithoutDisplay.
+solstream::WithoutDisplay g_without_display;
+/// When the watcher first saw the slot empty after that Mac; see
+/// WithoutDisplayEnds. Watcher thread only.
+unsigned long long g_without_display_empty_since = 0;
+
+/// Whether a game is in exclusive full screen on one of the PC's monitors, so
+/// the display is not attached under it; see AttachWaitsFor. Never this host.
+bool ExclusiveGameInFront() {
+    HWND front = GetForegroundWindow();
+    DWORD pid = 0;
+    if (front) {
+        GetWindowThreadProcessId(front, &pid);
+        if (pid == GetCurrentProcessId()) {
+            return false;
+        }
+    }
+    QUERY_USER_NOTIFICATION_STATE state = QUNS_ACCEPTS_NOTIFICATIONS;
+    if (FAILED(SHQueryUserNotificationState(&state))) {
+        return false;
+    }
+    return solstream::AttachWaitsFor((int) state);
+}
+
+/// Whether anything full screen is in front on one of the PC's own monitors, so
+/// the display is not detached under it; see FullScreenInFront. Never this
+/// host's own window.
+bool FullScreenGameInFront() {
+    HWND front = GetForegroundWindow();
+    DWORD pid = 0;
+    if (front) {
+        GetWindowThreadProcessId(front, &pid);
+        if (pid == GetCurrentProcessId()) {
+            return false;
+        }
+    }
+    QUERY_USER_NOTIFICATION_STATE state = QUNS_ACCEPTS_NOTIFICATIONS;
+    if (FAILED(SHQueryUserNotificationState(&state))) {
+        state = QUNS_ACCEPTS_NOTIFICATIONS;
+    }
+    bool fills = false;
+    bool on_virtual = false;
+    // The desktop has no caption and covers its monitor too.
+    if (front && !IsShellWindow(front)) {
+        HMONITOR monitor = MonitorFromWindow(front, MONITOR_DEFAULTTONULL);
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        RECT rect{};
+        if (monitor && GetMonitorInfoW(monitor, &info) && GetWindowRect(front, &rect)) {
+            on_virtual = solstream::IsSolStreamDisplayDriver(
+                ToWide(AdapterDescription(info.szDevice)));
+            fills = solstream::LooksFullScreen(GetWindowLongPtrW(front, GWL_STYLE), rect,
+                                               info.rcMonitor);
+        }
+    }
+    return solstream::FullScreenInFront((int) state, fills, on_virtual);
+}
+
+/// Put the virtual display on the desktop for the Mac `client` that has just
+/// proved the token, before it is sent the display list it picks its capture
+/// display from. Waits, three seconds at most, for Windows to list it as a
+/// monitor, then puts its scaling right. Under a game in exclusive full screen
+/// it is left off, and this session streams the main display, as a PC without
+/// the virtual display does -- and so does every reconnect and takeover of the
+/// same Mac until the slot has been empty for a while: attached under a
+/// session already running, it would move the desktop under the stream, and
+/// the host would capture a display that Mac never chose.
+void AttachForSession(const std::string& client) {
+    if (!g_display_on_demand || !solstream::HasVirtualDisplayCached()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_display_demand_mutex);
+    if (!solstream::VirtualDisplayDevice().empty()) {
+        g_without_display = solstream::WithoutDisplay{};
+        return;
+    }
+    if (solstream::StaysWithoutDisplay(g_without_display, client)) {
+        Log("[display] the same Mac again, whose session streams the main display; "
+            "left the virtual display off");
+        return;
+    }
+    // From here this is a session of its own. A failed attach is one too: the
+    // same Mac back in a moment is not attached for under a running stream.
+    g_without_display.active = true;
+    g_without_display.client = client;
+    if (ExclusiveGameInFront()) {
+        Log("[display] a game is in exclusive full screen; left the virtual display off, "
+            "and this session streams the main display");
+        return;
+    }
+    std::string note, error;
+    if (!solstream::AttachVirtualDisplay(note, error)) {
+        Log("[display] could not attach the virtual display: %s", error.c_str());
+        return;
+    }
+    g_without_display = solstream::WithoutDisplay{};
+    for (const std::string& line : SplitLines(note)) {
+        Log("[display] %s", line.c_str());
+    }
+    const ULONGLONG started = GetTickCount64();
+    bool listed = false;
+    while (!listed && GetTickCount64() - started < 3000) {
+        const std::string name = ToUtf8(solstream::VirtualDisplayDevice());
+        const std::vector<Display> displays = EnumerateDisplays();
+        listed = !name.empty()
+              && std::any_of(displays.begin(), displays.end(),
+                             [&name](const Display& display) {
+                                 return display.device_name == name;
+                             });
+        if (!listed) {
+            Sleep(100);
+        }
+    }
+    if (!listed) {
+        Log("[display] the virtual display was attached but is not listed as a monitor "
+            "after 3 s; the Mac is sent the displays as they are");
+    }
+    // Its scaling to SolStream's, if Windows brought it back at its own; then
+    // its size, rate and scaling as they are, and "Use HDR" off if Windows
+    // turned it on with it.
+    std::string check;
+    if (listed) {
+        solstream::ScaleVirtualDisplayToDefault(check);
+    }
+    solstream::CheckVirtualDisplay(check);
+    for (const std::string& line : SplitLines(check)) {
+        Log("[display] %s", line.c_str());
+    }
+    g_forget_rescued = true;
+    ChooseCaptureDisplay();
+}
+
+/// On the watcher's look at the displays: detach the virtual display once it
+/// has gone unused for kDetachAfterIdleMs -- after the last Mac has gone and
+/// its windows have been given back, or at a start that found it attached.
+void TendVirtualDisplay() {
+    if (!g_display_on_demand) {
+        return;
+    }
+    // A Mac in the slot, even one still on the token prompt; a session's
+    // windows still being given back; a host's owed windows; or Set up at work.
+    const auto in_use = [] {
+        return g_clients_connected.load() > 0 || g_clients_authenticated.load() > 0
+            || g_windows_restoring.load() > 0 || g_owed_pass_running.load()
+            || solstream::ConfiguringVirtualDisplay();
+    };
+    // Asked first, and cheaply: with a Mac here nothing below is worth the
+    // walk of the display devices.
+    if (in_use()) {
+        g_display_idle = solstream::DisplayIdle{};
+        g_without_display_empty_since = 0;
+        g_detach_failures = 0;
+        return;
+    }
+    // Not waited for: a Mac attaching holds it for seconds, and the watcher
+    // has windows to look after. The next look tries again.
+    std::unique_lock<std::mutex> lock(g_display_demand_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const bool busy = in_use();
+    if (solstream::WithoutDisplayEnds(g_without_display.active,
+                                      g_without_display_empty_since, now, busy)) {
+        g_without_display = solstream::WithoutDisplay{};
+        g_without_display_empty_since = 0;
+    }
+    const bool attached =
+        solstream::HasVirtualDisplayCached() && !solstream::VirtualDisplayDevice().empty();
+    const std::string topology = attached ? solstream::DisplayTopology() : std::string();
+    const solstream::DisplayStep step = solstream::NextDisplayStep(
+        g_display_idle, now, attached, busy, attached && FullScreenGameInFront(), topology);
+    if (step == solstream::DisplayStep::Defer) {
+        Log("[display] the virtual display is unused, but a full-screen game is in "
+            "front; it is detached once the game is not");
+        return;
+    }
+    if (step != solstream::DisplayStep::Detach) {
+        return;
+    }
+    std::string note;
+    const solstream::DetachOutcome outcome = solstream::DetachVirtualDisplay(note);
+    // Kept is tried again only once the displays change, so it is said each
+    // time; Windows saying no is tried every minute, and said the first time.
+    if (outcome != solstream::DetachOutcome::Failed || g_detach_failures == 0) {
+        for (const std::string& line : SplitLines(note)) {
+            Log("[display] %s", line.c_str());
+        }
+        if (outcome == solstream::DetachOutcome::Failed) {
+            Log("[display] tried again every %llu s while Windows says no",
+                solstream::kDetachRetryMs / 1000);
+        }
+    }
+    if (outcome != solstream::DetachOutcome::Detached) {
+        g_detach_failures =
+            outcome == solstream::DetachOutcome::Failed ? g_detach_failures + 1 : 0;
+        solstream::NoteDetachRefused(g_display_idle, outcome, now, topology);
+        return;
+    }
+    g_detach_failures = 0;
+    ChooseCaptureDisplay();
+}
+
+/// At a clean exit, after every window has been given back: detach the
+/// virtual display, unless a full-screen game is in front, when the next
+/// host's start does it instead.
+void DetachAtExit() {
+    if (!g_display_on_demand || !solstream::HasVirtualDisplayCached()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_display_demand_mutex);
+    if (solstream::VirtualDisplayDevice().empty()) {
+        return;
+    }
+    if (FullScreenGameInFront()) {
+        Log("[display] a full-screen game is in front; left the virtual display "
+            "attached, for the next host's start to detach");
+        return;
+    }
+    std::string note;
+    solstream::DetachVirtualDisplay(note);
+    for (const std::string& line : SplitLines(note)) {
+        Log("[display] %s", line.c_str());
+    }
 }
 
 // ── Keeping the PC's own mouse off the capture display ───────────────────────
@@ -3180,6 +3450,12 @@ BOOL CALLBACK StrandedProc(HWND window, LPARAM param) {
 /// Moving it is not answering it. Whatever the dialog asks stays the user's
 /// decision — this only puts the question somewhere they can read it.
 void RescueStrandedWindows() {
+    // The virtual display has just been attached for a Mac. Windows can put a
+    // window back on it that was there when it was last detached, and one
+    // carried off it before is no longer one somebody dragged there.
+    if (g_forget_rescued.exchange(false)) {
+        g_rescued.clear();
+    }
     if (!g_capture_visibility.invisible) {
         return;
     }
@@ -3703,6 +3979,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
             if (!looked || now - looked_at >= kDisplayLookMs) {
                 looked = true;
                 looked_at = now;
+                TendVirtualDisplay();
                 LookAtDisplays();
             }
             RescueStrandedWindows();
@@ -6433,6 +6710,7 @@ void ServeClient(SOCKET client) {
             return;
         }
         BecomeHolder(client, std::string());
+        AttachForSession(std::string());
         if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
             return;
         }
@@ -6626,6 +6904,8 @@ void ServeClient(SOCKET client) {
                 FieldString(line, "pushes", pushes);
                 InterlockedExchange(&g_push_features, solstream::PushFeaturesFrom(pushes));
                 InterlockedExchange(&g_push_authorised, 1);
+                // Before the list: the Mac picks its capture display from it.
+                AttachForSession(id);
                 if (!SendLine(client, DisplaysJson(EnumerateDisplays()))) {
                     return;
                 }
@@ -6697,9 +6977,6 @@ bool ClaimClientSlot() {
     return g_clients_connected.compare_exchange_strong(expected, 1);
 }
 
-/// Sessions whose windows are still being put back where they were, after the
-/// slot was freed. See ServeAndRetire.
-std::atomic<int> g_windows_restoring{0};
 
 /// Serve a client that holds the slot, then put everything back. Runs on a
 /// thread of its own; the slot must already have been claimed for it.
@@ -7446,6 +7723,10 @@ int wmain(int argc, wchar_t** argv) {
             uninstall_now = true;
         } else if (arg == L"--configure-display") {
             configure_display = true;
+        } else if (arg == L"--keep-virtual-display") {
+            // Leave the virtual display attached or not, as Windows has it,
+            // rather than attach it for each Mac and detach it after.
+            g_display_on_demand = false;
         } else if (arg == L"--progress-window" && i + 1 < argc) {
             // Only a live window in this session: anything else on the switch is
             // ignored, and the worst a wrong one could do is receive a number.
@@ -7987,27 +8268,35 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Make the virtual display fit to stream, before deciding what to capture —
-    // this is what attaches it, so doing it afterwards would pick from a list it
-    // was not on yet.
+    // Say how the virtual display is, and change nothing about it but HDR.
     //
-    // The privileged half of this (teaching the driver its mode list) needs
-    // rights the agent does not have and will simply be noted as undone; the
-    // half that matters most does not. Turning "Use HDR" off is a per-display
+    // This used to set the display up -- attach it, move it, size it, scale
+    // it -- at every start, which is every logon and every restart after a
+    // crash. Each of those can be a display reconfiguration of the whole
+    // desktop, and it fought the size the Mac's `canvas` had chosen. Set up
+    // does all that, once. Turning "Use HDR" off stays: it is a per-display
     // toggle any user can set, and leaving it on is what made streamed content
     // arrive as a black rectangle inside correctly drawn window chrome — worst
     // in terminals and browsers, invisible in anything pure black-on-white.
+    //
+    // Attached for each Mac and detached after (display_demand.h), a display
+    // that is off at the start is as it should be, and one that is on was
+    // left so by a host that crashed: the watcher detaches it once it has gone
+    // unused for a while, which leaves a Mac reconnecting after that crash the
+    // time to keep it.
     if (solstream::HasVirtualDisplay()) {
-        std::string note;
-        std::string display_error;
-        const bool ready = solstream::ConfigureVirtualDisplay(
-            solstream::kDefaultCanvasWidth, solstream::kDefaultCanvasHeight,
-            solstream::kDefaultScalePercent, note, display_error);
-        for (const std::string& line : SplitLines(note)) {
-            Log("[display] %s", line.c_str());
-        }
-        if (!ready) {
-            Log("[display] %s", display_error.c_str());
+        if (g_display_on_demand && solstream::VirtualDisplayDevice().empty()) {
+            Log("[display] the virtual display is off the desktop until a Mac connects");
+        } else {
+            std::string note;
+            solstream::CheckVirtualDisplay(note);
+            for (const std::string& line : SplitLines(note)) {
+                Log("[display] %s", line.c_str());
+            }
+            if (g_display_on_demand) {
+                Log("[display] attached with no Mac connected; detached in %llu s "
+                    "unless one connects", solstream::kDetachAfterIdleMs / 1000);
+            }
         }
     }
 
@@ -8274,6 +8563,35 @@ int wmain(int argc, wchar_t** argv) {
             status.driver_off = off;
             status.driver_failing = failing;
             status.driver_restart_pending = restart_pending;
+            // Running and not attached, which the host leaves for Set up.
+            const std::wstring virtual_device =
+                status.virtual_display ? solstream::VirtualDisplayDevice() : std::wstring();
+            // Not while the host attaches it for each Mac and nobody is here:
+            // off then is how it is meant to be, not something to set up.
+            const bool detached = status.virtual_display && virtual_device.empty();
+            const bool off_until_a_mac = detached && g_display_on_demand
+                                      && g_clients_authenticated.load() == 0;
+            status.display_detached = detached && !off_until_a_mac;
+            // Its scaling, at most every ten seconds like the driver's state:
+            // it changes only when somebody changes it, and reading it is a
+            // walk of the display configuration.
+            // Off the desktop between Macs, the one it was at the last time
+            // it was attached is kept, so the window can offer Set up for it
+            // while somebody is at the PC to see it; read again at once when
+            // it is next attached.
+            static ULONGLONG scale_checked = 0;
+            static int scale = 0;
+            if (!status.virtual_display) {
+                scale = 0;
+                scale_checked = 0;
+            } else if (virtual_device.empty()) {
+                scale_checked = 0;
+            } else if (scale_checked == 0 || GetTickCount64() - scale_checked > 10000) {
+                scale = solstream::VirtualDisplayScale();
+                scale_checked = GetTickCount64();
+            }
+            status.display_off_scale =
+                scale != 0 && scale != solstream::kDefaultScalePercent ? scale : 0;
             // Its size rather than its device name: "\\.\DISPLAY9" says
             // nothing to the person reading the window, and the name stays in
             // the log.
@@ -8281,7 +8599,9 @@ int wmain(int argc, wchar_t** argv) {
             // falling back to the main one for a moment, it would have shown
             // the main monitor's size under the virtual display's name.
             status.display_detail = !status.virtual_display ? L"not installed"
-                : CaptureDisplay() == solstream::VirtualDisplayDevice()
+                : off_until_a_mac ? L"attached while your Mac is connected"
+                : status.display_detached ? L"not attached"
+                : CaptureDisplay() == virtual_device
                 ? VirtualDisplaySummary(CaptureDisplay())
                 : L"ready";
 
@@ -8360,6 +8680,7 @@ int wmain(int argc, wchar_t** argv) {
         solstream::media::MediaSession::Instance().Stop();
 #endif
         UnlockAll();
+        DetachAtExit();
     });
     const int code = solstream::RunHostWindowLoop();
     // On its way out by request from here: a crash in the shutdown below is
@@ -8390,5 +8711,8 @@ int wmain(int argc, wchar_t** argv) {
     // does this when its Mac goes away, but ExitProcess ends that thread
     // wherever it is, and a window left unresizable outlives the host.
     UnlockAll();
+    // And the virtual display off the desktop, now that nothing is left on it
+    // to strand: see display_demand.h.
+    DetachAtExit();
     ExitProcess((UINT) code);
 }

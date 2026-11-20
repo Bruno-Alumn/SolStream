@@ -42,6 +42,8 @@
 #include "agent_crypto.h"
 #include "capture_display.h"
 #include "clipboard.h"
+#include "display_demand.h"
+#include "display_mode.h"
 #include "transfer.h"
 #include "app_ids.h"
 #include "wake.h"
@@ -4848,6 +4850,229 @@ void TestResampler() {
     CHECK(!positive);
 }
 
+void TestDisplayMode() {
+    using namespace solstream;
+    const unsigned target = kDisplayRefreshTarget;
+    CHECK(target == 60);
+    // The lowest rate that keeps up with the stream, not the highest offered.
+    CHECK(ChooseRefresh({30, 60, 120, 144}, target) == 60);
+    CHECK(ChooseRefresh({144, 120, 60, 30}, target) == 60);
+    CHECK(ChooseRefresh({60}, target) == 60);
+    // Nothing at 60: the next one up, never one below.
+    CHECK(ChooseRefresh({59, 75, 120}, target) == 75);
+    CHECK(ChooseRefresh({30, 50, 90}, target) == 90);
+    // Nothing that keeps up: the fastest there is.
+    CHECK(ChooseRefresh({24, 30, 50}, target) == 50);
+    CHECK(ChooseRefresh({30}, target) == 30);
+    // Duplicates, one per bit depth or scaling the driver lists.
+    CHECK(ChooseRefresh({120, 60, 120, 60}, target) == 60);
+    // None, and Windows' "hardware default" placeholders, which say nothing.
+    CHECK(ChooseRefresh({}, target) == 0);
+    CHECK(ChooseRefresh({0, 1}, target) == 0);
+    CHECK(ChooseRefresh({1, 120}, target) == 120);
+    // A stream that asked for more than 60.
+    CHECK(ChooseRefresh({60, 120, 144}, 120) == 120);
+    CHECK(ChooseRefresh({60, 144}, 120) == 144);
+
+    CHECK(BetterRefresh(60, 120, target));
+    CHECK(!BetterRefresh(120, 60, target));
+    CHECK(BetterRefresh(60, 30, target));
+    CHECK(BetterRefresh(50, 30, target));
+    CHECK(!BetterRefresh(60, 60, target));
+
+    // Setup keeps any attached size the encoder takes, the Mac's own included,
+    // and not one past 4096 or an empty one.
+    CHECK(KeepsAttachedSize(3600, 2338));
+    CHECK(KeepsAttachedSize(3024, 1964));
+    CHECK(KeepsAttachedSize(1920, 1080));
+    CHECK(KeepsAttachedSize(4096, 4096));
+    CHECK(!KeepsAttachedSize(4097, 2160));
+    CHECK(!KeepsAttachedSize(3840, 4097));
+    CHECK(!KeepsAttachedSize(7680, 4320));
+    CHECK(!KeepsAttachedSize(0, 0));
+
+    // Windows' scaling range for a display. Steps: 100, 125, 150, 175, 200, ...
+    // so 200% is step 4. A 1080p display recommends 125% (step 1, min -1) and
+    // goes three steps above it, to 200%; a 3600x2338 one recommends 250%
+    // (step 6, min -6) and goes well past 200%.
+    CHECK(ReachesScaleStep(4, -1, 3));
+    CHECK(!ReachesScaleStep(4, -1, 2));  // stops at 175%: setup re-attaches
+    CHECK(ReachesScaleStep(4, -6, 4));
+    CHECK(ReachesScaleStep(0, -6, 4));   // down to 100% is always there
+    CHECK(ReachesScaleStep(1, -1, 0));   // the recommended step itself
+    CHECK(!ReachesScaleStep(2, -1, 0));
+    CHECK(!ReachesScaleStep(-1, -6, 4));  // not one of Windows' steps
+}
+
+void TestDisplayDemand() {
+    using namespace solstream;
+    const unsigned long long after = 10000;
+    const std::string top = TopologyText(2, "\\\\.\\DISPLAY1");
+    DisplayIdle idle;
+
+    // Not attached, or in use: nothing, and the wait starts again.
+    CHECK(NextDisplayStep(idle, 1000, false, false, false, top, after) == DisplayStep::Wait);
+    CHECK(idle.since == 0);
+    CHECK(NextDisplayStep(idle, 1000, true, true, false, top, after) == DisplayStep::Wait);
+    CHECK(idle.since == 0);
+
+    // Attached and unused: detached once it has been so for the whole delay.
+    CHECK(NextDisplayStep(idle, 5000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(idle.since == 5000);
+    CHECK(NextDisplayStep(idle, 14999, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 15000, true, false, false, top, after) == DisplayStep::Detach);
+    CHECK(idle.since == 0);
+
+    // A Mac back within the delay -- a reconnect, a takeover -- starts it
+    // again, so the display is not taken from under it.
+    idle = DisplayIdle{};
+    CHECK(NextDisplayStep(idle, 20000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 22000, true, true, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 31000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(idle.since == 31000);
+    CHECK(NextDisplayStep(idle, 40000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 41000, true, false, false, top, after) == DisplayStep::Detach);
+
+    // Due under a full-screen game: said once, then waited out, then detached.
+    idle = DisplayIdle{};
+    CHECK(NextDisplayStep(idle, 50000, true, false, true, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 60000, true, false, true, top, after) == DisplayStep::Defer);
+    CHECK(idle.deferred);
+    CHECK(NextDisplayStep(idle, 61000, true, false, true, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 90000, true, false, true, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 91000, true, false, false, top, after) == DisplayStep::Detach);
+    CHECK(!idle.deferred);
+    // And a Mac arriving meanwhile clears the deferral with the wait.
+    idle = DisplayIdle{};
+    NextDisplayStep(idle, 100000, true, false, true, top, after);
+    CHECK(NextDisplayStep(idle, 110000, true, false, true, top, after) == DisplayStep::Defer);
+    CHECK(NextDisplayStep(idle, 111000, true, true, true, top, after) == DisplayStep::Wait);
+    CHECK(!idle.deferred && idle.since == 0);
+
+    // A detach kept -- the primary display, the only one -- is not tried again
+    // until the display has been in use or off the desktop, or the displays
+    // on the desktop change.
+    idle = DisplayIdle{};
+    NextDisplayStep(idle, 200000, true, false, false, top, after);
+    CHECK(NextDisplayStep(idle, 210000, true, false, false, top, after) == DisplayStep::Detach);
+    NoteDetachRefused(idle, DetachOutcome::Kept, 210000, top);
+    CHECK(NextDisplayStep(idle, 220000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 900000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 900000, true, false, true, top, after) == DisplayStep::Wait);
+    CHECK(NextDisplayStep(idle, 901000, true, true, false, top, after) == DisplayStep::Wait);
+    CHECK(!idle.refused);
+    NextDisplayStep(idle, 902000, true, false, false, top, after);
+    CHECK(NextDisplayStep(idle, 912000, true, false, false, top, after) == DisplayStep::Detach);
+    NoteDetachRefused(idle, DetachOutcome::Kept, 912000, top);
+    CHECK(NextDisplayStep(idle, 913000, false, false, false, top, after) == DisplayStep::Wait);
+    CHECK(!idle.refused);
+
+    // Kept as the only display, with the monitor asleep; the monitor wakes,
+    // and the virtual display is detached after a fresh wait.
+    const std::string alone = TopologyText(1, "\\\\.\\DISPLAY9");
+    idle = DisplayIdle{};
+    NextDisplayStep(idle, 1000000, true, false, false, alone, after);
+    CHECK(NextDisplayStep(idle, 1010000, true, false, false, alone, after)
+          == DisplayStep::Detach);
+    NoteDetachRefused(idle, DetachOutcome::Kept, 1010000, alone);
+    CHECK(idle.refused && idle.refused_topology == alone);
+    CHECK(NextDisplayStep(idle, 5000000, true, false, false, alone, after) == DisplayStep::Wait);
+    CHECK(idle.refused);
+    CHECK(NextDisplayStep(idle, 5001000, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(!idle.refused && idle.since == 5001000);
+    CHECK(NextDisplayStep(idle, 5011000, true, false, false, top, after) == DisplayStep::Detach);
+    // A topology that could not be read still latches.
+    NoteDetachRefused(idle, DetachOutcome::Kept, 5011000, std::string());
+    CHECK(idle.refused && !idle.refused_topology.empty());
+
+    // Windows saying no is tried again a minute later, not latched for good.
+    idle = DisplayIdle{};
+    NextDisplayStep(idle, 6000000, true, false, false, top, after);
+    CHECK(NextDisplayStep(idle, 6010000, true, false, false, top, after) == DisplayStep::Detach);
+    NoteDetachRefused(idle, DetachOutcome::Failed, 6010000, top);
+    CHECK(idle.refused && idle.refused_topology.empty() && idle.refused_at == 6010000);
+    CHECK(NextDisplayStep(idle, 6010000 + kDetachRetryMs - 1, true, false, false, top, after)
+          == DisplayStep::Wait);
+    CHECK(idle.refused);
+    CHECK(NextDisplayStep(idle, 6010000 + kDetachRetryMs, true, false, false, top, after)
+          == DisplayStep::Wait);
+    CHECK(!idle.refused);
+    CHECK(NextDisplayStep(idle, 6010000 + kDetachRetryMs + after, true, false, false, top,
+                          after)
+          == DisplayStep::Detach);
+
+    // A clock reading 0 still starts the wait.
+    idle = DisplayIdle{};
+    CHECK(NextDisplayStep(idle, 0, true, false, false, top, after) == DisplayStep::Wait);
+    CHECK(idle.since != 0);
+
+    // What counts as a full-screen game in front.
+    CHECK(NotificationStateIsFullScreen(2));   // QUNS_BUSY
+    CHECK(NotificationStateIsFullScreen(3));   // QUNS_RUNNING_D3D_FULL_SCREEN
+    CHECK(NotificationStateIsFullScreen(4));   // QUNS_PRESENTATION_MODE
+    CHECK(!NotificationStateIsFullScreen(1));  // QUNS_NOT_PRESENT
+    CHECK(!NotificationStateIsFullScreen(5));  // QUNS_ACCEPTS_NOTIFICATIONS
+    CHECK(!NotificationStateIsFullScreen(6));
+    CHECK(!NotificationStateIsFullScreen(7));
+    CHECK(FullScreenInFront(5, true, false));   // a borderless game
+    CHECK(FullScreenInFront(3, false, false));  // exclusive full screen
+    CHECK(!FullScreenInFront(5, false, false));
+    // A streamed window held to the Mac's full screen, on the virtual display.
+    CHECK(!FullScreenInFront(5, true, true));
+    CHECK(!FullScreenInFront(2, true, true));
+    // The attach waits only for exclusive full screen: a borderless game, a
+    // browser on F11, a screensaver or a presentation is re-laid out, not
+    // thrown out of its mode, and the session gets the virtual display.
+    CHECK(AttachWaitsFor(3));
+    CHECK(!AttachWaitsFor(1));
+    CHECK(!AttachWaitsFor(2));
+    CHECK(!AttachWaitsFor(4));
+    CHECK(!AttachWaitsFor(5));
+
+    // A Mac served without the display stays so through a reconnect or a
+    // takeover of its own, and until the slot has been empty for the delay.
+    WithoutDisplay without;
+    CHECK(!StaysWithoutDisplay(without, "mac-a"));
+    without.active = true;
+    without.client = "mac-a";
+    CHECK(StaysWithoutDisplay(without, "mac-a"));
+    CHECK(!StaysWithoutDisplay(without, "mac-b"));
+    CHECK(!StaysWithoutDisplay(without, std::string()));
+    unsigned long long empty_since = 0;
+    CHECK(!WithoutDisplayEnds(true, empty_since, 1000, true, after));
+    CHECK(empty_since == 0);
+    CHECK(!WithoutDisplayEnds(true, empty_since, 2000, false, after));
+    CHECK(empty_since == 2000);
+    CHECK(!WithoutDisplayEnds(true, empty_since, 11999, false, after));
+    // Back within the delay: the clock starts again.
+    CHECK(!WithoutDisplayEnds(true, empty_since, 5000, true, after));
+    CHECK(empty_since == 0);
+    CHECK(!WithoutDisplayEnds(true, empty_since, 20000, false, after));
+    CHECK(WithoutDisplayEnds(true, empty_since, 30000, false, after));
+    // Nothing recorded, nothing to end.
+    empty_since = 0;
+    CHECK(!WithoutDisplayEnds(false, empty_since, 40000, false, after));
+    CHECK(!WithoutDisplayEnds(false, empty_since, 90000, false, after));
+    CHECK(empty_since == 0);
+    // A Mac sending no id is matched as one.
+    without.client.clear();
+    CHECK(StaysWithoutDisplay(without, std::string()));
+
+    // The size written down at a detach.
+    unsigned width = 0, height = 0;
+    CHECK(ParseDisplaySize("3024x1964", width, height) && width == 3024 && height == 1964);
+    CHECK(ParseDisplaySize("3600x2338\r\n", width, height) && width == 3600 && height == 2338);
+    CHECK(ParseDisplaySize("4096x4096\n", width, height));
+    CHECK(!ParseDisplaySize("4097x2160", width, height));
+    CHECK(!ParseDisplaySize("0x1080", width, height));
+    CHECK(!ParseDisplaySize("1920x", width, height));
+    CHECK(!ParseDisplaySize("x1080", width, height));
+    CHECK(!ParseDisplaySize("1920 1080", width, height));
+    CHECK(!ParseDisplaySize("1920x1080x60", width, height));
+    CHECK(!ParseDisplaySize("", width, height));
+    CHECK(!ParseDisplaySize("99999999999x1080", width, height));
+}
+
 void TestFullScreen() {
     using namespace solstream;
     const RECT monitor{0, 0, 3024, 1964};
@@ -5029,6 +5254,8 @@ int wmain(int argc, wchar_t** argv) {
     TestTransferNames();
     TestTransferEncoding();
     TestWake();
+    TestDisplayMode();
+    TestDisplayDemand();
     TestFullScreen();
     TestResampler();
     TestAudioTree();

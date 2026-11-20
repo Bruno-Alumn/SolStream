@@ -221,7 +221,25 @@ std::wstring g_notice_detail;
 DriverState g_driver_state = DriverState::Missing;
 bool g_can_install_driver = true;
 bool g_driver_ours = false;
+/// With g_driver_state Ready after a failed set-up: whether the host window
+/// offers Set up for the display as it was left -- not attached, or attached
+/// at a scaling setup did not choose. Read with g_driver_state, not while
+/// painting.
+bool g_ready_offers_set_up = false;
 std::string g_display_result;
+
+/// The host's own test for offering Set up with the driver running, as
+/// main.cpp's status thread makes it: attached at another scaling. Not for a
+/// display that is off the desktop: the host attaches it for each Mac and has
+/// it off otherwise, and its window offers Set up for that only at a scaling
+/// it saw the last time it was attached, which setup cannot see.
+bool DisplayOffersSetUp() {
+    if (VirtualDisplayDevice().empty()) {
+        return false;
+    }
+    const int scale = VirtualDisplayScale();
+    return scale != 0 && scale != kDefaultScalePercent;
+}
 /// What was ticked when Install was pressed, for the summary afterwards.
 InstallOptions g_chosen;
 /// Registered: the elevated half's progress, a DriverStep in wParam.
@@ -1030,10 +1048,12 @@ Screen Describe(const HostStatus& status) {
     // and not while a Mac is streaming, because the installer restarts this
     // host and that would end the stream under whoever is using it.
     //
-    // Except while a Mac is connected without the virtual display: Install
-    // can't be pressed then anyway, and that is exactly when the advisory is
-    // true -- everything on the main display is going to the Mac.
-    if (g_update_found && !(screen.connected && !status.virtual_display)) {
+    // Except while a Mac is connected without the virtual display, or with it
+    // not attached: Install can't be pressed then anyway, and that is exactly
+    // when the advisory is true -- everything on the main display is going to
+    // the Mac.
+    if (g_update_found
+        && !(screen.connected && (!status.virtual_display || status.display_detached))) {
         screen.what = (g_update_downloaded ? L"Update ready to install: " : L"Update available: ")
                     + ToWide(g_update.version);
         screen.mark = Mark::NeedsYou;
@@ -1062,10 +1082,44 @@ Screen Describe(const HostStatus& status) {
         // restart is the one thing left, and Device Manager has nothing to
         // turn on.
         screen.what = L"Restart this PC to finish setting up the virtual display.";
-        screen.why = L"Windows finishes installing it when this PC restarts, and SolStream "
-                     L"sets it up for your Mac after that. Until then it streams your main "
-                     L"display.";
+        screen.why = L"Windows finishes installing it when this PC restarts. Until then "
+                     L"SolStream streams your main display.";
         screen.mark = Mark::NeedsYou;
+        return screen;
+    }
+
+    // Running, and not attached: Windows has it, but not on the desktop, so
+    // there is nothing on it to capture. The host leaves it so when it starts
+    // -- attaching it is a reconfiguration of the whole desktop -- and Set up
+    // is what attaches it.
+    //
+    // No shield on either: with the driver running, Set up attaches and scales
+    // it in this process, which needs the session and not administrator rights.
+    if (status.virtual_display && status.display_detached) {
+        screen.what = L"Streaming your main display.";
+        screen.why = L"SolStream's virtual display is installed, but Windows isn't using it. "
+                     L"Set up attaches it, so the picture fits your Mac and nothing dragged "
+                     L"over the application goes with it.";
+        screen.mark = Mark::NeedsYou;
+        screen.fix = L"Set up";
+        screen.shield = false;
+        screen.action = BannerAction::InstallDriver;
+        return screen;
+    }
+
+    // Attached, at a scaling setup did not choose: Windows attaches a new
+    // display at its own recommended scaling, and nothing but Set up changes
+    // it. Below 200%, text arrives on a Retina Mac smaller than it should be.
+    if (status.virtual_display && status.display_off_scale != 0) {
+        screen.what = L"The virtual display isn't scaled for your Mac.";
+        screen.why = L"It is at " + std::to_wstring(status.display_off_scale)
+                   + L"% scaling, so text on your Mac is a different size from your Mac's "
+                     L"own. Set up sets it to "
+                   + std::to_wstring(kDefaultScalePercent) + L"%, to match a Retina Mac.";
+        screen.mark = Mark::NeedsYou;
+        screen.fix = L"Set up";
+        screen.shield = false;
+        screen.action = BannerAction::InstallDriver;
         return screen;
     }
 
@@ -1465,8 +1519,8 @@ float DrawSetupSummary(float pad, float top, float right) {
         display.mark = restart ? Mark::NeedsYou : Mark::Live;
         display.title = restart ? L"Restart this PC to finish" : L"Virtual display ready";
         display.detail = restart
-            ? L"Windows finishes installing the virtual display when this PC restarts, "
-              L"and SolStream sets it up for your Mac after that."
+            ? L"Windows finishes installing the virtual display when this PC restarts. "
+              L"If SolStream still streams your main display after that, choose Set up."
             : L"Your Mac gets a screen of its own on this PC, so nothing on your monitor "
               L"is streamed.";
     } else if (result.rfind("failed", 0) == 0) {
@@ -1497,8 +1551,14 @@ float DrawSetupSummary(float pad, float top, float right) {
                                   L"says why.";
                 break;
             case DriverState::Ready:
-                // It runs, and the host sets it up again each time it starts.
-                display.detail += L" SolStream tries again each time it starts.";
+                // It runs. The window offers Set up again only while it is not
+                // attached or not at the scaling, and the host no longer sets
+                // it up when it starts, so otherwise the command line is what
+                // is left.
+                display.detail += g_ready_offers_set_up
+                    ? L" Choose Set up in SolStream's window to try again."
+                    : L" To try again, run SolStream.exe --configure-display from a "
+                      L"command prompt run as administrator.";
                 break;
         }
     } else if (g_driver_state == DriverState::Ready) {
@@ -1968,7 +2028,14 @@ void LayoutAndPaint(HWND window) {
     // display: not installed" reads as a broken component; "Display: your main
     // display" reads as a choice, which is what it is — and its dot is the
     // accent that means "works, but there is something to do", not coral.
-    rows.push_back(status.virtual_display
+    rows.push_back(status.virtual_display && status.display_detached
+        ? Row{L"Virtual display", L"not attached", Mark::NeedsYou}
+        : status.virtual_display && status.display_off_scale != 0
+        ? Row{L"Virtual display",
+              (status.display_detail.empty() ? L"—" : status.display_detail) + L" · "
+                  + std::to_wstring(status.display_off_scale) + L"%",
+              Mark::NeedsYou}
+        : status.virtual_display
         ? Row{L"Virtual display",
               status.display_detail.empty() ? L"—" : status.display_detail,
               Mark::Live}
@@ -2508,26 +2575,51 @@ void StartDisplayJob(HWND window) {
     if (g_job_running) {
         return;
     }
+    // A driver that is already running needs only attaching and scaling, and
+    // those need this session rather than administrator rights: no prompt, so
+    // a standard account can do it, and the scaling is written for whoever is
+    // signed in rather than for the administrator who answered a prompt.
+    bool running = false;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        running = g_status.virtual_display;
+    }
     g_job_running = true;
     g_host_job = HostJob::Display;
     g_display_result.clear();
     SetNotice(L"Setting the virtual display up…",
-              L"Waiting for you to allow this in the Windows prompt.", Mark::NeedsYou,
-              false, true);
+              running ? L"Windows may rearrange your windows for a moment."
+                      : L"Waiting for you to allow this in the Windows prompt.",
+              Mark::NeedsYou, false, true);
     InvalidateRect(window, nullptr, FALSE);
 
-    std::thread([window] {
-        // The same elevated steps as setup's tick box: download, check,
+    std::thread([window, running] {
+        // Set up in place when the driver runs; otherwise, or when that fails,
+        // the same elevated steps as setup's tick box: download, check,
         // install, create the device, set it up.
         std::string error;
         std::string display;
-        if (IsElevated()) {
+        if (running && !IsElevated()) {
+            std::string note;
+            if (ConfigureVirtualDisplay(kDefaultCanvasWidth, kDefaultCanvasHeight,
+                                        kDefaultScalePercent, note, error)) {
+                display = DisplayDriverResult(true, false, false, note, error);
+            } else {
+                // What is left needs the rights after all: a driver offering
+                // no size SolStream streams, which only writing its settings
+                // file fixes. So the prompt, as for a missing one.
+                media::Log("[window] setting the display up here failed: %s",
+                           error.c_str());
+                error.clear();
+            }
+        }
+        if (display.empty() && IsElevated()) {
             display = InstallDisplayDriverResult(
                 [window](DriverStep step) {
                     PostMessageW(window, g_progress_message, (WPARAM) step, 0);
                 },
                 window);
-        } else {
+        } else if (display.empty()) {
             const std::wstring progress = L"--install-display-driver --progress-window "
                 + std::to_wstring((unsigned long long) (uintptr_t) window);
             if (RelaunchElevated(progress, error, true)) {
@@ -2553,8 +2645,9 @@ void StartDisplayJob(HWND window) {
         // time the answer's headline is chosen from it.
         PostOwned(window, WM_SOLSTREAM_JOB_DISPLAY, 0, new std::string(display));
         PostDone(window, ok,
-                 ok ? (restart ? L"Windows finishes installing it when this PC restarts, "
-                                 L"and SolStream sets it up for your Mac after that."
+                 ok ? (restart ? L"Windows finishes installing it when this PC restarts. "
+                                 L"If SolStream still streams your main display after "
+                                 L"that, choose Set up."
                                : L"Your Mac gets a screen of its own from the next time it "
                                  L"connects.")
                     : ToWide(display.substr(7)) + L" Then choose Set up again.");
@@ -3239,14 +3332,19 @@ void ShowTrayMenu(HWND window) {
         std::lock_guard<std::mutex> lock(g_mutex);
         state.connected = g_status.connected_clients > 0;
         state.no_token = g_status.pairing_token.empty();
-        state.offer_display = !g_status.virtual_display && !g_status.driver_off
-                           && !g_status.driver_failing && !g_status.driver_restart_pending;
+        // The download is for a missing driver only, so only that needs a PC
+        // SolStream can install it on: one already running is set up in place,
+        // ARM or not.
+        state.offer_display = (!g_status.virtual_display && !g_status.driver_off
+                               && !g_status.driver_failing && !g_status.driver_restart_pending
+                               && CanInstallDisplayDriver())
+                           || (g_status.virtual_display
+                               && (g_status.display_detached || g_status.display_off_scale != 0));
     }
     state.busy = g_job_running || g_update_checking || g_update_installing;
     state.job_running = g_job_running;
     state.streaming = StreamingNow();
     state.update_version = g_update_found ? ToWide(g_update.version) : std::wstring();
-    state.offer_display = state.offer_display && CanInstallDisplayDriver();
     for (const TrayItem& item : TrayMenuItems(state)) {
         if (item.id == 0) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -3543,6 +3641,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 // not one Set up is offered for.
                 if (g_display_result.rfind("failed", 0) == 0) {
                     g_driver_state = CurrentDriverState();
+                    g_ready_offers_set_up = DisplayOffersSetUp();
                 }
             }
             delete text;
@@ -4061,6 +4160,8 @@ static bool SameStatus(const HostStatus& a, const HostStatus& b) {
         && a.tailscale_address == b.tailscale_address && a.driver_off == b.driver_off
         && a.driver_failing == b.driver_failing
         && a.driver_restart_pending == b.driver_restart_pending
+        && a.display_detached == b.display_detached
+        && a.display_off_scale == b.display_off_scale
         && a.windows_too_old == b.windows_too_old;
 }
 
