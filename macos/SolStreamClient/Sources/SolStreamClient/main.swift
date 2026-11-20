@@ -669,21 +669,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agent.resetCallbacks()
         self.agent = agent
 
-        let picker = AppPicker(host: host, onChoose: { [weak self] choice in
-            self?.open(choice: choice, host: host, agent: agent)
-        }, onCancel: { [weak self] in
+        // Off the PC: the session a stream left the picker in is over.
+        let leave: () -> Void = { [weak self] in
             guard let self else { return }
             self.forgetPicker()
             self.agent = nil
             agent.disconnect()
-            // Off the PC: the session a stream left the picker in is over.
             if self.appWindows.isEmpty {
                 MainActor.assumeIsolated { Updater.shared.isStreaming = false }
             }
+        }
+        let picker = AppPicker(host: host, onChoose: { [weak self] choice in
+            self?.open(choice: choice, host: host, agent: agent)
+        }, onCancel: { [weak self] in
+            leave()
+            guard let self else { return }
             if self.appWindows.isEmpty && !self.testMode {
                 self.showConnectWindow()
             }
         })
+        // The red button quits rather than going back: Back and Escape already
+        // go back to the PC list. With a stream still open somewhere, it only
+        // leaves the picker, as before.
+        picker.onCloseButton = { [weak self] in
+            leave()
+            guard let self else { return }
+            if self.appWindows.isEmpty && !self.testMode {
+                NSApp.terminate(nil)
+            }
+        }
         picker.agent = agent
         picker.onAddToDock = { [weak self, weak agent, weak picker] choice in
             guard let self, let agent else { return }
