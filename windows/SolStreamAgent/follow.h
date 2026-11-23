@@ -21,8 +21,9 @@
 // Never on a process id alone: a browser being streamed is the same process as
 // every other browser window the person at the PC has open. Never after input
 // at the PC itself, newer than the Mac's: that window is theirs, and it must
-// stay on their monitor. Never the shell, the host itself, a tooltip, or
-// Earshot, which the person relies on staying where it is.
+// stay on their monitor. Never the host itself or Earshot, which the person
+// relies on staying where it is; and, unless they are owned, never the shell
+// or a tooltip -- the Windows key the Mac sends opens Start.
 //
 // Header-only and with nothing to call, so the test program can check it.
 
@@ -171,7 +172,8 @@ struct FollowFacts {
     bool press_was_on_held = false;
     /// GetTickCount64 now, when the window was first seen shown, when the
     /// Mac's latest press went in (0 for never), and when input at the PC
-    /// itself last did (LocalInputAt; 0 for none).
+    /// itself last did as of the window's first sighting (LocalInputAt; 0 for
+    /// none).
     uint64_t now = 0;
     uint64_t shown_at = 0;
     uint64_t mac_press_at = 0;
@@ -180,17 +182,28 @@ struct FollowFacts {
 
 /// Whether a newly shown window follows a held one, and why.
 inline FollowReason DecideFollow(const FollowFacts& f) {
-    if (!f.top_level || f.held || f.own_process || f.shell || f.earshot || f.tooltip) {
+    if (!f.top_level || f.held || f.own_process || f.earshot) {
         return FollowReason::None;
     }
-    // Input at the PC itself since the Mac's last press, and recent enough to
-    // have opened this: the window is the PC user's.
+    // Input at the PC itself since the Mac's last press, in the moments before
+    // this window was shown: the window is the PC user's. Measured from when
+    // it was shown, not from now, so the answer does not change as the
+    // watcher looks again -- and `local_input_at` is what was known when it
+    // was first seen, so input after it was shown takes nothing away.
     if (f.local_input_at != 0 && f.local_input_at >= f.mac_press_at
-        && f.now - f.local_input_at <= kFollowAfterMacInputMs) {
+        && f.local_input_at <= f.shown_at + kLocalInputSlackMs
+        && (f.shown_at > f.local_input_at ? f.shown_at - f.local_input_at : 0)
+               <= kFollowAfterMacInputMs) {
         return FollowReason::None;
     }
+    // Windows' own word that it belongs to the application: a credential
+    // prompt or a sign-in from a broker process, a palette, a menu that
+    // reaches past its window.
     if (f.owner_reaches_held) {
         return FollowReason::Owned;
+    }
+    if (f.shell || f.tooltip) {
+        return FollowReason::None;
     }
     // A window already showing before the press was not opened by it.
     if (f.foreground && f.press_was_on_held && !f.tool_window && f.mac_press_at != 0
@@ -204,7 +217,8 @@ inline FollowReason DecideFollow(const FollowFacts& f) {
 /// Whether nothing more can make this window follow: a window that might yet
 /// take the foreground is worth another look until its time runs out.
 inline bool NeverFollows(const FollowFacts& f) {
-    return f.held || f.own_process || f.shell || f.earshot || f.tooltip;
+    return f.held || f.own_process || f.earshot
+        || (!f.owner_reaches_held && (f.shell || f.tooltip));
 }
 
 /// Whether `inner` lies wholly inside `outer`: an owned pop-up -- a menu, a

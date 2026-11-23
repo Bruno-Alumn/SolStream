@@ -2918,6 +2918,9 @@ std::wstring ProcessImagePath(DWORD pid) {
 void FollowNewWindows() {
     struct Pending {
         ULONGLONG shown_at = 0;
+        /// The PC's own input as known when it was first seen: input after
+        /// that did not open it.
+        ULONGLONG local_input_at = 0;
         bool looked_up = false;
         std::wstring image;
     };
@@ -3031,6 +3034,7 @@ void FollowNewWindows() {
         if (pending.size() < 32 && followers.count(window) == 0) {
             Pending first;
             first.shown_at = at;
+            first.local_input_at = local_input_at;
             pending.emplace(window, first);  // the first sighting stands
         }
     }
@@ -3083,7 +3087,7 @@ void FollowNewWindows() {
         facts.now = now;
         facts.shown_at = seen.shown_at;
         facts.mac_press_at = press_at;
-        facts.local_input_at = local_input_at;
+        facts.local_input_at = seen.local_input_at;
         const solstream::FollowReason reason = solstream::DecideFollow(facts);
         if (reason == solstream::FollowReason::None) {
             if (solstream::NeverFollows(facts)) {

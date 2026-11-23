@@ -267,6 +267,7 @@ names none of them and receives none. The ones there are:
 | `fileOffer` | `{"type":"fileOffer","id":N,"name":"…","size":S}`: a file sent with Send to Mac, fetched with `download` |
 | `fullScreen` | `{"type":"fullScreen","id":N,"on":bool}`: the app went full screen on the PC, or came out of it |
 | `inputBlocked` | `{"type":"inputBlocked","reason":"…","app":"…"}`: the Mac's input can't reach the PC. `reason` is `secureDesktop` (a UAC prompt, Ctrl+Alt+Del or the lock screen), `screenSaver`, or `elevated`, with `app` naming the program in front that runs as administrator. An empty `reason` means input works again. Sent on change, checked about twice a second |
+| `windowOpened` | `{"type":"windowOpened","id":N,"parent":P,"pid":…,"owned":bool,"x","y","w","h","title":"…"}`: the streamed window `P` has another window with it. `owned` is true when `P` owns it, and false when it came to the front just after the Mac's click or key went into `P`. `x,y,w,h` is its client area, as in `windows`. The host leaves it where it is. When it goes before the Mac has taken it with `place`, `lock` or `topmost`, the host sends `closed` with its id. See `follow.h` for which windows count |
 
 `displays[].name` is the `DXGI_OUTPUT_DESC.DeviceName` form (`\\.\DISPLAY1`) —
 the same string the media session names, so the capture display

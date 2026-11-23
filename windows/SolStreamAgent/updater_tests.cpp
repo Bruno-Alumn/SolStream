@@ -1816,21 +1816,43 @@ void TestFollowDecision() {
     CHECK(DecideFollow(tip) == FollowReason::None);
     CHECK(NeverFollows(tip));
 
-    // Input at the PC since the Mac's press: the window is the PC user's,
-    // owned or not.
+    // Input at the PC since the Mac's press, just before the window showed:
+    // the window is the PC user's, owned or not.
     FollowFacts local = opened;
     local.local_input_at = 99400;
     CHECK(DecideFollow(local) == FollowReason::None);
+    CHECK(!NeverFollows(local));
     FollowFacts local_owned = owned;
-    local_owned.local_input_at = 99900;
+    local_owned.local_input_at = 99300;
     CHECK(DecideFollow(local_owned) == FollowReason::None);
-    // Input at the PC before the Mac's press, or long ago, decides nothing.
+    // And it stays theirs however long the watcher goes on looking: the
+    // veto is measured from when the window showed, not from now.
+    for (const uint64_t later : {100000ull, 102500ull, 103000ull, 110000ull}) {
+        FollowFacts still = local_owned;
+        still.now = later;
+        CHECK(DecideFollow(still) == FollowReason::None);
+    }
+    // Input at the PC before the Mac's press, long before the window showed,
+    // or only after it showed, decides nothing.
     FollowFacts before = opened;
     before.local_input_at = 98000;
     CHECK(DecideFollow(before) == FollowReason::OpenedByMac);
     FollowFacts stale = owned;
-    stale.local_input_at = stale.now - kFollowAfterMacInputMs - 1;
+    stale.local_input_at = stale.shown_at - kFollowAfterMacInputMs - 1;
     CHECK(DecideFollow(stale) == FollowReason::Owned);
+    FollowFacts after = owned;
+    after.local_input_at = after.shown_at + kLocalInputSlackMs + 1;
+    CHECK(DecideFollow(after) == FollowReason::Owned);
+
+    // The shell and tooltips are turned away only when nothing owns them:
+    // an owned one is Windows saying it belongs to the application.
+    FollowFacts owned_tip = owned;
+    owned_tip.tooltip = true;
+    CHECK(DecideFollow(owned_tip) == FollowReason::Owned);
+    CHECK(!NeverFollows(owned_tip));
+    FollowFacts owned_shell = owned;
+    owned_shell.shell = true;
+    CHECK(DecideFollow(owned_shell) == FollowReason::Owned);
 
     // Never these, whatever opened them.
     const auto refused = [](FollowFacts f) {
