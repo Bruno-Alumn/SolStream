@@ -5,7 +5,7 @@ import DesignSystem
 @testable import SolStreamClient
 
 /// Quitting an open window's app from the picker: its row's menu, VoiceOver
-/// and ⌘⌫ ask for it, an installed app offers none, and a row being quit
+/// and ⌘⌫ in the list ask for it, an installed app offers none, and a row being quit
 /// still goes when the PC's next list leaves it out.
 ///
 /// Built off screen throughout, as `AppPickerTests` is.
@@ -101,8 +101,9 @@ final class AppPickerQuitTests: XCTestCase {
         XCTAssertEqual(quits.count, 1, "an installed app has nothing to quit")
     }
 
-    /// In the field, ⌘⌫ edits what was typed; only an empty field passes it on.
-    func testCommandDeleteInTheFieldQuitsOnlyWithNothingTyped() throws {
+    /// In the field, ⌘⌫ is the field's, typed in or empty: a second press
+    /// after clearing the query must never quit an app.
+    func testCommandDeleteInTheFieldNeverQuits() throws {
         let picker = makePicker()
         let window = picker.window
         let field = try XCTUnwrap(find(DS.Field.self, in: window.contentView))
@@ -112,11 +113,9 @@ final class AppPickerQuitTests: XCTestCase {
 
         editor.insertText("note")
         XCTAssertFalse(picker.control(field, textView: editor, doCommandBy: command))
-        XCTAssertTrue(quits.isEmpty)
-
         field.stringValue = ""
-        XCTAssertTrue(picker.control(field, textView: editor, doCommandBy: command))
-        XCTAssertEqual(quits.map(\.title), ["Untitled - Notepad"])
+        XCTAssertFalse(picker.control(field, textView: editor, doCommandBy: command))
+        XCTAssertTrue(quits.isEmpty)
     }
 
     /// The row being quit is marked and is neither opened nor quit again, and

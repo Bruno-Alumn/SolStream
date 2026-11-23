@@ -2905,13 +2905,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quit(target, force: true)
     }
 
-    /// Asked before anything is force quit. After a refusal, the PC's reason
-    /// comes first.
-    static func forceQuitAlert(name: String, reason: String? = nil) -> NSAlert {
+    /// Asked before anything is force quit, from a stream or the picker.
+    static func forceQuitAlert(name: String) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Force quit \u{201C}\(name)\u{201D} on the PC?"
-        alert.informativeText = (reason.map { "\($0)\n\n" } ?? "")
-            + "Anything not saved in it will be lost. Use this only "
+        alert.informativeText = "Anything not saved in it will be lost. Use this only "
             + "when the app has stopped responding."
         alert.addButton(withTitle: "Force Quit")
         alert.addButton(withTitle: "Cancel")
@@ -2919,19 +2917,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Quit from the picker's row. As the stream's Quit does, except that it
-    /// all happens on the picker: the row says it is quitting, a refusal
-    /// offers Force Quit as a sheet, and what still fails goes on the status
-    /// line. The row goes when the PC's next list leaves the window out.
+    /// all happens on the picker: the row says it is quitting, Force Quit
+    /// asks first in a sheet, and a refusal goes on the status line. No
+    /// Force Quit is offered after one: the PC refuses that in the same
+    /// cases. The row goes when the PC's next list leaves the window out.
     private func quitFromPicker(_ window: RemoteWindow, force: Bool, agent: AgentConnection,
                                 picker: AppPicker) {
-        if force {
-            confirmForceQuit(window, reason: nil, picker: picker) { [weak self, weak agent, weak picker] in
-                guard let agent, let picker else { return }
+        guard force else {
+            sendQuit(window, force: false, agent: agent, picker: picker)
+            return
+        }
+        // One sheet at a time: a token sheet already up comes first.
+        guard picker.window.attachedSheet == nil else { return }
+        Self.forceQuitAlert(name: window.title)
+            .beginSheetModal(for: picker.window) { [weak self, weak agent, weak picker] response in
+                guard response == .alertFirstButtonReturn, let agent, let picker else { return }
                 self?.sendQuit(window, force: true, agent: agent, picker: picker)
             }
-        } else {
-            sendQuit(window, force: false, agent: agent, picker: picker)
-        }
     }
 
     private func sendQuit(_ window: RemoteWindow, force: Bool, agent: AgentConnection,
@@ -2949,37 +2951,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             Log.info("[quit] the PC refused: \(reason)")
-            guard let picker else { return }
-            // Forced already, or the PC not there to ask: nothing more to offer
-            // than why.
-            // The connection's failure goes when it comes back; see
+            // A lost connection's failure goes when it comes back; see
             // `connectionIsBack`.
-            guard let agent, agent.isConnected else {
-                picker.showFailure(reason, isConnection: true)
-                return
-            }
-            guard !force else {
-                picker.showFailure(reason)
-                return
-            }
-            self?.confirmForceQuit(window, reason: reason, picker: picker) { [weak self, weak agent, weak picker] in
-                guard let agent, let picker else { return }
-                self?.sendQuit(window, force: true, agent: agent, picker: picker)
-            }
+            picker?.showFailure(reason, isConnection: agent?.isConnected != true)
         }
-    }
-
-    private func confirmForceQuit(_ window: RemoteWindow, reason: String?, picker: AppPicker,
-                                  then forceQuit: @escaping () -> Void) {
-        // One sheet at a time; a token sheet already up says why, if anything.
-        guard picker.window.attachedSheet == nil else {
-            if let reason { picker.showFailure(reason) }
-            return
-        }
-        Self.forceQuitAlert(name: window.title, reason: reason)
-            .beginSheetModal(for: picker.window) { response in
-                if response == .alertFirstButtonReturn { forceQuit() }
-            }
     }
 
     /// Ask the PC to quit it. Its window closes on the Mac by itself once the

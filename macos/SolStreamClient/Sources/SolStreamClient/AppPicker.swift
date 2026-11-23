@@ -1042,7 +1042,8 @@ extension AppPicker: NSMenuDelegate {
             menu.addItem(item)
         }
         // Quit, and Force Quit under ⌥, as the stream's own menus have them.
-        // ⌘⌫ is shown, not handled here: the list and the field take it.
+        // ⌘⌫ is shown, not handled here: the list takes it. The search field
+        // keeps it for its text, so a second press never quits an app.
         if onQuit != nil, entry.isRunning {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
             let quit = NSMenuItem(title: Self.quitTitle(entry.title, force: false),
@@ -1107,12 +1108,6 @@ extension AppPicker: NSTextFieldDelegate {
             return true
         case #selector(NSResponder.moveUp(_:)):
             moveSelection(by: -1)
-            return true
-        case #selector(NSResponder.deleteToBeginningOfLine(_:)):
-            // ⌘⌫ takes back what was typed; with nothing typed, it quits the
-            // selected row's app, as it does with the list focused.
-            guard searchField.stringValue.isEmpty, onQuit != nil else { return false }
-            if !Self.keyIsRepeating { quitSelected() }
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             if searchField.stringValue.isEmpty {
