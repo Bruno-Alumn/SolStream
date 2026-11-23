@@ -2952,7 +2952,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let picker else { return }
             // Forced already, or the PC not there to ask: nothing more to offer
             // than why.
-            guard !force, let agent, agent.isConnected else {
+            // The connection's failure goes when it comes back; see
+            // `connectionIsBack`.
+            guard let agent, agent.isConnected else {
+                picker.showFailure(reason, isConnection: true)
+                return
+            }
+            guard !force else {
                 picker.showFailure(reason)
                 return
             }
