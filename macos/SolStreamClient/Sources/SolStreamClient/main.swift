@@ -94,6 +94,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// While `presentApps` opens its windows one by one, the tiles of those
     /// not open yet; see there.
     private var unopenedTiles: [CGRect] = []
+    /// The picker Add App put up over the running stream, and the apps it
+    /// listed; see `showAddPicker`. Apart from `picker`, which is the one a
+    /// stream starts from and goes back to.
+    private var addPicker: AppPicker?
+    private var addPickerApps: [RemoteApp] = []
+    /// The app being started on the PC to be added to the stream, by name,
+    /// until the PC answers. One at a time: see `add`.
+    private var addingLaunch: String?
+    /// Counts the streams `presentApps` opened, so an add answered late can
+    /// tell whether the stream it was for is still the one on screen.
+    private var streamsOpened = 0
     /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
     private weak var tokenPromptParent: NSWindow?
@@ -441,13 +452,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (`openPending`) and opens it as a click on its row would.
     private func open(link: AppLink) {
         NSApp.activate(ignoringOtherApps: true)
-        if let streamLink, streamLink.likelySameApp(as: link), let window = appWindows.first?.window {
+        // Whichever window it is: one added beside the first is on screen
+        // too, and opened again it was added twice.
+        if let window = appWindows.first(where: { $0.link?.likelySameApp(as: link) == true })?.window {
             Log.info("[app] \"\(link.name)\" is on screen already; bringing it forward")
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
             return
         }
         Log.info("[app] asked to open \"\(link.name)\" on \(link.host)")
+        if let addPicker, !appWindows.isEmpty, let agent, let host = streamHost,
+           AppLink.sameHost(host, link.host) {
+            // Add App is up: the launcher is what to add, beside the rest.
+            addFromLink(link, host: host, agent: agent, picker: addPicker)
+            return
+        }
         if !appWindows.isEmpty, AppLink.sameHost(streamHost, link.host) {
             // One application at a time, as Switch App: the stream closes and
             // the picker comes back over the same connection, and opens this.
@@ -645,15 +664,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func addStreamToDock() {
-        guard let streamLink, let agent else { return }
+        guard let (link, linked) = dockTarget, let agent else { return }
         // The icon from the window the link was opened for, while it is still
         // streamed; another app's would be the wrong one, and with none the
         // shortcut's own is used.
-        let windowID = linkedWindowID.flatMap { id in
-            appWindows.contains { $0.remoteWindowID == id } ? id : nil
-        }
-        addToDock(streamLink, windowID: windowID, agent: agent,
+        addToDock(link, windowID: linked?.remoteWindowID, agent: agent,
                   over: appWindows.first { $0.window?.isKeyWindow == true }?.window)
+    }
+
+    /// What Add to Dock adds: the app of the window in front -- or of the
+    /// window a dialog in front belongs to -- and that window. With neither
+    /// naming one, the app the stream was opened for.
+    private var dockTarget: (link: AppLink, window: AppWindow?)? {
+        if let front = frontAppWindow {
+            let owner = front.ownerID.flatMap { id in appWindows.first { $0.remoteWindowID == id } }
+            for candidate in [front, owner].compactMap({ $0 }) {
+                if let link = candidate.link { return (link, candidate) }
+            }
+        }
+        guard let streamLink else { return nil }
+        return (streamLink, appWindows.first { $0.remoteWindowID == linkedWindowID })
     }
 
     private func showConnectWindow() {
@@ -1023,17 +1053,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Start `app` on the PC and open the window it shows: on a stream of its
+    /// own from the picker, or, given `opened`, however that says -- Add App
+    /// adds it to the stream running. `busy` and `failed` say how it is going
+    /// on the picker unless given.
     private func launch(app: RemoteApp, host: String, agent: AgentConnection,
-                        knownPIDs: Set<Int>) {
+                        knownPIDs: Set<Int>, busy: ((String) -> Void)? = nil,
+                        opened: ((RemoteWindow) -> Void)? = nil,
+                        failed: ((String) -> Void)? = nil) {
         guard isCurrent(agent) else { return }
-        picker?.showBusy("Starting \(app.name) on \(pcLabel(host))…")
+        let opened = opened ?? { [weak self] in self?.attach($0, host: host, agent: agent) }
+        let failed = failed ?? { [weak self] in self?.failOpen($0, for: agent) }
+        let starting = "Starting \(app.name) on \(pcLabel(host))…"
+        if let busy { busy(starting) } else { picker?.showBusy(starting) }
         agent.launch(path: app.path) { [weak self] id, trouble in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let trouble {
                     // Nothing to look for: no window can have come of it yet.
-                    self.failOpen(Self.launchTroubleText(trouble, app: app.name, host: self.pcLabel(host)),
-                                  for: agent)
+                    failed(Self.launchTroubleText(trouble, app: app.name, host: self.pcLabel(host)))
                     return
                 }
                 guard let id else {
@@ -1044,14 +1082,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         DispatchQueue.main.async {
                             guard let existing = LaunchMatch.afterLaunch(
                                 app.name, in: windows, knownPIDs: knownPIDs) else {
-                                self.failOpen("\(app.name) didn't open a window. If it opened on the PC's own "
-                                              + "screen, pick its Open window row; otherwise try again.",
-                                              for: agent)
+                                failed("\(app.name) didn't open a window. If it opened on the PC's own "
+                                       + "screen, pick its Open window row; otherwise try again.")
                                 return
                             }
                             Log.info("[app] \"\(app.name)\" was already open; "
                                      + "attaching to \"\(existing.title)\"")
-                            self.attach(existing, host: host, agent: agent)
+                            opened(existing)
                         }
                     }
                     return
@@ -1063,12 +1100,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 agent.windows { windows in
                     DispatchQueue.main.async {
                         guard let target = windows.first(where: { $0.id == id }) else {
-                            self.failOpen("\(app.name) closed its first window, a splash or "
-                                          + "update screen. Once it's ready, pick it from the open "
-                                          + "windows.", for: agent)
+                            failed("\(app.name) closed its first window, a splash or "
+                                   + "update screen. Once it's ready, pick it from the open "
+                                   + "windows.")
                             return
                         }
-                        self.attach(target, host: host, agent: agent)
+                        opened(target)
                     }
                 }
             }
@@ -1562,6 +1599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let session = StreamSession(host: host, config: config, session: media)
         session.retryReopensApp = streamLink != nil
         self.session = session
+        streamsOpened += 1
         stayAwake.hold()
         streamConfig = config
         streamDisplay = display
@@ -1583,7 +1621,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // window is placed as it is made, and the first one, with nothing
             // beside it yet, would otherwise be placed over the others' tiles.
             unopenedTiles = Array(tiles.dropFirst(index + 1))
-            addAppWindow(target: target, tile: tiles[index])
+            addAppWindow(target: target, tile: tiles[index],
+                         link: target.id == linkedWindowID ? streamLink : nil)
         }
         unopenedTiles = []
 
@@ -1745,8 +1784,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The stream's session, connection and display must be set; `presentApps`
     /// sets them before its first window, and `addToStream` checks them.
     /// - Parameter whenPlaced: see `AppWindow.show`.
+    /// - Parameter link: the app it is opened for; see `AppWindow.link`.
     @discardableResult
-    private func addAppWindow(target: RemoteWindow, tile: CGRect,
+    private func addAppWindow(target: RemoteWindow, tile: CGRect, link: AppLink? = nil,
                               whenPlaced: Bool = false, quietly: Bool = false) -> AppWindow? {
         guard let session, let agent, let host = streamHost, let display = streamDisplay else {
             Log.error("[app] no stream to open \"\(target.title)\" on")
@@ -1762,6 +1802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return self.appWindows.filter { $0.remoteWindowID != target.id }.map(\.occupied)
                 + self.unopenedTiles
         }
+        appWindow.link = link
         appWindow.onPlaced = { [weak self] in
             self?.neighboursChanged(except: target.id)
         }
@@ -1781,6 +1822,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // whole display, as it always had.
             self.neighboursChanged()
             guard self.appWindows.isEmpty else { return }
+            // Nothing left to add to: the picker the stream goes back to
+            // takes its place.
+            self.closeAddPicker()
             // End the media session by asking, not by dropping the socket.
             // The UDP BYE alone only sets `running = false` on the host: the
             // capture, encoder, sender and receive threads, the socket and
@@ -1817,9 +1861,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // does for a launcher: Try Again said it would, and left the app to
         // be found and clicked again. A whole display, with no app to name,
         // goes back to the list.
-        appWindow.onRetry = { [weak self] in
+        appWindow.onRetry = { [weak self, weak appWindow] in
             guard let self else { return }
-            if let link = self.streamLink {
+            // The app of the window whose Try Again it was, when it has one:
+            // each window says the stream has ended, and the one clicked is
+            // the one wanted back. Otherwise the app the stream was opened
+            // for, as before.
+            if let own = appWindow?.link, let appWindow {
+                Log.info("[app] retry after a lost stream; opening \"\(own.name)\" again")
+                self.pendingOpen = own
+                self.pendingWindowID = appWindow.remoteWindowID
+            } else if let link = self.streamLink {
                 Log.info("[app] retry after a lost stream; opening \"\(link.name)\" again")
                 self.pendingOpen = link
                 // The window the stream was opened for, not whichever is
@@ -2476,11 +2528,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///   room is only logged, never said in a note.
     /// - Returns: the window opened for it, if one was.
     @discardableResult
-    func addToStream(_ target: RemoteWindow, quietly: Bool = false) -> AppWindow? {
-        let gate = Self.addGate(streaming: session != nil && agent != nil && streamDisplay != nil
-                                    && !appWindows.isEmpty,
-                                recovering: recoveringMedia, connectionLost: connectionLostShown,
-                                ended: streamEnded, pictureLive: pictureLive)
+    func addToStream(_ target: RemoteWindow, quietly: Bool = false,
+                     link: AppLink? = nil) -> AppWindow? {
+        let gate = currentAddGate
         guard case .open(let hidesCard) = gate, let display = streamDisplay else {
             if case .refuse(let reason) = gate {
                 Log.error("[app] not adding \"\(target.title)\": \(reason)")
@@ -2501,20 +2551,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.error("[app] not adding \"\(target.title)\": \(appWindows.count) windows "
                       + "are streamed, the most the PC holds")
             // Not for a window the PC opened by itself: nobody asked for it.
-            if !quietly {
-                frontAppWindow?.tell("SolStream can show \(TileAllocator.maxWindows) windows from "
-                                     + "a PC at once. Close one to add \(target.title).")
+            if !quietly, let text = Self.refusal(.full, adding: target.title) {
+                frontAppWindow?.tell(text)
             }
             return nil
         case .noRoom:
             Log.error("[app] not adding \"\(target.title)\": no room left on the capture display")
-            if !quietly {
-                frontAppWindow?.tell("There's no room left on the PC's display for \(target.title). "
-                                     + "Close a window or make one smaller, then try again.")
+            if !quietly, let text = Self.refusal(.noRoom, adding: target.title) {
+                frontAppWindow?.tell(text)
             }
             return nil
         case .add(let tile):
-            guard let appWindow = addAppWindow(target: target, tile: tile,
+            guard let appWindow = addAppWindow(target: target, tile: tile, link: link,
                                                whenPlaced: quietly && hidesCard,
                                                quietly: quietly) else { return nil }
             // The windows already there may no longer grow into what this
@@ -2529,6 +2577,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if hidesCard { appWindow.hideStatus() }
             return appWindow
         }
+    }
+
+    /// `addGate`, for the stream as it is now.
+    private var currentAddGate: AddGate {
+        Self.addGate(streaming: session != nil && agent != nil && streamDisplay != nil
+                         && !appWindows.isEmpty,
+                     recovering: recoveringMedia, connectionLost: connectionLostShown,
+                     ended: streamEnded, pictureLive: pictureLive)
     }
 
     /// Whether a window may be added to the stream now, and whether its card
@@ -2547,6 +2603,287 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !connectionLost, !ended else { return .refuse("the stream has ended") }
         guard !recovering else { return .refuse("the stream is being restarted") }
         return .open(hidesCard: pictureLive)
+    }
+
+    /// What a window not added says, for `name`; nil when it is added, or is
+    /// on screen already and only comes forward.
+    static func refusal(_ addition: StreamAddition, adding name: String) -> String? {
+        switch addition {
+        case .full:
+            return "SolStream can show \(TileAllocator.maxWindows) windows from a PC at once. "
+                + "Close one to add \(name)."
+        case .noRoom:
+            return "There's no room left on the PC's display for \(name). "
+                + "Close a window or make one smaller, then try again."
+        case .add, .alreadyStreamed:
+            return nil
+        }
+    }
+
+    // MARK: - Add App
+
+    /// Whether Add App may be chosen: over a stream windows can be added to,
+    /// and not while an app is being started on the PC for it already -- the
+    /// PC answers one launch at a time, and a second would wait behind it.
+    static func addAppAllowed(gate: AddGate, launching: Bool) -> Bool {
+        guard case .open = gate else { return false }
+        return !launching
+    }
+
+    /// The PC's open windows Add App lists: not the ones streamed already,
+    /// nor the dialogs shown over them. Pure, for the tests.
+    static func addable(_ windows: [RemoteWindow], streamed: Set<UInt64>) -> [RemoteWindow] {
+        windows.filter { !streamed.contains($0.id) }
+    }
+
+    /// Whether there is anywhere for a window not seen yet -- the one an app
+    /// is about to be started for -- on a stream already covering `streamed`.
+    /// Asked before the launch, so no app is started on the PC with no room
+    /// for it here. Pure, for the tests.
+    static func roomForAnother(streamed: [CGRect], canvas: CGRect) -> StreamAddition {
+        guard streamed.count < TileAllocator.maxWindows else { return .full }
+        guard let frame = TileAllocator.allocate(canvas: canvas, inUse: streamed,
+                                                 wanted: TileAllocator.minimumSize) else {
+            return .noRoom
+        }
+        return .add(frame)
+    }
+
+    /// Why nothing can be added now, said for the person who asked; nil when
+    /// something can. With `target`, for that window in particular.
+    private func addRefusal(for target: RemoteWindow?) -> String? {
+        guard case .open = currentAddGate, let display = streamDisplay else {
+            return recoveringMedia
+                ? "The stream is restarting. Add the app once the picture is back."
+                : "The stream has ended, so nothing can be added to it."
+        }
+        let canvas = Self.displayRect(display)
+        guard let target else {
+            return Self.refusal(Self.roomForAnother(streamed: appWindows.map(\.occupied),
+                                                    canvas: canvas),
+                                adding: "another window")
+        }
+        let streamed = appWindows.map { (id: $0.remoteWindowID, occupied: $0.occupied) }
+        return Self.refusal(Self.addition(of: target, to: streamed, canvas: canvas),
+                            adding: target.title)
+    }
+
+    /// Add App: the picker for the PC being streamed, over the stream, to add
+    /// a window beside the rest. Back puts it away and changes nothing.
+    @objc private func addApp() {
+        if let addPicker {
+            addPicker.show()
+            return
+        }
+        guard Self.addAppAllowed(gate: currentAddGate, launching: addingLaunch != nil),
+              let host = streamHost, let agent else { return }
+        showAddPicker(host: host, agent: agent)
+    }
+
+    /// Asks the PC for its lists again, while Add App's picker is up.
+    private var refillAddPicker: (() -> Void)?
+
+    /// Not `showPicker`, which takes the connection over for a picker a
+    /// stream starts from: its callbacks would replace the stream's, and
+    /// what is picked there opens a media session of its own, which ends
+    /// this one. This one only lists, and hands what is picked to `add`.
+    private func showAddPicker(host: String, agent: AgentConnection) {
+        let picker = AppPicker(host: host, adding: true, onChoose: { [weak self, weak agent] choice in
+            guard let self, let agent, let picker = self.addPicker else { return }
+            self.add(choice, host: host, agent: agent,
+                     link: AppLink.of(choice, host: host, apps: self.addPickerApps),
+                     report: self.report(on: picker))
+        }, onCancel: { [weak self] in
+            self?.closeAddPicker()
+        })
+        picker.onCloseButton = { [weak self] in self?.closeAddPicker() }
+        picker.agent = agent
+        picker.onAddToDock = { [weak self, weak agent, weak picker] choice in
+            guard let self, let agent else { return }
+            var windowID: UInt64?
+            if case .running(let window) = choice { windowID = window.id }
+            self.addToDock(AppLink.of(choice, host: host, apps: self.addPickerApps),
+                           windowID: windowID, agent: agent, over: picker?.window)
+        }
+        picker.onQuit = { [weak self, weak agent, weak picker] window, force in
+            guard let self, let agent, let picker else { return }
+            self.quitFromPicker(window, force: force, agent: agent, picker: picker)
+        }
+        picker.window.title = pcLabel(host)
+        addPicker = picker
+        addPickerApps = []
+        picker.show()
+
+        // Both lists, as the other picker asks for them: the Start Menu once,
+        // and the windows again whenever the PC says one opened or closed.
+        // Only the newest fill is shown; an older one that brought the Start
+        // Menu still leaves it for the list on screen.
+        var latestFill = 0
+        var shownWindows: [RemoteWindow] = []
+        let fill: (_ includeApps: Bool) -> Void = { [weak self, weak agent, weak picker] includeApps in
+            guard let agent else { return }
+            latestFill += 1
+            let mine = latestFill
+            agent.windows { windows in
+                let present: ([RemoteApp]) -> Void = { apps in
+                    DispatchQueue.main.async {
+                        guard let self, let picker, self.addPicker === picker else { return }
+                        if !apps.isEmpty { self.addPickerApps = apps }
+                        if mine == latestFill {
+                            let streamed = Set(self.appWindows.flatMap {
+                                [$0.remoteWindowID] + $0.ownedWindows.map(\.remoteWindowID)
+                            })
+                            shownWindows = Self.addable(windows, streamed: streamed)
+                        } else if apps.isEmpty {
+                            return
+                        }
+                        picker.present(windows: shownWindows, apps: self.addPickerApps)
+                    }
+                }
+                if includeApps { agent.apps(completion: present) } else { present([]) }
+            }
+        }
+        refillAddPicker = { fill(false) }
+        // The stream asks for no lists of its own (see `presentApps`), so
+        // this is the picker's until it is put away.
+        agent.onWindowsChanged = { [weak agent] in
+            // Not behind a launch: the list would come only once the launch
+            // is answered, and the picker holds its list while one is out.
+            guard agent?.isLaunching != true else { return }
+            fill(false)
+        }
+        fill(true)
+    }
+
+    /// Put Add App's picker away. The stream goes on as it was; an app being
+    /// started from it is still added once it has a window (see `add`).
+    private func closeAddPicker() {
+        guard let picker = addPicker else { return }
+        addPicker = nil
+        addPickerApps = []
+        refillAddPicker = nil
+        picker.onCloseButton = nil
+        picker.close()
+        agent?.onWindowsChanged = nil
+    }
+
+    /// How an add says how it is going.
+    struct AddReport {
+        let busy: (String) -> Void
+        let failed: (String) -> Void
+        /// Just before the window opens, so that it, not the picker, ends up
+        /// in front.
+        let adding: () -> Void
+    }
+
+    /// On Add App's picker while it is up; once it has been put away, a
+    /// failure is said on the stream window in front.
+    private func report(on picker: AppPicker) -> AddReport {
+        AddReport(busy: { [weak self, weak picker] text in
+            guard let self, let picker, self.addPicker === picker else { return }
+            picker.showBusy(text)
+        }, failed: { [weak self, weak picker] text in
+            guard let self else { return }
+            Log.error("[app] not added: \(text)")
+            if let picker, self.addPicker === picker {
+                picker.clearBusy()
+                picker.showFailure(text)
+                self.refillAddPicker?()
+            } else {
+                self.frontAppWindow?.tell(text)
+            }
+        }, adding: { [weak self] in
+            self?.closeAddPicker()
+        })
+    }
+
+    /// Add `choice` to the stream running: an open window as it is; an
+    /// installed app once it has been started and has a window, or the
+    /// window it has open already. Never a stream of its own.
+    ///
+    /// One launch at a time. The PC answers it only once the app has a
+    /// window, up to half a minute, and answers nothing else on the channel
+    /// meanwhile: the stream windows hold what can wait until then (see
+    /// `AgentConnection.isLaunching`), and their picture, which goes another
+    /// way, carries on. The picker put away meanwhile leaves the launch going,
+    /// and the app's window is still added when it comes: it has been started
+    /// on the PC either way, and left there it would be on a display nobody
+    /// can see.
+    private func add(_ choice: AppPicker.Choice, host: String, agent: AgentConnection,
+                     link: AppLink, report: AddReport) {
+        // Before anything is asked of the PC: an app started with no room for
+        // it here would be left running there for nothing.
+        if let refusal = addRefusal(for: nil) { return report.failed(refusal) }
+        // The stream asked for, not whichever is running when the PC answers:
+        // Switch App keeps the connection, and the next stream is another.
+        let stream = streamsOpened
+        let place: (RemoteWindow) -> Void = { [weak self] target in
+            guard let self, self.agent === agent, self.streamsOpened == stream else {
+                Log.info("[app] not adding \"\(target.title)\": the stream it was for has ended")
+                return
+            }
+            if let refusal = self.addRefusal(for: target) { return report.failed(refusal) }
+            report.adding()
+            Log.info("[app] adding \"\(target.title)\" (window \(target.id)) to the stream")
+            self.addToStream(target, link: link)
+        }
+        switch choice {
+        case .running(let window):
+            place(window)
+        case .launch(let app):
+            guard addingLaunch == nil else {
+                return report.failed("\(addingLaunch ?? "Another app") is still starting on "
+                                     + "\(pcLabel(host)). Add this once it's open.")
+            }
+            addingLaunch = app.name
+            let done: () -> Void = { [weak self] in self?.addingLaunch = nil }
+            // Open already: that window, as the other picker does.
+            report.busy("Opening \(app.name) on \(pcLabel(host))…")
+            agent.windows { [weak self] windows in
+                DispatchQueue.main.async {
+                    guard let self, self.agent === agent else { return done() }
+                    if let existing = LaunchMatch.existing(app.name, in: windows) {
+                        Log.info("[app] \"\(app.name)\" is already open; adding "
+                                 + "\"\(existing.title)\"")
+                        done()
+                        return place(existing)
+                    }
+                    self.launch(app: app, host: host, agent: agent,
+                                knownPIDs: Set(windows.map(\.pid)), busy: report.busy,
+                                opened: { done(); place($0) },
+                                failed: { done(); report.failed($0) })
+                }
+            }
+        }
+    }
+
+    /// A launcher for the PC being streamed, clicked while Add App is up: its
+    /// app is added, as though it had been picked there.
+    private func addFromLink(_ link: AppLink, host: String, agent: AgentConnection,
+                             picker: AppPicker) {
+        picker.show()
+        guard !picker.isOpening, addingLaunch == nil else {
+            Log.info("[app] not adding \"\(link.name)\": something else is opening already")
+            NSSound.beep()
+            return
+        }
+        let report = report(on: picker)
+        let cached = addPickerApps
+        agent.windows { [weak self] windows in
+            let found: ([RemoteApp]) -> Void = { apps in
+                DispatchQueue.main.async {
+                    guard let self, self.addPicker === picker else { return }
+                    guard let choice = Self.choice(for: link, windowID: nil, windows: windows,
+                                                   apps: apps) else {
+                        return report.failed("\(link.name) isn't on \(self.pcLabel(host)) any "
+                                             + "more. Choose another app.")
+                    }
+                    picker.highlight(choice)
+                    self.add(choice, host: host, agent: agent, link: link, report: report)
+                }
+            }
+            if cached.isEmpty { agent.apps(completion: found) } else { found(cached) }
+        }
     }
 
     // MARK: - Following the windows a streamed app opens
@@ -2743,6 +3080,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hostMenu = NSMenu(title: "Host")
         Self.reserve(hostMenu.addItem(withTitle: "Switch App…",
                                       action: #selector(switchApp), keyEquivalent: "o"))
+        // ⌃⌘N, not ⇧⌘N: bare ⌘ goes to the PC, where Ctrl+Shift+N is a
+        // browser's private window.
+        Self.reserve(hostMenu.addItem(withTitle: "Add App…",
+                                      action: #selector(addApp), keyEquivalent: "n"))
         Self.reserve(hostMenu.addItem(withTitle: "Disconnect",
                                       action: #selector(disconnectHost), keyEquivalent: "d"))
         hostMenu.addItem(withTitle: "Add App to Dock", action: #selector(addStreamToDock),
@@ -2826,6 +3167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// deliberately rather than a second one.
     @objc private func switchApp() {
         guard !appWindows.isEmpty else { return }
+        closeAddPicker()
         appWindows.forEach { $0.close() }
     }
 
@@ -2841,6 +3183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // inside its own delegate method — and it routes back to the picker. Left
         // attached, disconnecting would show the connect window and then have a
         // picker appear over it, reconnecting to the host just left.
+        closeAddPicker()
         let windows = appWindows
         appWindows.removeAll()
         windows.forEach {
@@ -3148,6 +3491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !appWindows.isEmpty {
             if !entries.isEmpty { menu.addItem(.separator()) }
             for (title, action) in [("Switch App…", #selector(switchApp)),
+                                    ("Add App…", #selector(addApp)),
                                     ("Disconnect", #selector(disconnectHost))] {
                 let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
                 item.target = self
@@ -3431,8 +3775,12 @@ extension AppDelegate: NSMenuItemValidation {
         }
         if menuItem.action == #selector(addStreamToDock) {
             // Named, so it says what it will add.
-            menuItem.title = streamLink.map { "Add \($0.name) to Dock" } ?? "Add App to Dock"
-            return !appWindows.isEmpty && streamLink?.path != nil
+            let link = dockTarget?.link
+            menuItem.title = link.map { "Add \($0.name) to Dock" } ?? "Add App to Dock"
+            return !appWindows.isEmpty && link?.path != nil
+        }
+        if menuItem.action == #selector(addApp) {
+            return Self.addAppAllowed(gate: currentAddGate, launching: addingLaunch != nil)
         }
         if menuItem.action == #selector(quitStreamedApp(_:))
             || menuItem.action == #selector(forceQuitStreamedApp(_:)) {

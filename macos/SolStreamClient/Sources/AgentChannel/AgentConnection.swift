@@ -255,6 +255,13 @@ public final class AgentConnection {
     /// streaming, a PC that may be impersonated -- for whoever asks after the
     /// screen that showed it has gone. Guarded by `stateLock`.
     private var lastFailureText: String?
+    /// Launches the host has not answered yet, and the focus held behind
+    /// them; see `LaunchHold`. Guarded by `stateLock`, so the windows can ask
+    /// `isLaunching` from the main thread.
+    private var launchHold = LaunchHold()
+    /// What to call once the held focus has been answered, or replaced by a
+    /// newer one. Belongs to `queue`.
+    private var heldFocusDone: [() -> Void] = []
     private var buffer = Data()
     /// Replies arrive in request order, so a FIFO of continuations is enough —
     /// no request ids needed in the protocol.
@@ -2377,10 +2384,18 @@ public final class AgentConnection {
     /// The agent blocks until a window appears, so this reply is slow by design
     /// — a cold application start can take many seconds, and the alternative is
     /// making the Mac guess which new window belongs to what it just launched.
+    ///
+    /// The host answers it on the thread that answers everything else on this
+    /// connection, so nothing sent after it is answered until it is: see
+    /// `isLaunching`, and `focus`, which waits with one request rather than
+    /// many.
     public func launch(path: String, timeout: TimeInterval = 25,
                        completion: @escaping (UInt64?, LaunchTrouble?) -> Void) {
+        queue.async { [weak self] in self?.holdLaunch { $0.launchStarted() } }
         send(["cmd": "launch", "path": path,
-              "timeoutMs": Int(timeout * 1000)]) { result in
+              "timeoutMs": Int(timeout * 1000)]) { [weak self] result in
+            // On `queue`, as every reply and failure is.
+            self?.launchAnswered()
             guard case .success(let message) = result,
                   message["alive"] as? Bool == true,
                   let id = (message["id"] as? NSNumber)?.uint64Value else {
@@ -2552,14 +2567,62 @@ public final class AgentConnection {
     ///   over -- answered, refused or lost. The host answers only after it has
     ///   tried to bring the window forward, so this is the moment a click sent
     ///   down the media channel lands in this window rather than the last one.
+    ///
+    ///   While a launch is waiting on the host, only the newest focus is
+    ///   sent, once the launch is answered: the window clicked in last is the
+    ///   one that should have the keyboard then, and the others' requests are
+    ///   over at once -- their clicks went after `focusWait` anyway.
     public func focus(windowID: UInt64, completion: (() -> Void)? = nil) {
+        let done: () -> Void = {
+            if let completion { DispatchQueue.main.async(execute: completion) }
+        }
+        queue.async { [weak self] in
+            guard let self else { return done() }
+            guard !self.holdLaunch({ $0.focus(windowID) }) else {
+                return self.sendFocus(windowID, done: done)
+            }
+            // The one held before is replaced, and over.
+            let replaced = self.heldFocusDone
+            self.heldFocusDone = [done]
+            replaced.forEach { $0() }
+            Log.info("[agent] focus on window \(windowID) held until the launch is answered")
+        }
+    }
+
+    private func sendFocus(_ windowID: UInt64, done: @escaping () -> Void) {
         send(["cmd": "focus", "id": windowID]) { result in
             if case .success(let reply) = result, reply["foreground"] as? Bool == false {
                 Log.info("[agent] the host could not focus window \(windowID);"
                          + " keystrokes will go to whatever is focused there")
             }
-            if let completion { DispatchQueue.main.async(execute: completion) }
+            done()
         }
+    }
+
+    /// Whether a launch sent on this connection has not been answered yet.
+    /// Anything asked meanwhile waits behind it, for up to the launch's whole
+    /// timeout, so what can wait -- a poll, a list nobody is looking at --
+    /// is better not asked.
+    public var isLaunching: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return launchHold.isLaunching
+    }
+
+    @discardableResult
+    private func holdLaunch<T>(_ change: (inout LaunchHold) -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return change(&launchHold)
+    }
+
+    /// On `queue`: a launch has its answer, or failed. The focus held behind
+    /// it goes now, after it on the wire, when it was the last one out.
+    private func launchAnswered() {
+        guard let windowID = holdLaunch({ $0.launchEnded() }) else { return }
+        let waiting = heldFocusDone
+        heldFocusDone = []
+        sendFocus(windowID) { waiting.forEach { $0() } }
     }
 
     /// Quit the application that owns this window on the host, as its close

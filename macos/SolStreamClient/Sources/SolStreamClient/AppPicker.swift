@@ -77,10 +77,22 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     private let onChoose: (Choice) -> Void
     private let onCancel: () -> Void
 
-    init(host: String, onChoose: @escaping (Choice) -> Void, onCancel: @escaping () -> Void) {
+    /// Over a stream that is running: what is chosen is added beside it, and
+    /// Back only puts the picker away.
+    let adding: Bool
+
+    /// What the picker says it is for: its heading, which the window also
+    /// carries as its subtitle, and its way out.
+    static func wording(adding: Bool) -> (heading: String, back: String) {
+        adding ? ("Add a window to the stream", "Cancel") : ("Choose an application", "Back")
+    }
+
+    init(host: String, adding: Bool = false, onChoose: @escaping (Choice) -> Void,
+         onCancel: @escaping () -> Void) {
+        self.adding = adding
         self.onChoose = onChoose
         self.onCancel = onCancel
-        backButton = DS.Button(title: "Back", target: nil, action: nil)
+        backButton = DS.Button(title: Self.wording(adding: adding).back, target: nil, action: nil)
         openButton = DS.Button(title: "Open", style: .primary, target: nil, action: nil)
 
         // The title bar is transparent and the content runs under it, so the
@@ -93,7 +105,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                                       .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = host
-        window.subtitle = "Choose an application"
+        window.subtitle = Self.wording(adding: adding).heading
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
@@ -106,7 +118,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     }
 
     private func build(host: String) {
-        let heading = DS.label("Choose an application", font: DS.title)
+        let heading = DS.label(Self.wording(adding: adding).heading, font: DS.title)
         let subheading = NSTextField(labelWithString: "")
         let lead = NSMutableAttributedString(string: "Open windows and installed apps on ", attributes: [
             .font: DS.body, .foregroundColor: DS.textSecondary,

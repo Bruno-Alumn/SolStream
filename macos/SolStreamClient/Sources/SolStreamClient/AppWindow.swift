@@ -251,10 +251,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
     ///
     /// Every five seconds, and never more than one in flight: the push covers
     /// the common case, and a host stuck on a slow request must not have a
-    /// queue of these building up behind it.
+    /// queue of these building up behind it. Nor asked while a launch is out:
+    /// it would only be answered once the launch is, and the push still comes.
     private func startWatchingForExit() {
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            guard let self, !self.isClosing, !self.statusInFlight else { return }
+            guard let self, !self.isClosing, !self.statusInFlight,
+                  !self.agent.isLaunching else { return }
             self.statusInFlight = true
             self.agent.windowStatus(id: self.remoteWindowID) { [weak self] status in
                 DispatchQueue.main.async {
@@ -388,6 +390,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// The streamed window that owns this one on the PC, for a dialog that
     /// had to be given a tile of its own; it closes with that window.
     var ownerID: UInt64?
+
+    /// The app this window was opened for, from the picker, a launcher or
+    /// Add App: what its Try Again opens again and what Add to Dock adds
+    /// while it is in front. Nil for a window the app opened by itself, and
+    /// for a whole display.
+    var link: AppLink?
 
     /// This window, or a dialog over it, has the keyboard: what the clipboard
     /// and the notes mean by the stream having it.

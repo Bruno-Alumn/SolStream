@@ -180,10 +180,12 @@ final class OwnedWindow: NSObject, NSWindowDelegate {
     /// Every half second, and one at a time: where the dialog is, and whether
     /// it is still there. The host's `closed` push is the quick way it goes;
     /// this is the one that still works after a reconnect, when the host has
-    /// forgotten what it told the last connection about.
+    /// forgotten what it told the last connection about. Not while a launch
+    /// is out, which would hold the answer back until it is answered.
     private func startPolling() {
         let timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self, !self.isClosing, !self.pollInFlight else { return }
+            guard let self, !self.isClosing, !self.pollInFlight,
+                  !self.agent.isLaunching else { return }
             self.pollInFlight = true
             self.agent.windowStatus(id: self.remoteWindowID) { [weak self] status in
                 DispatchQueue.main.async {
