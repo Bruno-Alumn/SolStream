@@ -3,6 +3,7 @@
 #include "pointer_math.h"
 #include "log.h"
 #include "smt.h"
+#include "../follow.h"
 
 #include <dwmapi.h>
 
@@ -305,8 +306,10 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                 break;
             }
             if (down && length >= 6 && slot >= 0) {
-                return PressCharKey(slot, body + 4, length - 4,
-                                    (body[3] & kModifierCapsLock) != 0);
+                const bool pressed = PressCharKey(slot, body + 4, length - 4,
+                                                  (body[3] & kModifierCapsLock) != 0);
+                if (pressed) { NoteMacInput(true); }
+                return pressed;
             }
             if (!BuildScanKeyInput(code, down, &input)) { return false; }
             trackedKey = kHeldByScan | code;
@@ -328,6 +331,7 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                     typed = false;
                 }
             }
+            NoteMacInput(true);
             return typed;
         }
         default:
@@ -335,6 +339,9 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
     }
     const bool sent = SendInput(1, &input, sizeof(INPUT)) == 1;
     if (sent) {
+        // For telling a window the Mac opened from one the PC's own user did:
+        // see follow.h.
+        NoteMacInput(trackedDown && (trackedKey != 0 || trackedButton != 0));
         if (trackedKey != 0) { TrackKey(trackedKey, trackedDown); }
         if (trackedButton != 0) {
             const unsigned char bit = (unsigned char) (1u << (trackedButton - 1));

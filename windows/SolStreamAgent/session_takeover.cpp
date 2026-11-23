@@ -37,6 +37,8 @@ long PushFeaturesFrom(const std::string& names) {
             features |= kPushFullScreen;
         } else if (name == "inputBlocked") {
             features |= kPushInputBlocked;
+        } else if (name == "windowOpened") {
+            features |= kPushWindowOpened;
         }
         if (end == std::string::npos) {
             break;

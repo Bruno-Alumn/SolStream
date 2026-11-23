@@ -126,6 +126,42 @@ public struct RemoteWindowStatus: Sendable, Equatable {
     public var captionInset: Int?
 }
 
+/// A window a streamed application opened on the host: a dialog it owns, or a
+/// window that came to the front just after this Mac's click or key went into
+/// it -- a sign-in page in the browser, say. Pushed as `windowOpened` by a host
+/// that knows this Mac understands it. Nothing has been done to it on the
+/// host: it is wherever the application put it until this Mac asks for it with
+/// `place`, `lock` or `topmost`.
+public struct OpenedWindow: Sendable, Equatable {
+    /// The window's own id, as `windows` and `place` use.
+    public let id: UInt64
+    /// The streamed window it goes with.
+    public let parent: UInt64
+    public let pid: UInt32
+    /// Owned by `parent` (true), or brought up by this Mac's input (false).
+    public let owned: Bool
+    /// Its client area, in the host's virtual-desktop pixels, as `windows`
+    /// reports a window's.
+    public let x: Int
+    public let y: Int
+    public let width: Int
+    public let height: Int
+    public let title: String
+
+    public init(id: UInt64, parent: UInt64, pid: UInt32, owned: Bool,
+                x: Int, y: Int, width: Int, height: Int, title: String) {
+        self.id = id
+        self.parent = parent
+        self.pid = pid
+        self.owned = owned
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.title = title
+    }
+}
+
 /// Talks to the SolStream agent running on the Windows host.
 ///
 /// Newline-delimited JSON over TCP. The agent greets with `hello` and
@@ -312,6 +348,10 @@ public final class AgentConnection {
     /// A streamed application went full screen on the host (true), or came
     /// out of it (false).
     public var onFullScreen: ((UInt64, Bool) -> Void)?
+    /// A streamed application opened another window on the host. When it goes
+    /// again before this Mac has taken it on, `onWindowClosed` says so with
+    /// its id. Main queue.
+    public var onWindowOpened: ((OpenedWindow) -> Void)?
     /// The PC said its input is blocked -- "secureDesktop", "screenSaver" or
     /// "elevated", with the app's name -- or nil once it is not. Main queue.
     public var onInputBlocked: ((String?, String?) -> Void)?
@@ -1272,6 +1312,7 @@ public final class AgentConnection {
         onWindowTitle = nil
         onAttention = nil
         onFullScreen = nil
+        onWindowOpened = nil
         onOpenLink = nil
         onFileOffer = nil
         onOccluded = nil
@@ -3051,6 +3092,13 @@ public final class AgentConnection {
                 DispatchQueue.main.async { [weak self] in self?.onFullScreen?(id, on) }
             }
             return
+        case "windowOpened":
+            // Unsolicited, sent only to a Mac that listed it among the pushes
+            // it understands.
+            if let opened = Self.openedWindow(from: message) {
+                DispatchQueue.main.async { [weak self] in self?.onWindowOpened?(opened) }
+            }
+            return
         case "attention":
             // Unsolicited; the host sends one per flash every few seconds.
             if let id = (message["id"] as? NSNumber)?.uint64Value {
@@ -3169,11 +3217,30 @@ public final class AgentConnection {
     /// decides whether this Mac gives up, waits, or asks for its session back.
     static let skippablePushes: Set<String> = ["cursor", "closed", "occluded", "windowsChanged",
                                                "title", "attention", "openURL",
-                                               "fileOffer", "fullScreen", "inputBlocked"]
+                                               "fileOffer", "fullScreen", "inputBlocked",
+                                               "windowOpened"]
 
     /// Said in the auth line; see the host's PushFeaturesFrom. Every push
     /// newer than the original set is named here once this Mac handles it.
-    static let understoodPushes = "title attention openURL fileOffer fullScreen inputBlocked"
+    static let understoodPushes =
+        "title attention openURL fileOffer fullScreen inputBlocked windowOpened"
+
+    /// A `windowOpened` push, read; nil when it lacks an id or the window it
+    /// goes with. A missing place or title reads as zero or empty.
+    static func openedWindow(from message: [String: Any]) -> OpenedWindow? {
+        guard message["type"] as? String == "windowOpened",
+              let id = (message["id"] as? NSNumber)?.uint64Value, id != 0,
+              let parent = (message["parent"] as? NSNumber)?.uint64Value, parent != 0 else {
+            return nil
+        }
+        func int(_ key: String) -> Int { (message[key] as? NSNumber)?.intValue ?? 0 }
+        return OpenedWindow(
+            id: id, parent: parent,
+            pid: (message["pid"] as? NSNumber)?.uint32Value ?? 0,
+            owned: (message["owned"] as? Bool) ?? false,
+            x: int("x"), y: int("y"), width: max(0, int("w")), height: max(0, int("h")),
+            title: message["title"] as? String ?? "")
+    }
 
     /// A link from the host that this Mac may open: web or mail, as the host
     /// registered for, and nothing else -- not a file, not a script, not an

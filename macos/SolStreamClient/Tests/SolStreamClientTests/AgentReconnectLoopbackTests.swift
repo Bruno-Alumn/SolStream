@@ -541,6 +541,45 @@ final class AgentReconnectLoopbackTests: XCTestCase {
         XCTAssertEqual(request["id"] as? Int, 42)
     }
 
+    /// A `windowOpened` arriving while a request waits is a push, not the
+    /// request's answer: it goes to `onWindowOpened`, and the request waits on.
+    func testAWindowOpenedPushIsNotTakenForAReply() throws {
+        let host = ScriptedHost { _, connection in
+            connection.greetWithoutAuth()
+            _ = connection.readLine(timeout: 5)
+            connection.send(#"{"type":"windowOpened","id":263412,"parent":42,"pid":4120,"#
+                            + #""owned":false,"x":10,"y":20,"w":800,"h":600,"title":"Sign in"}"#)
+            Thread.sleep(forTimeInterval: 0.3)
+            connection.send(#"{"type":"focused","ok":true,"foreground":true}"#)
+            Thread.sleep(forTimeInterval: 2)
+        }
+        let port = try host.start()
+        defer { host.stop() }
+        let agent = AgentConnection(host: "::1", port: port)
+        defer { agent.disconnect() }
+        connectAndWaitForGreeting(agent)
+
+        var opened: OpenedWindow?
+        var openedBeforeFocus = false
+        var focused = false
+        let heard = expectation(description: "windowOpened heard")
+        let done = expectation(description: "focus answered")
+        agent.onWindowOpened = { window in
+            opened = window
+            openedBeforeFocus = !focused
+            heard.fulfill()
+        }
+        agent.focus(windowID: 42) {
+            focused = true
+            done.fulfill()
+        }
+        wait(for: [heard, done], timeout: 5, enforceOrder: true)
+        XCTAssertTrue(openedBeforeFocus)
+        XCTAssertEqual(opened, OpenedWindow(id: 263412, parent: 42, pid: 4120, owned: false,
+                                            x: 10, y: 20, width: 800, height: 600,
+                                            title: "Sign in"))
+    }
+
     func testARecoverableWaitKeepsRepliesWithTheirRequests() throws {
         let requested = DispatchSemaphore(value: 0)
         let answer = DispatchSemaphore(value: 0)

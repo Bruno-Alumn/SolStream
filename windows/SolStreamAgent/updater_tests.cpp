@@ -70,6 +70,7 @@
 #include "banner_advice.h"
 #include "window_keys.h"
 #include "stranded.h"
+#include "follow.h"
 #include "media/keys.h"
 #include "media/pointer_math.h"
 #include "mouse_fence.h"
@@ -1740,6 +1741,149 @@ void TestPushFeatures() {
     CHECK(PushFeaturesFrom("openURL,title") == (kPushOpenUrl | kPushTitle));
     CHECK(PushFeaturesFrom("titles attention nonsense") == kPushAttention);
     CHECK(PushFeaturesFrom("  title  ") == kPushTitle);
+    CHECK(kPushWindowOpened == 64);
+    CHECK(PushFeaturesFrom("windowOpened") == kPushWindowOpened);
+    CHECK(PushFeaturesFrom("title fullScreen inputBlocked windowOpened")
+          == (kPushTitle | kPushFullScreen | kPushInputBlocked | kPushWindowOpened));
+    CHECK(PushFeaturesFrom("windowopened") == 0);
+}
+
+/// A window shown while something is streamed, as the watcher sees it: a
+/// plain application window, not held, nothing excluding it.
+FollowFacts PlainNewWindow() {
+    FollowFacts f;
+    f.top_level = true;
+    f.now = 100000;
+    f.shown_at = 99500;
+    return f;
+}
+
+/// Which new windows go with the stream: owned by a held window, or brought to
+/// the front by the Mac's press into one -- never by the process alone, never
+/// after the PC's own input, and never Earshot.
+void TestFollowDecision() {
+    // Owned by a held window: follows whatever has the foreground.
+    FollowFacts owned = PlainNewWindow();
+    owned.owner_reaches_held = true;
+    CHECK(DecideFollow(owned) == FollowReason::Owned);
+    // A palette the app owns follows too; only rule (b) turns tool windows away.
+    owned.tool_window = true;
+    CHECK(DecideFollow(owned) == FollowReason::Owned);
+
+    // Not owned, and in front, but nothing the Mac did brought it: the PC's
+    // own, or the app's process alone -- which is never enough.
+    FollowFacts front = PlainNewWindow();
+    front.foreground = true;
+    CHECK(DecideFollow(front) == FollowReason::None);
+    CHECK(!NeverFollows(front));
+
+    // In front a second after the Mac clicked in a held window: a sign-in page
+    // opening in the browser that was already running.
+    FollowFacts opened = PlainNewWindow();
+    opened.foreground = true;
+    opened.press_was_on_held = true;
+    opened.mac_press_at = 99000;
+    CHECK(DecideFollow(opened) == FollowReason::OpenedByMac);
+    // Not yet in front: not yet, but it may still come.
+    FollowFacts behind = opened;
+    behind.foreground = false;
+    CHECK(DecideFollow(behind) == FollowReason::None);
+    CHECK(!NeverFollows(behind));
+    // Too long after the press.
+    FollowFacts late = opened;
+    late.mac_press_at = late.now - kFollowAfterMacInputMs - 1;
+    late.shown_at = late.mac_press_at + 10;
+    CHECK(DecideFollow(late) == FollowReason::None);
+    late.mac_press_at = late.now - kFollowAfterMacInputMs;
+    CHECK(DecideFollow(late) == FollowReason::OpenedByMac);
+    // Already showing before the press: the press did not open it.
+    FollowFacts earlier = opened;
+    earlier.shown_at = earlier.mac_press_at - 1000;
+    CHECK(DecideFollow(earlier) == FollowReason::None);
+    // The press went somewhere other than a held window.
+    FollowFacts elsewhere = opened;
+    elsewhere.press_was_on_held = false;
+    CHECK(DecideFollow(elsewhere) == FollowReason::None);
+    // The Mac never pressed anything.
+    FollowFacts never = opened;
+    never.mac_press_at = 0;
+    CHECK(DecideFollow(never) == FollowReason::None);
+    // A tool window or a tooltip it brought up is not a window of its own.
+    FollowFacts tool = opened;
+    tool.tool_window = true;
+    CHECK(DecideFollow(tool) == FollowReason::None);
+    FollowFacts tip = opened;
+    tip.tooltip = true;
+    CHECK(DecideFollow(tip) == FollowReason::None);
+    CHECK(NeverFollows(tip));
+
+    // Input at the PC since the Mac's press: the window is the PC user's,
+    // owned or not.
+    FollowFacts local = opened;
+    local.local_input_at = 99400;
+    CHECK(DecideFollow(local) == FollowReason::None);
+    FollowFacts local_owned = owned;
+    local_owned.local_input_at = 99900;
+    CHECK(DecideFollow(local_owned) == FollowReason::None);
+    // Input at the PC before the Mac's press, or long ago, decides nothing.
+    FollowFacts before = opened;
+    before.local_input_at = 98000;
+    CHECK(DecideFollow(before) == FollowReason::OpenedByMac);
+    FollowFacts stale = owned;
+    stale.local_input_at = stale.now - kFollowAfterMacInputMs - 1;
+    CHECK(DecideFollow(stale) == FollowReason::Owned);
+
+    // Never these, whatever opened them.
+    const auto refused = [](FollowFacts f) {
+        CHECK(DecideFollow(f) == FollowReason::None);
+        CHECK(NeverFollows(f));
+    };
+    FollowFacts ear = opened;
+    ear.owner_reaches_held = true;
+    ear.earshot = true;
+    refused(ear);
+    FollowFacts shell = opened;
+    shell.shell = true;
+    refused(shell);
+    FollowFacts self = owned;
+    self.own_process = true;
+    refused(self);
+    FollowFacts held = opened;
+    held.held = true;
+    refused(held);
+    FollowFacts hidden = owned;
+    hidden.top_level = false;
+    CHECK(DecideFollow(hidden) == FollowReason::None);
+
+    // Earshot by its image, in any case; Start, search and the switcher by
+    // their process or their class.
+    CHECK(IsEarshotImage(L"C:\\Program Files\\Earshot\\Earshot.exe"));
+    CHECK(IsEarshotImage(L"C:\\Users\\me\\AppData\\Local\\EARSHOT-beta\\app.exe"));
+    CHECK(!IsEarshotImage(L"C:\\Windows\\notepad.exe"));
+    CHECK(!IsEarshotImage(L""));
+    CHECK(IsShellImage(L"C:\\Windows\\SystemApps\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\StartMenuExperienceHost.exe"));
+    CHECK(IsShellImage(L"SearchHost.exe"));
+    CHECK(!IsShellImage(L"C:\\Windows\\explorer.exe"));
+    CHECK(!IsShellImage(L""));
+    CHECK(IsShellClass(L"Shell_TrayWnd"));
+    CHECK(IsShellClass(L"XamlExplorerHostIslandWindow"));
+    CHECK(!IsShellClass(L"Chrome_WidgetWin_1"));
+    CHECK(IsTooltipClass(L"tooltips_class32"));
+    CHECK(IsTooltipClass(L"HwndWrapper[App;;ToolTip]"));
+    CHECK(!IsTooltipClass(L"#32770"));
+
+    // The PC's own input is whatever came in clearly after the Mac's last.
+    CHECK(LocalInputAt(0, 5000) == 0);
+    CHECK(LocalInputAt(5000, 5000) == 0);
+    CHECK(LocalInputAt(5000 + kLocalInputSlackMs, 5000) == 0);
+    CHECK(LocalInputAt(5001 + kLocalInputSlackMs, 5000) == 5001 + kLocalInputSlackMs);
+    CHECK(LocalInputAt(4000, 0) == 4000);
+
+    // A menu over its window is in its picture; one hanging off the edge is not.
+    const RECT parent{0, 0, 800, 600};
+    CHECK(WhollyInside(RECT{10, 10, 200, 300}, parent));
+    CHECK(WhollyInside(parent, parent));
+    CHECK(!WhollyInside(RECT{700, 10, 900, 300}, parent));
 }
 
 /// Only web and mail links cross to the Mac, and only ones nothing could
@@ -5050,6 +5194,7 @@ int wmain(int argc, wchar_t** argv) {
     TestWaitsForRestart();
     TestFileOffers();
     TestPushFeatures();
+    TestFollowDecision();
     TestUploadRefusal();
     TestTokenStore();
     TestWindowsToClose();

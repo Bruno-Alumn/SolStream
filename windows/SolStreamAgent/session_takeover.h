@@ -48,6 +48,11 @@ constexpr long kPushFullScreen = 16;
 /// {"type":"inputBlocked","reason":"secureDesktop"|"elevated"|"","app":…}:
 /// the Mac's input cannot reach the PC now, and why -- or "" once it can.
 constexpr long kPushInputBlocked = 32;
+/// {"type":"windowOpened","id":…,"parent":…,"pid":…,"owned":…,"x","y","w","h",
+/// "title"}: a window the streamed application opened, which follows the held
+/// window `parent` (see follow.h) -- and `closed` with its id once it goes,
+/// while the Mac has not taken it on with `place`, `lock` or `topmost`.
+constexpr long kPushWindowOpened = 64;
 
 /// The bits for the auth line's "pushes": names separated by spaces or
 /// commas; unknown names are ignored. Nothing for a Mac that sent none.

@@ -73,6 +73,7 @@
 #include "display_mode.h"
 #include "display_setup.h"
 #include "driver_install.h"
+#include "follow.h"
 #include "foreground.h"
 #include "full_screen.h"
 #include "mouse_fence.h"
@@ -1122,6 +1123,8 @@ bool ForceForeground(HWND window) {
                 nudge.type = INPUT_MOUSE;
                 nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
                 SendInput(1, &nudge, sizeof(nudge));
+                // Asked for by the Mac, so not the PC user's: see follow.h.
+                solstream::NoteMacInput(false);
                 SetForegroundWindow(target);
             }
 
@@ -2553,6 +2556,31 @@ std::atomic<bool> g_window_titles_dirty{false};
 std::atomic<bool> g_streamed_titles_dirty{false};
 std::mutex g_attention_cs;
 std::vector<HWND> g_attention_pending;  // guarded by g_attention_cs
+/// Top-level windows shown or uncloaked while something is streamed, with
+/// when, for the watcher to decide whether they follow it: see
+/// FollowNewWindows. Queued by the window-event hook, which must not wait.
+std::mutex g_follow_cs;
+std::vector<std::pair<HWND, ULONGLONG>> g_follow_shown;  // guarded by g_follow_cs
+/// Bumped whenever the Mac being served changes: what the last one was told
+/// about is not the next one's.
+std::atomic<LONG> g_follow_epoch{0};
+
+/// Note that `window` has been shown, if it is a top-level window and
+/// something is streamed. Hook thread.
+void QueueShownForFollow(HWND window) {
+    if (GetAncestor(window, GA_ROOT) != window) {
+        return;
+    }
+    bool streaming = false;
+    if (HeldWindow(window, &streaming) || !streaming) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_follow_cs);
+    // Only bounds what piles up between two watcher ticks.
+    if (g_follow_shown.size() < 64) {
+        g_follow_shown.emplace_back(window, GetTickCount64());
+    }
+}
 /// When a rename last went out. Watcher thread only.
 ULONGLONG g_titles_pushed_at = 0;
 constexpr ULONGLONG kTitlePushIntervalMs = 5000;
@@ -2588,6 +2616,11 @@ void CALLBACK WindowSetChanged(HWINEVENTHOOK, DWORD event, HWND window,
                                LONG object, LONG child, DWORD, DWORD) {
     if (object != OBJID_WINDOW || child != CHILDID_SELF || !window) {
         return;
+    }
+    // Before the picker's filter, which turns away the owned windows -- the
+    // dialogs -- that are most of what follows a streamed one.
+    if (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_UNCLOAKED) {
+        QueueShownForFollow(window);
     }
     // A streamed window's own title goes to its Mac window at once, not with
     // the picker's five-second nudge.
@@ -2856,6 +2889,247 @@ void NotifyStreamedWindows() {
     }
     // Forget windows no longer streamed, so the map never grows.
     pushed_titles.swap(current);
+}
+
+/// The full path of a process's image, or empty when Windows will not say.
+std::wstring ProcessImagePath(DWORD pid) {
+    HANDLE process = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    if (!process) {
+        return {};
+    }
+    wchar_t path[MAX_PATH] = {};
+    DWORD length = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(process, 0, path, &length);
+    CloseHandle(process);
+    return ok ? std::wstring(path, length) : std::wstring();
+}
+
+/// Tell the Mac about the windows a streamed application opens, and when they
+/// go again. See follow.h for which windows those are.
+///
+/// Only told: nothing here moves or places the window. The Mac answers with
+/// `place`, `lock` and `topmost` if it wants the window, and those claim a
+/// slot, which records where the window was first -- so a window that opened
+/// on the PC's own monitor goes back there when the Mac lets go of it. Once it
+/// is held, its slot says when it closes; until then, this does.
+///
+/// Watcher thread only. Nothing here messages a window, so a hung application
+/// cannot hold the watcher.
+void FollowNewWindows() {
+    struct Pending {
+        ULONGLONG shown_at = 0;
+        bool looked_up = false;
+        std::wstring image;
+    };
+    struct Follower {
+        DWORD pid = 0;
+        HWND parent = nullptr;
+    };
+    static std::map<HWND, Pending> pending;
+    static std::map<HWND, Follower> followers;
+    static LONG epoch = 0;
+    static ULONGLONG local_input_at = 0;
+
+    std::vector<std::pair<HWND, ULONGLONG>> shown;
+    {
+        std::lock_guard<std::mutex> lock(g_follow_cs);
+        shown.swap(g_follow_shown);
+    }
+    const LONG now_epoch = g_follow_epoch.load();
+    if (now_epoch != epoch) {
+        epoch = now_epoch;
+        pending.clear();
+        followers.clear();
+    }
+    HWND held[kMaxLocks] = {};
+    int held_count = 0;
+    EnterCriticalSection(&g_lock_cs);
+    for (int i = 0; i < kMaxLocks; ++i) {
+        if (g_locks[i].active && g_locks[i].window) {
+            held[held_count++] = g_locks[i].window;
+        }
+    }
+    LeaveCriticalSection(&g_lock_cs);
+    // Nothing streamed, or a Mac that would not understand: nobody to tell.
+    if (held_count == 0
+        || (InterlockedCompareExchange(&g_push_features, 0, 0) & solstream::kPushWindowOpened)
+               == 0) {
+        pending.clear();
+        followers.clear();
+        return;
+    }
+    auto is_held = [&](HWND window) {
+        for (int i = 0; i < held_count; ++i) {
+            if (held[i] == window) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // The held window that `window` is, or follows; null for neither.
+    auto stream_of = [&](HWND window) -> HWND {
+        if (!window) {
+            return nullptr;
+        }
+        if (is_held(window)) {
+            return window;
+        }
+        const auto known = followers.find(window);
+        return known != followers.end() ? known->second.parent : nullptr;
+    };
+    // The held window that `window`'s owner chain reaches, if any.
+    auto owner_stream = [&](HWND window) -> HWND {
+        HWND owner = GetWindow(window, GW_OWNER);
+        for (int depth = 0; owner && depth < 16; ++depth) {
+            if (HWND stream = stream_of(owner)) {
+                return stream;
+            }
+            owner = GetWindow(owner, GW_OWNER);
+        }
+        return nullptr;
+    };
+    const ULONGLONG now = GetTickCount64();
+
+    // Input at the PC itself: anything newer than the Mac's last. Remembered,
+    // because the Mac's next pointer movement takes the last-input time over.
+    LASTINPUTINFO last{};
+    last.cbSize = sizeof(last);
+    if (GetLastInputInfo(&last)) {
+        const ULONGLONG ago = (DWORD) ((DWORD) now - last.dwTime);
+        const uint64_t local =
+            solstream::LocalInputAt(now > ago ? now - ago : 0, solstream::g_mac_input_at.load());
+        if (local > local_input_at) {
+            local_input_at = local;
+        }
+    }
+
+    // Followers the Mac has not taken on, gone again: said as `closed`, which
+    // a Mac that heard of them knows already.
+    for (auto it = followers.begin(); it != followers.end();) {
+        HWND window = it->first;
+        if (is_held(window)) {
+            // Its slot tells the Mac when it closes from now on.
+            it = followers.erase(it);
+            continue;
+        }
+        DWORD pid = 0;
+        const bool alive = IsWindow(window) && GetWindowThreadProcessId(window, &pid)
+                        && pid == it->second.pid;
+        if (alive && IsWindowVisible(window) && !IsCloaked(window)) {
+            ++it;
+            continue;
+        }
+        const uint64_t id = IdFromWindow(window);
+        Log("[follow] window %llu, which followed window %llu, has gone",
+            (unsigned long long) id, (unsigned long long) IdFromWindow(it->second.parent));
+        PushFeature(solstream::kPushWindowOpened,
+                    "{\"type\":\"closed\",\"id\":" + std::to_string(id) + "}");
+        it = followers.erase(it);
+    }
+
+    for (const auto& [window, at] : shown) {
+        if (pending.size() < 32 && followers.count(window) == 0) {
+            Pending first;
+            first.shown_at = at;
+            pending.emplace(window, first);  // the first sighting stands
+        }
+    }
+    if (pending.empty()) {
+        return;
+    }
+
+    const uint64_t press_at = solstream::g_mac_press_at.load();
+    const HWND pressed = reinterpret_cast<HWND>(solstream::g_mac_press_foreground.load());
+    HWND press_stream = stream_of(pressed);
+    if (!press_stream && pressed) {
+        press_stream = stream_of(GetAncestor(pressed, GA_ROOTOWNER));
+    }
+    if (!press_stream && pressed) {
+        press_stream = owner_stream(pressed);
+    }
+    const HWND foreground = GetForegroundWindow();
+
+    for (auto it = pending.begin(); it != pending.end();) {
+        HWND window = it->first;
+        Pending& seen = it->second;
+        if (now - seen.shown_at > solstream::kFollowAfterMacInputMs + 500 || !IsWindow(window)) {
+            it = pending.erase(it);
+            continue;
+        }
+        DWORD pid = 0;
+        GetWindowThreadProcessId(window, &pid);
+        if (!seen.looked_up) {
+            seen.looked_up = true;
+            seen.image = ProcessImagePath(pid);
+        }
+        wchar_t cls[256] = {};
+        GetClassNameW(window, cls, 256);
+        const HWND owner_parent = owner_stream(window);
+
+        solstream::FollowFacts facts;
+        facts.top_level = GetAncestor(window, GA_ROOT) == window && IsWindowVisible(window)
+                       && !IsIconic(window) && !IsCloaked(window)
+                       && HasArea(VisibleFrame(window));
+        facts.held = is_held(window);
+        facts.own_process = pid == GetCurrentProcessId();
+        facts.shell = IsShellWindow(window) || solstream::IsShellClass(cls)
+                   || solstream::IsShellImage(seen.image);
+        facts.tooltip = solstream::IsTooltipClass(cls);
+        facts.tool_window = (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+        facts.earshot = solstream::IsEarshotImage(seen.image);
+        facts.owner_reaches_held = owner_parent != nullptr;
+        facts.foreground = foreground == window;
+        facts.press_was_on_held = press_stream != nullptr;
+        facts.now = now;
+        facts.shown_at = seen.shown_at;
+        facts.mac_press_at = press_at;
+        facts.local_input_at = local_input_at;
+        const solstream::FollowReason reason = solstream::DecideFollow(facts);
+        if (reason == solstream::FollowReason::None) {
+            if (solstream::NeverFollows(facts)) {
+                it = pending.erase(it);
+            } else {
+                ++it;
+            }
+            continue;
+        }
+        it = pending.erase(it);
+        const bool owned = reason == solstream::FollowReason::Owned;
+        const HWND parent = owned ? owner_parent : press_stream;
+        // A menu or a tooltip drawn over the window it belongs to is in that
+        // window's picture already.
+        if (owned && solstream::WhollyInside(VisibleFrame(window), ClientAreaInScreen(parent))) {
+            continue;
+        }
+        if (followers.size() >= 32) {
+            continue;
+        }
+        const RECT client = ClientAreaInScreen(window);
+        wchar_t title[1024] = {};
+        const int copied = InternalGetWindowText(window, title, 1024);
+        const std::string text =
+            ToUtf8(std::wstring(title, static_cast<size_t>(std::max(copied, 0))));
+        const uint64_t id = IdFromWindow(window);
+        const std::string line =
+            "{\"type\":\"windowOpened\",\"id\":" + std::to_string(id)
+            + ",\"parent\":" + std::to_string(IdFromWindow(parent))
+            + ",\"pid\":" + std::to_string(pid)
+            + ",\"owned\":" + (owned ? "true" : "false")
+            + ",\"x\":" + std::to_string(client.left)
+            + ",\"y\":" + std::to_string(client.top)
+            + ",\"w\":" + std::to_string(client.right - client.left)
+            + ",\"h\":" + std::to_string(client.bottom - client.top)
+            + ",\"title\":\"" + JsonEscape(text) + "\"}";
+        const bool told = PushFeature(solstream::kPushWindowOpened, line);
+        Log("[follow] window %llu [%s] \"%s\" follows window %llu (%s)%s",
+            (unsigned long long) id, ToUtf8(cls).c_str(), text.c_str(),
+            (unsigned long long) IdFromWindow(parent),
+            owned ? "owned by it" : "opened by the Mac's input",
+            told ? "" : "; the Mac was not told");
+        if (told) {
+            followers[window] = Follower{pid, parent};
+        }
+    }
 }
 
 /// Windows already carried back to a real monitor. Kept so that someone who
@@ -3733,6 +4007,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         RetryOwedRestoresIfDue();
         NotifyWindowsChangedIfSettled();
         NotifyStreamedWindows();
+        FollowNewWindows();
         interval = holding || g_window_set_dirty.load() ? kWatchActiveMs : kWatchIdleMs;
     }
 }
@@ -6199,6 +6474,7 @@ void StartCursorWatcher(SOCKET client, bool authorised) {
     EnterCriticalSection(&g_send_cs);
     g_push_client = client;
     InterlockedExchange(&g_push_features, 0);
+    g_follow_epoch.fetch_add(1);
     InterlockedExchange(&g_push_authorised, authorised ? 1 : 0);
     LeaveCriticalSection(&g_send_cs);
     const LONG generation = InterlockedIncrement(&g_cursor_generation);
@@ -6223,6 +6499,7 @@ void StopCursorWatcher() {
     g_push_client = INVALID_SOCKET;
     InterlockedExchange(&g_push_authorised, 0);
     InterlockedExchange(&g_push_features, 0);
+    g_follow_epoch.fetch_add(1);
     LeaveCriticalSection(&g_send_cs);
     // A link clicked or a file offered for this session is not the next one's:
     // that may be another Mac.
