@@ -82,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the window itself, while it is still there, rather than the app by
     /// name, which found another of its windows or launched a second copy.
     private var pendingWindowID: UInt64?
+    /// The PC window `streamLink` was opened for. Others can be streamed
+    /// beside it, and they are not what the link names.
+    private var linkedWindowID: UInt64?
     /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
     private weak var tokenPromptParent: NSWindow?
@@ -634,7 +637,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func addStreamToDock() {
         guard let streamLink, let agent else { return }
-        addToDock(streamLink, windowID: appWindows.first?.remoteWindowID, agent: agent,
+        // The icon from the window the link was opened for, while it is still
+        // streamed; another app's would be the wrong one, and with none the
+        // shortcut's own is used.
+        let windowID = linkedWindowID.flatMap { id in
+            appWindows.contains { $0.remoteWindowID == id } ? id : nil
+        }
+        addToDock(streamLink, windowID: windowID, agent: agent,
                   over: appWindows.first { $0.window?.isKeyWindow == true }?.window)
     }
 
@@ -1527,7 +1536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         bridge.onTextCut = { [weak self] note in
             guard let self else { return }
-            (self.appWindows.first { $0.window?.isKeyWindow == true } ?? self.appWindows.first)?
+            self.frontAppWindow?
                 .tell(note)
         }
         if StreamSettings.shared.syncsClipboard {
@@ -1550,85 +1559,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { Updater.shared.isStreaming = true }
 
         let tiles = Self.tileLayout(count: targets.count, on: display)
+        // The window this stream was opened for, while it is open: what Try
+        // Again and Add to Dock mean when there are others beside it.
+        linkedWindowID = streamLink == nil ? nil : targets.first?.id
 
         for (index, target) in targets.enumerated() {
-            let tile = tiles[index]
-
-            let appWindow = AppWindow(session: session, agent: agent, remote: target,
-                                      display: display, tile: tile)
-            appWindow.onClose = { [weak self, weak appWindow] in
-                guard let self else { return }
-                self.appWindows.removeAll { $0 === appWindow }
-                guard self.appWindows.isEmpty else { return }
-                AppWindow.resetCascade()
-                // End the media session by asking, not by dropping the socket.
-                // The UDP BYE alone only sets `running = false` on the host: the
-                // capture, encoder, sender and receive threads, the socket and
-                // the keys all survive until something starts a new session, and
-                // any key or mouse button still held is never released.
-                // Still the session, as far as an update is concerned: the
-                // picker comes straight back over the same connection, and an
-                // install that quit the app now would take it away mid-Switch
-                // App or mid-Retry. Leaving the picker ends it.
-                self.endStream(keepsSession: !self.testMode) { agent.closeMediaSession() }
-                // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
-                // tell a new connection from the last one's teardown still
-                // running, and answers "busy". Nothing needs the disconnect: the
-                // close path already sent `lock off`, which restores the window.
-                if !self.testMode {
-                    self.showPicker(host: host, reusing: agent)
-                }
-            }
-            // Gaining the keyboard sends a Mac copy held back until now, before
-            // the ⌘V that follows; losing it brings the PC's last copy over
-            // before the paste in whatever application is next.
-            appWindow.onKeyboardChange = { [weak self] in
-                self?.clipboard?.syncNow()
-            }
-            appWindow.onHostClipboardSet = { [weak self] sequence in
-                self?.clipboard?.adopt(remoteSequence: sequence)
-            }
-            appWindow.setStatus("Connecting to \(pcLabel(host))", detail: target.title)
-            // A StreamSession cannot be restarted in place — stop() releases the
-            // decoder and start() does not build another — so recovering means a
-            // new session. Closing the windows runs the path that already exists
-            // for that, back to the picker with the host connection still up,
-            // and the picker opens the same application again, as Switch App
-            // does for a launcher: Try Again said it would, and left the app to
-            // be found and clicked again. A whole display, with no app to name,
-            // goes back to the list.
-            appWindow.onRetry = { [weak self] in
-                guard let self else { return }
-                if let link = self.streamLink {
-                    Log.info("[app] retry after a lost stream; opening \"\(link.name)\" again")
-                    self.pendingOpen = link
-                    self.pendingWindowID = self.appWindows.first?.remoteWindowID
-                } else {
-                    Log.info("[app] retry after a lost stream; returning to the picker")
-                }
-                self.appWindows.forEach { $0.close() }
-            }
-            appWindows.append(appWindow)
-            // What the host last said about its cursor, before the window can
-            // become key: it only pushes on change, and the push that said a
-            // game had hidden it went to the picker.
-            if let shape = agent.lastCursorShape {
-                appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
-            }
-            appWindow.show()
-            appWindow.setInputBlocked(inputBlockedShort)
-            if let note = inputBlockedNow {
-                appWindow.tell(note)
-                inputBlockedShown = true
-            }
-
-            // Size the host window to this one and pin it there. The window owns
-            // its own geometry so the initial placement and a later drag go
-            // through identical code, and the lock is taken only once the window
-            // is where it belongs — it enforces whatever geometry it finds.
-            appWindow.placeAndLock()
-            agent.focus(windowID: target.id)
-            Log.info("[app] \"\(target.title)\" -> tile \(tile)")
+            addAppWindow(target: target, tile: tiles[index])
         }
 
         // Once per PC while SolStream runs, on the window opened last, which
@@ -1692,8 +1628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch state {
             case .needsToken(let host, let rejected):
-                let parent = self.appWindows.first { $0.window?.isKeyWindow == true }?.window
-                    ?? self.appWindows.first?.window
+                let parent = self.frontAppWindow?.window
                 MainActor.assumeIsolated {
                     self.promptForToken(host: host, rejected: rejected, over: parent,
                                         agent: agent) { reason in
@@ -1763,6 +1698,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Log.info("[app] settings changed while the stream was opening")
             scheduleMediaRestart()
         }
+    }
+
+    /// Open one native window on the running stream, showing `target` on
+    /// `tile` of the capture display: the whole of it for one window, its own
+    /// share when there are more.
+    ///
+    /// The stream's session, connection and display must be set; `presentApps`
+    /// sets them before its first window, and `addToStream` checks them.
+    @discardableResult
+    private func addAppWindow(target: RemoteWindow, tile: CGRect) -> AppWindow? {
+        guard let session, let agent, let host = streamHost, let display = streamDisplay else {
+            Log.error("[app] no stream to open \"\(target.title)\" on")
+            return nil
+        }
+        // Stepped away from the window in front, before this one is.
+        let previous = frontAppWindow?.window
+        // What the others cover, asked afresh each time: each window may grow
+        // into whatever they leave free, and no further.
+        let appWindow = AppWindow(session: session, agent: agent, remote: target,
+                                  display: display, tile: tile) { [weak self] in
+            self?.appWindows.filter { $0.remoteWindowID != target.id }.map(\.occupied) ?? []
+        }
+        appWindow.onPlaced = { [weak self] in
+            self?.neighboursChanged(except: target.id)
+        }
+        appWindow.onClose = { [weak self, weak appWindow] in
+            guard let self else { return }
+            self.appWindows.removeAll { $0 === appWindow }
+            // Its part of the display is free again, for the others to grow
+            // into and for whatever is added next. One left on its own has the
+            // whole display, as it always had.
+            self.neighboursChanged()
+            guard self.appWindows.isEmpty else { return }
+            // End the media session by asking, not by dropping the socket.
+            // The UDP BYE alone only sets `running = false` on the host: the
+            // capture, encoder, sender and receive threads, the socket and
+            // the keys all survive until something starts a new session, and
+            // any key or mouse button still held is never released.
+            // Still the session, as far as an update is concerned: the
+            // picker comes straight back over the same connection, and an
+            // install that quit the app now would take it away mid-Switch
+            // App or mid-Retry. Leaving the picker ends it.
+            self.endStream(keepsSession: !self.testMode) { agent.closeMediaSession() }
+            // KEEP THE AGENT CONNECTION. The host's one-client gate cannot
+            // tell a new connection from the last one's teardown still
+            // running, and answers "busy". Nothing needs the disconnect: the
+            // close path already sent `lock off`, which restores the window.
+            if !self.testMode {
+                self.showPicker(host: host, reusing: agent)
+            }
+        }
+        // Gaining the keyboard sends a Mac copy held back until now, before
+        // the ⌘V that follows; losing it brings the PC's last copy over
+        // before the paste in whatever application is next.
+        appWindow.onKeyboardChange = { [weak self] in
+            self?.clipboard?.syncNow()
+        }
+        appWindow.onHostClipboardSet = { [weak self] sequence in
+            self?.clipboard?.adopt(remoteSequence: sequence)
+        }
+        appWindow.setStatus("Connecting to \(pcLabel(host))", detail: target.title)
+        // A StreamSession cannot be restarted in place — stop() releases the
+        // decoder and start() does not build another — so recovering means a
+        // new session. Closing the windows runs the path that already exists
+        // for that, back to the picker with the host connection still up,
+        // and the picker opens the same application again, as Switch App
+        // does for a launcher: Try Again said it would, and left the app to
+        // be found and clicked again. A whole display, with no app to name,
+        // goes back to the list.
+        appWindow.onRetry = { [weak self] in
+            guard let self else { return }
+            if let link = self.streamLink {
+                Log.info("[app] retry after a lost stream; opening \"\(link.name)\" again")
+                self.pendingOpen = link
+                // The window the stream was opened for, not whichever is
+                // first: one added beside it is another app.
+                self.pendingWindowID = self.linkedWindowID.flatMap { id in
+                    self.appWindows.contains { $0.remoteWindowID == id } ? id : nil
+                }
+            } else {
+                Log.info("[app] retry after a lost stream; returning to the picker")
+            }
+            self.appWindows.forEach { $0.close() }
+        }
+        appWindows.append(appWindow)
+        // What the host last said about its cursor, before the window can
+        // become key: it only pushes on change, and the push that said a
+        // game had hidden it went to the picker.
+        if let shape = agent.lastCursorShape {
+            appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
+        }
+        appWindow.show(after: previous)
+        appWindow.setInputBlocked(inputBlockedShort)
+        if let note = inputBlockedNow {
+            appWindow.tell(note)
+            inputBlockedShown = true
+        }
+
+        // Size the host window to this one and pin it there. The window owns
+        // its own geometry so the initial placement and a later drag go
+        // through identical code, and the lock is taken only once the window
+        // is where it belongs — it enforces whatever geometry it finds.
+        appWindow.placeAndLock()
+        agent.focus(windowID: target.id)
+        Log.info("[app] \"\(target.title)\" -> tile \(tile)")
+        return appWindow
     }
 
     /// The session's own reports, routed to the windows — and, when the picture
@@ -2280,7 +2321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Non-overlapping tiles. Non-overlap is the whole point: the crop shows
     /// whatever is at those coordinates, so two windows sharing pixels would
     /// each show the other.
-    private static func tileLayout(count: Int, on display: RemoteDisplay) -> [CGRect] {
+    static func tileLayout(count: Int, on display: RemoteDisplay) -> [CGRect] {
         guard count > 0 else { return [] }
         let columns = Int(ceil(Double(count).squareRoot()))
         let rows = Int(ceil(Double(count) / Double(columns)))
@@ -2294,6 +2335,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           y: (CGFloat(display.y) + CGFloat(row) * height).rounded(),
                           width: width.rounded(),
                           height: height.rounded())
+        }
+    }
+
+    /// The capture display, in the host's virtual-desktop coordinates: the
+    /// tile a window on its own has.
+    static func displayRect(_ display: RemoteDisplay) -> CGRect {
+        CGRect(x: display.x, y: display.y, width: display.width, height: display.height)
+    }
+
+    /// The stream window in front: the one with the keyboard, else the
+    /// highest on screen, else any. Where a note for no window in particular
+    /// is said, and what a window added to the stream steps away from.
+    private var frontAppWindow: AppWindow? {
+        if let key = appWindows.first(where: { $0.window?.isKeyWindow == true }) { return key }
+        for window in NSApp.orderedWindows {
+            if let match = appWindows.first(where: { $0.window === window }) { return match }
+        }
+        return appWindows.first
+    }
+
+    // MARK: - Adding to a running stream
+
+    /// What adding a PC window to the stream comes to. See `addition`.
+    enum StreamAddition: Equatable {
+        /// It is streamed already.
+        case alreadyStreamed
+        /// The host holds no more windows than this at once.
+        case full
+        /// Nowhere on the capture display is free, even shrunk.
+        case noRoom
+        /// Open it here: the client area, in capture-display pixels.
+        case add(CGRect)
+    }
+
+    /// Where `target` would go on a stream already showing `streamed`, as
+    /// `(PC window, what it covers)`. Pure, for the tests.
+    ///
+    /// Asked for at its own size with its frame on top, wherever nothing
+    /// streamed is, and smaller if it has to be; see `TileAllocator`.
+    static func addition(of target: RemoteWindow, to streamed: [(id: UInt64, occupied: CGRect)],
+                         canvas: CGRect) -> StreamAddition {
+        if streamed.contains(where: { $0.id == target.id }) { return .alreadyStreamed }
+        guard streamed.count < TileAllocator.maxWindows else { return .full }
+        let caption = CGFloat(max(target.captionInset, 0))
+        var size = target.naturalSize
+        if size.width < 1 || size.height < 1 {
+            // A host that says nothing of its size: half the display.
+            size = CGSize(width: canvas.width / 2, height: canvas.height / 2)
+        }
+        let wanted = CGSize(width: size.width, height: size.height + caption)
+        guard let frame = TileAllocator.allocate(canvas: canvas, inUse: streamed.map(\.occupied),
+                                                 wanted: wanted),
+              frame.height > caption + 1 else { return .noRoom }
+        return .add(CGRect(x: frame.minX, y: frame.minY + caption,
+                           width: frame.width, height: frame.height - caption))
+    }
+
+    /// A window was added, closed or placed: every other one holds itself to
+    /// its room again. See `AppWindow.room`.
+    private func neighboursChanged(except id: UInt64? = nil) {
+        for appWindow in appWindows where appWindow.remoteWindowID != id {
+            appWindow.neighboursChanged()
+        }
+    }
+
+    /// Open `target` beside what is already streamed, on a part of the
+    /// capture display nobody else is using.
+    ///
+    /// Nothing happens if it is on screen already but bringing it forward.
+    /// With the host's eight windows held, or no room left on its display, it
+    /// is said in the window in front and nothing else changes. The windows
+    /// already open keep everything they are showing, and may no longer grow
+    /// into what the new one takes.
+    func addToStream(_ target: RemoteWindow) {
+        guard let session, agent != nil, let display = streamDisplay, !appWindows.isEmpty,
+              !recoveringMedia, !connectionLostShown else {
+            Log.error("[app] not adding \"\(target.title)\": nothing is streaming now")
+            return
+        }
+        let canvas = Self.displayRect(display)
+        let streamed = appWindows.map { (id: $0.remoteWindowID, occupied: $0.occupied) }
+        switch Self.addition(of: target, to: streamed, canvas: canvas) {
+        case .alreadyStreamed:
+            Log.info("[app] \"\(target.title)\" is streamed already; bringing it forward")
+            if let window = appWindows.first(where: { $0.remoteWindowID == target.id })?.window {
+                if window.isMiniaturized { window.deminiaturize(nil) }
+                window.makeKeyAndOrderFront(nil)
+            }
+        case .full:
+            Log.error("[app] not adding \"\(target.title)\": \(appWindows.count) windows "
+                      + "are streamed, the most the PC holds")
+            frontAppWindow?.tell("SolStream can show \(TileAllocator.maxWindows) windows from a PC "
+                                 + "at once. Close one to add \(target.title).")
+        case .noRoom:
+            Log.error("[app] not adding \"\(target.title)\": no room left on the capture display")
+            frontAppWindow?.tell("There's no room left on the PC's display for \(target.title). "
+                                 + "Close a window or make one smaller, then try again.")
+        case .add(let tile):
+            guard let appWindow = addAppWindow(target: target, tile: tile) else { return }
+            // The windows already there may no longer grow into what this
+            // one has taken.
+            neighboursChanged(except: target.id)
+            // `presentApps` does these once for all its windows, after the
+            // session has started; this one joins a session already going.
+            appWindow.inputBecameLive()
+            if session.framesDecoded > 0 { appWindow.hideStatus() }
         }
     }
 
@@ -2523,6 +2670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session = nil
         mediaRequest = nil
         streamLink = nil
+        linkedWindowID = nil
         streamConfig = nil
         streamDisplay = nil
         streamHost = nil
@@ -2683,7 +2831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let named = sender.representedObject as? AppWindow {
             return appWindows.contains { $0 === named } ? named : nil
         }
-        return appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
+        return frontAppWindow
     }
 
     @objc private func quitStreamedApp(_ sender: NSMenuItem) {
@@ -2811,9 +2959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             receiver.onReport = { [weak self] text in
                 Log.info("[files] \(text)")
                 // In the window the progress was in, which takes it away.
-                if let window = self?.receivingWindow
-                    ?? self?.appWindows.first(where: { $0.window?.isKeyWindow == true })
-                    ?? self?.appWindows.first {
+                if let window = self?.receivingWindow ?? self?.frontAppWindow {
                     window.holdNote(nil, as: .receiving)
                     window.tell(text)
                 }
@@ -2827,9 +2973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 // One window for a download's progress, so none is left
                 // holding a percent when the keyboard moves to another.
-                let window = self.receivingWindow
-                    ?? self.appWindows.first(where: { $0.window?.isKeyWindow == true })
-                    ?? self.appWindows.first
+                let window = self.receivingWindow ?? self.frontAppWindow
                 self.receivingWindow = window
                 window?.holdNote(text, as: .receiving)
             }
@@ -2869,7 +3013,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         inputBlockedShort = Self.inputBlockedShort(reason, app: app)
         appWindows.forEach { $0.setInputBlocked(inputBlockedShort) }
         if reason == nil && !inputBlockedShown { return }
-        let window = appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first
+        let window = frontAppWindow
         // Held while it lasts: in full screen the subtitle is out of sight,
         // and the note is all there is to say why clicks go nowhere.
         window?.tell(note, for: reason == nil ? 8 : nil)
@@ -2926,7 +3070,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .firstHeldBack:
             Log.info("[links] more than ten links from the PC in a minute; holding the rest back")
             // Not only a key window: the links that did open took the focus.
-            (appWindows.first { $0.window?.isKeyWindow == true } ?? appWindows.first)?
+            frontAppWindow?
                 .tell(LinkRateLimit.note)
         case .heldBack:
             Log.info("[links] held back a link from the PC")

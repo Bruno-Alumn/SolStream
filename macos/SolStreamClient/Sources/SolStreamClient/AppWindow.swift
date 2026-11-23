@@ -30,6 +30,46 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Where this window's client area sits on the capture display.
     private(set) var tile: CGRect
 
+    /// The host's own title bar above the client area, in host pixels: part of
+    /// the host window, and so of what it covers, though never in the picture.
+    let captionInset: CGFloat
+
+    /// What every other streamed window covers, frame and all. Empty for a
+    /// window on its own, which has the whole display.
+    private let neighbours: () -> [CGRect]
+
+    /// A `place` was answered, so this window may cover something else now and
+    /// the others' room has changed.
+    var onPlaced: (() -> Void)?
+
+    /// A `place` on its way, so a neighbour working out its room in the
+    /// meantime keeps clear of where this one is going as well as where it is.
+    private var requestedInFlight: CGRect?
+
+    /// What the host window covers on the capture display, frame and all: as
+    /// last placed, or the tile before then, and wherever a `place` on its way
+    /// is taking it.
+    var occupied: CGRect {
+        var client = lastPlacement?.frame ?? tile
+        if let requestedInFlight { client = client.union(requestedInFlight) }
+        return CGRect(x: client.minX, y: client.minY - captionInset,
+                      width: client.width, height: client.height + captionInset)
+    }
+
+    /// The part of the capture display this window may grow into, as a client
+    /// area: everything free around it, up to its neighbours' edges and a gap,
+    /// and the display's own. For a window on its own, the whole display --
+    /// the title bar may sit above it, as it always could. The host window is
+    /// only ever asked to fit inside this, and the picture never shows past
+    /// it, because what lies past it is another window's. See `TileAllocator`.
+    var room: CGRect {
+        let canvas = CGRect(x: CGFloat(display.x), y: CGFloat(display.y) - captionInset,
+                            width: CGFloat(display.width), height: CGFloat(display.height) + captionInset)
+        let frame = TileAllocator.room(around: occupied, others: neighbours(), canvas: canvas)
+        return CGRect(x: frame.minX, y: frame.minY + captionInset,
+                      width: frame.width, height: frame.height - captionInset)
+    }
+
     /// The title bar the application draws inside its own window, in host
     /// pixels at the top of `tile`, as the host last measured it; zero when it
     /// draws none there.
@@ -42,12 +82,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var program = ""
     /// The last placement, so a change to the crop can apply its limits again.
     private var lastPlacement: AgentConnection.Placement?
-
-    /// The capture display, in virtual-desktop coordinates. Nothing outside this
-    /// is in the stream at all.
-    private var displayRect: CGRect {
-        CGRect(x: display.x, y: display.y, width: display.width, height: display.height)
-    }
 
     /// One `place` in flight at a time — see `requestResize`.
     private var resizeInFlight = false
@@ -106,7 +140,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     init(session: StreamSession, agent: AgentConnection,
-         remote: RemoteWindow, display: RemoteDisplay, tile: CGRect) {
+         remote: RemoteWindow, display: RemoteDisplay, tile: CGRect,
+         neighbours: @escaping () -> [CGRect] = { [] }) {
         self.session = session
         self.agent = agent
         self.remoteWindowID = remote.id
@@ -114,6 +149,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
         hostDisplay = "\(display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
             + "· \(display.width)×\(display.height)"
         self.tile = tile
+        self.neighbours = neighbours
+        captionInset = CGFloat(max(remote.captionInset, 0))
         super.init()
         build(title: remote.title,
               naturalSize: remote.naturalSize)
@@ -231,23 +268,6 @@ final class AppWindow: NSObject, NSWindowDelegate {
         lifeTimer = timer
     }
 
-    /// Where the next streamed window should be placed, so two of them do not
-    /// land on top of each other.
-    ///
-    /// Every window is built at the same default rectangle, so streaming two
-    /// applications opened one exactly behind the other: the log said two
-    /// windows were attached, the screen showed one, and the second was only
-    /// reachable through the Window menu. AppKit's own cascade is the answer it
-    /// uses for document windows, which is the same problem.
-    private static var cascadePoint = NSPoint.zero
-
-    /// Centre the next window again: the last one has closed, so the one
-    /// after Switch App or a launcher is not a second window to step away
-    /// from the first, and used to open a little further down-right each time.
-    static func resetCascade() {
-        cascadePoint = .zero
-    }
-
     /// How much of the screen a window may take when it opens. Not a limit on
     /// the window — it resizes to anything afterwards — just a starting size that
     /// leaves the desktop visible around it.
@@ -272,11 +292,26 @@ final class AppWindow: NSObject, NSWindowDelegate {
                       height: (points.height * shrink).rounded())
     }
 
-    func show() {
+    /// Put the window on screen, stepped down and right from `previous` --
+    /// the stream window in front -- or centred when there is none.
+    ///
+    /// Every window is built at the same default rectangle, so streaming two
+    /// applications opened one exactly behind the other: the log said two
+    /// windows were attached, the screen showed one, and the second was only
+    /// reachable through the Window menu. AppKit's own cascade is the answer it
+    /// uses for document windows, which is the same problem.
+    ///
+    /// From where that window is now, not from where the last one was opened:
+    /// a point kept between opens went on stepping down-right for as long as
+    /// any window was left, and knew nothing of a window since moved.
+    func show(after previous: NSWindow? = nil) {
         if let window {
-            if Self.cascadePoint == .zero {
-                // Centre the first one, then cascade from there.
-                //
+            if let previous, previous.isVisible, !previous.isMiniaturized,
+               !previous.styleMask.contains(.fullScreen) {
+                window.setFrameTopLeftPoint(NSPoint(x: previous.frame.minX, y: previous.frame.maxY))
+                // From zero the window stays put and the step is returned.
+                window.cascadeTopLeft(from: window.cascadeTopLeft(from: .zero))
+            } else {
                 // The window is built at origin (0,0), which in macOS is the
                 // BOTTOM-left of the screen. That went unnoticed while every
                 // streamed window was very nearly screen-sized — it had nowhere
@@ -284,13 +319,19 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // their own size made it plain: Character Map appeared in the
                 // bottom-left corner, half of it below the edge of the display.
                 window.center()
-                Self.cascadePoint = window.cascadeTopLeft(from: .zero)
-            } else {
-                Self.cascadePoint = window.cascadeTopLeft(from: Self.cascadePoint)
             }
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Another window was added, closed or resized, so this one's `room` may
+    /// have changed: hold the window to it again, so a drag stops at the
+    /// neighbour's edge instead of being snapped back after it.
+    func neighboursChanged() {
+        guard !isClosing, let lastPlacement, let window,
+              let screen = window.screen ?? NSScreen.main else { return }
+        applySizeLimits(lastPlacement, achieved: picture(of: tile), scale: screen.backingScaleFactor)
     }
 
     func close() {
@@ -483,7 +524,12 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let screen = NSScreen.main
         let scale = screen?.backingScaleFactor ?? 2
         let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
-        let wanted = naturalSize.width > 0 && naturalSize.height > 0 ? naturalSize : tile.size
+        var wanted = naturalSize.width > 0 && naturalSize.height > 0 ? naturalSize : tile.size
+        // No bigger than its room on the display: the host window cannot be,
+        // and opening bigger only to be snapped back is a jump on screen.
+        let room = self.room
+        wanted = CGSize(width: min(wanted.width, room.width),
+                        height: min(wanted.height, room.height))
         let content = NSRect(origin: .zero,
                              size: Self.openingSize(hostPixels: wanted, scale: scale,
                                                     visible: visible))
@@ -784,18 +830,25 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// The rectangle, in capture-display pixels, the host window is asked to
     /// take for this window as it is now: its size at the backing scale, plus
     /// the application's own title bar when the picture leaves it out, kept
-    /// on the display. Nil before there is a window or a size.
-    private func openingRequest() -> CGRect? {
+    /// inside `room` -- for one window, the display. Nil before there is a
+    /// window or a size.
+    private func openingRequest(within room: CGRect? = nil) -> CGRect? {
         guard let window, let screen = window.screen ?? NSScreen.main else { return nil }
         let scale = screen.backingScaleFactor
         let size = window.contentView?.bounds.size ?? .zero
-        let maxWidth = CGFloat(display.width)
-        let maxHeight = CGFloat(display.height)
-        let wanted = CGSize(width: min((size.width * scale).rounded(), maxWidth),
-                            height: min((size.height * scale).rounded() + hiddenStrip, maxHeight))
-        let origin = CGPoint(x: min(tile.minX, CGFloat(display.x) + maxWidth - wanted.width),
-                             y: min(tile.minY, CGFloat(display.y) + maxHeight - wanted.height))
-        let requested = CGRect(origin: origin, size: wanted)
+        return Self.request(size: CGSize(width: (size.width * scale).rounded(),
+                                         height: (size.height * scale).rounded() + hiddenStrip),
+                            at: tile.origin, within: room ?? self.room)
+    }
+
+    /// `size` at `origin`, moved up and left and then cut down as far as it
+    /// takes to stay inside `room`. Nil if nothing is left. Pure, for the tests.
+    static func request(size: CGSize, at origin: CGPoint, within room: CGRect) -> CGRect? {
+        let wanted = CGSize(width: min(size.width, room.width),
+                            height: min(size.height, room.height))
+        let corner = CGPoint(x: max(room.minX, min(origin.x, room.maxX - wanted.width)),
+                             y: max(room.minY, min(origin.y, room.maxY - wanted.height)))
+        let requested = CGRect(origin: corner, size: wanted)
         return requested.width >= 1 && requested.height >= 1 ? requested : nil
     }
 
@@ -816,17 +869,28 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // size a window past the edge of its display, and the part that hangs
         // off is simply not in the captured frame — so the crop ends up partly
         // outside the canvas and the window fills with desktop.
+        //
+        // Nor more than this window's room: whatever size it is asked for,
+        // by a drag, by full screen or by the code, so no path takes it over
+        // a neighbour. The room it was asked inside is the one its answer is
+        // clipped to.
         let scale = screen.backingScaleFactor
-        guard let requested = openingRequest() else {
+        let room = self.room
+        guard let requested = openingRequest(within: room) else {
             completion?()
             return
         }
 
+        requestedInFlight = requested
         agent.place(windowID: remoteWindowID, at: requested) { [weak self] placement in
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { completion?() }
+                self.requestedInFlight = nil
                 guard let placement else { return }
+                // After the rest, so the others work their room out from
+                // where this one ended up.
+                defer { self.onPlaced?() }
                 let achieved = placement.frame
                 // Follow what the host actually did, then clip to the canvas.
                 //
@@ -838,7 +902,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // so the visible rectangle is what the crop and this window must
                 // both follow. Matching the unclipped size instead is what draws
                 // bars: the window ends up a different shape from the picture.
-                let visible = achieved.intersection(self.displayRect)
+                // And to this window's room on it: past that is a neighbour's,
+                // and the crop would show it. For one window the two are the same.
+                let visible = achieved.intersection(room)
                 let hidingBefore = self.hiddenStrip
                 self.adoptTitleBar(placement)
                 // The program's title bar is left out by a choice kept from
@@ -868,7 +934,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 }
                 if visible != achieved {
                     Log.info("[window] host window \(Int(achieved.width))x\(Int(achieved.height))"
-                             + " does not fit the display; showing "
+                             + " does not fit its room on the display; showing "
                              + "\(Int(visible.width))x\(Int(visible.height))")
                 } else {
                     // Both numbers, always. This logged only what the host
@@ -956,6 +1022,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
         var maximum = placement.maximumSize
         if maximum.height > 0 { maximum.height = max(maximum.height - strip, 1) }
+        // With other windows streamed, no bigger than the room beside them,
+        // so a drag stops at a neighbour's edge rather than being snapped back
+        // after it. Whichever of that and the application's own maximum is
+        // smaller wins. A window on its own is left as it always was.
+        let free = Self.roomLimit(room: room, strip: strip, hasNeighbours: !neighbours().isEmpty)
+        if let free {
+            maximum.width = maximum.width > 0 ? min(maximum.width, free.width) : free.width
+            maximum.height = maximum.height > 0 ? min(maximum.height, free.height) : free.height
+        }
         if maximum.width > 0 || maximum.height > 0 {
             let limit = points(CGSize(width: maximum.width > 0 ? maximum.width : .greatestFiniteMagnitude,
                                       height: maximum.height > 0 ? maximum.height : .greatestFiniteMagnitude))
@@ -963,10 +1038,33 @@ final class AppWindow: NSObject, NSWindowDelegate {
                                  height: max(limit.height, window.contentMinSize.height))
             if window.contentMaxSize != ceiling {
                 window.contentMaxSize = ceiling
-                Log.info("[window] host maximum is \(Int(maximum.width))x\(Int(maximum.height)); "
-                         + "this window stops at \(Int(ceiling.width))x\(Int(ceiling.height)) points")
+                // Debug for the room: it moves with every neighbour's drag.
+                let line = "[window] \(free == nil ? "host" : "room and host") maximum is "
+                    + "\(Int(maximum.width))x\(Int(maximum.height)); "
+                    + "this window stops at \(Int(ceiling.width))x\(Int(ceiling.height)) points"
+                if free == nil { Log.info(line) } else { Log.debug(line) }
             }
+            heldToRoom = free != nil
+        } else if heldToRoom {
+            // The last neighbour has gone and the application sets no limit
+            // of its own: as large as AppKit allows again.
+            heldToRoom = false
+            window.contentMaxSize = NSSize(width: CGFloat(Float.greatestFiniteMagnitude),
+                                           height: CGFloat(Float.greatestFiniteMagnitude))
+            Log.info("[window] no other window streamed; this one may grow to the whole display")
         }
+    }
+
+    /// `contentMaxSize` was last set for the room beside other windows.
+    private var heldToRoom = false
+
+    /// The most picture, in host pixels, a window may show in `room`: all of
+    /// it, less the application's own title bar when that is left out. Nil
+    /// for a window with no neighbours, which is held to nothing but the
+    /// application's own limits, as it always was. Pure, for the tests.
+    static func roomLimit(room: CGRect, strip: CGFloat, hasNeighbours: Bool) -> CGSize? {
+        guard hasNeighbours else { return nil }
+        return CGSize(width: max(room.width, 1), height: max(room.height - strip, 1))
     }
 
     /// Make this window exactly as tall and wide as the crop it is showing.
