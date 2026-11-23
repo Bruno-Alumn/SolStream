@@ -124,6 +124,11 @@ public struct RemoteWindowStatus: Sendable, Equatable {
     /// Pixels of title bar above the client area, measured where the window is
     /// now. A host from before this says nothing.
     public var captionInset: Int?
+    /// Its client area where it is now, in the host's virtual-desktop
+    /// pixels; nil when the reply leaves it out.
+    public var frame: CGRect?
+    /// Minimised on the PC.
+    public var isMinimized = false
 }
 
 /// A window a streamed application opened on the host: a dialog it owns, or a
@@ -159,6 +164,22 @@ public struct OpenedWindow: Sendable, Equatable {
         self.width = width
         self.height = height
         self.title = title
+    }
+}
+
+extension RemoteWindow {
+    /// The window `opened` names, to be streamed like one chosen in the
+    /// picker: where `status` last found it if it has an answer, else where
+    /// the push said it was, with the push's title.
+    public static func following(_ opened: OpenedWindow,
+                                 status: RemoteWindowStatus? = nil) -> RemoteWindow {
+        let frame = status?.frame ?? CGRect(x: opened.x, y: opened.y,
+                                            width: opened.width, height: opened.height)
+        return RemoteWindow(id: opened.id, pid: Int(opened.pid), title: opened.title,
+                            className: "", x: Int(frame.minX), y: Int(frame.minY),
+                            width: Int(frame.width), height: Int(frame.height),
+                            isOccluded: false, occludedBy: nil,
+                            captionInset: max(0, status?.captionInset ?? 0))
     }
 }
 
@@ -2399,13 +2420,25 @@ public final class AgentConnection {
                 completion(nil)
                 return
             }
-            completion(RemoteWindowStatus(
-                isAlive: alive,
-                isOccluded: message["occluded"] as? Bool ?? false,
-                occludedBy: message["occludedBy"] as? String,
-                isVisible: message["visible"] as? Bool ?? true,
-                captionInset: message["captionInset"] as? Int))
+            completion(Self.windowStatus(from: message, alive: alive))
         }
+    }
+
+    /// A `window` reply, read. Pure, for the tests.
+    static func windowStatus(from message: [String: Any], alive: Bool) -> RemoteWindowStatus {
+        var frame: CGRect?
+        if let x = (message["x"] as? NSNumber)?.intValue, let y = (message["y"] as? NSNumber)?.intValue,
+           let w = (message["w"] as? NSNumber)?.intValue, let h = (message["h"] as? NSNumber)?.intValue {
+            frame = CGRect(x: x, y: y, width: max(0, w), height: max(0, h))
+        }
+        return RemoteWindowStatus(
+            isAlive: alive,
+            isOccluded: message["occluded"] as? Bool ?? false,
+            occludedBy: message["occludedBy"] as? String,
+            isVisible: message["visible"] as? Bool ?? true,
+            captionInset: message["captionInset"] as? Int,
+            frame: frame,
+            isMinimized: message["minimized"] as? Bool ?? false)
     }
 
     /// Move and size a window so its client area lands exactly on `rect`, in

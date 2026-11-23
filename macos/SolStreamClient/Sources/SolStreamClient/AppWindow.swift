@@ -317,7 +317,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// From where that window is now, not from where the last one was opened:
     /// a point kept between opens went on stepping down-right for as long as
     /// any window was left, and knew nothing of a window since moved.
-    func show(after previous: NSWindow? = nil) {
+    /// - Parameter whenPlaced: kept invisible until the PC's window is where
+    ///   this one shows it -- for a window opening beside a picture already
+    ///   live, which then has no card to put up, and whose first frames show
+    ///   whatever was on that part of the display before.
+    func show(after previous: NSWindow? = nil, whenPlaced: Bool = false) {
+        if whenPlaced, !firstPlacementDone {
+            revealWhenPlaced = true
+            window?.alphaValue = 0
+        }
         if let window {
             if let previous, previous.isVisible, !previous.isMiniaturized,
                !previous.styleMask.contains(.fullScreen) {
@@ -364,6 +372,77 @@ final class AppWindow: NSObject, NSWindowDelegate {
         window?.close()
     }
 
+    // MARK: - Dialogs the application opens
+
+    /// The dialogs its application has open over it on the PC, shown over
+    /// this window; see `OwnedWindow`.
+    private(set) var ownedWindows: [OwnedWindow] = []
+
+    /// The streamed window that owns this one on the PC, for a dialog that
+    /// had to be given a tile of its own; it closes with that window.
+    var ownerID: UInt64?
+
+    /// This window, or a dialog over it, has the keyboard: what the clipboard
+    /// and the notes mean by the stream having it.
+    var hasKeyboard: Bool {
+        window?.isKeyWindow == true || ownedWindows.contains { $0.isKey }
+    }
+
+    /// On its way out: a dialog closing with it gives nothing back to it.
+    var isGoing: Bool { isClosing }
+
+    /// Close the dialogs shown over it: they are a picture of something
+    /// that has stopped, and would sit over the card's Try Again.
+    private func closeOwned() {
+        let owned = ownedWindows
+        ownedWindows.removeAll()
+        owned.forEach { $0.close() }
+        applySubtitle()
+    }
+
+    func ownedWindow(id: UInt64) -> OwnedWindow? {
+        ownedWindows.first { $0.remoteWindowID == id }
+    }
+
+    /// What the picture shows of the PC, in its virtual-desktop pixels.
+    var shownPicture: CGRect { picture(of: tile) }
+
+    /// The picture's view on the Mac's screen, in points.
+    var contentOnScreen: CGRect? {
+        guard let window, let view = window.contentView else { return nil }
+        return window.convertToScreen(view.convert(view.bounds, to: nil))
+    }
+
+    /// Show `opened`, a dialog the application opened over this window, as a
+    /// child of it. Nil when this window is on its way out.
+    @discardableResult
+    func mirror(_ opened: OpenedWindow) -> OwnedWindow? {
+        guard !isClosing, window != nil else { return nil }
+        let owned = OwnedWindow(session: session, agent: agent, opened: opened,
+                                display: display, parent: self)
+        owned.onClose = { [weak self, weak owned] in
+            guard let self else { return }
+            self.ownedWindows.removeAll { $0 === owned }
+            self.applySubtitle()
+        }
+        owned.onKeyboardChange = { [weak self] in self?.onKeyboardChange?() }
+        ownedWindows.append(owned)
+        if let shape = lastCursor {
+            owned.hostCursorChanged(shape)
+        }
+        owned.show()
+        // The dialog is what was named as in front; it is in front here too.
+        applySubtitle()
+        return owned
+    }
+
+    /// The Mac cursor last shown for the PC's, for a dialog opened after it.
+    private var lastCursor: NSCursor?
+
+    private func repositionOwned() {
+        ownedWindows.forEach { $0.reposition() }
+    }
+
     /// Whether the last poll said something was covering the host window, so
     /// the overlay is only touched when the answer changes.
     private var wasOccluded = false
@@ -399,6 +478,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// stream gives an I-beam here too.
     func setRemoteCursor(_ cursor: NSCursor) {
         metalView?.remoteCursor = cursor
+        lastCursor = cursor
+        ownedWindows.forEach { $0.hostCursorChanged(cursor) }
     }
 
     /// The host's cursor changed: its shape, by name, as the agent pushes it,
@@ -483,6 +564,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         inputCapture?.sourceRect = crop
         inputCapture?.guardsTopEdge = picture(of: rect).minY == rect.minY
         inputCapture?.canvasSize = session.canvasSize
+        repositionOwned()
         // Deliberately NO contentAspectRatio. The remote window resizes to match
         // whatever shape we are dragged into, so locking the aspect would stop
         // the very thing that makes this feel native — stretch either axis and
@@ -700,6 +782,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     func windowDidResize(_ notification: Notification) {
+        // The dialogs over it keep their place on the picture as it scales.
+        repositionOwned()
         // Resizing the macOS window resizes the real Windows window while the
         // drag is happening, not after it, at whatever rate the host keeps up
         // with — see `requestResize`.
@@ -834,7 +918,14 @@ final class AppWindow: NSObject, NSWindowDelegate {
             hideStatusWhenPlaced = false
             metalView?.hideStatus()
         }
+        if revealWhenPlaced {
+            revealWhenPlaced = false
+            window?.alphaValue = 1
+        }
     }
+
+    /// Shown, but not to be seen until the first placement; see `show`.
+    private var revealWhenPlaced = false
 
     /// One more fit, a moment after the window first opens.
     ///
@@ -1188,6 +1279,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         if window?.isKeyWindow == true {
             installPointerStats()
         }
+        ownedWindows.forEach { $0.rebind(to: fresh) }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1201,6 +1293,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// session -- went nowhere, so what must be in step is put in step now.
     func inputBecameLive() {
         inputCapture?.inputBecameLive()
+        ownedWindows.forEach { $0.inputBecameLive() }
     }
 
     /// Drive the host pointer to a known point in the picture, for `--test-input`.
@@ -1212,6 +1305,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         isClosing = true
+        // Its dialogs go with it, before it lets go of the PC's window: they
+        // are a picture of what lies over it there.
+        closeOwned()
         endWayOut()
         sendingFiles?.cancel()
         lifeTimer?.invalidate()
@@ -1654,6 +1750,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         // ended, left the pointer hidden and frozen over a Try Again it could
         // not reach -- and the way to get it back is only said the first time.
         inputCapture?.streamEnded()
+        closeOwned()
         hideStatusWhenPlaced = false
         endWayOut()
         metalView?.setError(title, detail: detail)
@@ -1706,7 +1803,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     private var inputBlocked: String?
 
     private func applySubtitle() {
-        window?.subtitle = Self.subtitle(inputBlocked: inputBlocked, occludedBy: occludedBy)
+        // Not "in front" while a dialog is shown over it: what covers the
+        // picture on the PC is, most likely, that dialog, there to be seen.
+        window?.subtitle = Self.subtitle(inputBlocked: inputBlocked,
+                                         occludedBy: ownedWindows.isEmpty ? occludedBy : nil)
     }
 
     /// Kept short on purpose. AppKit centres the title and the quality pill
