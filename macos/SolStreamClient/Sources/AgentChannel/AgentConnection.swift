@@ -87,6 +87,14 @@ public struct RemoteWindow: Sendable, Equatable, Identifiable {
             : CGSize(width: width, height: height)
     }
 
+    /// `captionInset` once the window is on the capture display, grown by the
+    /// same ratio as its height: on a 200% display from a 100% one, the title
+    /// bar is twice as tall too. As measured when there is no natural size.
+    public var naturalCaptionInset: Int {
+        guard captionInset > 0, height > 0, naturalHeight > 0 else { return max(captionInset, 0) }
+        return Int((Double(captionInset) * Double(naturalHeight) / Double(height)).rounded())
+    }
+
     public var frame: CGRect {
         CGRect(x: x, y: y, width: width, height: height)
     }
@@ -113,6 +121,9 @@ public struct RemoteWindowStatus: Sendable, Equatable {
     /// Shown on the PC. An app that closes to the notification area hides its
     /// window and keeps running. A host from before this says nothing: shown.
     public var isVisible: Bool = true
+    /// Pixels of title bar above the client area, measured where the window is
+    /// now. A host from before this says nothing.
+    public var captionInset: Int?
 }
 
 /// Talks to the SolStream agent running on the Windows host.
@@ -2351,7 +2362,8 @@ public final class AgentConnection {
                 isAlive: alive,
                 isOccluded: message["occluded"] as? Bool ?? false,
                 occludedBy: message["occludedBy"] as? String,
-                isVisible: message["visible"] as? Bool ?? true))
+                isVisible: message["visible"] as? Bool ?? true,
+                captionInset: message["captionInset"] as? Int))
         }
     }
 

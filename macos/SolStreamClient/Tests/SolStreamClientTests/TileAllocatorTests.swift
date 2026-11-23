@@ -26,8 +26,8 @@ final class TileAllocatorTests: XCTestCase {
                              file: StaticString = #filePath, line: UInt = #line) {
         for (i, a) in rects.enumerated() {
             for b in rects[(i + 1)...] {
-                XCTAssertFalse(TileAllocator.overlaps(a.insetBy(dx: -gap / 2, dy: -gap / 2),
-                                                      b.insetBy(dx: -gap / 2, dy: -gap / 2)),
+                XCTAssertFalse(overlaps(a.insetBy(dx: -gap / 2, dy: -gap / 2),
+                                        b.insetBy(dx: -gap / 2, dy: -gap / 2)),
                                "\(a) and \(b) overlap", file: file, line: line)
             }
         }
@@ -146,13 +146,12 @@ final class TileAllocatorTests: XCTestCase {
     func testGrowingRightStopsAtTheNeighboursEdge() {
         let current = CGRect(x: 3440, y: 0, width: 1200, height: 900)
         let neighbour = CGRect(x: 5400, y: 0, width: 1200, height: 900)
-        let size = TileAllocator.maxSize(for: current.size, origin: current.origin,
-                                         others: [neighbour], canvas: canvas)
+        let size = TileAllocator.room(around: current, others: [neighbour], canvas: canvas).size
         // Up to the neighbour less the gap, and on down the display below it:
         // the larger of the two ways to grow.
         let right = CGRect(origin: current.origin, size: size)
-        XCTAssertFalse(TileAllocator.overlaps(right, neighbour.insetBy(dx: -TileAllocator.gap,
-                                                                       dy: -TileAllocator.gap)))
+        XCTAssertFalse(overlaps(right, neighbour.insetBy(dx: -TileAllocator.gap,
+                                                         dy: -TileAllocator.gap)))
         XCTAssertTrue(right.contains(current))
         XCTAssertTrue(canvas.contains(right))
         XCTAssertEqual(size.width, 5400 - TileAllocator.gap - 3440, "stopped at the neighbour")
@@ -162,17 +161,19 @@ final class TileAllocatorTests: XCTestCase {
     func testGrowingDownStopsAtTheNeighbourBelow() {
         let current = CGRect(x: 3440, y: 0, width: 3600, height: 900)
         let below = CGRect(x: 3440, y: 1500, width: 3600, height: 800)
-        let size = TileAllocator.maxSize(for: current.size, origin: current.origin,
-                                         others: [below], canvas: canvas)
+        let size = TileAllocator.room(around: current, others: [below], canvas: canvas).size
         XCTAssertEqual(size, CGSize(width: 3600, height: 1500 - TileAllocator.gap))
     }
 
-    func testNeverPastTheDisplaysEdge() {
+    /// Up to the display's own edges, and left only as far as a neighbour in
+    /// the top-left corner allows.
+    func testNeverPastTheDisplaysEdgeNorIntoANeighbour() {
         let current = CGRect(x: 6000, y: 1800, width: 800, height: 400)
-        let size = TileAllocator.maxSize(for: current.size, origin: current.origin,
-                                         others: [CGRect(x: 3440, y: 0, width: 500, height: 500)],
-                                         canvas: canvas)
-        XCTAssertEqual(size, CGSize(width: 7040 - 6000, height: 2338 - 1800))
+        let room = TileAllocator.room(around: current,
+                                      others: [CGRect(x: 3440, y: 0, width: 500, height: 500)],
+                                      canvas: canvas)
+        XCTAssertEqual(room, CGRect(x: 3940 + TileAllocator.gap, y: 0,
+                                    width: 7040 - 3940 - TileAllocator.gap, height: 2338))
     }
 
     /// Free space beside a neighbour is a staircase: whichever way it grows,
@@ -185,8 +186,8 @@ final class TileAllocatorTests: XCTestCase {
         XCTAssertTrue(room.contains(current))
         XCTAssertTrue(canvas.contains(room))
         for other in others {
-            XCTAssertFalse(TileAllocator.overlaps(room, other.insetBy(dx: -TileAllocator.gap,
-                                                                     dy: -TileAllocator.gap)))
+            XCTAssertFalse(overlaps(room, other.insetBy(dx: -TileAllocator.gap,
+                                                    dy: -TileAllocator.gap)))
         }
         XCTAssertGreaterThan(room.width * room.height, current.width * current.height,
                              "there is free space to grow into")
@@ -295,7 +296,7 @@ final class TileAllocatorTests: XCTestCase {
         XCTAssertEqual(room, tiles[0])
         let request = AppWindow.request(size: CGSize(width: 2600, height: 1700),
                                         at: tiles[0].origin, within: room)
-        XCTAssertEqual(request.map { TileAllocator.overlaps($0, tiles[1]) }, false)
+        XCTAssertEqual(request.map { overlaps($0, tiles[1]) }, false)
     }
 
     /// A window that closes leaves its neighbour free to grow over where it was.
@@ -306,4 +307,84 @@ final class TileAllocatorTests: XCTestCase {
         XCTAssertLessThan(held.width, canvas.width)
         XCTAssertEqual(TileAllocator.room(around: current, others: [], canvas: canvas), canvas)
     }
+
+    // MARK: - The title bar on the capture display
+
+    /// Measured on a 100% monitor, the title bar is half as tall as it will
+    /// be on the 200% capture display; it grows with the window.
+    func testTheTitleBarIsScaledAsTheWindowIs() {
+        var notepad = window(1, 800, 600, caption: 31)
+        notepad.naturalWidth = 1600
+        notepad.naturalHeight = 1200
+        XCTAssertEqual(notepad.naturalCaptionInset, 62)
+        // 125% to 200%.
+        var dialog = window(2, 1000, 750, caption: 39)
+        dialog.naturalWidth = 1600
+        dialog.naturalHeight = 1200
+        XCTAssertEqual(dialog.naturalCaptionInset, 62)
+    }
+
+    func testAHostThatSaysNothingOfTheNaturalSizeKeepsTheMeasuredTitleBar() {
+        XCTAssertEqual(window(1, 800, 600, caption: 31).naturalCaptionInset, 31)
+        XCTAssertEqual(window(2, 800, 600, caption: 0).naturalCaptionInset, 0)
+        XCTAssertEqual(window(3, 800, 600, caption: -4).naturalCaptionInset, 0)
+    }
+
+    /// A window added below another leaves room for its title bar as tall as
+    /// it will be on the capture display, not as it was measured elsewhere.
+    func testANewWindowBelowAnotherLeavesRoomForItsScaledTitleBar() {
+        let first = CGRect(x: 3440, y: 0, width: 3600, height: 1000)
+        var target = window(2, 800, 500, caption: 31)
+        target.naturalWidth = 1600
+        target.naturalHeight = 1000
+        guard case .add(let tile) = AppDelegate.addition(of: target, to: [(id: 1, occupied: first)],
+                                                         canvas: canvas) else {
+            return XCTFail("there is room below")
+        }
+        XCTAssertGreaterThanOrEqual(tile.minY - 62, first.maxY + TileAllocator.gap,
+                                    "the title bar at 200% clears the window above")
+    }
+
+    // MARK: - Adding to a stream that has ended
+
+    func testNothingIsAddedToAStreamThatHasEnded() {
+        let ended = AppDelegate.addGate(streaming: true, recovering: false, connectionLost: false,
+                                        ended: true, pictureLive: false)
+        guard case .refuse = ended else { return XCTFail("added to an ended stream") }
+        let lost = AppDelegate.addGate(streaming: true, recovering: false, connectionLost: true,
+                                       ended: false, pictureLive: false)
+        guard case .refuse = lost else { return XCTFail("added over a lost connection") }
+        let restarting = AppDelegate.addGate(streaming: true, recovering: true, connectionLost: false,
+                                             ended: false, pictureLive: false)
+        guard case .refuse = restarting else { return XCTFail("added mid-restart") }
+        let none = AppDelegate.addGate(streaming: false, recovering: false, connectionLost: false,
+                                       ended: false, pictureLive: false)
+        guard case .refuse = none else { return XCTFail("added with nothing streaming") }
+    }
+
+    /// A stalled stream takes the window, but its card stays until pictures
+    /// come again; a live one takes the card down at once.
+    func testTheCardComesDownOnlyOverALivePicture() {
+        XCTAssertEqual(AppDelegate.addGate(streaming: true, recovering: false, connectionLost: false,
+                                           ended: false, pictureLive: false),
+                       .open(hidesCard: false))
+        XCTAssertEqual(AppDelegate.addGate(streaming: true, recovering: false, connectionLost: false,
+                                           ended: false, pictureLive: true),
+                       .open(hidesCard: true))
+    }
+
+    // MARK: - A place still on its way
+
+    func testTheAnswerToAnOlderPlaceLeavesTheNewerOneInFlight() {
+        let older = CGRect(x: 3440, y: 0, width: 1000, height: 700)
+        let newer = CGRect(x: 3440, y: 0, width: 1200, height: 800)
+        XCTAssertEqual(AppWindow.inFlight(newer, answered: older), newer)
+        XCTAssertNil(AppWindow.inFlight(newer, answered: newer))
+        XCTAssertNil(AppWindow.inFlight(nil, answered: older))
+    }
+}
+
+/// Sharing area, not just an edge.
+private func overlaps(_ a: CGRect, _ b: CGRect) -> Bool {
+    a.minX < b.maxX && b.minX < a.maxX && a.minY < b.maxY && b.minY < a.maxY
 }

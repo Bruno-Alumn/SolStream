@@ -30,9 +30,11 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// Where this window's client area sits on the capture display.
     private(set) var tile: CGRect
 
-    /// The host's own title bar above the client area, in host pixels: part of
-    /// the host window, and so of what it covers, though never in the picture.
-    let captionInset: CGFloat
+    /// The host's own title bar above the client area, in host pixels on the
+    /// capture display: part of the host window, and so of what it covers,
+    /// though never in the picture. Scaled from where the window was until the
+    /// poll measures it there; see `adoptCaption`.
+    private(set) var captionInset: CGFloat
 
     /// What every other streamed window covers, frame and all. Empty for a
     /// window on its own, which has the whole display.
@@ -48,12 +50,22 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// What the host window covers on the capture display, frame and all: as
     /// last placed, or the tile before then, and wherever a `place` on its way
-    /// is taking it.
+    /// is taking it. What the neighbours keep clear of.
     var occupied: CGRect {
-        var client = lastPlacement?.frame ?? tile
-        if let requestedInFlight { client = client.union(requestedInFlight) }
-        return CGRect(x: client.minX, y: client.minY - captionInset,
-                      width: client.width, height: client.height + captionInset)
+        withCaption((lastPlacement?.frame ?? tile).union(requestedInFlight ?? .null))
+    }
+
+    /// What this window's own room is worked out around: its picture and
+    /// where a `place` on its way is taking it -- not the host window, which
+    /// for an application that will not be made small enough hangs past the
+    /// room, and would make the room grow over a neighbour to hold it.
+    private var footprint: CGRect {
+        withCaption(tile.union(requestedInFlight ?? .null))
+    }
+
+    private func withCaption(_ client: CGRect) -> CGRect {
+        CGRect(x: client.minX, y: client.minY - captionInset,
+               width: client.width, height: client.height + captionInset)
     }
 
     /// The part of the capture display this window may grow into, as a client
@@ -65,7 +77,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
     var room: CGRect {
         let canvas = CGRect(x: CGFloat(display.x), y: CGFloat(display.y) - captionInset,
                             width: CGFloat(display.width), height: CGFloat(display.height) + captionInset)
-        let frame = TileAllocator.room(around: occupied, others: neighbours(), canvas: canvas)
+        let frame = TileAllocator.room(around: footprint, others: neighbours(), canvas: canvas)
         return CGRect(x: frame.minX, y: frame.minY + captionInset,
                       width: frame.width, height: frame.height - captionInset)
     }
@@ -150,7 +162,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             + "· \(display.width)×\(display.height)"
         self.tile = tile
         self.neighbours = neighbours
-        captionInset = CGFloat(max(remote.captionInset, 0))
+        captionInset = CGFloat(remote.naturalCaptionInset)
         super.init()
         build(title: remote.title,
               naturalSize: remote.naturalSize)
@@ -258,6 +270,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
                         self.hostWindowClosed(noticedBy: "quit to the notification area")
                     } else if status.isAlive {
                         self.reportOcclusion(status)
+                        self.adoptCaption(status.captionInset)
                     } else {
                         self.hostWindowClosed(noticedBy: "poll")
                     }
@@ -323,6 +336,19 @@ final class AppWindow: NSObject, NSWindowDelegate {
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Take the title bar's height as the host measures it now. Only once the
+    /// window has been placed, so it is measured on the capture display and
+    /// not on the monitor it came from; and the neighbours are told, since
+    /// what this window covers has changed with it.
+    private func adoptCaption(_ measured: Int?) {
+        guard let measured, measured >= 0, lastPlacement != nil, !isClosing,
+              CGFloat(measured) != captionInset else { return }
+        Log.info("[window] the host's title bar is \(measured) px on the capture display "
+                 + "(was taken as \(Int(captionInset)))")
+        captionInset = CGFloat(measured)
+        onPlaced?()
     }
 
     /// Another window was added, closed or resized, so this one's `room` may
@@ -844,6 +870,13 @@ final class AppWindow: NSObject, NSWindowDelegate {
                             at: tile.origin, within: room ?? self.room)
     }
 
+    /// What is still on its way once the `place` for `answered` has its reply:
+    /// nothing, unless a later one went out meanwhile, which is still in
+    /// flight and still to be kept clear of. Pure, for the tests.
+    static func inFlight(_ current: CGRect?, answered: CGRect) -> CGRect? {
+        current == answered ? nil : current
+    }
+
     /// `size` at `origin`, moved up and left and then cut down as far as it
     /// takes to stay inside `room`. Nil if nothing is left. Pure, for the tests.
     static func request(size: CGSize, at origin: CGPoint, within room: CGRect) -> CGRect? {
@@ -889,7 +922,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { completion?() }
-                self.requestedInFlight = nil
+                self.requestedInFlight = Self.inFlight(self.requestedInFlight, answered: requested)
                 guard let placement else { return }
                 // After the rest, so the others work their room out from
                 // where this one ended up.

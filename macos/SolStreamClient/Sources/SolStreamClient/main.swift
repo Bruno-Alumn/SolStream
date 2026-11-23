@@ -70,6 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The agent channel's final failure is on the stream windows, and the
     /// picture's own troubles must not paint over it. See `notice(for:)`.
     private var connectionLostShown = false
+    /// Every window says the stream has ended (`showEnded`), until a picture
+    /// comes again. Nothing is added to it meanwhile; see `addToStream`.
+    private var streamEnded = false
+    /// Pictures are coming now: `.live` or `.streaming` said so, and nothing
+    /// since has said they stopped.
+    private var pictureLive = false
 
     /// An application asked for from outside the picker -- by a launcher,
     /// or as the one reopened at launch -- waiting for the picker's lists to
@@ -1558,6 +1564,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         streamHost = host
         mediaRecoveryAttempts = 0
         mediaRestarts = []
+        streamEnded = false
+        pictureLive = false
         // Nothing downloads or installs while this is set; see Updater.
         MainActor.assumeIsolated { Updater.shared.isStreaming = true }
 
@@ -1834,12 +1842,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // are the last of a stream that is about to stop, and Try
                 // Again is still the only way back.
                 guard !self.connectionLostShown else { return }
+                self.streamEnded = false
+                self.pictureLive = true
                 self.appWindows.forEach { $0.hideStatus() }
                 // Pictures again after an error said the stream had ended.
                 self.stayAwake.hold()
             case .stalled(let seconds):
+                self.pictureLive = false
                 self.show(self.notice(for: .stalled(seconds: seconds), agent: agent, host: host))
             case .lost:
+                self.pictureLive = false
                 if self.mediaRecoveryAttempts >= 3 {
                     // Three restarts in a row and not one picture from any of
                     // them. A restart that shows one starts the count again
@@ -1872,8 +1884,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // recoveries over a long stream used up every retry it had.
                 self.mediaRecoveryAttempts = 0
                 guard !self.connectionLostShown else { return }
+                self.streamEnded = false
+                self.pictureLive = true
                 self.appWindows.forEach { $0.hideStatus() }
             case .failed(let message):
+                self.pictureLive = false
                 let notice = self.notice(for: .failed(message), agent: agent, host: host)
                 if case .restart = notice, let agent {
                     Log.info("[app] stream failed (\(message)); restarting it")
@@ -1890,6 +1905,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.show(notice)
                 }
             case .waitingForVideo:
+                self.pictureLive = false
                 guard !self.connectionLostShown else { return }
                 self.appWindows.forEach { $0.setStatus("Waiting for video") }
             default:
@@ -1916,6 +1932,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// again: a window left saying so -- the PC shut down while nobody was
     /// at the Mac -- must not keep the screen on until someone comes back.
     private func showEnded(_ title: String, detail: String) {
+        streamEnded = true
+        pictureLive = false
         appWindows.forEach { $0.setError(title, detail: detail) }
         stayAwake.release()
     }
@@ -2027,6 +2045,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         recoveringMedia = true
+        pictureLive = false
         mediaRecoveryAttempts += 1
         let attempt = mediaRecoveryAttempts
         Log.info("[app] restarting the stream from \(host) (attempt \(attempt))")
@@ -2388,7 +2407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          canvas: CGRect) -> StreamAddition {
         if streamed.contains(where: { $0.id == target.id }) { return .alreadyStreamed }
         guard streamed.count < TileAllocator.maxWindows else { return .full }
-        let caption = CGFloat(max(target.captionInset, 0))
+        let caption = CGFloat(target.naturalCaptionInset)
         var size = target.naturalSize
         if size.width < 1 || size.height < 1 {
             // A host that says nothing of its size: half the display.
@@ -2419,9 +2438,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// already open keep everything they are showing, and may no longer grow
     /// into what the new one takes.
     func addToStream(_ target: RemoteWindow) {
-        guard let session, agent != nil, let display = streamDisplay, !appWindows.isEmpty,
-              !recoveringMedia, !connectionLostShown else {
-            Log.error("[app] not adding \"\(target.title)\": nothing is streaming now")
+        let gate = Self.addGate(streaming: session != nil && agent != nil && streamDisplay != nil
+                                    && !appWindows.isEmpty,
+                                recovering: recoveringMedia, connectionLost: connectionLostShown,
+                                ended: streamEnded, pictureLive: pictureLive)
+        guard case .open(let hidesCard) = gate, let display = streamDisplay else {
+            if case .refuse(let reason) = gate {
+                Log.error("[app] not adding \"\(target.title)\": \(reason)")
+            }
             return
         }
         let canvas = Self.displayRect(display)
@@ -2450,8 +2474,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `presentApps` does these once for all its windows, after the
             // session has started; this one joins a session already going.
             appWindow.inputBecameLive()
-            if session.framesDecoded > 0 { appWindow.hideStatus() }
+            // Only over a picture that is coming now: a stream that has
+            // stalled or is waiting keeps the card, and `.live` takes it down
+            // with everyone else's.
+            if hidesCard { appWindow.hideStatus() }
         }
+    }
+
+    /// Whether a window may be added to the stream now, and whether its card
+    /// comes straight down. See `addGate`.
+    enum AddGate: Equatable {
+        case refuse(String)
+        case open(hidesCard: Bool)
+    }
+
+    /// Not to a stream that is not there, is being got back, or has been said
+    /// to have ended: the new window would show a picture that is not coming.
+    /// Pure, for the tests.
+    static func addGate(streaming: Bool, recovering: Bool, connectionLost: Bool,
+                        ended: Bool, pictureLive: Bool) -> AddGate {
+        guard streaming else { return .refuse("nothing is streaming now") }
+        guard !connectionLost, !ended else { return .refuse("the stream has ended") }
+        guard !recovering else { return .refuse("the stream is being restarted") }
+        return .open(hidesCard: pictureLive)
     }
 
     // MARK: - Menu

@@ -87,7 +87,9 @@ enum TileAllocator {
     /// Grown out from `current` one side at a time -- left and right then up
     /// and down, and the other way round -- keeping whichever covers more. Free
     /// space beside a neighbour is a staircase with no one biggest rectangle;
-    /// either answer is free all over and holds the window as it is.
+    /// either answer is free all over and holds the window as it is. The pick
+    /// is by area, not by which way the window is being dragged, so beside a
+    /// staircase a drag can stop short on one axis while the other had room.
     ///
     /// Never smaller than `current` on the canvas, even where `current` already
     /// reaches a neighbour (an application that would not be made small
@@ -110,18 +112,6 @@ enum TileAllocator {
         return across.width * across.height >= down.width * down.height ? across : down
     }
 
-    /// The largest size a window at `origin`, now `size` big, can be made by
-    /// growing right and down. See `room(around:)`, whose size this is when
-    /// nothing to the left or above is free.
-    static func maxSize(for size: CGSize, origin: CGPoint, others: [CGRect], canvas: CGRect,
-                        gap: CGFloat = gap) -> CGSize {
-        let from = CGRect(x: origin.x, y: origin.y, width: canvas.maxX - origin.x,
-                          height: canvas.maxY - origin.y)
-        let room = room(around: CGRect(origin: origin, size: size), others: others,
-                        canvas: from.intersection(canvas), gap: gap)
-        return room.size
-    }
-
     /// `rect` made as wide as it can be without its rows reaching a block.
     private static func grow(horizontally rect: CGRect, canvas: CGRect, blocks: [CGRect]) -> CGRect {
         var left = canvas.minX
@@ -142,10 +132,5 @@ enum TileAllocator {
             if block.maxY > rect.maxY { bottom = min(bottom, max(block.minY, rect.maxY)) }
         }
         return CGRect(x: rect.minX, y: top, width: rect.width, height: bottom - top)
-    }
-
-    /// Sharing area, not just an edge.
-    static func overlaps(_ a: CGRect, _ b: CGRect) -> Bool {
-        a.minX < b.maxX && b.minX < a.maxX && a.minY < b.maxY && b.minY < a.maxY
     }
 }
