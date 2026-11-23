@@ -228,7 +228,23 @@ final class OwnedWindow: NSObject, NSWindowDelegate {
 
     var isKey: Bool { window?.isKeyWindow == true }
 
+    /// Whether this dialog can be seen now; see `AppWindow.isShown`.
+    var isShown: Bool {
+        guard let window, !isClosing else { return false }
+        return AppWindow.isShown(occlusion: window.occlusionState,
+                                 miniaturized: window.isMiniaturized)
+    }
+
+    /// See `AppWindow.onShownChange`.
+    var onShownChange: (() -> Void)?
+
     // MARK: - NSWindowDelegate
+
+    /// Not drawn while it cannot be seen, as its window is not.
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        metalView?.setDrawingPaused(!isShown)
+        onShownChange?()
+    }
 
     func windowDidBecomeKey(_ notification: Notification) {
         inputCapture?.enableCapture()

@@ -5467,6 +5467,21 @@ std::string HandleMedia(const std::string& line) {
         return std::string("{\"type\":\"media\",\"ok\":")
              + (ok ? "true" : "false") + ",\"op\":\"retarget\"}";
     }
+    // {"cmd":"media","op":"rate","fps":N}: at most N pictures a second while
+    // the Mac shows none of them, or with 0 the session's own rate again. A
+    // reply like any other, so a Mac sends it only to a host whose `open`
+    // reply said "rateCap"; an older host says "unknown op".
+    if (op == "rate") {
+        long long fps = 0;
+        FieldNumber(line, "fps", fps);
+        if (fps < 0 || fps > 1000) {
+            return "{\"type\":\"media\",\"ok\":false,\"message\":\"bad fps\"}";
+        }
+        const bool ok = solstream::media::MediaSession::Instance().SetFrameRateCap(
+            static_cast<unsigned>(fps));
+        return std::string("{\"type\":\"media\",\"ok\":")
+             + (ok ? "true" : "false") + ",\"op\":\"rate\"}";
+    }
 #endif
     if (op != "open") {
         return "{\"type\":\"media\",\"ok\":false,\"message\":\"unknown op\"}";
@@ -5527,7 +5542,8 @@ std::string HandleMedia(const std::string& line) {
     std::string inputReply;
 #ifdef SOLSTREAM_MEDIA
     // 2: a key may come with the character the Mac typed; see keys.h.
-    inputReply = ",\"scancodes\":2";
+    // "rateCap": `media rate` is taken, for a Mac showing none of the picture.
+    inputReply = ",\"scancodes\":2,\"rateCap\":1";
     long long targetId = 0, fps = 60, bitrate = 20000000, audio = 1;
     // Zero means "host decides", which is what an absent field leaves behind.
     long long width = 0, height = 0;

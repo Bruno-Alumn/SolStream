@@ -27,6 +27,10 @@
 
 namespace solstream::media {
 
+/// The lowest rate SetFrameRateCap goes to. Under it, a still picture's
+/// 250 ms refresh would come more often than a moving one's pictures.
+constexpr unsigned kMinFrameRateCap = 5;
+
 struct MediaConfig {
     HWND window = nullptr;
     HMONITOR monitor = nullptr;
@@ -64,6 +68,13 @@ public:
 
     /// Point the capture at something else without renegotiating keys.
     bool Retarget(HWND window, HMONITOR monitor);
+
+    /// At most `fps` pictures a second, or with 0 the rate the session was
+    /// opened at again: the Mac shows none of them while every stream window
+    /// is hidden or minimised. Raised to kMinFrameRateCap. The encoder is not
+    /// reopened, and the picture after the cap is lifted is a keyframe.
+    /// False with no session running. A new session starts with no cap.
+    bool SetFrameRateCap(unsigned fps);
 
     /// The codec this session sends, for the `media open` reply. Settled by
     /// the time Start returns: see the fallback in RunCapture.

@@ -196,6 +196,11 @@ struct MediaSession::Impl {
     /// and a send-queue overflow writes it from an encoder work-queue thread,
     /// so it is atomic for the reason lastHeardAt is.
     std::atomic<long long> lastIdrAt{0};
+    /// The most pictures a second the Mac wants while it shows none of them
+    /// -- every stream window hidden or minimised -- or 0 for the rate the
+    /// session was opened at. Set from the agent's command thread, read by
+    /// the capture thread on every pass. See SetFrameRateCap.
+    std::atomic<unsigned> rateCap{0};
     long long nextSlot = 0;
     double ticksPerByte = 0;
 
@@ -729,7 +734,10 @@ void MediaSession::Impl::RunCapture() {
     // spends bitrate/fps on each, so the stream ran at two or more times the
     // bitrate asked for, the sender fell behind, and its queue was thrown
     // away with a keyframe over and over whenever anything moved.
-    const long long frameTicks = g_frequency.QuadPart / (long long) (active.fps ? active.fps : 60);
+    const UINT sessionFps = active.fps ? active.fps : 60;
+    long long frameTicks = g_frequency.QuadPart / (long long) sessionFps;
+    // The cap this pass's slots are worked out from; see `rateCap`.
+    unsigned passCap = 0;
     const long long slackTicks = g_frequency.QuadPart / 1000;   // 1 ms
     // Its own high-resolution timer, as the sender has: a plain Sleep is held
     // to the system tick -- 15.6 ms for a process whose window is hidden in
@@ -796,6 +804,22 @@ void MediaSession::Impl::RunCapture() {
                 encoderFailed = true;
                 break;
             }
+        }
+        // Slower while the Mac shows nothing, and at once back up: the slot
+        // starts again from now either way, or the first picture after the
+        // cap is lifted waited out the rest of a fifth of a second. The
+        // encoder is not told -- it keeps its rate, and spends bitrate/fps on
+        // each of the fewer pictures, which is the saving -- and the one
+        // after the cap is lifted is a keyframe, so the picture is back at
+        // full quality at once rather than over the pictures that follow.
+        const unsigned cap = rateCap.load();
+        if (cap != passCap) {
+            const bool lifted = passCap != 0 && cap == 0;
+            passCap = cap;
+            frameTicks = g_frequency.QuadPart
+                       / (long long) (cap && cap < sessionFps ? cap : sessionFps);
+            nextDue = Now();
+            if (lifted) { encoder->RequestIdr(); }
         }
         Frame current{};
         if (!capture->Acquire(current, lastSerial, idleMs)) {
@@ -1321,6 +1345,9 @@ bool MediaSession::Start(const unsigned char* okm, const MediaConfig& config,
     s.startedAt = Now();
     s.lastHeardAt.store(0);
     s.lastIdrAt.store(0);
+    // A new session runs at its own rate: the Mac asks again if it still
+    // shows nothing.
+    s.rateCap.store(0);
     s.nextSlot = s.startedAt;
     // Pace at twice the encoder's target. Metering at exactly the bitrate makes
     // every IDR late by construction, and metering at line rate is what loses
@@ -1518,6 +1545,25 @@ bool MediaSession::Retarget(HWND window, HMONITOR monitor) {
     // client's replay window indexes on it, and restarting it would look
     // exactly like an attack.
     s.retargetWanted.store(true);
+    return true;
+}
+
+bool MediaSession::SetFrameRateCap(unsigned fps) {
+    Impl& s = *impl_;
+    if (!s.running.load()) {
+        return false;
+    }
+    // Never below kMinFrameRateCap; and the Mac's watchdog, which calls a
+    // second with no picture a stall, is well clear of it.
+    if (fps && fps < kMinFrameRateCap) { fps = kMinFrameRateCap; }
+    const unsigned before = s.rateCap.exchange(fps);
+    if (before != fps) {
+        if (fps) {
+            Log("[media] nothing is shown on the Mac; at most %u fps until it is", fps);
+        } else {
+            Log("[media] the Mac shows the picture again; back to the session's rate");
+        }
+    }
     return true;
 }
 

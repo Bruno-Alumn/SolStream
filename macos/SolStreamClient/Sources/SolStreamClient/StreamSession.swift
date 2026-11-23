@@ -146,6 +146,9 @@ final class StreamSession {
     /// layout decides what they type. Fixed for the session, as the host's
     /// answer is; a host that predates it is sent keys by virtual key.
     let hostTakesScanCodes: Bool
+    /// The host can be asked for fewer pictures while none are seen; see
+    /// `HiddenRate`.
+    let hostTakesRateCap: Bool
     /// The host types the character this Mac's layout made for a key, sent
     /// with it, so a Spanish Mac types Spanish on a US PC. See InputCapture.
     let hostTakesKeyCharacters: Bool
@@ -209,6 +212,7 @@ final class StreamSession {
         self.hostSendsWholePC = Self.hostSendsWholePC(asked: config, answered: session.audioSource,
                                                       stated: session.audioSourceStated)
         self.hostTakesScanCodes = session.takesScanCodes
+        self.hostTakesRateCap = session.takesRateCap
         self.hostTakesKeyCharacters = session.takesScanCodes && session.takesKeyCharacters
         self.outdatedHostNote = Self.outdatedHostNote(
             hostVersion: session.hostVersion,

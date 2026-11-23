@@ -109,6 +109,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Counts the streams `presentApps` opened, so an add answered late can
     /// tell whether the stream it was for is still the one on screen.
     private var streamsOpened = 0
+    /// Whether the PC has been asked for fewer pictures, with every stream
+    /// window out of sight, and the check waiting to ask; see `HiddenRate`.
+    private var hiddenRate = HiddenRate()
+    private var hiddenRateCheck: DispatchWorkItem?
     /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
     private weak var tokenPromptParent: NSWindow?
@@ -1609,6 +1613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         session.retryReopensApp = streamLink != nil
         self.session = session
         streamsOpened += 1
+        hiddenRate = HiddenRate()
         stayAwake.hold()
         streamConfig = config
         streamDisplay = display
@@ -1815,6 +1820,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appWindow.onPlaced = { [weak self] in
             self?.neighboursChanged(except: target.id)
         }
+        appWindow.onShownChange = { [weak self] in
+            self?.refreshHiddenRate()
+        }
         appWindow.onClose = { [weak self, weak appWindow] in
             guard let self else { return }
             self.appWindows.removeAll { $0 === appWindow }
@@ -1830,6 +1838,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // into and for whatever is added next. One left on its own has the
             // whole display, as it always had.
             self.neighboursChanged()
+            // The one seen may have been the one that closed.
+            self.refreshHiddenRate()
             guard self.appWindows.isEmpty else { return }
             // Nothing left to add to: the picker the stream goes back to
             // takes its place.
@@ -2199,6 +2209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.wire(fresh, host: host, agent: agent)
             self.appWindows.forEach { $0.rebind(to: fresh) }
             fresh.start()
+            // At the PC's full rate, whatever the last session was asked for.
+            self.hiddenRate.sessionStarted()
+            self.refreshHiddenRate()
             self.appWindows.forEach { $0.inputBecameLive() }
             Log.info("[app] stream restarted")
         }
@@ -2866,7 +2879,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             addingLaunch = app.name
-            let done: () -> Void = { [weak self] in self?.addingLaunch = nil }
+            // The full rate first, if the PC was asked for less: asked behind
+            // the launch, it would wait for it. See `HiddenRate`.
+            refreshHiddenRate()
+            let done: () -> Void = { [weak self] in
+                self?.addingLaunch = nil
+                self?.refreshHiddenRate()
+            }
             // Open already: that window, as the other picker does.
             report.busy("Opening \(app.name) on \(pcLabel(host))…")
             agent.windows { [weak self] windows in
@@ -2921,6 +2940,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             if cached.isEmpty { agent.apps(completion: found) } else { found(cached) }
+        }
+    }
+
+    // MARK: - Fewer pictures while none are seen
+
+    /// Ask the PC for fewer pictures once every stream window has been out of
+    /// sight for a while, and for the full rate the moment one is seen; see
+    /// `HiddenRate`. Asked again whenever a window is seen or hidden, opens
+    /// or closes, a launch starts or ends, or a new session starts.
+    ///
+    /// Only of a host that said it takes it, and only with a session to ask
+    /// about: during a restart the next session settles it.
+    private func refreshHiddenRate() {
+        hiddenRateCheck?.cancel()
+        hiddenRateCheck = nil
+        guard let session, session.hostTakesRateCap, let agent, !appWindows.isEmpty else { return }
+        let anyShown = appWindows.contains { $0.isShown }
+        let action = hiddenRate.update(anyShown: anyShown,
+                                       launching: addingLaunch != nil || agent.isLaunching,
+                                       now: ProcessInfo.processInfo.systemUptime)
+        switch action {
+        case .none:
+            break
+        case .check(let after):
+            let check = DispatchWorkItem { [weak self] in self?.refreshHiddenRate() }
+            hiddenRateCheck = check
+            DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: check)
+        case .lower:
+            Log.info("[stream] no stream window has been seen for "
+                     + "\(Int(HiddenRate.delay)) s; asking for \(HiddenRate.hiddenRate) fps")
+            agent.setFrameRateCap(HiddenRate.hiddenRate)
+        case .restore:
+            Log.info("[stream] a stream window is "
+                     + (anyShown ? "seen again" : "about to be needed: an app is starting")
+                     + "; asking for the full rate")
+            agent.setFrameRateCap(0)
         }
     }
 
@@ -3271,6 +3326,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         streamHost = nil
         pendingRestart?.cancel()
         pendingRestart = nil
+        hiddenRateCheck?.cancel()
+        hiddenRateCheck = nil
+        hiddenRate = HiddenRate()
         clipboard?.stop()
         clipboard = nil
         stayAwake.release()

@@ -1581,6 +1581,9 @@ public final class AgentConnection {
         /// The PC's IPv4 address this connection reached it on, for the
         /// stream to go to the same one; nil when it went another way.
         public var address: String?
+        /// The host takes `media rate`, said as "rateCap" in its reply; see
+        /// `setFrameRateCap`. False from one that predates it.
+        public var takesRateCap = false
     }
 
     /// The IPv4 address the connection reached, as dotted digits; nil when
@@ -1816,7 +1819,33 @@ public final class AgentConnection {
                             takesScanCodes: Self.takesScanCodes(inReply: reply),
                             takesKeyCharacters: Self.takesKeyCharacters(inReply: reply),
                             hostVersion: reply["appVersion"] as? String,
-                            videoCodec: videoCodec, address: currentIPv4())
+                            videoCodec: videoCodec, address: currentIPv4(),
+                            takesRateCap: Self.takesRateCap(inReply: reply))
+    }
+
+    /// Whether a `media open` reply says the host takes `media rate`.
+    ///
+    /// Said in the reply, as "scancodes" is, rather than by a bit in the auth
+    /// line's "pushes": those say which pushes this Mac can read, and this is
+    /// a request it sends, which only the host can say it knows.
+    static func takesRateCap(inReply reply: [String: Any]) -> Bool {
+        (reply["rateCap"] as? Int ?? 0) >= 1
+    }
+
+    /// Ask the host for at most `fps` pictures a second, or with 0 for the
+    /// session's own rate again: nothing it sends is seen while every stream
+    /// window is out of sight. See `HiddenRate`. Only to a host whose `open`
+    /// reply said it takes it; an older one answers "unknown op", which is a
+    /// reply all the same. `completion` says whether it was done, on `queue`.
+    public func setFrameRateCap(_ fps: Int, completion: ((Bool) -> Void)? = nil) {
+        send(["cmd": "media", "op": "rate", "fps": max(0, fps)]) { result in
+            guard case .success(let reply) = result, reply["ok"] as? Bool == true else {
+                Log.info("[media] the host did not take a rate of \(fps == 0 ? "its own" : "\(fps)")")
+                completion?(false)
+                return
+            }
+            completion?(true)
+        }
     }
 
     /// Ask for the host's displays.

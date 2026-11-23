@@ -441,7 +441,52 @@ final class AppWindow: NSObject, NSWindowDelegate {
         return deferredOwned.count != before
     }
 
+    // MARK: - Seen or not
+
+    /// Whether a window macOS reports as `occlusion`, and minimised or not,
+    /// can be seen at all. Covered, minimised and on another Space all leave
+    /// `.visible` out; minimised is asked as well, for the moment between
+    /// the Dock taking it and the occlusion change. Pure, for the tests.
+    static func isShown(occlusion: NSWindow.OcclusionState, miniaturized: Bool) -> Bool {
+        occlusion.contains(.visible) && !miniaturized
+    }
+
+    /// This window, or a dialog shown over it, can be seen now. Until the
+    /// window exists, it counts as seen: it is about to be.
+    var isShown: Bool {
+        guard let window else { return true }
+        return Self.isShown(occlusion: window.occlusionState, miniaturized: window.isMiniaturized)
+            || ownedWindows.contains { $0.isShown }
+    }
+
+    /// Whether this window can be seen changed; the owner works out the
+    /// stream's rate from all of them. See `HiddenRate`.
+    var onShownChange: (() -> Void)?
+
+    /// Drawing stops while the window cannot be seen, and starts again with
+    /// the newest picture at once when it can. See `MetalView.setDrawingPaused`.
+    private func shownChanged() {
+        guard let window else { return }
+        let shown = Self.isShown(occlusion: window.occlusionState,
+                                 miniaturized: window.isMiniaturized)
+        if metalView?.isDrawingPaused == shown {
+            Log.info("[window] \"\(window.title)\" is \(shown ? "seen again" : "out of sight"); "
+                     + "\(shown ? "drawing" : "not drawing")")
+        }
+        metalView?.setDrawingPaused(!shown)
+        onShownChange?()
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        shownChanged()
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        shownChanged()
+    }
+
     func windowDidDeminiaturize(_ notification: Notification) {
+        shownChanged()
         let waiting = deferredOwned
         deferredOwned.removeAll()
         for opened in waiting {
@@ -509,6 +554,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
             self.applySubtitle()
         }
         owned.onKeyboardChange = { [weak self] in self?.onKeyboardChange?() }
+        owned.onShownChange = { [weak self] in self?.onShownChange?() }
         ownedWindows.append(owned)
         if let shape = lastCursor {
             owned.hostCursorChanged(shape)

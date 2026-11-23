@@ -47,6 +47,10 @@ public final class MetalView: NSView {
     /// was nothing on the window at all. Main thread only.
     private var showingError = false
     private var pendingEpoch = 0
+    /// The window is not to be seen -- minimised, on another Space, or covered
+    /// -- so frames are kept, newest only, and not drawn. Under pendingLock;
+    /// see `setDrawingPaused`.
+    private var drawingPaused = false
     /// When the texture cache was last flushed; see `present`.
     private var lastFlush = Date.distantPast
 
@@ -270,25 +274,62 @@ public final class MetalView: NSView {
         pendingLock.lock()
         pendingPixelBuffer = pixelBuffer
         pendingEpoch = statusEpoch
-        let alreadyScheduled = presentScheduled
-        presentScheduled = true
+        // Paused, the frame is only kept: no trip to the main thread for a
+        // picture nobody can see. `setDrawingPaused(false)` draws it.
+        let alreadyScheduled = presentScheduled || drawingPaused
+        if !drawingPaused { presentScheduled = true }
         pendingLock.unlock()
 
         guard !alreadyScheduled else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.pendingLock.lock()
-            let next = self.pendingPixelBuffer
-            self.pendingPixelBuffer = nil
-            self.presentScheduled = false
-            // A frame from before the card went up is drawn under it, and the
-            // card stays: it says why that picture is the last one.
-            let afterCard = self.pendingEpoch == self.statusEpoch
-            self.pendingLock.unlock()
-
-            if let next { self.present(next, hidesStatus: afterCard) }
+            self?.presentPending()
         }
+    }
+
+    /// Draw the frame waiting, if there is one. Main thread.
+    private func presentPending() {
+        pendingLock.lock()
+        // Paused after this was scheduled: kept for the resume.
+        guard !drawingPaused else {
+            presentScheduled = false
+            pendingLock.unlock()
+            return
+        }
+        let next = pendingPixelBuffer
+        pendingPixelBuffer = nil
+        presentScheduled = false
+        // A frame from before the card went up is drawn under it, and the
+        // card stays: it says why that picture is the last one.
+        let afterCard = pendingEpoch == statusEpoch
+        pendingLock.unlock()
+
+        if let next { present(next, hidesStatus: afterCard) }
+    }
+
+    /// Stop drawing while macOS says the window cannot be seen, and start
+    /// again, at once, when it can. Main thread.
+    ///
+    /// The decoder goes on as before: every picture is decoded, so the next
+    /// one is never waiting on a keyframe. Only the newest is kept meanwhile,
+    /// and resuming draws it straight away -- before, the frames that came
+    /// while the window was hidden were dropped in `present`, and the window
+    /// came back showing whatever it last drew until the next one arrived,
+    /// which with the PC sending few for a hidden window could be a while.
+    public func setDrawingPaused(_ paused: Bool) {
+        pendingLock.lock()
+        let changed = drawingPaused != paused
+        drawingPaused = paused
+        pendingLock.unlock()
+        guard changed, !paused else { return }
+        presentPending()
+    }
+
+    /// Whether drawing is paused; see `setDrawingPaused`.
+    public var isDrawingPaused: Bool {
+        pendingLock.lock()
+        defer { pendingLock.unlock() }
+        return drawingPaused
     }
 
     private func present(_ pixelBuffer: CVPixelBuffer, hidesStatus: Bool) {
