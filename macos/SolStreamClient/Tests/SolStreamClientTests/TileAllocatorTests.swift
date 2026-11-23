@@ -285,6 +285,19 @@ final class TileAllocatorTests: XCTestCase {
         }
     }
 
+    /// `--app-window "A,B"`: the first window is placed before the second
+    /// exists, with the second's tile counted as taken, so its room is its
+    /// own tile and no more.
+    func testTheFirstOfTwoGridWindowsKeepsToItsOwnTile() {
+        let tiles = AppDelegate.tileLayout(count: 2, on: display)
+        XCTAssertEqual(tiles.count, 2)
+        let room = TileAllocator.room(around: tiles[0], others: [tiles[1]], canvas: canvas)
+        XCTAssertEqual(room, tiles[0])
+        let request = AppWindow.request(size: CGSize(width: 2600, height: 1700),
+                                        at: tiles[0].origin, within: room)
+        XCTAssertEqual(request.map { TileAllocator.overlaps($0, tiles[1]) }, false)
+    }
+
     /// A window that closes leaves its neighbour free to grow over where it was.
     func testAClosedNeighboursSpaceCanBeGrownInto() {
         let current = CGRect(x: 3440, y: 0, width: 1200, height: 900)

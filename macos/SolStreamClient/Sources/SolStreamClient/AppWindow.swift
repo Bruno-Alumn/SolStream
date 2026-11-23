@@ -525,11 +525,14 @@ final class AppWindow: NSObject, NSWindowDelegate {
         let scale = screen?.backingScaleFactor ?? 2
         let visible = screen?.visibleFrame.size ?? CGSize(width: 1280, height: 800)
         var wanted = naturalSize.width > 0 && naturalSize.height > 0 ? naturalSize : tile.size
-        // No bigger than its room on the display: the host window cannot be,
-        // and opening bigger only to be snapped back is a jump on screen.
-        let room = self.room
-        wanted = CGSize(width: min(wanted.width, room.width),
-                        height: min(wanted.height, room.height))
+        // Beside other windows, no bigger than its room: the host window
+        // cannot be, and opening bigger only to be snapped back is a jump on
+        // screen. A window on its own opens as it always did.
+        if !neighbours().isEmpty {
+            let room = self.room
+            wanted = CGSize(width: min(wanted.width, room.width),
+                            height: min(wanted.height, room.height))
+        }
         let content = NSRect(origin: .zero,
                              size: Self.openingSize(hostPixels: wanted, scale: scale,
                                                     visible: visible))

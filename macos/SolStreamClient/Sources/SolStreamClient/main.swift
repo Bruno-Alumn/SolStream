@@ -85,6 +85,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The PC window `streamLink` was opened for. Others can be streamed
     /// beside it, and they are not what the link names.
     private var linkedWindowID: UInt64?
+    /// While `presentApps` opens its windows one by one, the tiles of those
+    /// not open yet; see there.
+    private var unopenedTiles: [CGRect] = []
     /// A pairing-token sheet is up, and over which window; see `promptForToken`.
     private var tokenPromptOpen = false
     private weak var tokenPromptParent: NSWindow?
@@ -1564,8 +1567,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         linkedWindowID = streamLink == nil ? nil : targets.first?.id
 
         for (index, target) in targets.enumerated() {
+            // The tiles of the windows still to come count as taken: each
+            // window is placed as it is made, and the first one, with nothing
+            // beside it yet, would otherwise be placed over the others' tiles.
+            unopenedTiles = Array(tiles.dropFirst(index + 1))
             addAppWindow(target: target, tile: tiles[index])
         }
+        unopenedTiles = []
 
         // Once per PC while SolStream runs, on the window opened last, which
         // is the one in front: a reminder on every window would be nagging,
@@ -1718,7 +1726,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // into whatever they leave free, and no further.
         let appWindow = AppWindow(session: session, agent: agent, remote: target,
                                   display: display, tile: tile) { [weak self] in
-            self?.appWindows.filter { $0.remoteWindowID != target.id }.map(\.occupied) ?? []
+            guard let self else { return [] }
+            return self.appWindows.filter { $0.remoteWindowID != target.id }.map(\.occupied)
+                + self.unopenedTiles
         }
         appWindow.onPlaced = { [weak self] in
             self?.neighboursChanged(except: target.id)
