@@ -149,7 +149,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.action = #selector(rowClicked)
         tableView.onReturn = { [weak self] in self?.openTapped() }
         tableView.onEscape = { [weak self] isRepeat in self?.backOnEscape(isRepeat: isRepeat) }
-        tableView.onQuit = { [weak self] in self?.quitSelected() }
+        tableView.onQuit = { [weak self] force in self?.quitSelected(force: force) }
         // Typing with the list focused goes on searching, as it would if the
         // focus had never left the field.
         tableView.onTyping = { [weak self] event in self?.continueSearch(with: event) }
@@ -651,19 +651,21 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             && !(0xF700...0xF8FF).contains(scalar.value)
     }
 
-    /// Quit the selected row's app, for ⌘⌫.
-    private func quitSelected() {
+    /// Quit the selected row's app, for ⌘⌫, or Force Quit it, for ⌥⌘⌫.
+    private func quitSelected(force: Bool) {
         let index = tableView.selectedRow
         guard index >= 0, index < rows.count else { return }
-        quit(rows[index])
+        quit(rows[index], force: force)
     }
 
     /// Only an open window has an app to quit, and a quit already under way
     /// is not asked for again. Force Quit may still follow one: it is what an
-    /// app that never closed needs.
+    /// app that never closed needs. Not the row being opened, whose window
+    /// the open is about to stream.
     private func quit(_ row: Row, force: Bool = false) {
         guard let onQuit, case .running(let window) = row.choice,
-              force || !quittingKeys.contains(row.key) else { return }
+              force || !quittingKeys.contains(row.key),
+              !(isBusy && row.key == busyKey) else { return }
         onQuit(window, force)
     }
 
@@ -813,8 +815,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
                        note: busy ? nil : entry.note,
                        dot: busy ? .working : (entry.isRunning ? .live : nil),
                        action: entry.isRunning ? "Attach" : "Launch")
-        // The ×: open windows only, and not one already being quit.
-        if onQuit != nil, entry.isRunning, !quitting {
+        // The ×: open windows only, and not one being opened or quit.
+        if onQuit != nil, entry.isRunning, !busy {
             let key = entry.key
             cell.quitButton.toolTip = Self.quitTitle(entry.title, force: false)
             cell.quitButton.setAccessibilityLabel(Self.quitTitle(entry.title, force: false))
@@ -1014,6 +1016,7 @@ private final class PickerCell: NSTableCellView {
         self.selected = selected
         self.hovered = hovered
         quitButton.isHidden = onQuit == nil || !(selected || hovered)
+        quitButton.onSelectedRow = selected
         subtitleLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
         subtitleLabel.stringValue = (selected ? note : nil).map { "\(subtitle) · \($0)" } ?? subtitle
         actionLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
@@ -1123,19 +1126,43 @@ extension AppPicker: NSTextFieldDelegate {
     }
 }
 
-/// The × on an open window's row: a muted glyph on nothing at rest, `edge`
+/// The × on an open window's row: a muted glyph on nothing at rest, a disc
 /// behind it and full-strength ink under the pointer, so it reads as a
-/// button only when it is about to be one.
+/// button only when it is about to be one. On the selected row the glyph is
+/// `accentTintInk`, as the verb beside it is.
 final class QuitButton: NSButton {
     private var hovering = false { didSet { restyle() } }
-
-    override var isHighlighted: Bool {
-        didSet { restyle() }
-    }
+    /// Held down. Kept here: NSButton's own `isHighlighted` is not set while
+    /// a borderless button tracks the mouse, so the press never showed.
+    private var pressed = false { didSet { restyle() } }
+    var onSelectedRow = false { didSet { restyle() } }
 
     private func restyle() {
-        contentTintColor = hovering || isHighlighted ? DS.text : DS.textMuted
+        let lit = hovering || pressed
+        contentTintColor = onSelectedRow ? DS.accentTintInk : (lit ? DS.text : DS.textMuted)
         needsDisplay = true
+    }
+
+    /// Under the pointer: `edge`, which still shows on a `raised` row in the
+    /// dark. On the selected row `surface`, a lighter chip on the tint rather
+    /// than a grey blob on blue. Pressed goes one step stronger.
+    private var disc: NSColor? {
+        switch (onSelectedRow, pressed, hovering) {
+        case (_, false, false): return nil
+        case (false, false, true): return DS.edge
+        case (false, true, _): return DS.textFaint
+        case (true, false, true): return DS.surface
+        case (true, true, _): return DS.accentTintInk.withAlphaComponent(0.25)
+        }
+    }
+
+    /// The tracking loop runs inside `super`, so the press is drawn before
+    /// it starts and taken off when it returns, on the mouse going up.
+    override func mouseDown(with event: NSEvent) {
+        pressed = true
+        display()
+        super.mouseDown(with: event)
+        pressed = false
     }
 
     init() {
@@ -1173,8 +1200,8 @@ final class QuitButton: NSButton {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if hovering || isHighlighted {
-            (isHighlighted ? DS.edge : DS.hairline).setFill()
+        if let disc {
+            disc.setFill()
             NSBezierPath(ovalIn: bounds).fill()
         }
         super.draw(dirtyRect)
@@ -1190,14 +1217,15 @@ private final class PickerTableView: NSTableView {
     /// Told whether the press is the key repeating.
     var onEscape: ((_ isRepeat: Bool) -> Void)?
     var onTyping: ((NSEvent) -> Void)?
-    /// ⌘⌫, the Mac's "remove" in a list: quit the selected row's app. Not
-    /// ⌘Q, which quits SolStream.
-    var onQuit: (() -> Void)?
+    /// ⌘⌫, the Mac's "remove" in a list: quit the selected row's app; with
+    /// ⌥, Force Quit it, as the row's menu shows. Not ⌘Q, which quits
+    /// SolStream.
+    var onQuit: ((_ force: Bool) -> Void)?
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if event.keyCode == 51, modifiers == .command {  // ⌘⌫
-            if !event.isARepeat { onQuit?() }
+        if event.keyCode == 51, modifiers == .command || modifiers == [.command, .option] {
+            if !event.isARepeat { onQuit?(modifiers.contains(.option)) }
             return
         }
         switch event.keyCode {

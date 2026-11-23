@@ -38,8 +38,10 @@ final class AppPickerQuitTests: XCTestCase {
         return nil
     }
 
-    private func commandDelete(isRepeat: Bool = false, in window: NSWindow) -> NSEvent {
-        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+    private func commandDelete(option: Bool = false, isRepeat: Bool = false,
+                               in window: NSWindow) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero,
+                         modifierFlags: option ? [.command, .option] : .command, timestamp: 0,
                          windowNumber: window.windowNumber, context: nil, characters: "\u{7F}",
                          charactersIgnoringModifiers: "\u{7F}", isARepeat: isRepeat, keyCode: 51)!
     }
@@ -99,6 +101,40 @@ final class AppPickerQuitTests: XCTestCase {
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         table.keyDown(with: commandDelete(in: window))
         XCTAssertEqual(quits.count, 1, "an installed app has nothing to quit")
+    }
+
+    /// ⌥⌘⌫ is the Force Quit the row's menu shows under ⌥.
+    func testOptionCommandDeleteInTheListForceQuits() throws {
+        let picker = makePicker()
+        let window = picker.window
+        let table = try XCTUnwrap(find(NSTableView.self, in: window.contentView))
+        window.makeFirstResponder(table)
+
+        table.keyDown(with: commandDelete(option: true, isRepeat: true, in: window))
+        XCTAssertTrue(quits.isEmpty, "a held key quits nothing")
+        table.keyDown(with: commandDelete(option: true, in: window))
+        XCTAssertEqual(quits.map(\.title), ["Untitled - Notepad"])
+        XCTAssertEqual(quits.map(\.force), [true])
+    }
+
+    /// The row being opened is not one to quit: its window is about to be
+    /// streamed.
+    func testARowBeingOpenedCannotBeQuit() throws {
+        let picker = makePicker()
+        let window = picker.window
+        let table = try XCTUnwrap(find(NSTableView.self, in: window.contentView))
+        window.makeFirstResponder(table)
+
+        picker.showBusy("Opening Untitled - Notepad on pc\u{2026}")
+        table.keyDown(with: commandDelete(in: window))
+        table.keyDown(with: commandDelete(option: true, in: window))
+        let quit = try XCTUnwrap(try menu(forRow: 0, of: picker).items.first)
+        _ = (quit.target as? NSObject)?.perform(quit.action, with: quit)
+        XCTAssertTrue(quits.isEmpty)
+
+        picker.clearBusy()
+        table.keyDown(with: commandDelete(in: window))
+        XCTAssertEqual(quits.count, 1)
     }
 
     /// In the field, ⌘⌫ is the field's, typed in or empty: a second press
