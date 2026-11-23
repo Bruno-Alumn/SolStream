@@ -1741,8 +1741,7 @@ void TestPushFeatures() {
     CHECK(PushFeaturesFrom("openURL,title") == (kPushOpenUrl | kPushTitle));
     CHECK(PushFeaturesFrom("titles attention nonsense") == kPushAttention);
     CHECK(PushFeaturesFrom("  title  ") == kPushTitle);
-    CHECK(kPushWindowOpened == 64);
-    CHECK(PushFeaturesFrom("windowOpened") == kPushWindowOpened);
+    CHECK(PushFeaturesFrom("windowOpened") == 64);
     CHECK(PushFeaturesFrom("title fullScreen inputBlocked windowOpened")
           == (kPushTitle | kPushFullScreen | kPushInputBlocked | kPushWindowOpened));
     CHECK(PushFeaturesFrom("windowopened") == 0);
