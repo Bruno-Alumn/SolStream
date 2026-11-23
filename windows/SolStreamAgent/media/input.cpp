@@ -15,6 +15,19 @@ namespace {
 static_assert(kInputButton == 3 && kInputKey == 6 && kInputKeyScan == 8,
               "HoldTarget in keys.cpp names the kinds by number");
 
+/// SendInput, with every event marked as the Mac's, so the host can tell it
+/// from the PC's own hand however that hand types or points: see follow.h.
+UINT SendTagged(UINT count, INPUT* inputs, int size) {
+    for (UINT i = 0; i < count; ++i) {
+        if (inputs[i].type == INPUT_MOUSE) {
+            inputs[i].mi.dwExtraInfo = kMacInputSignature;
+        } else if (inputs[i].type == INPUT_KEYBOARD) {
+            inputs[i].ki.dwExtraInfo = kMacInputSignature;
+        }
+    }
+    return SendInput(count, inputs, size);
+}
+
 int16_t ReadBE16s(const unsigned char* p) {
     return (int16_t) (uint16_t) smt::ReadBE(p, 2);
 }
@@ -327,7 +340,7 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
                 const size_t used = BuildTextCharInput(body, length, at, keys, &count);
                 if (used == 0) { break; }
                 at += used;
-                if (count > 0 && SendInput((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
+                if (count > 0 && SendTagged((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
                     typed = false;
                 }
             }
@@ -337,7 +350,7 @@ bool InputInjector::ApplyOne(unsigned char kind, const unsigned char* body,
         default:
             return false;
     }
-    const bool sent = SendInput(1, &input, sizeof(INPUT)) == 1;
+    const bool sent = SendTagged(1, &input, sizeof(INPUT)) == 1;
     if (sent) {
         // For telling a window the Mac opened from one the PC's own user did:
         // see follow.h.
@@ -575,7 +588,7 @@ bool InputInjector::PressCharKey(int slot, const unsigned char* chars, size_t le
     if (before != 0 && before != kCharTyped
         && (vkScan == -1 || (WORD) (vkScan & 0xFF) != before)) {
         INPUT up = VirtualKeyInput(before, false);
-        if (SendInput(1, &up, sizeof(INPUT)) == 1) { TrackKey(before, false); }
+        if (SendTagged(1, &up, sizeof(INPUT)) == 1) { TrackKey(before, false); }
         charKeys_[slot] = 0;
     }
 
@@ -584,7 +597,7 @@ bool InputInjector::PressCharKey(int slot, const unsigned char* chars, size_t le
     // Caps Lock is already in the Shift chosen above.
     const int count = BuildCharKeyPress(units, unitCount, vkScan, vkScanCode, held, false,
                                         false, keys, &pressed);
-    if (count == 0 || SendInput((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
+    if (count == 0 || SendTagged((UINT) count, keys, sizeof(INPUT)) != (UINT) count) {
         return false;
     }
     if (pressed != 0) {
@@ -613,7 +626,7 @@ void InputInjector::MatchCapsLock(bool wanted) {
     BuildCapsLockToggle(toggle);
     // Believed only once Windows has taken both halves. Refused -- an
     // elevated window has the foreground -- the next key asks again.
-    if (SendInput(2, toggle, sizeof(INPUT)) == 2) {
+    if (SendTagged(2, toggle, sizeof(INPUT)) == 2) {
         CapsLockNoted(capsLock_, wanted, now);
     }
 }
@@ -670,7 +683,7 @@ void InputInjector::RetryOwedReleases() {
         // No longer held -- ReleaseAll let go of it -- so nothing owed.
         if (!held) { continue; }
         INPUT up{};
-        if (KeyUpInput(key, &up) && SendInput(1, &up, sizeof(INPUT)) == 1) {
+        if (KeyUpInput(key, &up) && SendTagged(1, &up, sizeof(INPUT)) == 1) {
             TrackKey(key, false);
             Log("[input] a release Windows refused earlier went through");
             continue;
@@ -686,7 +699,7 @@ void InputInjector::RetryOwedReleases() {
             continue;
         }
         INPUT up = ButtonUpInput(i);
-        if (SendInput(1, &up, sizeof(INPUT)) == 1) {
+        if (SendTagged(1, &up, sizeof(INPUT)) == 1) {
             buttonsDown_ = (unsigned char) (buttonsDown_ & ~bit);
             owedButtons_ = (unsigned char) (owedButtons_ & ~bit);
         }
@@ -706,7 +719,7 @@ void InputInjector::ReleaseAll() {
     for (int i = 0; i < keysDownCount_; ++i) {
         const uint32_t key = keysDown_[i];
         INPUT up{};
-        if (!KeyUpInput(key, &up) || SendInput(1, &up, sizeof(INPUT)) == 1) {
+        if (!KeyUpInput(key, &up) || SendTagged(1, &up, sizeof(INPUT)) == 1) {
             continue;
         }
         keysDown_[held++] = key;
@@ -723,7 +736,7 @@ void InputInjector::ReleaseAll() {
         const unsigned char bit = (unsigned char) (1u << i);
         if (!(buttonsDown_ & bit)) { continue; }
         INPUT up = ButtonUpInput(i);
-        if (SendInput(1, &up, sizeof(INPUT)) != 1) { buttons = (unsigned char) (buttons | bit); }
+        if (SendTagged(1, &up, sizeof(INPUT)) != 1) { buttons = (unsigned char) (buttons | bit); }
     }
     buttonsDown_ = buttons;
     owedButtons_ = buttons;

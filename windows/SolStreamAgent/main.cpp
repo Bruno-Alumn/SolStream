@@ -1122,6 +1122,8 @@ bool ForceForeground(HWND window) {
                 INPUT nudge{};
                 nudge.type = INPUT_MOUSE;
                 nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
+                // The Mac's, not the PC user's: see follow.h.
+                nudge.mi.dwExtraInfo = solstream::kMacInputSignature;
                 SendInput(1, &nudge, sizeof(nudge));
                 SetForegroundWindow(target);
             }
@@ -3069,14 +3071,22 @@ void FollowNewWindows() {
         facts.mac_press_at = press_at;
         // As it is now, at every look: see PcInputRulesOut.
         facts.pc_input_at = solstream::g_pc_input_at.load();
+        facts.watching_since = solstream::g_pc_watching_since.load();
         const solstream::FollowReason reason = solstream::DecideFollow(facts);
         if (reason == solstream::FollowReason::None) {
             if (solstream::NeverFollows(facts)) {
-                if (solstream::PcInputRulesOut(facts) && facts.top_level && !facts.held
-                    && !facts.own_process && !facts.earshot) {
-                    Log("[follow] window %llu [%s] was left alone: the PC's own mouse or "
-                        "keyboard was in use", (unsigned long long) IdFromWindow(window),
-                        ToUtf8(cls).c_str());
+                // Said only of a window that would have followed on a quiet PC.
+                solstream::FollowFacts quiet = facts;
+                quiet.pc_input_at = 0;
+                quiet.watching_since = 1;
+                quiet.now = std::max<uint64_t>(quiet.now, solstream::kPcIdleForMacOpenMs + 1);
+                if (solstream::PcInputRulesOut(facts)
+                    && solstream::DecideFollow(quiet) == solstream::FollowReason::OpenedByMac) {
+                    Log("[follow] window %llu [%s] was left alone: %s",
+                        (unsigned long long) IdFromWindow(window), ToUtf8(cls).c_str(),
+                        facts.watching_since == 0
+                            ? "the PC's own input is not being heard"
+                            : "someone at the PC pressed something in the last 10 s");
                 }
                 it = pending.erase(it);
             } else {
@@ -3377,9 +3387,11 @@ void UpdateMouseFence(bool holding) {
 //
 // For telling a window the PC's user opened from one the Mac did (follow.h).
 // Raw Input rather than a low-level hook: every key and mouse event on the PC
-// waits for a hook, while Raw Input is only told afterwards. Each event with
-// a device behind it stamps g_pc_input_at; injected ones -- the Mac's, and
-// the fence's own resends -- have none. Only while something is held.
+// waits for a hook, while Raw Input is only told afterwards. Every press not
+// marked as the Mac's (kMacInputSignature) stamps g_pc_input_at -- a touchpad,
+// a pen, the on-screen keyboard and Steam Input have no device handle, so
+// that cannot be the test. Game controllers are polled through XInput, which
+// Raw Input does not see. Only while something is held.
 
 constexpr UINT kPcInputUpdate = WM_APP + 1;  ///< g_pc_input_wanted changed
 DWORD g_pc_input_thread = 0;
@@ -3387,11 +3399,12 @@ std::atomic<bool> g_pc_input_wanted{false};
 
 LRESULT CALLBACK PcInputWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_INPUT) {
-        RAWINPUTHEADER header{};
-        UINT size = sizeof(header);
-        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_HEADER, &header, &size,
+        // Mouse and keyboard only are registered, and both fit.
+        RAWINPUT raw{};
+        UINT size = sizeof(raw);
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &raw, &size,
                             sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1)
-            && solstream::RawInputIsPhysical(header.hDevice)) {
+            && solstream::IsPcPress(raw)) {
             solstream::g_pc_input_at.store(GetTickCount64());
         }
     }
@@ -3414,6 +3427,80 @@ bool WatchPcInput(HWND window, bool on) {
     return RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE)) != FALSE;
 }
 
+/// The PC's game controllers, looked at every kPadPollMs while the PC's input
+/// is heard. XInput is loaded when first wanted, and a PC without it simply
+/// has no controllers here. A slot with nothing in it is the slow call, so it
+/// is asked again only every kPadRescanMs.
+class PadPoller {
+public:
+    static constexpr DWORD kPadPollMs = 100;
+    static constexpr ULONGLONG kPadRescanMs = 2000;
+
+    /// Look at every controller; true when someone used one.
+    bool Poll(ULONGLONG now) {
+        if (!Load()) {
+            return false;
+        }
+        if (now >= rescan_at_) {
+            rescan_at_ = now + kPadRescanMs;
+            for (bool& empty : empty_) {
+                empty = false;
+            }
+        }
+        bool used = false;
+        for (DWORD i = 0; i < XUSER_MAX_COUNT; ++i) {
+            if (empty_[i]) {
+                continue;
+            }
+            XINPUT_STATE state{};
+            const DWORD result = get_state_(i, &state);
+            if (result == ERROR_DEVICE_NOT_CONNECTED) {
+                empty_[i] = true;
+            }
+            used = solstream::PadUsed(slots_[i], result == ERROR_SUCCESS, state) || used;
+        }
+        return used;
+    }
+
+    /// Forget what the controllers looked like: on watching again, a button
+    /// held meanwhile is not news.
+    void Forget() {
+        for (solstream::PadSlot& slot : slots_) {
+            slot = solstream::PadSlot{};
+        }
+        rescan_at_ = 0;
+    }
+
+private:
+    using GetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+
+    bool Load() {
+        if (!tried_) {
+            tried_ = true;
+            HMODULE library = LoadLibraryExW(L"xinput1_4.dll", nullptr,
+                                             LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!library) {
+                library = LoadLibraryExW(L"xinput9_1_0.dll", nullptr,
+                                         LOAD_LIBRARY_SEARCH_SYSTEM32);
+            }
+            if (library) {
+                get_state_ = reinterpret_cast<GetState>(
+                    reinterpret_cast<void*>(GetProcAddress(library, "XInputGetState")));
+            }
+            if (!get_state_) {
+                Log("[follow] XInput is not here; game controllers at the PC are not heard");
+            }
+        }
+        return get_state_ != nullptr;
+    }
+
+    bool tried_ = false;
+    GetState get_state_ = nullptr;
+    solstream::PadSlot slots_[XUSER_MAX_COUNT];
+    bool empty_[XUSER_MAX_COUNT] = {};
+    ULONGLONG rescan_at_ = 0;
+};
+
 DWORD WINAPI PcInputThreadProc(void*) {
     WNDCLASSW window_class{};
     window_class.lpfnWndProc = PcInputWindowProc;
@@ -3425,7 +3512,8 @@ DWORD WINAPI PcInputThreadProc(void*) {
                                   HWND_MESSAGE, nullptr, window_class.hInstance, nullptr);
     if (!window) {
         Log("[follow] could not make a window to hear the PC's own input on (error %lu); "
-            "windows opened at the PC may be told to the Mac", GetLastError());
+            "windows the Mac's clicks open in other programs are not told to it",
+            GetLastError());
     }
     MSG msg;
     // The queue first, so an update posted from here on is not lost; then the
@@ -3433,23 +3521,46 @@ DWORD WINAPI PcInputThreadProc(void*) {
     PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
     PostThreadMessageW(GetCurrentThreadId(), kPcInputUpdate, 0, 0);
     bool watching = false;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!msg.hwnd && msg.message == kPcInputUpdate) {
-            const bool want = g_pc_input_wanted.load();
-            if (window && want != watching) {
-                if (WatchPcInput(window, want)) {
-                    watching = want;
-                } else if (want) {
-                    Log("[follow] could not hear the PC's own input (error %lu); windows "
-                        "opened at the PC may be told to the Mac", GetLastError());
-                }
+    PadPoller pads;
+    ULONGLONG polled_at = 0;
+    for (;;) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE,
+                                  watching ? PadPoller::kPadPollMs : INFINITE, QS_ALLINPUT);
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                return 0;
             }
-            continue;
+            if (!msg.hwnd && msg.message == kPcInputUpdate) {
+                const bool want = g_pc_input_wanted.load();
+                if (want != watching) {
+                    if (window && WatchPcInput(window, want)) {
+                        watching = want;
+                    } else if (want) {
+                        Log("[follow] could not hear the PC's own input (error %lu); windows "
+                            "the Mac's clicks open in other programs are not told to it",
+                            GetLastError());
+                    } else {
+                        watching = false;
+                    }
+                    // From now, and only once it took: until the PC has been
+                    // heard for a while, its being quiet says nothing.
+                    solstream::g_pc_watching_since.store(watching ? GetTickCount64() : 0);
+                    pads.Forget();
+                }
+                continue;
+            }
+            DispatchMessageW(&msg);
         }
-        DispatchMessageW(&msg);
+        const ULONGLONG now = GetTickCount64();
+        if (watching && now - polled_at >= PadPoller::kPadPollMs) {
+            polled_at = now;
+            if (pads.Poll(now)) {
+                solstream::g_pc_input_at.store(now);
+            }
+        }
     }
-    return 0;
 }
+
 
 /// Hear the PC's own input while something is held, and not otherwise: a game
 /// played at the PC sends a thousand mouse events a second. Watcher thread.

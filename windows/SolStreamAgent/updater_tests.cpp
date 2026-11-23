@@ -1754,6 +1754,7 @@ FollowFacts PlainNewWindow() {
     f.top_level = true;
     f.now = 100000;
     f.shown_at = 99500;
+    f.watching_since = 1;
     return f;
 }
 
@@ -1816,20 +1817,19 @@ void TestFollowDecision() {
     CHECK(DecideFollow(tip) == FollowReason::None);
     CHECK(NeverFollows(tip));
 
-    // ── The PC's own mouse and keyboard ──
-    // Opened by the Mac only on a PC nobody is using: no physical input in
-    // the last kPcIdleForMacOpenMs.
+    // ── The PC's own input ──
+    // Opened by the Mac only on a PC nobody has pressed anything at for
+    // kPcIdleForMacOpenMs.
     FollowFacts idle = opened;
     idle.pc_input_at = idle.now - kPcIdleForMacOpenMs - 1;
     CHECK(DecideFollow(idle) == FollowReason::OpenedByMac);
     CHECK(!PcInputRulesOut(idle));
-    // Input at the PC just before the window showed, after the Mac's press.
+    // A press at the PC just before the window showed, after the Mac's press.
     FollowFacts local = opened;
     local.pc_input_at = 99400;
     CHECK(DecideFollow(local) == FollowReason::None);
     CHECK(NeverFollows(local));
-    // A click at the PC after the window showed: looked at again, it is
-    // ruled out, and for good.
+    // A click at the PC after the window showed: ruled out at that look.
     FollowFacts clicked_after = opened;
     clicked_after.pc_input_at = 99800;
     CHECK(DecideFollow(clicked_after) == FollowReason::None);
@@ -1844,24 +1844,90 @@ void TestFollowDecision() {
     CHECK(DecideFollow(launched) == FollowReason::None);
     // A window ruled out is dropped at that look -- NeverFollows says so for
     // every case above -- so no later look, with the PC gone quiet and the
-    // rule satisfied on paper, can let it follow.
+    // rule satisfied on paper, can let it follow this sighting.
     FollowFacts quiet_again = clicked_after;
     quiet_again.pc_input_at = 0;
     CHECK(DecideFollow(quiet_again) == FollowReason::OpenedByMac);
     CHECK(NeverFollows(clicked_after) && NeverFollows(launched) && NeverFollows(local));
 
-    // The Mac's pointer moving does not hide the PC's own hand: injected
-    // input has no device, and only input with one stamps the time.
-    CHECK(!RawInputIsPhysical(nullptr));
-    CHECK(RawInputIsPhysical(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x10045))));
+    // Not until the PC has been heard for kPcIdleForMacOpenMs, and never when
+    // it is not heard at all: a quiet PC nobody listened to says nothing.
+    FollowFacts just_started = opened;
+    just_started.watching_since = just_started.now - kPcIdleForMacOpenMs + 1;
+    CHECK(DecideFollow(just_started) == FollowReason::None);
+    CHECK(NeverFollows(just_started));
+    just_started.watching_since = just_started.now - kPcIdleForMacOpenMs;
+    CHECK(DecideFollow(just_started) == FollowReason::OpenedByMac);
+    FollowFacts deaf = opened;
+    deaf.watching_since = 0;
+    CHECK(DecideFollow(deaf) == FollowReason::None);
+    CHECK(PcInputRulesOut(deaf));
+
+    // Owned windows follow whatever the PC's own hand did, and whether or not
+    // it is heard: the Mac's Save As must not be left where nobody sees it.
+    for (const uint64_t at : {99300ull, 99600ull, 100000ull}) {
+        FollowFacts owned_busy = owned;
+        owned_busy.pc_input_at = at;
+        CHECK(DecideFollow(owned_busy) == FollowReason::Owned);
+        CHECK(!NeverFollows(owned_busy));
+        owned_busy.watching_since = 0;
+        CHECK(DecideFollow(owned_busy) == FollowReason::Owned);
+    }
+
+    // What counts as a press at the PC: anything not marked as the Mac's --
+    // a device or none, since a touchpad, pen, touch and the on-screen
+    // keyboard have none -- and only presses, not movement.
     {
-        struct Event { uint64_t at; HANDLE device; };
-        const HANDLE mouse = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x10045));
-        const Event events[] = {{99300, mouse}, {99350, nullptr}, {99400, nullptr},
-                                {99600, nullptr}, {99900, nullptr}};
+        const auto mouse = [](USHORT flags, ULONG extra, bool device) {
+            RAWINPUT raw{};
+            raw.header.dwType = RIM_TYPEMOUSE;
+            raw.header.hDevice = device ? reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x10045))
+                                        : nullptr;
+            raw.data.mouse.usButtonFlags = flags;
+            raw.data.mouse.ulExtraInformation = extra;
+            return raw;
+        };
+        const auto key = [](USHORT flags, ULONG extra) {
+            RAWINPUT raw{};
+            raw.header.dwType = RIM_TYPEKEYBOARD;
+            raw.data.keyboard.Flags = flags;
+            raw.data.keyboard.ExtraInformation = extra;
+            return raw;
+        };
+        // The Mac's, tagged: never, whatever it is.
+        CHECK(!IsPcPress(mouse(RI_MOUSE_LEFT_BUTTON_DOWN, kMacInputSignature, false)));
+        CHECK(!IsPcPress(key(RI_KEY_MAKE, kMacInputSignature)));
+        CHECK(!IsPcPress(mouse(RI_MOUSE_WHEEL, kMacInputSignature, true)));
+        // Untagged with no device -- a touchpad tap, the on-screen keyboard:
+        // the PC is in use.
+        CHECK(IsPcPress(mouse(RI_MOUSE_LEFT_BUTTON_DOWN, 0, false)));
+        CHECK(IsPcPress(key(RI_KEY_MAKE, 0)));
+        CHECK(IsPcPress(mouse(RI_MOUSE_RIGHT_BUTTON_DOWN, 7, true)));
+        CHECK(IsPcPress(mouse(RI_MOUSE_WHEEL, 0, true)));
+        CHECK(IsPcPress(mouse(RI_MOUSE_HWHEEL, 0, true)));
+        CHECK(IsPcPress(mouse(RI_MOUSE_BUTTON_4_DOWN, 0, true)));
+        CHECK(IsPcPress(key(RI_KEY_E0, 0)));
+        // Movement and releases are not presses.
+        CHECK(!IsPcPress(mouse(0, 0, true)));
+        CHECK(!IsPcPress(mouse(RI_MOUSE_LEFT_BUTTON_UP, 0, true)));
+        CHECK(!IsPcPress(key(RI_KEY_BREAK, 0)));
+        CHECK(!MousePresses(0));
+        RAWINPUT hid{};
+        hid.header.dwType = RIM_TYPEHID;
+        CHECK(!IsPcPress(hid));
+
+        // The Mac's pointer moving, and its tagged clicks, after a press at
+        // the PC do not hide that press.
         uint64_t pc_at = 0;
-        for (const Event& event : events) {
-            if (RawInputIsPhysical(event.device)) {
+        const struct { uint64_t at; RAWINPUT raw; } events[] = {
+            {99300, mouse(RI_MOUSE_LEFT_BUTTON_DOWN, 0, true)},
+            {99350, mouse(0, kMacInputSignature, false)},
+            {99400, mouse(RI_MOUSE_LEFT_BUTTON_DOWN, kMacInputSignature, false)},
+            {99600, mouse(0, 0, true)},
+            {99900, key(RI_KEY_MAKE, kMacInputSignature)},
+        };
+        for (const auto& event : events) {
+            if (IsPcPress(event.raw)) {
                 pc_at = event.at;
             }
         }
@@ -1871,28 +1937,35 @@ void TestFollowDecision() {
         CHECK(DecideFollow(moved) == FollowReason::None);
     }
 
-    // Owned: the PC used since the Mac's press, up to kFollowAfterMacInputMs
-    // before the window showed, or after it.
-    FollowFacts local_owned = owned;
-    local_owned.pc_input_at = 99300;
-    CHECK(DecideFollow(local_owned) == FollowReason::None);
-    CHECK(NeverFollows(local_owned));
-    for (const uint64_t at : {100000ull, 102500ull, 110000ull}) {
-        FollowFacts still = local_owned;
-        still.now = at;
-        CHECK(DecideFollow(still) == FollowReason::None);
+    // Game controllers: a packet number that moves, on a pad in use.
+    {
+        PadSlot slot;
+        XINPUT_STATE state{};
+        state.dwPacketNumber = 10;
+        CHECK(!PadUsed(slot, true, state));          // first seen: nothing to compare
+        CHECK(!PadUsed(slot, true, state));          // the same packet
+        state.dwPacketNumber = 11;
+        state.Gamepad.wButtons = XINPUT_GAMEPAD_A;
+        CHECK(PadUsed(slot, true, state));           // A went down
+        state.dwPacketNumber = 12;
+        state.Gamepad.wButtons = 0;
+        CHECK(PadUsed(slot, true, state));           // and came up
+        state.dwPacketNumber = 13;
+        state.Gamepad.sThumbLX = 300;                // a resting stick drifting
+        CHECK(!PadUsed(slot, true, state));
+        state.dwPacketNumber = 14;
+        state.Gamepad.sThumbLX = 20000;              // pushed
+        CHECK(PadUsed(slot, true, state));
+        state.dwPacketNumber = 15;
+        state.Gamepad.sThumbLX = 0;
+        state.Gamepad.bRightTrigger = 200;           // a trigger pulled
+        CHECK(PadUsed(slot, true, state));
+        // Gone, then back with a new packet: says nothing until it changes.
+        CHECK(!PadUsed(slot, false, state));
+        state.dwPacketNumber = 99;
+        CHECK(!PadUsed(slot, true, state));
+        CHECK(PadAtRest(XINPUT_GAMEPAD{}));
     }
-    FollowFacts owned_after = owned;
-    owned_after.pc_input_at = owned_after.shown_at + 50;
-    CHECK(DecideFollow(owned_after) == FollowReason::None);
-    // Long before it showed, or before the Mac's last press, decides nothing.
-    FollowFacts stale = owned;
-    stale.pc_input_at = stale.shown_at - kFollowAfterMacInputMs - 1;
-    CHECK(DecideFollow(stale) == FollowReason::Owned);
-    FollowFacts owned_before_press = owned;
-    owned_before_press.mac_press_at = 99200;
-    owned_before_press.pc_input_at = 99100;
-    CHECK(DecideFollow(owned_before_press) == FollowReason::Owned);
 
     // The shell and tooltips are turned away only when nothing owns them:
     // an owned one is Windows saying it belongs to the application.
