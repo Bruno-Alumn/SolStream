@@ -1123,8 +1123,6 @@ bool ForceForeground(HWND window) {
                 nudge.type = INPUT_MOUSE;
                 nudge.mi.dwFlags = MOUSEEVENTF_MOVE;
                 SendInput(1, &nudge, sizeof(nudge));
-                // Asked for by the Mac, so not the PC user's: see follow.h.
-                solstream::NoteMacInput(false);
                 SetForegroundWindow(target);
             }
 
@@ -2918,9 +2916,6 @@ std::wstring ProcessImagePath(DWORD pid) {
 void FollowNewWindows() {
     struct Pending {
         ULONGLONG shown_at = 0;
-        /// The PC's own input as known when it was first seen: input after
-        /// that did not open it.
-        ULONGLONG local_input_at = 0;
         bool looked_up = false;
         std::wstring image;
     };
@@ -2931,7 +2926,6 @@ void FollowNewWindows() {
     static std::map<HWND, Pending> pending;
     static std::map<HWND, Follower> followers;
     static LONG epoch = 0;
-    static ULONGLONG local_input_at = 0;
 
     std::vector<std::pair<HWND, ULONGLONG>> shown;
     {
@@ -2993,19 +2987,6 @@ void FollowNewWindows() {
     };
     const ULONGLONG now = GetTickCount64();
 
-    // Input at the PC itself: anything newer than the Mac's last. Remembered,
-    // because the Mac's next pointer movement takes the last-input time over.
-    LASTINPUTINFO last{};
-    last.cbSize = sizeof(last);
-    if (GetLastInputInfo(&last)) {
-        const ULONGLONG ago = (DWORD) ((DWORD) now - last.dwTime);
-        const uint64_t local =
-            solstream::LocalInputAt(now > ago ? now - ago : 0, solstream::g_mac_input_at.load());
-        if (local > local_input_at) {
-            local_input_at = local;
-        }
-    }
-
     // Followers the Mac has not taken on, gone again: said as `closed`, which
     // a Mac that heard of them knows already.
     for (auto it = followers.begin(); it != followers.end();) {
@@ -3034,7 +3015,6 @@ void FollowNewWindows() {
         if (pending.size() < 32 && followers.count(window) == 0) {
             Pending first;
             first.shown_at = at;
-            first.local_input_at = local_input_at;
             pending.emplace(window, first);  // the first sighting stands
         }
     }
@@ -3087,10 +3067,17 @@ void FollowNewWindows() {
         facts.now = now;
         facts.shown_at = seen.shown_at;
         facts.mac_press_at = press_at;
-        facts.local_input_at = seen.local_input_at;
+        // As it is now, at every look: see PcInputRulesOut.
+        facts.pc_input_at = solstream::g_pc_input_at.load();
         const solstream::FollowReason reason = solstream::DecideFollow(facts);
         if (reason == solstream::FollowReason::None) {
             if (solstream::NeverFollows(facts)) {
+                if (solstream::PcInputRulesOut(facts) && facts.top_level && !facts.held
+                    && !facts.own_process && !facts.earshot) {
+                    Log("[follow] window %llu [%s] was left alone: the PC's own mouse or "
+                        "keyboard was in use", (unsigned long long) IdFromWindow(window),
+                        ToUtf8(cls).c_str());
+                }
                 it = pending.erase(it);
             } else {
                 ++it;
@@ -3384,6 +3371,104 @@ void UpdateMouseFence(bool holding) {
         return;  // it reads the fence as it starts
     }
     PostThreadMessageW(g_fence_thread, kFenceUpdate, 0, 0);
+}
+
+// ── The PC's own input ───────────────────────────────────────────────────────
+//
+// For telling a window the PC's user opened from one the Mac did (follow.h).
+// Raw Input rather than a low-level hook: every key and mouse event on the PC
+// waits for a hook, while Raw Input is only told afterwards. Each event with
+// a device behind it stamps g_pc_input_at; injected ones -- the Mac's, and
+// the fence's own resends -- have none. Only while something is held.
+
+constexpr UINT kPcInputUpdate = WM_APP + 1;  ///< g_pc_input_wanted changed
+DWORD g_pc_input_thread = 0;
+std::atomic<bool> g_pc_input_wanted{false};
+
+LRESULT CALLBACK PcInputWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_INPUT) {
+        RAWINPUTHEADER header{};
+        UINT size = sizeof(header);
+        if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_HEADER, &header, &size,
+                            sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1)
+            && solstream::RawInputIsPhysical(header.hDevice)) {
+            solstream::g_pc_input_at.store(GetTickCount64());
+        }
+    }
+    // WM_INPUT too: it frees what Windows kept for the message.
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+/// Start or stop hearing about the PC's mice and keyboards, wherever the
+/// focus is.
+bool WatchPcInput(HWND window, bool on) {
+    RAWINPUTDEVICE devices[2] = {};
+    devices[0].usUsagePage = 0x01;  // generic desktop
+    devices[0].usUsage = 0x02;      // mouse
+    devices[1].usUsagePage = 0x01;
+    devices[1].usUsage = 0x06;      // keyboard
+    for (RAWINPUTDEVICE& device : devices) {
+        device.dwFlags = on ? RIDEV_INPUTSINK : RIDEV_REMOVE;
+        device.hwndTarget = on ? window : nullptr;
+    }
+    return RegisterRawInputDevices(devices, 2, sizeof(RAWINPUTDEVICE)) != FALSE;
+}
+
+DWORD WINAPI PcInputThreadProc(void*) {
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = PcInputWindowProc;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = L"SolStreamPcInput";
+    RegisterClassW(&window_class);
+    // Message-only: never listed, shown or captured.
+    HWND window = CreateWindowExW(0, window_class.lpszClassName, L"", 0, 0, 0, 0, 0,
+                                  HWND_MESSAGE, nullptr, window_class.hInstance, nullptr);
+    if (!window) {
+        Log("[follow] could not make a window to hear the PC's own input on (error %lu); "
+            "windows opened at the PC may be told to the Mac", GetLastError());
+    }
+    MSG msg;
+    // The queue first, so an update posted from here on is not lost; then the
+    // wish as it is, for one posted before.
+    PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE);
+    PostThreadMessageW(GetCurrentThreadId(), kPcInputUpdate, 0, 0);
+    bool watching = false;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!msg.hwnd && msg.message == kPcInputUpdate) {
+            const bool want = g_pc_input_wanted.load();
+            if (window && want != watching) {
+                if (WatchPcInput(window, want)) {
+                    watching = want;
+                } else if (want) {
+                    Log("[follow] could not hear the PC's own input (error %lu); windows "
+                        "opened at the PC may be told to the Mac", GetLastError());
+                }
+            }
+            continue;
+        }
+        DispatchMessageW(&msg);
+    }
+    return 0;
+}
+
+/// Hear the PC's own input while something is held, and not otherwise: a game
+/// played at the PC sends a thousand mouse events a second. Watcher thread.
+void UpdatePcInputWatch(bool holding) {
+    if (g_pc_input_wanted.exchange(holding) == holding && g_pc_input_thread) {
+        return;
+    }
+    if (!g_pc_input_thread) {
+        if (!holding) {
+            return;
+        }
+        HANDLE thread =
+            CreateThread(nullptr, 0, PcInputThreadProc, nullptr, 0, &g_pc_input_thread);
+        if (thread) {
+            CloseHandle(thread);
+        }
+        return;  // it reads the wish as it starts
+    }
+    PostThreadMessageW(g_pc_input_thread, kPcInputUpdate, 0, 0);
 }
 
 struct StrandedSearch {
@@ -3998,6 +4083,7 @@ DWORD WINAPI WatcherProc(LPVOID) {
         ReportPointerTarget();
         ReportOcclusion();
         UpdateMouseFence(holding);
+        UpdatePcInputWatch(holding);
         const ULONGLONG now = GetTickCount64();
         if (now - rescued_at >= kRescueIntervalMs) {
             rescued_at = now;

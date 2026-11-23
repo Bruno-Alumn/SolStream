@@ -19,9 +19,13 @@
 //     browser is caught, since nothing in Windows ties it to the click.
 //
 // Never on a process id alone: a browser being streamed is the same process as
-// every other browser window the person at the PC has open. Never after input
-// at the PC itself, newer than the Mac's: that window is theirs, and it must
-// stay on their monitor. Never the host itself or Earshot, which the person
+// every other browser window the person at the PC has open. Never when the
+// PC's own mouse or keyboard says someone there may have opened it -- the
+// second rule only on a PC nobody has touched for kPcIdleForMacOpenMs (see
+// PcInputRulesOut): that window is theirs, and it must stay on their monitor.
+// What is left is a window another program raises on its own, on an idle PC,
+// just after the Mac's click; the Mac decides what to do with it. Never the
+// host itself or Earshot, which the person
 // relies on staying where it is; and, unless they are owned, never the shell
 // or a tooltip -- the Windows key the Mac sends opens Start.
 //
@@ -47,42 +51,42 @@ namespace solstream {
 /// can take a second or two to show it.
 constexpr uint64_t kFollowAfterMacInputMs = 2500;
 
-/// How far past the Mac's latest input the PC's last-input time may be and
-/// still be the Mac's own: the two are read from different clocks' ticks.
-constexpr uint64_t kLocalInputSlackMs = 150;
+/// How long the PC's own mouse and keyboard must have been still for a window
+/// to count as opened by the Mac: rule (b) is for a PC nobody is using. A
+/// program started at the PC can take seconds to show its window, long after
+/// the Mac's next click.
+constexpr uint64_t kPcIdleForMacOpenMs = 10000;
 
-/// When the Mac's input last went into the PC, in GetTickCount64 time: any
-/// event at all, and the latest press -- a button or key going down, or text.
-/// Written by the media session's receive thread (media/input.cpp) and read by
-/// the window watcher. 0 for never.
-inline std::atomic<uint64_t> g_mac_input_at{0};
+/// How far before the Mac's press a window may be seen shown and still be
+/// opened by it: the press is stamped once SendInput returns, and the
+/// application may have answered on another core by then.
+constexpr uint64_t kShownBeforePressSlackMs = 100;
+
+/// When the Mac's latest press went in -- a button or key going down, or
+/// text -- in GetTickCount64 time, 0 for never. Written by the media session's
+/// receive thread (media/input.cpp), read by the window watcher.
 inline std::atomic<uint64_t> g_mac_press_at{0};
 /// The window in front when that press went in -- the one a key goes to, and
 /// the one a click lands on once the Mac has focused it.
 inline std::atomic<uintptr_t> g_mac_press_foreground{0};
 
-/// Note that the Mac's input went in, and whether it was a press. Cheap: the
-/// receive thread calls it for every event.
-inline void NoteMacInput(bool press) {
-    const uint64_t now = GetTickCount64();
-    g_mac_input_at.store(now);
-    if (press) {
-        g_mac_press_foreground.store(reinterpret_cast<uintptr_t>(GetForegroundWindow()));
-        g_mac_press_at.store(now);
-    }
+/// When a physical mouse or keyboard at the PC was last used, 0 for not since
+/// the host started watching. Written from Raw Input (main.cpp's
+/// PcInputWindowProc) for every event with a device behind it, and never by
+/// anything injected: the Mac's pointer moving cannot hide the PC's own hand,
+/// as Windows' last-input time, which counts both, did.
+inline std::atomic<uint64_t> g_pc_input_at{0};
+
+/// Note that the Mac pressed something. Cheap: the receive thread calls it.
+inline void NoteMacPress() {
+    g_mac_press_foreground.store(reinterpret_cast<uintptr_t>(GetForegroundWindow()));
+    g_mac_press_at.store(GetTickCount64());
 }
 
-/// When input at the PC itself last arrived, given its last-input time and the
-/// Mac's: the last-input time when it is clearly later than anything the Mac
-/// sent, and otherwise 0, for "nothing seen that was not the Mac's".
-inline uint64_t LocalInputAt(uint64_t last_input, uint64_t mac_input_at) {
-    if (last_input == 0) {
-        return 0;
-    }
-    if (mac_input_at != 0 && last_input <= mac_input_at + kLocalInputSlackMs) {
-        return 0;
-    }
-    return last_input;
+/// Whether a Raw Input event came from a device at the PC. Input sent with
+/// SendInput -- the Mac's, or any other program's -- has no device.
+inline bool RawInputIsPhysical(HANDLE device) {
+    return device != nullptr;
 }
 
 /// Whether `path` -- a full image path or a file name -- contains `needle`,
@@ -171,29 +175,44 @@ struct FollowFacts {
     /// The Mac's latest press went to a held window, or to one of its own.
     bool press_was_on_held = false;
     /// GetTickCount64 now, when the window was first seen shown, when the
-    /// Mac's latest press went in (0 for never), and when input at the PC
-    /// itself last did as of the window's first sighting (LocalInputAt; 0 for
-    /// none).
+    /// Mac's latest press went in (0 for never), and when a physical mouse or
+    /// keyboard at the PC was last used, as of now (g_pc_input_at; 0 for
+    /// never).
     uint64_t now = 0;
     uint64_t shown_at = 0;
     uint64_t mac_press_at = 0;
-    uint64_t local_input_at = 0;
+    uint64_t pc_input_at = 0;
 };
+
+/// Whether the PC's own mouse or keyboard rules this window out: it is the PC
+/// user's. Read with the PC's input as it is now, every time the watcher
+/// looks, and a window ruled out once is dropped for good (NeverFollows).
+///
+/// Owned: the PC was used since the Mac's last press, at most
+/// kFollowAfterMacInputMs before the window showed or at any time after.
+///
+/// Opened by the Mac: the PC was used since the Mac's press at all, or in the
+/// kPcIdleForMacOpenMs before now, whichever came first -- a program started
+/// at the PC shows its window seconds later, after the Mac's next click as
+/// easily as before it. Rule (b) is for a PC that nobody is using.
+inline bool PcInputRulesOut(const FollowFacts& f) {
+    if (f.pc_input_at == 0) {
+        return false;
+    }
+    if (f.owner_reaches_held) {
+        return f.pc_input_at >= f.mac_press_at
+            && f.pc_input_at + kFollowAfterMacInputMs >= f.shown_at;
+    }
+    return f.pc_input_at > f.mac_press_at
+        || f.now <= f.pc_input_at + kPcIdleForMacOpenMs;
+}
 
 /// Whether a newly shown window follows a held one, and why.
 inline FollowReason DecideFollow(const FollowFacts& f) {
     if (!f.top_level || f.held || f.own_process || f.earshot) {
         return FollowReason::None;
     }
-    // Input at the PC itself since the Mac's last press, in the moments before
-    // this window was shown: the window is the PC user's. Measured from when
-    // it was shown, not from now, so the answer does not change as the
-    // watcher looks again -- and `local_input_at` is what was known when it
-    // was first seen, so input after it was shown takes nothing away.
-    if (f.local_input_at != 0 && f.local_input_at >= f.mac_press_at
-        && f.local_input_at <= f.shown_at + kLocalInputSlackMs
-        && (f.shown_at > f.local_input_at ? f.shown_at - f.local_input_at : 0)
-               <= kFollowAfterMacInputMs) {
+    if (PcInputRulesOut(f)) {
         return FollowReason::None;
     }
     // Windows' own word that it belongs to the application: a credential
@@ -207,7 +226,7 @@ inline FollowReason DecideFollow(const FollowFacts& f) {
     }
     // A window already showing before the press was not opened by it.
     if (f.foreground && f.press_was_on_held && !f.tool_window && f.mac_press_at != 0
-        && f.shown_at + kLocalInputSlackMs >= f.mac_press_at
+        && f.shown_at + kShownBeforePressSlackMs >= f.mac_press_at
         && f.now >= f.mac_press_at && f.now - f.mac_press_at <= kFollowAfterMacInputMs) {
         return FollowReason::OpenedByMac;
     }
@@ -215,9 +234,10 @@ inline FollowReason DecideFollow(const FollowFacts& f) {
 }
 
 /// Whether nothing more can make this window follow: a window that might yet
-/// take the foreground is worth another look until its time runs out.
+/// take the foreground is worth another look until its time runs out, but
+/// one the PC's own input has ruled out stays out, however still the PC goes.
 inline bool NeverFollows(const FollowFacts& f) {
-    return f.held || f.own_process || f.earshot
+    return f.held || f.own_process || f.earshot || PcInputRulesOut(f)
         || (!f.owner_reaches_held && (f.shell || f.tooltip));
 }
 

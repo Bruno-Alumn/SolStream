@@ -1816,33 +1816,83 @@ void TestFollowDecision() {
     CHECK(DecideFollow(tip) == FollowReason::None);
     CHECK(NeverFollows(tip));
 
-    // Input at the PC since the Mac's press, just before the window showed:
-    // the window is the PC user's, owned or not.
+    // ── The PC's own mouse and keyboard ──
+    // Opened by the Mac only on a PC nobody is using: no physical input in
+    // the last kPcIdleForMacOpenMs.
+    FollowFacts idle = opened;
+    idle.pc_input_at = idle.now - kPcIdleForMacOpenMs - 1;
+    CHECK(DecideFollow(idle) == FollowReason::OpenedByMac);
+    CHECK(!PcInputRulesOut(idle));
+    // Input at the PC just before the window showed, after the Mac's press.
     FollowFacts local = opened;
-    local.local_input_at = 99400;
+    local.pc_input_at = 99400;
     CHECK(DecideFollow(local) == FollowReason::None);
-    CHECK(!NeverFollows(local));
+    CHECK(NeverFollows(local));
+    // A click at the PC after the window showed: looked at again, it is
+    // ruled out, and for good.
+    FollowFacts clicked_after = opened;
+    clicked_after.pc_input_at = 99800;
+    CHECK(DecideFollow(clicked_after) == FollowReason::None);
+    CHECK(NeverFollows(clicked_after));
+    // Something started at the PC BEFORE the Mac's press, its window showing
+    // just after it: ruled out by the PC not being idle.
+    FollowFacts launched = opened;
+    launched.pc_input_at = launched.mac_press_at - 3000;
+    CHECK(DecideFollow(launched) == FollowReason::None);
+    CHECK(NeverFollows(launched));
+    launched.pc_input_at = launched.now - kPcIdleForMacOpenMs;
+    CHECK(DecideFollow(launched) == FollowReason::None);
+    // A window ruled out is dropped at that look -- NeverFollows says so for
+    // every case above -- so no later look, with the PC gone quiet and the
+    // rule satisfied on paper, can let it follow.
+    FollowFacts quiet_again = clicked_after;
+    quiet_again.pc_input_at = 0;
+    CHECK(DecideFollow(quiet_again) == FollowReason::OpenedByMac);
+    CHECK(NeverFollows(clicked_after) && NeverFollows(launched) && NeverFollows(local));
+
+    // The Mac's pointer moving does not hide the PC's own hand: injected
+    // input has no device, and only input with one stamps the time.
+    CHECK(!RawInputIsPhysical(nullptr));
+    CHECK(RawInputIsPhysical(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x10045))));
+    {
+        struct Event { uint64_t at; HANDLE device; };
+        const HANDLE mouse = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0x10045));
+        const Event events[] = {{99300, mouse}, {99350, nullptr}, {99400, nullptr},
+                                {99600, nullptr}, {99900, nullptr}};
+        uint64_t pc_at = 0;
+        for (const Event& event : events) {
+            if (RawInputIsPhysical(event.device)) {
+                pc_at = event.at;
+            }
+        }
+        CHECK(pc_at == 99300);
+        FollowFacts moved = opened;
+        moved.pc_input_at = pc_at;
+        CHECK(DecideFollow(moved) == FollowReason::None);
+    }
+
+    // Owned: the PC used since the Mac's press, up to kFollowAfterMacInputMs
+    // before the window showed, or after it.
     FollowFacts local_owned = owned;
-    local_owned.local_input_at = 99300;
+    local_owned.pc_input_at = 99300;
     CHECK(DecideFollow(local_owned) == FollowReason::None);
-    // And it stays theirs however long the watcher goes on looking: the
-    // veto is measured from when the window showed, not from now.
-    for (const uint64_t later : {100000ull, 102500ull, 103000ull, 110000ull}) {
+    CHECK(NeverFollows(local_owned));
+    for (const uint64_t at : {100000ull, 102500ull, 110000ull}) {
         FollowFacts still = local_owned;
-        still.now = later;
+        still.now = at;
         CHECK(DecideFollow(still) == FollowReason::None);
     }
-    // Input at the PC before the Mac's press, long before the window showed,
-    // or only after it showed, decides nothing.
-    FollowFacts before = opened;
-    before.local_input_at = 98000;
-    CHECK(DecideFollow(before) == FollowReason::OpenedByMac);
+    FollowFacts owned_after = owned;
+    owned_after.pc_input_at = owned_after.shown_at + 50;
+    CHECK(DecideFollow(owned_after) == FollowReason::None);
+    // Long before it showed, or before the Mac's last press, decides nothing.
     FollowFacts stale = owned;
-    stale.local_input_at = stale.shown_at - kFollowAfterMacInputMs - 1;
+    stale.pc_input_at = stale.shown_at - kFollowAfterMacInputMs - 1;
     CHECK(DecideFollow(stale) == FollowReason::Owned);
-    FollowFacts after = owned;
-    after.local_input_at = after.shown_at + kLocalInputSlackMs + 1;
-    CHECK(DecideFollow(after) == FollowReason::Owned);
+    FollowFacts owned_before_press = owned;
+    owned_before_press.mac_press_at = 99200;
+    owned_before_press.pc_input_at = 99100;
+    CHECK(DecideFollow(owned_before_press) == FollowReason::Owned);
 
     // The shell and tooltips are turned away only when nothing owns them:
     // an owned one is Windows saying it belongs to the application.
@@ -1892,13 +1942,6 @@ void TestFollowDecision() {
     CHECK(IsTooltipClass(L"tooltips_class32"));
     CHECK(IsTooltipClass(L"HwndWrapper[App;;ToolTip]"));
     CHECK(!IsTooltipClass(L"#32770"));
-
-    // The PC's own input is whatever came in clearly after the Mac's last.
-    CHECK(LocalInputAt(0, 5000) == 0);
-    CHECK(LocalInputAt(5000, 5000) == 0);
-    CHECK(LocalInputAt(5000 + kLocalInputSlackMs, 5000) == 0);
-    CHECK(LocalInputAt(5001 + kLocalInputSlackMs, 5000) == 5001 + kLocalInputSlackMs);
-    CHECK(LocalInputAt(4000, 0) == 4000);
 
     // A menu over its window is in its picture; one hanging off the edge is not.
     const RECT parent{0, 0, 800, 600};
