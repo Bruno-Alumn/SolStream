@@ -225,7 +225,7 @@ everything after the proof is encrypted (see Pairing).
 | `{"cmd":"focus","id":N}` | `{"type":"focused","ok":bool,"foreground":bool}` |
 | `{"cmd":"lock","id":N,"on":1}` | `{"type":"locked","ok":bool,"on":bool}` |
 | `{"cmd":"topmost","id":N,"on":1}` | `{"type":"topmost","ok":bool,"on":bool}` |
-| `{"cmd":"quit","id":N,"force":0}` | `{"type":"quit","ok":true,"windows":N}` once the app's windows have been asked to close, `{"type":"quit","ok":true,"forced":true}` with `"force":1`, or `{"type":"quit","ok":false,"reason":"…"}` in words the Mac shows; only a window being streamed can be quit |
+| `{"cmd":"quit","id":N,"force":0}` | `{"type":"quit","ok":true,"windows":N}` once the app's windows have been asked to close, `{"type":"quit","ok":true,"forced":true}` with `"force":1`, or `{"type":"quit","ok":false,"reason":"…"}` in words the Mac shows; the window must be one being streamed or one the `windows` list offers |
 | `{"cmd":"download","id":N,"offset":O}` | `{"type":"download","ok":true,"id","total","offset","data"}`: 512 KB of a file offered with Send to Mac, base64; the last chunk withdraws the offer. `{"cmd":"download","id":N,"offset":0,"cancel":1}` lets go of it early (`"cancelled":true`); a failure is `ok:false` with `message` |
 
 `lock` and `topmost` take `"on":1` or `"on":0`, and read an absent `on` as 1.

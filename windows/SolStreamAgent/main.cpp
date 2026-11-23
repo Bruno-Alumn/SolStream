@@ -6234,11 +6234,13 @@ std::string HandleCommand(const std::string& line, bool& authenticated,
         if (!window) {
             return refusal;
         }
-        // Only a window being streamed: the Mac names what it shows, never
-        // some other window it happens to know the id of.
-        if (!HeldWindow(window, nullptr)) {
+        // A window being streamed, or one the picker lists: the same windows a
+        // client can already open and stream, so quitting one gives it nothing
+        // new. Never a dialog, a tool window, the shell or SolStream's own window
+        // -- IsUserWindow turns all of those away.
+        if (!HeldWindow(window, nullptr) && !IsUserWindow(window)) {
             return "{\"type\":\"quit\",\"ok\":false,\"reason\":"
-                   "\"Only an app being streamed can be quit from the Mac.\"}";
+                   "\"That window can't be quit from the Mac.\"}";
         }
         long long force = 0;
         FieldNumber(line, "force", force);
