@@ -208,6 +208,27 @@ inline bool IsTooltipClass(const std::wstring& cls) {
     return cls == L"tooltips_class32" || ImageContains(cls, L"tooltip");
 }
 
+/// A transient pop-up, by class: a menu (`#32768`), a combo box's drop-down
+/// list, a tooltip, or a pop-up a XAML or DirectUI application hosts in a
+/// window of its own -- a flyout, a context menu, a tooltip. They come and go
+/// with the pointer and live in menu mode, and the Mac must never give one the
+/// keyboard: focusing it ends the menu.
+inline bool IsPopupClass(const std::wstring& cls) {
+    return cls == L"#32768" || cls == L"ComboLBox" || cls == L"DropDown"
+        || cls == L"SysDragImage" || cls == L"Xaml_WindowedPopupClass"
+        || cls == L"Microsoft.UI.Content.PopupWindowSiteBridge"
+        || cls == L"DirectUIHWND_Popup" || cls == L"NetUIToolWindow"
+        || cls == L"Net UI Tool Window" || IsTooltipClass(cls);
+}
+
+/// Whether a window that follows is a pop-up rather than a window to work
+/// in: a pop-up class, or WS_EX_TOOLWINDOW -- a palette, a floating strip, and
+/// what many toolkits draw their menus and tooltips in. Said to the Mac as
+/// `"popup": true`, so that it never takes the keyboard for one.
+inline bool IsPopupWindow(const std::wstring& cls, LONG_PTR ex_style) {
+    return (ex_style & WS_EX_TOOLWINDOW) != 0 || IsPopupClass(cls);
+}
+
 /// Why a window follows a held one, if it does.
 enum class FollowReason {
     None,

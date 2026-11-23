@@ -3116,6 +3116,9 @@ void FollowNewWindows() {
             + ",\"parent\":" + std::to_string(IdFromWindow(parent))
             + ",\"pid\":" + std::to_string(pid)
             + ",\"owned\":" + (owned ? "true" : "false")
+            + ",\"popup\":"
+            + (solstream::IsPopupWindow(cls, GetWindowLongPtrW(window, GWL_EXSTYLE)) ? "true"
+                                                                                      : "false")
             + ",\"x\":" + std::to_string(client.left)
             + ",\"y\":" + std::to_string(client.top)
             + ",\"w\":" + std::to_string(client.right - client.left)

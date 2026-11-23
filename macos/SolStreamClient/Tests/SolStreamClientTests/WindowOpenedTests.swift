@@ -32,6 +32,19 @@ final class WindowOpenedTests: XCTestCase {
         XCTAssertEqual(opened.title, "Sign in — アカウント \"x\"")
     }
 
+    func testAPopUpIsSaidSo() throws {
+        let menu = try XCTUnwrap(decode(
+            #"{"type":"windowOpened","id":5,"parent":7,"owned":true,"popup":true,"#
+            + #""x":0,"y":0,"w":200,"h":300,"title":""}"#))
+        XCTAssertTrue(menu.popup)
+        let dialog = try XCTUnwrap(decode(
+            #"{"type":"windowOpened","id":6,"parent":7,"owned":true,"popup":false,"w":1,"h":1}"#))
+        XCTAssertFalse(dialog.popup)
+        // A host from before the field: not a pop-up.
+        let old = try XCTUnwrap(decode(#"{"type":"windowOpened","id":6,"parent":7,"w":1,"h":1}"#))
+        XCTAssertFalse(old.popup)
+    }
+
     func testWithoutAnIdOrAParentItIsNothing() {
         XCTAssertNil(decode(#"{"type":"windowOpened","parent":7,"x":0,"y":0,"w":1,"h":1}"#))
         XCTAssertNil(decode(#"{"type":"windowOpened","id":5,"x":0,"y":0,"w":1,"h":1}"#))

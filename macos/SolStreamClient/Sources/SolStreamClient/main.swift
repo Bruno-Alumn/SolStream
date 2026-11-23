@@ -1616,10 +1616,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let appWindow = self.appWindows.first(where: { $0.remoteWindowID == id }) {
                 appWindow.hostWindowClosed(noticedBy: "pushed by the host")
-            } else {
+            } else if let dialog = self.appWindows.lazy.compactMap({ $0.ownedWindow(id: id) }).first {
                 // A dialog shown over its window, which the PC does not hold.
-                self.appWindows.lazy.compactMap { $0.ownedWindow(id: id) }.first?
-                    .hostWindowClosed(noticedBy: "pushed by the host")
+                dialog.hostWindowClosed(noticedBy: "pushed by the host")
+            } else if self.appWindows.contains(where: { $0.forgetDeferred(id: id) }) {
+                Log.info("[follow] window \(id), held until its window came back from the "
+                         + "Dock, closed on the PC")
             }
         }
 
@@ -1745,7 +1747,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// - Parameter whenPlaced: see `AppWindow.show`.
     @discardableResult
     private func addAppWindow(target: RemoteWindow, tile: CGRect,
-                              whenPlaced: Bool = false) -> AppWindow? {
+                              whenPlaced: Bool = false, quietly: Bool = false) -> AppWindow? {
         guard let session, let agent, let host = streamHost, let display = streamDisplay else {
             Log.error("[app] no stream to open \"\(target.title)\" on")
             return nil
@@ -1837,7 +1839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let shape = agent.lastCursorShape {
             appWindow.hostCursorChanged(shape, reportsHidden: agent.cursorReportsHidden)
         }
-        appWindow.show(after: previous, whenPlaced: whenPlaced)
+        appWindow.show(after: previous, whenPlaced: whenPlaced, quietly: quietly)
         appWindow.setInputBlocked(inputBlockedShort)
         if let note = inputBlockedNow {
             appWindow.tell(note)
@@ -2469,7 +2471,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// into what the new one takes.
     /// - Parameter quietly: over a live picture, the window is not seen until
     ///   the PC's window is on its tile, rather than with a card over it
-    ///   meanwhile: for a window the PC opened, which should just appear.
+    ///   meanwhile: for a window the PC opened, which should just appear. Nor
+    ///   is it made key with another Mac app in front, and a full stream or no
+    ///   room is only logged, never said in a note.
     /// - Returns: the window opened for it, if one was.
     @discardableResult
     func addToStream(_ target: RemoteWindow, quietly: Bool = false) -> AppWindow? {
@@ -2496,17 +2500,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .full:
             Log.error("[app] not adding \"\(target.title)\": \(appWindows.count) windows "
                       + "are streamed, the most the PC holds")
-            frontAppWindow?.tell("SolStream can show \(TileAllocator.maxWindows) windows from a PC "
-                                 + "at once. Close one to add \(target.title).")
+            // Not for a window the PC opened by itself: nobody asked for it.
+            if !quietly {
+                frontAppWindow?.tell("SolStream can show \(TileAllocator.maxWindows) windows from "
+                                     + "a PC at once. Close one to add \(target.title).")
+            }
             return nil
         case .noRoom:
             Log.error("[app] not adding \"\(target.title)\": no room left on the capture display")
-            frontAppWindow?.tell("There's no room left on the PC's display for \(target.title). "
-                                 + "Close a window or make one smaller, then try again.")
+            if !quietly {
+                frontAppWindow?.tell("There's no room left on the PC's display for \(target.title). "
+                                     + "Close a window or make one smaller, then try again.")
+            }
             return nil
         case .add(let tile):
             guard let appWindow = addAppWindow(target: target, tile: tile,
-                                               whenPlaced: quietly && hidesCard) else { return nil }
+                                               whenPlaced: quietly && hidesCard,
+                                               quietly: quietly) else { return nil }
             // The windows already there may no longer grow into what this
             // one has taken.
             neighboursChanged(except: target.id)
@@ -2560,15 +2570,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let streamed = Set(appWindows.map(\.remoteWindowID))
-        let mirrored = Set(appWindows.flatMap { $0.ownedWindows.map(\.remoteWindowID) })
+        let mirrored = Set(appWindows.flatMap {
+            $0.ownedWindows.map(\.remoteWindowID) + $0.deferredOwned.map(\.id)
+        })
         switch Follow.decide(opened, streamed: streamed, mirrored: mirrored,
                              display: Self.displayRect(display)) {
         case .ignore(let reason):
             Log.info("[follow] not following \(what): \(reason)")
         case .mirror:
             guard let parent = appWindows.first(where: { $0.remoteWindowID == opened.parent }),
-                  parent.mirror(opened) != nil else {
+                  !parent.isGoing else {
                 Log.info("[follow] not following \(what): the window it goes with is closing")
+                return
+            }
+            guard parent.mirror(opened) != nil else {
+                Log.info("[follow] holding \(what) until its window comes back from the Dock")
                 return
             }
             Log.info("[follow] showing \(what) over its window: it is a dialog on the capture "
@@ -2623,10 +2639,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.info("[follow] not following \(what): it is shown here already")
                 return
             case .full:
+                // Logged only: a note for a window nobody asked for would be
+                // a surprise, and the PC still has it where it opened.
                 Log.info("[follow] not following \(what): \(appWindows.count) windows are "
                          + "streamed, the most the PC holds")
+                return
             case .noRoom:
                 Log.info("[follow] not following \(what): no room left on the capture display")
+                return
             }
         }
         guard let appWindow = addToStream(target, quietly: true) else { return }

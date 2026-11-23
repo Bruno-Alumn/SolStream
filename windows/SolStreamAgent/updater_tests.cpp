@@ -1817,6 +1817,25 @@ void TestFollowDecision() {
     CHECK(DecideFollow(tip) == FollowReason::None);
     CHECK(NeverFollows(tip));
 
+    // ── Pop-ups, which the Mac must never give the keyboard ──
+    CHECK(IsPopupClass(L"#32768"));
+    CHECK(IsPopupClass(L"tooltips_class32"));
+    CHECK(IsPopupClass(L"WindowsForms10.tooltips_class32.app.0.1"));
+    CHECK(IsPopupClass(L"ComboLBox"));
+    CHECK(IsPopupClass(L"Xaml_WindowedPopupClass"));
+    CHECK(IsPopupClass(L"Microsoft.UI.Content.PopupWindowSiteBridge"));
+    CHECK(!IsPopupClass(L"#32770"));  // a dialog: Save As, a message box
+    CHECK(!IsPopupClass(L"Notepad"));
+    CHECK(!IsPopupClass(L"Chrome_WidgetWin_1"));
+    CHECK(IsPopupWindow(L"Notepad", WS_EX_TOOLWINDOW));
+    CHECK(IsPopupWindow(L"#32768", 0));
+    CHECK(!IsPopupWindow(L"#32770", WS_EX_DLGMODALFRAME | WS_EX_TOPMOST));
+    // An owned pop-up still follows: the Mac is told, and leaves it alone.
+    FollowFacts owned_menu = owned;
+    owned_menu.tooltip = true;
+    owned_menu.tool_window = true;
+    CHECK(DecideFollow(owned_menu) == FollowReason::Owned);
+
     // ── The PC's own input ──
     // Opened by the Mac only on a PC nobody has pressed anything at for
     // kPcIdleForMacOpenMs.

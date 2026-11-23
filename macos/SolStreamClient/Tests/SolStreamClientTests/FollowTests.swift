@@ -39,6 +39,48 @@ final class FollowTests: XCTestCase {
         }
     }
 
+    // MARK: - Menus and tooltips
+
+    /// A menu, a tooltip or a tool window would take the keyboard as a Mac
+    /// window, which ends the menu on the PC; it is left in its window's
+    /// picture. Seen live: a folder tooltip in Paint's Open dialog.
+    func testAPopUpIsNeverShownOrAdded() {
+        let tip = OpenedWindow(id: 901, parent: 42, pid: 4120, owned: true, x: 3440 + 800,
+                               y: 500, width: 120, height: 24, title: "", popup: true)
+        guard case .ignore(let reason) = decide(tip) else {
+            return XCTFail("a pop-up must not be mirrored")
+        }
+        XCTAssertTrue(reason.contains("menu"))
+        let offDisplay = OpenedWindow(id: 902, parent: 42, pid: 4120, owned: true, x: 100,
+                                      y: 100, width: 300, height: 400, title: "", popup: true)
+        guard case .ignore = decide(offDisplay) else {
+            return XCTFail("a pop-up off the capture display must not get a tile")
+        }
+        let unowned = OpenedWindow(id: 903, parent: 42, pid: 4120, owned: false, x: 100,
+                                   y: 100, width: 300, height: 400, title: "", popup: true)
+        guard case .ignore = decide(unowned) else {
+            return XCTFail("a pop-up must not get a tile")
+        }
+    }
+
+    // MARK: - The keyboard
+
+    func testAMirrorTakesTheKeyboardOnlyFromItsOwnWindow() {
+        XCTAssertTrue(Follow.mirrorTakesKeyboard(appActive: true, parentHasKeyboard: true))
+        // Another stream window has it, or another Mac app does.
+        XCTAssertFalse(Follow.mirrorTakesKeyboard(appActive: true, parentHasKeyboard: false))
+        XCTAssertFalse(Follow.mirrorTakesKeyboard(appActive: false, parentHasKeyboard: true))
+        XCTAssertFalse(Follow.mirrorTakesKeyboard(appActive: false, parentHasKeyboard: false))
+    }
+
+    func testAQuietFollowerDoesNotBringSolStreamForward() {
+        XCTAssertFalse(Follow.showActivates(quietly: true, appActive: false))
+        XCTAssertTrue(Follow.showActivates(quietly: true, appActive: true))
+        // One the user asked for comes forward either way.
+        XCTAssertTrue(Follow.showActivates(quietly: false, appActive: false))
+        XCTAssertTrue(Follow.showActivates(quietly: false, appActive: true))
+    }
+
     // MARK: - On the capture display or not
 
     func testADialogOnTheRealMonitorGetsATile() {

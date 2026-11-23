@@ -31,6 +31,12 @@ enum Follow {
         guard opened.width >= 1, opened.height >= 1 else {
             return .ignore("it has no size")
         }
+        // Never mirrored, even one hanging past its window: a Mac window over
+        // it would take the keyboard and the foreground, which ends a menu on
+        // the PC. What lies over its window is in that window's picture.
+        guard !opened.popup else {
+            return .ignore("it is a menu, tooltip or tool window")
+        }
         if streamed.contains(opened.id) || mirrored.contains(opened.id) {
             return .ignore("it is shown here already")
         }
@@ -44,6 +50,21 @@ enum Follow {
             return .tile("its dialog is not on the capture display")
         }
         return .mirror
+    }
+
+    /// Whether a dialog shown over its window takes the Mac's keyboard as it
+    /// opens: only from its own window, while SolStream is the app in front.
+    /// Opened while the keyboard is in another stream window, or another Mac
+    /// app, it is only put in front.
+    static func mirrorTakesKeyboard(appActive: Bool, parentHasKeyboard: Bool) -> Bool {
+        appActive && parentHasKeyboard
+    }
+
+    /// Whether a window added to the stream is made key and SolStream brought
+    /// forward. Not for one the PC opened by itself while the user is in
+    /// another Mac app: that one is only put in front, behind the app in use.
+    static func showActivates(quietly: Bool, appActive: Bool) -> Bool {
+        !quietly || appActive
     }
 
     /// Its client area, in the PC's virtual-desktop pixels.

@@ -152,9 +152,13 @@ public struct OpenedWindow: Sendable, Equatable {
     public let width: Int
     public let height: Int
     public let title: String
+    /// A menu, a tooltip, a drop-down list or a tool window: something that
+    /// comes and goes with the pointer, and must never be given the keyboard
+    /// -- focusing it ends the menu. False from a host that does not say.
+    public let popup: Bool
 
     public init(id: UInt64, parent: UInt64, pid: UInt32, owned: Bool,
-                x: Int, y: Int, width: Int, height: Int, title: String) {
+                x: Int, y: Int, width: Int, height: Int, title: String, popup: Bool = false) {
         self.id = id
         self.parent = parent
         self.pid = pid
@@ -164,6 +168,7 @@ public struct OpenedWindow: Sendable, Equatable {
         self.width = width
         self.height = height
         self.title = title
+        self.popup = popup
     }
 }
 
@@ -3272,7 +3277,8 @@ public final class AgentConnection {
             pid: (message["pid"] as? NSNumber)?.uint32Value ?? 0,
             owned: (message["owned"] as? Bool) ?? false,
             x: int("x"), y: int("y"), width: max(0, int("w")), height: max(0, int("h")),
-            title: message["title"] as? String ?? "")
+            title: message["title"] as? String ?? "",
+            popup: (message["popup"] as? Bool) ?? false)
     }
 
     /// A link from the host that this Mac may open: web or mail, as the host

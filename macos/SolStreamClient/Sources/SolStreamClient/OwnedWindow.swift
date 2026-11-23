@@ -110,14 +110,15 @@ final class OwnedWindow: NSObject, NSWindowDelegate {
     }
 
     /// Put it over its parent and give it the keyboard, as the dialog has it
-    /// on the PC -- unless SolStream is not the application in front: a
-    /// dialog the app opened by itself does not take the Mac from whatever
-    /// the user is doing.
+    /// on the PC -- only when its parent has the Mac's keyboard: a dialog the
+    /// app opened by itself does not take the keyboard from another stream
+    /// window, or the Mac from whatever the user is doing.
     func show() {
         guard let window, let parentWindow = parent?.window else { return }
         parentWindow.addChildWindow(window, ordered: .above)
         reposition()
-        if NSApp.isActive {
+        if Follow.mirrorTakesKeyboard(appActive: NSApp.isActive,
+                                      parentHasKeyboard: parent?.hasKeyboard == true) {
             window.makeKeyAndOrderFront(nil)
         } else {
             window.orderFront(nil)

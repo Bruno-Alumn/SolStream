@@ -321,7 +321,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
     ///   this one shows it -- for a window opening beside a picture already
     ///   live, which then has no card to put up, and whose first frames show
     ///   whatever was on that part of the display before.
-    func show(after previous: NSWindow? = nil, whenPlaced: Bool = false) {
+    /// - Parameter quietly: a window the PC opened by itself. With another
+    ///   Mac app in front it is only put in front of SolStream's own windows:
+    ///   not made key, and SolStream is not brought forward.
+    func show(after previous: NSWindow? = nil, whenPlaced: Bool = false, quietly: Bool = false) {
         if whenPlaced, !firstPlacementDone {
             revealWhenPlaced = true
             window?.alphaValue = 0
@@ -341,6 +344,10 @@ final class AppWindow: NSObject, NSWindowDelegate {
                 // bottom-left corner, half of it below the edge of the display.
                 window.center()
             }
+        }
+        guard Follow.showActivates(quietly: quietly, appActive: NSApp.isActive) else {
+            window?.orderFront(nil)
+            return
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -389,15 +396,69 @@ final class AppWindow: NSObject, NSWindowDelegate {
     }
 
     /// On its way out: a dialog closing with it gives nothing back to it.
-    var isGoing: Bool { isClosing }
+    var isGoing: Bool { isClosing || closingOwned }
+
+    /// Its dialogs are being closed together -- with it, or under an error
+    /// card -- so one that had the keyboard gives it back to nobody: that
+    /// would send `focus` and start the capture for a stream that has ended.
+    private var closingOwned = false
 
     /// Close the dialogs shown over it: they are a picture of something
     /// that has stopped, and would sit over the card's Try Again.
     private func closeOwned() {
+        deferredOwned.removeAll()
         let owned = ownedWindows
         ownedWindows.removeAll()
+        closingOwned = true
         owned.forEach { $0.close() }
+        closingOwned = false
         applySubtitle()
+    }
+
+    /// Dialogs that opened while this window was in the Dock, to be shown
+    /// when it comes back; see `mirror`.
+    private(set) var deferredOwned: [OpenedWindow] = []
+
+    /// The PC said `id` has gone: true if it was a dialog still waiting for
+    /// this window to come out of the Dock.
+    func forgetDeferred(id: UInt64) -> Bool {
+        let before = deferredOwned.count
+        deferredOwned.removeAll { $0.id == id }
+        return deferredOwned.count != before
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        let waiting = deferredOwned
+        deferredOwned.removeAll()
+        for opened in waiting {
+            // Where it is now, and whether it still is: it may have moved or
+            // gone while this window was away.
+            agent.windowStatus(id: opened.id) { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self, let status, status.isAlive, status.isVisible,
+                          !status.isMinimized else {
+                        Log.info("[follow] not showing \(Follow.describe(opened)): it went "
+                                 + "while its window was in the Dock")
+                        return
+                    }
+                    guard self.ownedWindow(id: opened.id) == nil else { return }
+                    let frame = status.frame ?? Follow.frame(of: opened)
+                    let fresh = OpenedWindow(
+                        id: opened.id, parent: opened.parent, pid: opened.pid, owned: opened.owned,
+                        x: Int(frame.minX), y: Int(frame.minY), width: Int(frame.width),
+                        height: Int(frame.height), title: opened.title, popup: opened.popup)
+                    guard Follow.onCaptureDisplay(frame,
+                                                  display: AppDelegate.displayRect(self.display)) else {
+                        Log.info("[follow] not showing \(Follow.describe(opened)): it left the "
+                                 + "capture display while its window was in the Dock")
+                        return
+                    }
+                    Log.info("[follow] showing \(Follow.describe(opened)) now its window is "
+                             + "back from the Dock")
+                    self.mirror(fresh)
+                }
+            }
+        }
     }
 
     func ownedWindow(id: UInt64) -> OwnedWindow? {
@@ -417,7 +478,15 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// child of it. Nil when this window is on its way out.
     @discardableResult
     func mirror(_ opened: OpenedWindow) -> OwnedWindow? {
-        guard !isClosing, window != nil else { return nil }
+        guard !isClosing, let window else { return nil }
+        // Not over a window in the Dock: a child window there would sit on
+        // the desktop with nothing under it. Shown when it comes back.
+        if window.isMiniaturized {
+            if !deferredOwned.contains(where: { $0.id == opened.id }) {
+                deferredOwned.append(opened)
+            }
+            return nil
+        }
         let owned = OwnedWindow(session: session, agent: agent, opened: opened,
                                 display: display, parent: self)
         owned.onClose = { [weak self, weak owned] in
