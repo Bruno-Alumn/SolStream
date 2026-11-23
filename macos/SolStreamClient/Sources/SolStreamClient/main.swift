@@ -724,6 +724,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.addToDock(AppLink.of(choice, host: host, apps: self.pickerApps),
                            windowID: windowID, agent: agent, over: picker?.window)
         }
+        picker.onQuit = { [weak self, weak agent, weak picker] window, force in
+            guard let self, let agent, let picker else { return }
+            self.quitFromPicker(window, force: force, agent: agent, picker: picker)
+        }
         self.picker = picker
         pickerHost = host
         // The name the Window menu and VoiceOver call the picker by, as the
@@ -2897,14 +2901,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func forceQuitStreamedApp(_ sender: NSMenuItem) {
         guard let target = quitTarget(sender) else { return }
         let name = target.window?.title ?? "the app"
+        guard Self.forceQuitAlert(name: name).runModal() == .alertFirstButtonReturn else { return }
+        quit(target, force: true)
+    }
+
+    /// Asked before anything is force quit. After a refusal, the PC's reason
+    /// comes first.
+    static func forceQuitAlert(name: String, reason: String? = nil) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Force quit \u{201C}\(name)\u{201D} on the PC?"
-        alert.informativeText = "Anything not saved in it will be lost. Use this only "
+        alert.informativeText = (reason.map { "\($0)\n\n" } ?? "")
+            + "Anything not saved in it will be lost. Use this only "
             + "when the app has stopped responding."
         alert.addButton(withTitle: "Force Quit")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        quit(target, force: true)
+        return alert
+    }
+
+    /// Quit from the picker's row. As the stream's Quit does, except that it
+    /// all happens on the picker: the row says it is quitting, a refusal
+    /// offers Force Quit as a sheet, and what still fails goes on the status
+    /// line. The row goes when the PC's next list leaves the window out.
+    private func quitFromPicker(_ window: RemoteWindow, force: Bool, agent: AgentConnection,
+                                picker: AppPicker) {
+        if force {
+            confirmForceQuit(window, reason: nil, picker: picker) { [weak self, weak agent, weak picker] in
+                guard let agent, let picker else { return }
+                self?.sendQuit(window, force: true, agent: agent, picker: picker)
+            }
+        } else {
+            sendQuit(window, force: false, agent: agent, picker: picker)
+        }
+    }
+
+    private func sendQuit(_ window: RemoteWindow, force: Bool, agent: AgentConnection,
+                          picker: AppPicker) {
+        Log.info("[quit] \(force ? "force quitting" : "quitting") \"\(window.title)\""
+                 + " on the PC from the picker")
+        picker.setQuitting(window, true)
+        agent.quit(windowID: window.id, force: force) { [weak self, weak agent, weak picker] reason in
+            picker?.setQuitting(window, false)
+            guard let reason else {
+                // Its stream, if one is open, closes the way the stream's own
+                // Quit closes it.
+                self?.appWindows.filter { $0.remoteWindowID == window.id }
+                    .forEach { $0.quitRequested = true }
+                return
+            }
+            Log.info("[quit] the PC refused: \(reason)")
+            guard let picker else { return }
+            // Forced already, or the PC not there to ask: nothing more to offer
+            // than why.
+            guard !force, let agent, agent.isConnected else {
+                picker.showFailure(reason)
+                return
+            }
+            self?.confirmForceQuit(window, reason: reason, picker: picker) { [weak self, weak agent, weak picker] in
+                guard let agent, let picker else { return }
+                self?.sendQuit(window, force: true, agent: agent, picker: picker)
+            }
+        }
+    }
+
+    private func confirmForceQuit(_ window: RemoteWindow, reason: String?, picker: AppPicker,
+                                  then forceQuit: @escaping () -> Void) {
+        // One sheet at a time; a token sheet already up says why, if anything.
+        guard picker.window.attachedSheet == nil else {
+            if let reason { picker.showFailure(reason) }
+            return
+        }
+        Self.forceQuitAlert(name: window.title, reason: reason)
+            .beginSheetModal(for: picker.window) { response in
+                if response == .alertFirstButtonReturn { forceQuit() }
+            }
     }
 
     /// Ask the PC to quit it. Its window closes on the Mac by itself once the

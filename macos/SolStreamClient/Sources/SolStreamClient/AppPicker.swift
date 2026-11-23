@@ -64,6 +64,13 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
     weak var agent: AgentConnection?
     /// "Add to Dock" on a row's menu. Nil leaves the menu off.
     var onAddToDock: ((Choice) -> Void)?
+    /// Quit, or with `force` Force Quit, an open window's app on the PC: the
+    /// row's menu, its × and ⌘⌫. The owner asks the PC and marks the row with
+    /// `setQuitting` meanwhile. Nil offers none of them.
+    var onQuit: ((_ window: RemoteWindow, _ force: Bool) -> Void)?
+    /// Rows whose app is being quit, by `key`. Apart from `busyKey`: a quit
+    /// must not hold back the refresh that drops its row, nor stop an open.
+    private var quittingKeys: Set<String> = []
     /// The window's own close button. Nil makes it the same as Back.
     var onCloseButton: (() -> Void)?
 
@@ -142,6 +149,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         tableView.action = #selector(rowClicked)
         tableView.onReturn = { [weak self] in self?.openTapped() }
         tableView.onEscape = { [weak self] isRepeat in self?.backOnEscape(isRepeat: isRepeat) }
+        tableView.onQuit = { [weak self] in self?.quitSelected() }
         // Typing with the list focused goes on searching, as it would if the
         // focus had never left the field.
         tableView.onTyping = { [weak self] event in self?.continueSearch(with: event) }
@@ -311,6 +319,8 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         }
 
         allRows = built
+        // A row gone is a quit done; its marker goes with it.
+        quittingKeys.formIntersection(built.map(\.key))
         hasPresented = true
         setSpinning(false)
         // A failure stays said until somebody does something: a refresh of
@@ -431,6 +441,23 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         busyKey = nil
         reloadRows(withKey: previous)
         openButton.isEnabled = tableView.selectedRow >= 0
+    }
+
+    /// Mark `window`'s row as being quit, or not any more. The row itself
+    /// stays until the PC says the window has gone: an app that asks to save
+    /// first is still open.
+    func setQuitting(_ window: RemoteWindow, _ quitting: Bool) {
+        let key = Self.key(of: .running(window))
+        if quitting { quittingKeys.insert(key) } else { quittingKeys.remove(key) }
+        reloadRows(withKey: key)
+        if quitting {
+            MainActor.assumeIsolated { _ = statusVoice.say("Quitting \(window.title) on the PC") }
+        }
+    }
+
+    /// Whether `window`'s row is marked as being quit.
+    func isQuitting(_ window: RemoteWindow) -> Bool {
+        quittingKeys.contains(Self.key(of: .running(window)))
     }
 
     private func reloadRows(withKey key: String?) {
@@ -570,12 +597,19 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         guard !isBusy else { return }
         let index = tableView.selectedRow
         guard index >= 0, index < rows.count else { return }
+        // An app on its way out is not one to stream.
+        guard !quittingKeys.contains(rows[index].key) else { return }
         onChoose(rows[index].choice)
     }
 
     @objc private func rowClicked() {
         let row = tableView.clickedRow
         guard row >= 0, row < rows.count else { return }
+        // A click on the row's × is the button's, not an open as well.
+        if let event = NSApp.currentEvent, let superview = tableView.superview,
+           tableView.hitTest(superview.convert(event.locationInWindow, from: nil)) is QuitButton {
+            return
+        }
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         openTapped()
     }
@@ -615,6 +649,22 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         // function key, which AppKit reports in the private-use range.
         return !CharacterSet.controlCharacters.contains(scalar)
             && !(0xF700...0xF8FF).contains(scalar.value)
+    }
+
+    /// Quit the selected row's app, for ⌘⌫.
+    private func quitSelected() {
+        let index = tableView.selectedRow
+        guard index >= 0, index < rows.count else { return }
+        quit(rows[index])
+    }
+
+    /// Only an open window has an app to quit, and a quit already under way
+    /// is not asked for again. Force Quit may still follow one: it is what an
+    /// app that never closed needs.
+    private func quit(_ row: Row, force: Bool = false) {
+        guard let onQuit, case .running(let window) = row.choice,
+              force || !quittingKeys.contains(row.key) else { return }
+        onQuit(window, force)
     }
 
     /// Move the highlighted row, keeping it on screen. Clamped rather than
@@ -673,16 +723,46 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
         let view = PickerRowView()
         // On the row as well as its cell: VoiceOver's cursor usually rests on
         // the row, and its Actions rotor lists what the focused element offers.
-        if onAddToDock != nil, rows.indices.contains(row) {
-            let choice = rows[row].choice
-            view.setAccessibilityCustomActions([
-                NSAccessibilityCustomAction(name: "Add to Dock") { [weak self] in
-                    self?.onAddToDock?(choice)
-                    return true
-                },
-            ])
+        if rows.indices.contains(row) {
+            view.setAccessibilityCustomActions(customActions(for: rows[row]))
         }
         return view
+    }
+
+    /// VoiceOver's Actions rotor: the context menu's items, by name.
+    func customActions(for choice: Choice) -> [NSAccessibilityCustomAction]? {
+        allRows.first { $0.key == Self.key(of: choice) }.flatMap(customActions(for:))
+    }
+
+    private func customActions(for entry: Row) -> [NSAccessibilityCustomAction]? {
+        var actions: [NSAccessibilityCustomAction] = []
+        if onAddToDock != nil {
+            let choice = entry.choice
+            actions.append(NSAccessibilityCustomAction(name: "Add to Dock") { [weak self] in
+                self?.onAddToDock?(choice)
+                return true
+            })
+        }
+        if onQuit != nil, entry.isRunning {
+            let key = entry.key
+            for force in [false, true] {
+                actions.append(NSAccessibilityCustomAction(name: Self.quitTitle(entry.title, force: force)) {
+                    [weak self] in
+                    guard let self, let row = self.allRows.first(where: { $0.key == key }) else {
+                        return false
+                    }
+                    self.quit(row, force: force)
+                    return true
+                })
+            }
+        }
+        return actions.isEmpty ? nil : actions
+    }
+
+    /// The words the stream's own Quit and Force Quit use.
+    static func quitTitle(_ name: String, force: Bool) -> String {
+        force ? "Force Quit \u{201C}\(name)\u{201D} on PC\u{2026}"
+            : "Quit \u{201C}\(name)\u{201D} on PC"
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?,
@@ -693,18 +773,7 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             as? PickerCell ?? PickerCell()
         let monogram = cell.tile
         monogram.configure(name: entry.title, key: entry.key)
-        // VoiceOver's Actions rotor: the context menu's one item, by name.
-        if onAddToDock != nil {
-            let choice = entry.choice
-            cell.setAccessibilityCustomActions([
-                NSAccessibilityCustomAction(name: "Add to Dock") { [weak self] in
-                    self?.onAddToDock?(choice)
-                    return true
-                },
-            ])
-        } else {
-            cell.setAccessibilityCustomActions(nil)
-        }
+        cell.setAccessibilityCustomActions(customActions(for: entry))
         // Cached across reloads: the list redraws on every keystroke, and asking
         // the host again each time would make typing hit the network.
         if let cached = iconCache[entry.key] {
@@ -733,15 +802,29 @@ final class AppPicker: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTabl
             }
         }
 
-        let busy = isBusy && entry.key == busyKey
+        let quitting = quittingKeys.contains(entry.key)
+        let busy = isBusy && entry.key == busyKey || quitting
         cell.configure(title: entry.title,
-                       subtitle: busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
+                       subtitle: quitting ? "Quitting on the PC\u{2026}"
+                           : busy ? "Starting on the PC — usually 10 s cold" : entry.subtitle,
                        // Installed applications get no dot at all rather than a
                        // grey one: the dot means "this is live". A launch under
                        // way is the blue working dot.
                        note: busy ? nil : entry.note,
                        dot: busy ? .working : (entry.isRunning ? .live : nil),
                        action: entry.isRunning ? "Attach" : "Launch")
+        // The ×: open windows only, and not one already being quit.
+        if onQuit != nil, entry.isRunning, !quitting {
+            let key = entry.key
+            cell.quitButton.toolTip = Self.quitTitle(entry.title, force: false)
+            cell.quitButton.setAccessibilityLabel(Self.quitTitle(entry.title, force: false))
+            cell.onQuit = { [weak self] in
+                guard let self, let row = self.allRows.first(where: { $0.key == key }) else { return }
+                self.quit(row)
+            }
+        } else {
+            cell.onQuit = nil
+        }
         // The longer story behind "own window buttons", for anybody who
         // wonders: these keep their own minimise and close inside the picture.
         cell.toolTip = entry.drawsOwnControls
@@ -847,6 +930,15 @@ private final class PickerCell: NSTableCellView {
     private let subtitleLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
     private let actionLabel = DS.label("", font: DS.caption, colour: DS.textMuted)
     private let dotView = DS.Dot()
+    /// Shown on an open window's row under the pointer or selected; see
+    /// `onQuit`.
+    let quitButton = QuitButton()
+    /// Set for a row whose app can be quit; nil hides the ×.
+    var onQuit: (() -> Void)? {
+        didSet { quitButton.isHidden = onQuit == nil || !(selected || hovered) }
+    }
+    private var selected = false
+    private var hovered = false
     private var action = ""
     private var subtitle = ""
     private var note: String?
@@ -875,7 +967,16 @@ private final class PickerCell: NSTableCellView {
         actionLabel.setContentHuggingPriority(.required, for: .horizontal)
         actionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        for child in [tile, labels, actionLabel] as [NSView] {
+        // The verb, then the ×; a hidden × gives up its slot.
+        quitButton.target = self
+        quitButton.action = #selector(quitTapped)
+        quitButton.isHidden = true
+        let trailing = NSStackView(views: [actionLabel, quitButton])
+        trailing.orientation = .horizontal
+        trailing.alignment = .centerY
+        trailing.spacing = DS.Space.x2
+
+        for child in [tile, labels, trailing] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = false
             addSubview(child)
         }
@@ -884,12 +985,14 @@ private final class PickerCell: NSTableCellView {
             tile.centerYAnchor.constraint(equalTo: centerYAnchor),
             labels.leadingAnchor.constraint(equalTo: tile.trailingAnchor, constant: DS.Space.x3),
             labels.centerYAnchor.constraint(equalTo: centerYAnchor),
-            actionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x3),
-            actionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            labels.trailingAnchor.constraint(lessThanOrEqualTo: actionLabel.leadingAnchor,
+            trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -DS.Space.x3),
+            trailing.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labels.trailingAnchor.constraint(lessThanOrEqualTo: trailing.leadingAnchor,
                                              constant: -DS.Space.x3),
         ])
     }
+
+    @objc private func quitTapped() { onQuit?() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -908,6 +1011,9 @@ private final class PickerCell: NSTableCellView {
     }
 
     func setState(selected: Bool, hovered: Bool) {
+        self.selected = selected
+        self.hovered = hovered
+        quitButton.isHidden = onQuit == nil || !(selected || hovered)
         subtitleLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
         subtitleLabel.stringValue = (selected ? note : nil).map { "\(subtitle) · \($0)" } ?? subtitle
         actionLabel.textColor = selected ? DS.accentTintInk : DS.textMuted
@@ -926,12 +1032,44 @@ extension AppPicker: NSMenuDelegate {
             .contains(NSApp.currentEvent?.type)
         let row = tableView.clickedRow >= 0 ? tableView.clickedRow
             : byMouse ? -1 : tableView.selectedRow
-        guard onAddToDock != nil, row >= 0, row < rows.count else { return }
-        let item = NSMenuItem(title: "Add to Dock", action: #selector(addToDockChosen(_:)),
-                              keyEquivalent: "")
-        item.target = self
-        item.representedObject = rows[row].key
-        menu.addItem(item)
+        guard row >= 0, row < rows.count else { return }
+        let entry = rows[row]
+        if onAddToDock != nil {
+            let item = NSMenuItem(title: "Add to Dock", action: #selector(addToDockChosen(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.key
+            menu.addItem(item)
+        }
+        // Quit, and Force Quit under ⌥, as the stream's own menus have them.
+        // ⌘⌫ is shown, not handled here: the list and the field take it.
+        if onQuit != nil, entry.isRunning {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            let quit = NSMenuItem(title: Self.quitTitle(entry.title, force: false),
+                                  action: #selector(quitChosen(_:)), keyEquivalent: "\u{8}")
+            quit.keyEquivalentModifierMask = .command
+            let force = NSMenuItem(title: Self.quitTitle(entry.title, force: true),
+                                   action: #selector(forceQuitChosen(_:)), keyEquivalent: "\u{8}")
+            force.keyEquivalentModifierMask = [.command, .option]
+            force.isAlternate = true
+            for item in [quit, force] {
+                item.target = self
+                item.representedObject = entry.key
+                menu.addItem(item)
+            }
+        }
+    }
+
+    @objc private func quitChosen(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let row = allRows.first(where: { $0.key == key }) else { return }
+        quit(row)
+    }
+
+    @objc private func forceQuitChosen(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String,
+              let row = allRows.first(where: { $0.key == key }) else { return }
+        quit(row, force: true)
     }
 
     @objc private func addToDockChosen(_ sender: NSMenuItem) {
@@ -970,6 +1108,12 @@ extension AppPicker: NSTextFieldDelegate {
         case #selector(NSResponder.moveUp(_:)):
             moveSelection(by: -1)
             return true
+        case #selector(NSResponder.deleteToBeginningOfLine(_:)):
+            // ⌘⌫ takes back what was typed; with nothing typed, it quits the
+            // selected row's app, as it does with the list focused.
+            guard searchField.stringValue.isEmpty, onQuit != nil else { return false }
+            if !Self.keyIsRepeating { quitSelected() }
+            return true
         case #selector(NSResponder.cancelOperation(_:)):
             if searchField.stringValue.isEmpty {
                 backOnEscape(isRepeat: Self.keyIsRepeating)
@@ -984,6 +1128,64 @@ extension AppPicker: NSTextFieldDelegate {
     }
 }
 
+/// The × on an open window's row: a muted glyph on nothing at rest, `edge`
+/// behind it and full-strength ink under the pointer, so it reads as a
+/// button only when it is about to be one.
+final class QuitButton: NSButton {
+    private var hovering = false { didSet { restyle() } }
+
+    override var isHighlighted: Bool {
+        didSet { restyle() }
+    }
+
+    private func restyle() {
+        contentTintColor = hovering || isHighlighted ? DS.text : DS.textMuted
+        needsDisplay = true
+    }
+
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        title = ""
+        setButtonType(.momentaryPushIn)
+        image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Quit")
+        symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        imagePosition = .imageOnly
+        contentTintColor = DS.textMuted
+        translatesAutoresizingMaskIntoConstraints = false
+        let side: CGFloat = 20
+        widthAnchor.constraint(equalToConstant: side).isActive = true
+        heightAnchor.constraint(equalToConstant: side).isActive = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.mouseEnteredAndExited, .activeInKeyWindow,
+                                                 .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override var isHidden: Bool {
+        didSet { if isHidden { hovering = false } }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering || isHighlighted {
+            (isHighlighted ? DS.edge : DS.hairline).setFill()
+            NSBezierPath(ovalIn: bounds).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 /// The list's own keys: Return opens the highlighted row and Escape goes back,
 /// whichever of the list and the search field has the focus -- NSTableView
 /// does neither by itself, so once a row had been clicked Return did nothing.
@@ -993,8 +1195,16 @@ private final class PickerTableView: NSTableView {
     /// Told whether the press is the key repeating.
     var onEscape: ((_ isRepeat: Bool) -> Void)?
     var onTyping: ((NSEvent) -> Void)?
+    /// ⌘⌫, the Mac's "remove" in a list: quit the selected row's app. Not
+    /// ⌘Q, which quits SolStream.
+    var onQuit: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if event.keyCode == 51, modifiers == .command {  // ⌘⌫
+            if !event.isARepeat { onQuit?() }
+            return
+        }
         switch event.keyCode {
         case 36, 76:  // Return, keypad Enter
             onReturn?()
