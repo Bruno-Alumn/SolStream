@@ -23,6 +23,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
     /// The host window this one is showing. Not private: the agent pushes
     /// closures by id, and the owner has to know which window it means.
     let remoteWindowID: UInt64
+    /// The process on the PC the host window belongs to: a window the app
+    /// opens by itself is told by it as the same app's (see `link`).
+    let pid: Int
     private let display: RemoteDisplay
     /// The capture display as the popover names it: "DISPLAY2 · 2560×1600".
     private let hostDisplay: String
@@ -157,6 +160,7 @@ final class AppWindow: NSObject, NSWindowDelegate {
         self.session = session
         self.agent = agent
         self.remoteWindowID = remote.id
+        self.pid = remote.pid
         self.display = display
         hostDisplay = "\(display.name.replacingOccurrences(of: "\\\\.\\", with: "")) "
             + "· \(display.width)×\(display.height)"
@@ -393,7 +397,9 @@ final class AppWindow: NSObject, NSWindowDelegate {
 
     /// The app this window was opened for, from the picker, a launcher or
     /// Add App: what its Try Again opens again and what Add to Dock adds
-    /// while it is in front. Nil for a window the app opened by itself, and
+    /// while it is in front. A window the app opened by itself takes the link
+    /// of a streamed window of the same process, if one has one (see
+    /// `AppDelegate.inheritedLink`); nil for one from another program, and
     /// for a whole display.
     var link: AppLink?
 

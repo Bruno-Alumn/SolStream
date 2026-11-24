@@ -75,13 +75,15 @@ enum LaunchMatch {
     /// likeliest to be it, and there a mention of the name will do, since
     /// something did just start. `knownPIDs` are the processes with windows
     /// before the launch; empty means that list never came, and nothing can be
-    /// called new. Failing that, what `existing` would take.
+    /// called new. Failing that, what `existing` would take, among the windows
+    /// not in `streamed`: Add App asking for an app that is streamed already
+    /// wants another window of it, not the one on screen.
     static func afterLaunch(_ name: String, in windows: [RemoteWindow],
-                            knownPIDs: Set<Int>) -> RemoteWindow? {
+                            knownPIDs: Set<Int>, streamed: Set<UInt64> = []) -> RemoteWindow? {
         let fresh = knownPIDs.isEmpty ? [] : windows.filter { !knownPIDs.contains($0.pid) }
         return fresh.first { isConfident(title: $0.title, name: name) }
             ?? fresh.first { mentions(title: $0.title, name: name) }
-            ?? existing(name, in: windows)
+            ?? existing(name, in: windows.filter { !streamed.contains($0.id) })
     }
 
     // MARK: - Reading a title

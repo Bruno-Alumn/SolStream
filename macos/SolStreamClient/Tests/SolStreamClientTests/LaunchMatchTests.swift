@@ -114,4 +114,24 @@ final class LaunchMatchTests: XCTestCase {
         // The browser itself still is.
         XCTAssertTrue(LaunchMatch.isConfident(title: "WhatsApp - Google Chrome", name: "Google Chrome"))
     }
+
+    func testAfterALaunchTheFallbackSkipsWhatIsStreamed() {
+        let windows = [window("Untitled - Notepad", pid: 10, id: 1),
+                       window("notes.txt - Notepad", pid: 10, id: 2)]
+        XCTAssertEqual(LaunchMatch.afterLaunch("Notepad", in: windows, knownPIDs: [10],
+                                               streamed: [1])?.id, 2,
+                       "the one on screen already is not the new window")
+        XCTAssertNil(LaunchMatch.afterLaunch("Notepad", in: windows, knownPIDs: [10],
+                                             streamed: [1, 2]),
+                     "every Notepad streamed: none to add")
+        XCTAssertEqual(LaunchMatch.afterLaunch("Notepad", in: windows, knownPIDs: [10])?.id, 1,
+                       "the picker's own launch streams nothing yet")
+    }
+
+    func testANewProcessIsTakenEvenBesideAStreamedOne() {
+        let windows = [window("Untitled - Notepad", pid: 10, id: 1),
+                       window("Untitled - Notepad", pid: 20, id: 2)]
+        XCTAssertEqual(LaunchMatch.afterLaunch("Notepad", in: windows, knownPIDs: [10],
+                                               streamed: [1])?.id, 2)
+    }
 }

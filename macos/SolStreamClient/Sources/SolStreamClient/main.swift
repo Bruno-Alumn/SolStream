@@ -102,6 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app being started on the PC to be added to the stream, by name,
     /// until the PC answers. One at a time: see `add`.
     private var addingLaunch: String?
+    /// A launcher clicked while Add App is up, until its app is found in the
+    /// PC's lists and `add` takes it on: a second click meanwhile is refused
+    /// there, not left to clear the first one's progress. See `addFromLink`.
+    private var addingFromLink = false
     /// Counts the streams `presentApps` opened, so an add answered late can
     /// tell whether the stream it was for is still the one on screen.
     private var streamsOpened = 0
@@ -453,8 +457,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func open(link: AppLink) {
         NSApp.activate(ignoringOtherApps: true)
         // Whichever window it is: one added beside the first is on screen
-        // too, and opened again it was added twice.
-        if let window = appWindows.first(where: { $0.link?.likelySameApp(as: link) == true })?.window {
+        // too, and opened again it was added twice. And the stream's own app
+        // with its first window closed is on screen still in the windows it
+        // opened: switching to it would end the stream it is in.
+        if let window = (appWindows.first(where: { $0.link?.likelySameApp(as: link) == true })
+            ?? (streamLink?.likelySameApp(as: link) == true ? appWindows.first : nil))?.window {
             Log.info("[app] \"\(link.name)\" is on screen already; bringing it forward")
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
@@ -1058,7 +1065,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// adds it to the stream running. `busy` and `failed` say how it is going
     /// on the picker unless given.
     private func launch(app: RemoteApp, host: String, agent: AgentConnection,
-                        knownPIDs: Set<Int>, busy: ((String) -> Void)? = nil,
+                        knownPIDs: Set<Int>, streamed: Set<UInt64> = [],
+                        busy: ((String) -> Void)? = nil,
                         opened: ((RemoteWindow) -> Void)? = nil,
                         failed: ((String) -> Void)? = nil) {
         guard isCurrent(agent) else { return }
@@ -1081,7 +1089,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     agent.windows { windows in
                         DispatchQueue.main.async {
                             guard let existing = LaunchMatch.afterLaunch(
-                                app.name, in: windows, knownPIDs: knownPIDs) else {
+                                app.name, in: windows, knownPIDs: knownPIDs,
+                                streamed: streamed) else {
                                 failed("\(app.name) didn't open a window. If it opened on the PC's own "
                                        + "screen, pick its Open window row; otherwise try again.")
                                 return
@@ -2636,6 +2645,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windows.filter { !streamed.contains($0.id) }
     }
 
+    /// Every PC window on screen here: the streamed ones and the dialogs
+    /// shown over them.
+    private var streamedWindowIDs: Set<UInt64> {
+        Set(appWindows.flatMap { [$0.remoteWindowID] + $0.ownedWindows.map(\.remoteWindowID) })
+    }
+
+    /// The app a window opened by process `pid` belongs to: the link of the
+    /// window it goes with (`parent`) when that is the same process's, else of
+    /// any streamed window of that process. Nil for another program's window
+    /// -- a browser a click opened is not the app streamed. Pure, for the
+    /// tests.
+    static func inheritedLink(pid: Int, parent: UInt64,
+                              among windows: [(id: UInt64, pid: Int, link: AppLink?)]) -> AppLink? {
+        let same = windows.filter { $0.pid == pid }
+        return same.first(where: { $0.id == parent })?.link ?? same.lazy.compactMap(\.link).first
+    }
+
     /// Whether there is anywhere for a window not seen yet -- the one an app
     /// is about to be started for -- on a stream already covering `streamed`.
     /// Asked before the launch, so no app is started on the PC with no room
@@ -2832,8 +2858,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             place(window)
         case .launch(let app):
             guard addingLaunch == nil else {
-                return report.failed("\(addingLaunch ?? "Another app") is still starting on "
-                                     + "\(pcLabel(host)). Add this once it's open.")
+                // Not `report.failed`: that would take down the progress of
+                // the launch going, which is still coming.
+                Log.info("[app] not adding \"\(app.name)\": \(addingLaunch ?? "another app") "
+                         + "is still starting on \(pcLabel(host))")
+                NSSound.beep()
+                return
             }
             addingLaunch = app.name
             let done: () -> Void = { [weak self] in self?.addingLaunch = nil }
@@ -2842,14 +2872,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             agent.windows { [weak self] windows in
                 DispatchQueue.main.async {
                     guard let self, self.agent === agent else { return done() }
-                    if let existing = LaunchMatch.existing(app.name, in: windows) {
+                    // Among the windows not streamed yet: one on screen already
+                    // is brought forward, not added, and asking for its app
+                    // again wants another window of it.
+                    let streamed = self.streamedWindowIDs
+                    if let existing = LaunchMatch.existing(
+                        app.name, in: Self.addable(windows, streamed: streamed)) {
                         Log.info("[app] \"\(app.name)\" is already open; adding "
                                  + "\"\(existing.title)\"")
                         done()
                         return place(existing)
                     }
                     self.launch(app: app, host: host, agent: agent,
-                                knownPIDs: Set(windows.map(\.pid)), busy: report.busy,
+                                knownPIDs: Set(windows.map(\.pid)), streamed: streamed,
+                                busy: report.busy,
                                 opened: { done(); place($0) },
                                 failed: { done(); report.failed($0) })
                 }
@@ -2862,16 +2898,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func addFromLink(_ link: AppLink, host: String, agent: AgentConnection,
                              picker: AppPicker) {
         picker.show()
-        guard !picker.isOpening, addingLaunch == nil else {
+        guard !picker.isOpening, addingLaunch == nil, !addingFromLink else {
             Log.info("[app] not adding \"\(link.name)\": something else is opening already")
             NSSound.beep()
             return
         }
+        addingFromLink = true
         let report = report(on: picker)
         let cached = addPickerApps
         agent.windows { [weak self] windows in
             let found: ([RemoteApp]) -> Void = { apps in
                 DispatchQueue.main.async {
+                    self?.addingFromLink = false
                     guard let self, self.addPicker === picker else { return }
                     guard let choice = Self.choice(for: link, windowID: nil, windows: windows,
                                                    apps: apps) else {
@@ -2986,7 +3024,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
         }
-        guard let appWindow = addToStream(target, quietly: true) else { return }
+        // The app's own, as its other windows are: a launcher for it, Add to
+        // Dock and Try Again name it, with its first window closed too.
+        let link = Self.inheritedLink(pid: target.pid, parent: opened.parent,
+                                      among: appWindows.map { ($0.remoteWindowID, $0.pid, $0.link) })
+        guard let appWindow = addToStream(target, quietly: true, link: link) else { return }
         Log.info("[follow] added \(what) to the stream: \(reason)")
         if opened.owned { appWindow.ownerID = opened.parent }
     }

@@ -134,4 +134,58 @@ final class AddAppTests: XCTestCase {
         XCTAssertNil(hold.launchEnded(), "an extra answer does not go below none")
         XCTAssertEqual(hold.launches, 0)
     }
+
+    // MARK: Adding an app that is streamed already
+
+    private func titled(_ id: UInt64, _ title: String, pid: Int = 100) -> RemoteWindow {
+        RemoteWindow(id: id, pid: pid, title: title, className: "Window",
+                     x: 0, y: 0, width: 800, height: 600,
+                     isOccluded: false, occludedBy: nil, captionInset: 31)
+    }
+
+    func testAnAppStreamedAlreadyIsNotFoundOpenInItsStreamedWindow() {
+        let windows = [titled(1, "Untitled - Notepad"), titled(7, "Inbox - Mail", pid: 200)]
+        let addable = AppDelegate.addable(windows, streamed: [1])
+        XCTAssertNil(LaunchMatch.existing("Notepad", in: addable),
+                     "its only window is on screen: launched for another")
+        XCTAssertEqual(LaunchMatch.existing("Mail", in: addable)?.id, 7)
+    }
+
+    func testAnotherWindowOfAStreamedAppIsAddedAsItIs() {
+        let windows = [titled(1, "Untitled - Notepad"), titled(2, "notes.txt - Notepad")]
+        XCTAssertEqual(LaunchMatch.existing("Notepad",
+                                            in: AppDelegate.addable(windows, streamed: [1]))?.id, 2)
+    }
+
+    // MARK: Windows an app opens by itself
+
+    private let notepad = AppLink(host: "pc", name: "Notepad", path: #"C:\Notepad.lnk"#)
+    private let mail = AppLink(host: "pc", name: "Mail", path: #"C:\Mail.lnk"#)
+
+    func testAWindowTheAppOpenedTakesItsLink() {
+        let streamed: [(id: UInt64, pid: Int, link: AppLink?)] = [(1, 10, notepad), (2, 20, mail)]
+        XCTAssertEqual(AppDelegate.inheritedLink(pid: 10, parent: 1, among: streamed), notepad)
+    }
+
+    func testAWindowAnotherProgramOpenedTakesNone() {
+        let streamed: [(id: UInt64, pid: Int, link: AppLink?)] = [(1, 10, notepad)]
+        XCTAssertNil(AppDelegate.inheritedLink(pid: 30, parent: 1, among: streamed),
+                     "a browser a click opened is not the app streamed")
+    }
+
+    func testTheParentsLinkWinsOverAnotherOfTheSameProcess() {
+        let streamed: [(id: UInt64, pid: Int, link: AppLink?)] = [(1, 10, mail), (2, 10, notepad)]
+        XCTAssertEqual(AppDelegate.inheritedLink(pid: 10, parent: 2, among: streamed), notepad)
+    }
+
+    func testAFollowersFollowerFindsTheLinkThroughItsProcess() {
+        let streamed: [(id: UInt64, pid: Int, link: AppLink?)] = [(1, 10, notepad), (3, 10, nil)]
+        XCTAssertEqual(AppDelegate.inheritedLink(pid: 10, parent: 3, among: streamed), notepad,
+                       "its parent was opened by the app too, and has none of its own")
+    }
+
+    func testNothingStreamedOfThatProcessHasALink() {
+        let streamed: [(id: UInt64, pid: Int, link: AppLink?)] = [(1, 10, nil)]
+        XCTAssertNil(AppDelegate.inheritedLink(pid: 10, parent: 1, among: streamed))
+    }
 }
