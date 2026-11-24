@@ -552,6 +552,8 @@ final class AppWindow: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.ownedWindows.removeAll { $0 === owned }
             self.applySubtitle()
+            // One window fewer that may be seen: the frame rate is asked again.
+            self.onShownChange?()
         }
         owned.onKeyboardChange = { [weak self] in self?.onKeyboardChange?() }
         owned.onShownChange = { [weak self] in self?.onShownChange?() }

@@ -2960,6 +2960,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let action = hiddenRate.update(anyShown: anyShown,
                                        launching: addingLaunch != nil || agent.isLaunching,
                                        now: ProcessInfo.processInfo.systemUptime)
+        // Sent without waiting on the reply: a `rate` that fails means the
+        // channel dropped, and the host then ends the session, so nothing stays capped.
         switch action {
         case .none:
             break

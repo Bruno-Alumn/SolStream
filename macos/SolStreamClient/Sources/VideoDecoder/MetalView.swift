@@ -257,8 +257,13 @@ public final class MetalView: NSView {
     }
 
     /// Let go of the decoder's pictures the texture cache still holds: the
-    /// stream feeding this view has ended. What is on screen stays.
+    /// stream feeding this view has ended. What is on screen stays; the frame
+    /// kept while drawing was paused goes, or a hidden window would hold a
+    /// picture of a stream that is over until it was seen again.
     public func releasePictures() {
+        pendingLock.lock()
+        pendingPixelBuffer = nil
+        pendingLock.unlock()
         if let textureCache { CVMetalTextureCacheFlush(textureCache, 0) }
     }
 
